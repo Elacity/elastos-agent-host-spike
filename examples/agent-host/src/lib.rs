@@ -8972,6 +8972,7 @@ mod tests {
     }
 
     /// The measured result of one opt-in probe.
+    #[derive(Debug)]
     struct PrefixProbe {
         prefix_bytes: usize,
         before: (f64, PrefillSeconds),
@@ -9117,8 +9118,8 @@ mod tests {
         (format!("http://{address}/v1"), handle)
     }
 
-    /// A local server that records every request path and answers until
-    /// stopped. The first `/metrics` read gets `before`; the next gets
+    /// A local server that records every request path and body and answers
+    /// until stopped. The first `/metrics` read gets `before`; the next gets
     /// `after`; every other request gets `completion`.
     #[allow(clippy::type_complexity)]
     fn recording_server(
@@ -9127,7 +9128,7 @@ mod tests {
         completion: String,
     ) -> (
         String,
-        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         std::thread::JoinHandle<()>,
     ) {
@@ -9152,13 +9153,22 @@ mod tests {
                             .set_nonblocking(false)
                             .expect("a blocking connection");
                         let request = read_http_request(&mut stream);
-                        let path = std::str::from_utf8(&request)
-                            .ok()
-                            .and_then(|text| text.lines().next())
+                        let split = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|end| end + 4)
+                            .unwrap_or(request.len());
+                        let head = std::str::from_utf8(&request[..split]).unwrap_or("");
+                        let path = head
+                            .lines()
+                            .next()
                             .and_then(|line| line.split_whitespace().nth(1))
                             .unwrap_or("")
                             .to_string();
-                        seen.lock().expect("the request list").push(path.clone());
+                        let body = String::from_utf8_lossy(&request[split..]).into_owned();
+                        seen.lock()
+                            .expect("the request list")
+                            .push((path.clone(), body));
                         let response = if path == "/metrics" {
                             metrics_reads += 1;
                             if metrics_reads == 1 {
@@ -9209,12 +9219,10 @@ mod tests {
         )
     }
 
-    #[test]
     fn the_opt_in_probe_skips_without_a_configured_url() {
         assert!(matches!(probe_prefix_turns(None), Ok(None)));
     }
 
-    #[test]
     fn the_opt_in_probe_sends_two_turns_between_two_metric_reads() {
         let (base_url, requests, stop, server) = recording_server(
             metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
@@ -9227,8 +9235,9 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("the server thread");
         let seen = requests.lock().expect("the request list").clone();
+        let paths: Vec<&str> = seen.iter().map(|(path, _)| path.as_str()).collect();
         assert_eq!(
-            seen,
+            paths,
             [
                 "/metrics",
                 "/v1/chat/completions",
@@ -9236,6 +9245,26 @@ mod tests {
                 "/metrics"
             ]
         );
+        let (_, first_prompt, _, second_prompt) = packed_turns();
+        let posts: Vec<&str> = seen
+            .iter()
+            .filter(|(path, _)| path == "/v1/chat/completions")
+            .map(|(_, body)| body.as_str())
+            .collect();
+        assert_eq!(posts.len(), 2);
+        let sent_prompt = |body: &str| -> String {
+            serde_json::from_str::<serde_json::Value>(body)
+                .expect("a JSON request")
+                .get("messages")
+                .and_then(|messages| messages.get(0))
+                .and_then(|message| message.get("content"))
+                .and_then(|content| content.as_str())
+                .expect("a request prompt")
+                .to_string()
+        };
+        assert_eq!(sent_prompt(posts[0]), first_prompt);
+        assert_eq!(sent_prompt(posts[1]), second_prompt);
+        assert_ne!(posts[0], posts[1]);
         assert_eq!(report.before.0, 100.0);
         assert_eq!(report.after.0, 147.0);
         assert_eq!(
@@ -9255,6 +9284,44 @@ mod tests {
         assert!(report.prefix_bytes > 0);
     }
 
+    fn the_opt_in_probe_refuses_a_rejected_turn() {
+        let (base_url, requests, stop, server) = recording_server(
+            metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
+            metrics_response(&metrics_snapshot(147.0, 1.5, 4.0)),
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        );
+        let error = probe_prefix_turns(Some(base_url))
+            .expect_err("a refused first turn must fail the probe");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("the server thread");
+        let seen = requests.lock().expect("the request list").clone();
+        let paths: Vec<&str> = seen.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, ["/metrics", "/v1/chat/completions"]);
+        assert!(
+            error.contains("the local model refused the first turn"),
+            "{error}"
+        );
+    }
+
+    /// The deterministic half of the opt-in test. It runs without the Sparks
+    /// endpoint and keeps these rules provable while the default gate stays
+    /// unchanged.
+    fn deterministic_checks() {
+        a_model_response_with_an_invalid_content_length_is_refused();
+        a_model_response_with_conflicting_content_lengths_is_refused();
+        a_chunked_model_response_needs_its_final_empty_line();
+        a_chunked_model_response_refuses_an_overflowing_chunk_size();
+        a_chunked_model_response_with_a_trailer_is_accepted();
+        a_metric_value_is_read_by_its_exact_name();
+        a_prefill_histogram_is_read_from_its_sum_and_count();
+        a_scalar_prefill_has_no_fabricated_count();
+        a_metrics_snapshot_without_both_required_counters_is_refused();
+        the_opt_in_probe_skips_without_a_configured_url();
+        the_opt_in_probe_sends_two_turns_between_two_metric_reads();
+        the_opt_in_probe_refuses_a_rejected_turn();
+    }
+
     /// Opt-in: sends the two consecutive turns whose packed prefixes are
     /// byte-identical to the local model, then records the counters the engine
     /// publishes. Ignored by default, and it skips when `SPARKS_MODEL_URL` is
@@ -9263,6 +9330,7 @@ mod tests {
     #[test]
     #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
     fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
+        deterministic_checks();
         match probe_prefix_turns(opt_in_model::configured_url()) {
             Ok(None) => println!(
                 "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
@@ -9296,7 +9364,6 @@ mod tests {
         result
     }
 
-    #[test]
     fn a_model_response_with_an_invalid_content_length_is_refused() {
         let response = "HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".to_string();
         let error =
@@ -9304,7 +9371,6 @@ mod tests {
         assert!(error.starts_with("invalid content-length"), "{error}");
     }
 
-    #[test]
     fn a_model_response_with_conflicting_content_lengths_is_refused() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9319,7 +9385,6 @@ mod tests {
         assert!(error.starts_with("conflicting content-length"), "{error}");
     }
 
-    #[test]
     fn a_chunked_model_response_needs_its_final_empty_line() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9337,7 +9402,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_chunked_model_response_refuses_an_overflowing_chunk_size() {
         let response =
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n".to_string();
@@ -9346,7 +9410,6 @@ mod tests {
         assert!(error.starts_with("invalid chunk size"), "{error}");
     }
 
-    #[test]
     fn a_chunked_model_response_with_a_trailer_is_accepted() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9362,7 +9425,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_metric_value_is_read_by_its_exact_name() {
         let metrics = "# TYPE tensorfold:prompt_tokens_total counter\n\
                        tensorfold:prompt_tokens_total{model=\"deepseek-v4-flash\"} 1234\n\
@@ -9395,7 +9457,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_prefill_histogram_is_read_from_its_sum_and_count() {
         let metrics = "tensorfold:request_prefill_seconds_sum 1.5\n\
                        tensorfold:request_prefill_seconds_count 3\n";
@@ -9416,7 +9477,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_scalar_prefill_has_no_fabricated_count() {
         let scalar = prefill_seconds("tensorfold:request_prefill_seconds 0.25\n");
         assert_eq!(scalar, Some(PrefillSeconds::Scalar(0.25)));
@@ -9429,7 +9489,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_metrics_snapshot_without_both_required_counters_is_refused() {
         let full = "tensorfold:prompt_tokens_total 100\n\
                     tensorfold:request_prefill_seconds_sum 0.5\n\

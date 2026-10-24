@@ -407,7 +407,7 @@
     }
    ],
    "tests": [
-    "tests::a_model_response_with_conflicting_content_lengths_is_refused"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -423,7 +423,7 @@
     }
    ],
    "tests": [
-    "tests::a_model_response_with_an_invalid_content_length_is_refused"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -439,7 +439,7 @@
     }
    ],
    "tests": [
-    "tests::a_chunked_model_response_needs_its_final_empty_line"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -455,7 +455,7 @@
     }
    ],
    "tests": [
-    "tests::a_chunked_model_response_refuses_an_overflowing_chunk_size"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -471,7 +471,7 @@
     }
    ],
    "tests": [
-    "tests::a_metric_value_is_read_by_its_exact_name"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -487,7 +487,7 @@
     }
    ],
    "tests": [
-    "tests::a_metrics_snapshot_without_both_required_counters_is_refused"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -503,7 +503,7 @@
     }
    ],
    "tests": [
-    "tests::a_prefill_histogram_is_read_from_its_sum_and_count"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -519,7 +519,7 @@
     }
    ],
    "tests": [
-    "tests::a_chunked_model_response_with_a_trailer_is_accepted"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -535,7 +535,7 @@
     }
    ],
    "tests": [
-    "tests::a_scalar_prefill_has_no_fabricated_count"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -551,7 +551,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_skips_without_a_configured_url"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -567,7 +567,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -583,7 +583,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   },
   {
@@ -599,7 +599,39 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
+   ]
+  },
+  {
+   "id": "FP15",
+   "title": "the second turn sends the first prompt again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &second_prompt)\n            .map_err(|error| format!(\"the local model refused the second turn: {error}\"))?;",
+     "new": "        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt)\n            .map_err(|error| format!(\"the local model refused the second turn: {error}\"))?;"
+    }
+   ],
+   "tests": [
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
+   ]
+  },
+  {
+   "id": "FP16",
+   "title": "a refused first turn is discarded and the probe continues",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt)\n            .map_err(|error| format!(\"the local model refused the first turn: {error}\"))?;",
+     "new": "        let _ = opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt);"
+    }
+   ],
+   "tests": [
+    "tests::an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns"
    ]
   }
  ]
