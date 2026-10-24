@@ -90,7 +90,7 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        restore_originals(mutation)",
+     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        pending = None\n        while True:\n            try:\n                mutation.restore()\n                break\n            except KeyboardInterrupt as error:\n                if not mutation.applied:\n                    raise\n                pending = error\n        if pending is not None:\n            raise pending",
      "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
     }
    ],
@@ -106,7 +106,7 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        proof = named_outcome(result, name)\n        if (proof == \"failed\" and result.code == 0) or (proof == \"passed\" and result.code != 0):\n            proof = \"not run\"\n        outcomes[name] = proof",
+     "old": "        proof = named_outcome(result, name)\n        if proof == \"failed\" and result.code != TEST_FAILURE:\n            proof = \"not run\"\n        elif proof == \"passed\" and result.code != 0:\n            proof = \"not run\"\n        outcomes[name] = proof",
      "new": "        proof = named_outcome(result, name)\n        outcomes[name] = \"passed\" if result.code == 0 else proof"
     }
    ],
@@ -122,7 +122,7 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        restore_originals(mutation)",
+     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        pending = None\n        while True:\n            try:\n                mutation.restore()\n                break\n            except KeyboardInterrupt as error:\n                if not mutation.applied:\n                    raise\n                pending = error\n        if pending is not None:\n            raise pending",
      "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
     },
     {
@@ -153,14 +153,14 @@
   },
   {
    "id": "FS10",
-   "title": "a failing suite is a catch without its named tests",
+   "title": "a catch is reported without its named tests in both modes",
    "command": "selftest",
    "expect": "caught",
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if not entry[\"tests\"]:\n            return False, \"SUITE FAILED (not a catch)\", \"no named tests to prove it\"\n        missing = [name for name in entry[\"tests\"] if outcomes.get(name) == \"not run\"]\n        passing = [name for name in entry[\"tests\"] if outcomes.get(name) != \"failed\"]\n        if missing or passing:\n            return (False, \"SUITE FAILED (not a catch)\",\n                    \"no proof: \" + \", \".join(dict.fromkeys(missing + passing)))\n        return True, \"CAUGHT\", \"\"",
-     "new": "        return True, \"CAUGHT\", \"\""
+     "old": "    missing = [name for name in tests if outcomes.get(name) == \"not run\"]\n    passing = [name for name in tests if outcomes.get(name) != \"failed\"]\n    return not missing and not passing, missing, passing",
+     "new": "    return True, [], []"
     }
    ],
    "tests": [
@@ -191,8 +191,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    pending = None\n    while True:\n        try:\n            mutation.restore()\n            break\n        except KeyboardInterrupt as error:\n            if not mutation.applied:\n                raise\n            pending = error\n    if pending is not None:\n        raise pending",
-     "new": "    mutation.restore()"
+     "old": "        pending = None\n        while True:\n            try:\n                mutation.restore()\n                break\n            except KeyboardInterrupt as error:\n                if not mutation.applied:\n                    raise\n                pending = error\n        if pending is not None:\n            raise pending",
+     "new": "        mutation.restore()"
     }
    ],
    "tests": [
@@ -209,6 +209,38 @@
      "file": "falsify.py",
      "old": "    if harness_error(result.stderr):\n        return \"not run\"",
      "new": "    if False:\n        return \"not run\""
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS14",
+   "title": "a crashed harness exit code still counts as a failed test",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if proof == \"failed\" and result.code != TEST_FAILURE:\n            proof = \"not run\"\n        elif proof == \"passed\" and result.code != 0:\n            proof = \"not run\"",
+     "new": "        if proof == \"passed\" and result.code != 0:\n            proof = \"not run\""
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS15",
+   "title": "cargo's crash block is ignored and its fabricated summary counts",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if CRASHED in stderr:\n        return True",
+     "new": "    if False:\n        return True"
     }
    ],
    "tests": [

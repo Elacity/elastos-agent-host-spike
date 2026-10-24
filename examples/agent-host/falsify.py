@@ -16,11 +16,12 @@ test to FAIL. The mutated code is built first (a build that fails is its own
 result); then each named test is listed with `--exact` (exactly one test must
 match) and run alone with `--exact`. A non-zero exit alone is not a catch: the
 harness's own run must name the test, close with a summary that says it ran
-and failed, and report no error of its own on stderr. A harness or loading
-error is NOT RUN and never a catch. One named test that still passes means
-SURVIVED. A `survives` entry that stops surviving is a catch only with that
-same proof; a `compile_error` entry reports a failed build as its own result,
-never as a catch.
+and failed, exit with its own code for that result, and report no error or
+crash of its own on stderr. A harness error, a loading error or a killed
+process is NOT RUN and never a catch. One named test that still passes means
+SURVIVED. Both modes ask one catch decision: a `survives` entry that stops
+surviving is a catch only when that proof passes, and a `compile_error` entry
+reports a failed build as its own result, never as a catch.
 
 The original file's bytes are kept as a hard link while the mutated copy is
 in place, and the restore is a rename, so it needs no free space. Every
@@ -192,33 +193,27 @@ class Mutation:
 def guard_mutation(entry, body, base=HERE):
     """Apply the edits, run body(), and always put the originals back.
 
-    Every mutation goes through here. The restore sits in this frame's finally,
-    so an interrupt at the return boundary of apply(), in body(), or at the
-    return of body() still restores before the error goes on. The restoration
-    can also be interrupted before restore() takes its own signal guard, so it
-    is retried until the originals are back; then the interrupt goes on."""
+    Every mutation goes through here. The restore loop sits in this frame's
+    finally, so an interrupt at the return boundary of apply(), in body(), at
+    the return of body(), or at the call that starts the restoration itself is
+    caught and the restoration runs again. applied empties only after every
+    original is back; the interrupt that came in goes on after that."""
     mutation = Mutation(entry, base)
     try:
         mutation.apply()
         return body()
     finally:
-        restore_originals(mutation)
-
-
-def restore_originals(mutation):
-    """Restore until nothing is left to put back, then re-raise the interrupt
-    that came in. applied empties only after every original is back."""
-    pending = None
-    while True:
-        try:
-            mutation.restore()
-            break
-        except KeyboardInterrupt as error:
-            if not mutation.applied:
-                raise
-            pending = error
-    if pending is not None:
-        raise pending
+        pending = None
+        while True:
+            try:
+                mutation.restore()
+                break
+            except KeyboardInterrupt as error:
+                if not mutation.applied:
+                    raise
+                pending = error
+        if pending is not None:
+            raise pending
 
 
 def spec(command, manifest=None, cargo_flags=("--locked",)):
@@ -265,13 +260,21 @@ def run(argv, cwd):
 RUN_HEADER = re.compile(r"^running (\d+) tests?$", re.MULTILINE)
 # Cargo prints this line after a run whose named test really did fail; any
 # other error line on stderr comes from the harness itself, before or instead
-# of a run, so the run's closing summary cannot be a catch.
+# of a run. A crashed test binary makes cargo add a "Caused by: ... didn't
+# exit successfully" block, so the run did not complete.
 CARGO_TEST_FAILED = "error: test failed, to rerun pass "
+CRASHED = "didn't exit successfully"
+# libtest exits 101 when a test fails and 0 when every test passes. Any other
+# code is a crash or a tool failure, not a run.
+TEST_FAILURE = 101
 
 
 def harness_error(stderr):
     """True when stderr reports an error that is not cargo's line for a
-    completed, failed run. A loading error or a harness crash is not a run."""
+    completed, failed run, or reports that the test process crashed. A loading
+    error or a crash is not a run."""
+    if CRASHED in stderr:
+        return True
     errors = [line for line in stderr.splitlines() if line.startswith("error:")]
     return any(not line.startswith(CARGO_TEST_FAILED) for line in errors)
 
@@ -341,9 +344,12 @@ def named_outcomes(entry, how):
             continue
         result = run(argv + extra + ["--exact", name], cwd)
         # The run's own closing summary must name the test and end a run with
-        # no harness error; the exit code must agree with it.
+        # no harness error or crash; the exit code must be the harness's own
+        # code for that result, so a killed or broken process is not a run.
         proof = named_outcome(result, name)
-        if (proof == "failed" and result.code == 0) or (proof == "passed" and result.code != 0):
+        if proof == "failed" and result.code != TEST_FAILURE:
+            proof = "not run"
+        elif proof == "passed" and result.code != 0:
             proof = "not run"
         outcomes[name] = proof
     return outcomes
@@ -365,6 +371,15 @@ def evaluate(entry, how):
     return False, named_outcomes(entry, how), None
 
 
+def catch_proof(tests, outcomes):
+    """(proved, missing, passing): the one catch decision. A catch is proved
+    only when every named test ran and failed; every mode that reports one
+    asks this function."""
+    missing = [name for name in tests if outcomes.get(name) == "not run"]
+    passing = [name for name in tests if outcomes.get(name) != "failed"]
+    return not missing and not passing, missing, passing
+
+
 def verdict(entry, build_failed, outcomes, suite_passed):
     """(ok, word, detail): ok is whether the falsifier did what it expects."""
     expect = entry["expect"]
@@ -376,24 +391,17 @@ def verdict(entry, build_failed, outcomes, suite_passed):
         return False, "SURVIVED", "it builds"
     if build_failed:
         return False, "BUILD FAILED", "the mutation must build so its tests can fail"
-    if expect == "survives":
-        if suite_passed:
-            return True, "SURVIVED (expected, by design)", ""
-        # Not surviving is a catch only with the same proof every mode uses:
-        # every named test ran and failed. A failing suite alone proves nothing.
+    if expect == "survives" and suite_passed:
+        return True, "SURVIVED (expected, by design)", ""
+    proved, missing, passing = catch_proof(entry["tests"], outcomes)
+    if not proved:
         if not entry["tests"]:
             return False, "SUITE FAILED (not a catch)", "no named tests to prove it"
-        missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
-        passing = [name for name in entry["tests"] if outcomes.get(name) != "failed"]
-        if missing or passing:
+        if expect == "survives":
             return (False, "SUITE FAILED (not a catch)",
                     "no proof: " + ", ".join(dict.fromkeys(missing + passing)))
-        return True, "CAUGHT", ""
-    missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
-    if missing:
-        return False, "NOT RUN", "did not run: " + ", ".join(missing)
-    passing = [name for name in entry["tests"] if outcomes.get(name) != "failed"]
-    if passing:
+        if missing:
+            return False, "NOT RUN", "did not run: " + ", ".join(missing)
         return False, "SURVIVED", "still pass: " + ", ".join(passing)
     return True, "CAUGHT", ""
 
@@ -470,6 +478,35 @@ print("running 1 test")
 print("test tests::planted_check ... FAILED")
 print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
 print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+# The child lists the test, prints a fabricated run and failure summary, then
+# dies by signal. No test body ran and libtest wrote no summary.
+STUB_FAKE_SUMMARY_THEN_SIGNAL = """import os
+import signal
+import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stdout.flush()
+os.kill(os.getpid(), signal.SIGTERM)
+"""
+
+# The same fabrication with cargo's exit code and crash block, as when a test
+# binary dies by signal under cargo test.
+STUB_FAKE_SUMMARY_CARGO_CRASH = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error: test failed, to rerun pass `--lib`", file=sys.stderr)
+print("\\nCaused by:\\n  process didn't exit successfully: `binary` (signal: 15, SIGTERM: termination signal)", file=sys.stderr)
 raise SystemExit(101)
 """
 
@@ -573,6 +610,30 @@ def verdict_cases():
         if got != want:
             print(f"self-test: verdict {args[1:]} -> {got}, want {want}")
             ok = False
+    # One catch decision serves both modes: the decision itself, then each mode
+    # against it with the same outcomes.
+    proofs = [
+        ((("a",), {"a": "failed"}), (True, [], [])),
+        ((("a",), {"a": "not run"}), (False, ["a"], ["a"])),
+        ((("a",), {"a": "passed"}), (False, [], ["a"])),
+        ((("a", "b"), {"a": "failed", "b": "failed"}), (True, [], [])),
+        ((("a", "b"), {"a": "failed", "b": "passed"}), (False, [], ["b"])),
+    ]
+    for args, want in proofs:
+        got = catch_proof(*args)
+        if got != want:
+            print(f"self-test: catch proof {args} -> {got}, want {want}")
+            ok = False
+    for outcomes, caught, survived in (
+        ({"a": "failed"}, (True, "CAUGHT"), (True, "CAUGHT")),
+        ({"a": "not run"}, (False, "NOT RUN"), (False, "SUITE FAILED (not a catch)")),
+        ({"a": "passed"}, (False, "SURVIVED"), (False, "SUITE FAILED (not a catch)")),
+    ):
+        for entry, suite, want in ((survivor, False, survived), ({**two, "tests": ["a"]}, None, caught)):
+            got = verdict(entry, False, outcomes, suite)[:2]
+            if got != want:
+                print(f"self-test: mode {entry['expect']} {outcomes} -> {got}, want {want}")
+                ok = False
     return ok
 
 
@@ -589,6 +650,8 @@ def a_named_test_that_does_not_run_is_not_a_catch():
                             ("harness error", STUB_HARNESS_ERROR),
                             ("fake summary then harness error on stderr", STUB_FAKE_SUMMARY_THEN_ERROR),
                             ("fake summary then harness error on stdout", STUB_FAKE_SUMMARY_ERROR_ON_STDOUT),
+                            ("fake summary then signal", STUB_FAKE_SUMMARY_THEN_SIGNAL),
+                            ("fake summary then cargo crash block", STUB_FAKE_SUMMARY_CARGO_CRASH),
                             ("exit 0 but no test ran", STUB_FILTERED_OUT)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
