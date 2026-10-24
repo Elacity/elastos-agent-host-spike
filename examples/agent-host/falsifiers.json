@@ -554,8 +554,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        || journal.task_budget.is_some()\n        || granted.requests == 0\n        || granted.seconds == 0\n    {",
-     "new": "        || journal.task_budget.is_some()\n    {"
+     "old": "        || journal.task_budget.is_some()\n        || granted.requests == 0\n        || granted.seconds == 0\n        || task_requests_used(journal) > granted.requests",
+     "new": "        || journal.task_budget.is_some()\n        || task_requests_used(journal) > granted.requests"
     }
    ],
    "tests": [
@@ -1821,8 +1821,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        .any(|step| step.id == child_id && step.kind == ProposalKind::Child)",
-     "new": "        .any(|step| step.id == child_id)"
+     "old": "    // A host journal carries a child's steps; it records no step of another kind.\n    if child.is_some() && journal.steps[index].kind != ProposalKind::Child {\n        return false;\n    }\n",
+     "new": ""
     }
    ],
    "tests": [
@@ -3492,8 +3492,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let child = usable_child(parent, child_id)?;\n    let Some(bound) = host.host_of.as_ref() else {",
-     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    let Some(bound) = host.host_of.as_ref() else {"
+     "old": "    let child = usable_child(parent, child_id)?;\n    host_binding_ok(parent, child, host)?;",
+     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    host_binding_ok(parent, child, host)?;"
     }
    ],
    "tests": [
@@ -3556,8 +3556,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if bound.child != child_id\n        || !bound.task.is(&parent.task)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)\n    {",
-     "new": "    if bound.child != child_id || !bound.task.is(&parent.task) {"
+     "old": "    if bound.child != child.id\n        || !bound.task.is(&parent.task)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)",
+     "new": "    if bound.child != child.id || !bound.task.is(&parent.task)"
     }
    ],
    "tests": [
@@ -3962,7 +3962,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if bound.child != child_id\n        ||",
+     "old": "    if bound.child != child.id\n        ||",
      "new": "    if false\n        ||"
     }
    ],
@@ -4097,8 +4097,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if bound.child != child_id\n        || !bound.task.is(&parent.task)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)",
-     "new": "    if bound.child != child_id\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)"
+     "old": "    if bound.child != child.id\n        || !bound.task.is(&parent.task)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)",
+     "new": "    if bound.child != child.id\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)"
     }
    ],
    "tests": [
@@ -4113,8 +4113,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        // The label is part of what is stored, so the cap bounds the final\n        // text, not the bytes before the label.\n        let marked = match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        };\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        marked\n    } else {\n        text.to_string()\n    };",
-     "new": "    let _ = child;\n    let text = text.to_string();"
+     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        // The label is part of what is stored, so the cap bounds the final\n        // text, not the bytes before the label.\n        let marked = match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        };\n        // Child text comes only from a verified host journal. A spill\n        // pointer is the guest's own text and passes no host.\n        if !guest_pointer {\n            let Some(host) = child else {\n                return false;\n            };\n            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }\n        }\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        marked\n    } else {\n        text.to_string()\n    };",
+     "new": "    let _ = (guest_pointer, child);\n    let text = text.to_string();"
     }
    ],
    "tests": [
@@ -4275,8 +4275,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        ProposalKind::Hosted => match step.parent_id {\n            Some(child) => usable_child(journal, child).map(|_| ()),\n            None if journal.task_budget.is_some() => Ok(()),\n            None => Err(TASK_BUDGET_REASON),\n        },",
-     "new": "        ProposalKind::Hosted => match step.parent_id {\n            Some(child) => usable_child(journal, child).map(|_| ()),\n            None => Ok(()),\n        },"
+     "old": "            None => {\n                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                if task_requests_used(journal) > budget.requests {\n                    return Err(\"requests\");\n                }\n                Ok(())\n            }",
+     "new": "            None => Ok(())"
     }
    ],
    "tests": [
@@ -4347,6 +4347,102 @@
    ],
    "tests": [
     "named case attribution"
+   ]
+  },
+  {
+   "id": "PX19",
+   "title": "a host write asks without its parent's current grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.depth > 0 || journal.host_of.is_some() {\n        let Some((parent, child_id)) = host else {\n            return false;\n        };\n        if host_step_ok(parent, child_id, journal, step_id, None).is_err() {\n            return false;\n        }\n    } else if host.is_some() {\n        return false;\n    }",
+     "new": "    let _ = host;"
+    }
+   ],
+   "tests": [
+    "tests::a_host_write_needs_its_parent_still_granting_it"
+   ]
+  },
+  {
+   "id": "PX20",
+   "title": "child text is stored with no host journal",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !guest_pointer {\n            let Some(host) = child else {\n                return false;\n            };\n            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }\n        }",
+     "new": "        let _ = (guest_pointer, child);"
+    }
+   ],
+   "tests": [
+    "tests::a_child_result_needs_a_verified_host"
+   ]
+  },
+  {
+   "id": "PX21",
+   "title": "a supplied child host is not checked against the parent",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }",
+     "new": "            let _ = host;"
+    }
+   ],
+   "tests": [
+    "tests::a_child_result_needs_a_verified_host"
+   ]
+  },
+  {
+   "id": "PX22",
+   "title": "a budget below the model calls already made is recorded",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || task_requests_used(journal) > granted.requests",
+     "new": "        || false"
+    }
+   ],
+   "tests": [
+    "tests::an_older_journal_cannot_exceed_a_new_budget"
+   ]
+  },
+  {
+   "id": "PX23",
+   "title": "a pending top task call skips the request counter",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                if task_requests_used(journal) > budget.requests {\n                    return Err(\"requests\");\n                }\n                Ok(())",
+     "new": "                journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                Ok(())"
+    }
+   ],
+   "tests": [
+    "tests::an_older_journal_cannot_exceed_a_new_budget"
+   ]
+  },
+  {
+   "id": "PX24",
+   "title": "a model call under a granted child skips the ancestor grant walk",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                // A child with no grant hands no granted scope downward; once\n                // it holds one, every step above must still grant it.\n                if child.grant.is_some() {\n                    scope_still_granted(journal, child).ok_or(\"not granted\")?;\n                }",
+     "new": "                let _ = child;"
+    }
+   ],
+   "tests": [
+    "tests::a_model_call_under_a_granted_child_needs_the_grant_above_it"
    ]
   }
  ]

@@ -452,3 +452,38 @@ Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a0
 ```
 
 **What is next:** the Mac check and Codex on #31. Sasha closes #25 when #31 merges.
+
+## Update: Codex FAIL at 75ac0ae, four findings (24 Oct)
+
+```text
+Finding 1:    provider_write_may_be_asked accepted a granted host edit after the parent task was cancelled,
+              while dispatch_in_host refused it.
+Fix:          the gate takes the parent journal and the child and calls host_step_ok, the one host check; a host
+              journal with no parent context asks nothing.
+Finding 2:    record_tool_result(parent, child, text, None) stored a host-only grant; the spill exception was open
+              to any caller.
+Fix:          child text needs verified host context (host_binding_ok: task mark, child id, depth, system head),
+              used by record_child_result and the generic path; the guest's own spill pointer is a separate entry,
+              record_spill_result, called only by spill_pointer. A host journal for a non-child step is refused.
+Finding 3:    record_task_budget accepted one request on a pre-idea-2 journal with two calls; authorize and
+              dispatch checked only presence.
+Fix:          the counter rule in record_task_budget (calls already made) and in call_parent_usable before live
+              use ("requests"), the same rule the reload check applies.
+Finding 4:    a model call under a granted child dispatched after the root run's grant was withdrawn.
+Fix:          call_parent_usable also walks the ancestor grants for a granted child (scope_still_granted).
+Tests:        a_host_write_needs_its_parent_still_granting_it, a_child_result_needs_a_verified_host,
+              an_older_journal_cannot_exceed_a_new_budget,
+              a_model_call_under_a_granted_child_needs_the_grant_above_it. Each is caught by the falsifier that
+              removes its fix.
+Falsifiers:   PX19-PX24 new; PX14 and CL13 re-targeted to the moved checks; CL86, HC01, HC05, RV16, PX03 and
+              PX04 re-targeted to host_binding_ok and the separate spill entry.
+Full run:     python3 -I examples/agent-host/falsify.py: 251 CAUGHT, 1 CAUGHT (does not build: OY19), 1 SURVIVED
+              (expected, by design: OZ01) of 253; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "222 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   0a1b2c0ca3660e0d9d166faf6f685c29d23f436989be7c546bf57ca30a4eb757 on verify.sh.
+              wasm_sections.py: file 660815 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   3 (no new authority), 5 (all work stays in examples/agent-host), 10 (one shared check per rule),
+              11 (each refusal keeps its reason and denies by default), 12 (design note updated), 7 (each rule has
+              a failing-first test and a caught falsifier).
+```

@@ -45,10 +45,13 @@ child step (the parent's journal), never from a child host's own journal.
   idea 2) are kept, not replaced with a bare false; each refused grant leaves one refusal record with that reason.
 - `call_parent_usable`: a model call already proposed under a child is authorized and dispatched only while
   `usable_child` still passes for that child, so a deny, stop or cancel after the proposal takes the pending call
-  with it. A granted child is authorized and dispatched only while `usable_child` and `scope_still_granted` both
-  pass, so a run denied after granting its child takes the child's dispatch with it.
-- `host_step_ok` returns the reason it refused, and `authorize_in_host`, `host_inbox` and `dispatch_in_host` each
-  write one refusal record in the host's journal with that reason (a stop, the missing-budget
+  with it. A model call under a granted child also needs `scope_still_granted`, so a run denied after the call was
+  authorized takes it with the child. A model call of the top task needs the task budget and may not exceed its
+  request count. A granted child is authorized and dispatched only while `usable_child` and `scope_still_granted`
+  both pass, so a run denied after granting its child takes the child's dispatch with it.
+- `host_step_ok` returns the reason it refused, and `authorize_in_host`, `host_inbox`, `dispatch_in_host` and the
+  provider-write gate `provider_write_may_be_asked` each check the parent's current journal with it; the host
+  actions write one refusal record in the host's journal with that reason (a stop, the missing-budget
   `TASK_BUDGET_REASON`, a path or scope miss), so a host refusal keeps the shared check's words.
 
 ### Depth (R1)
@@ -102,11 +105,13 @@ child step (the parent's journal), never from a child host's own journal.
 ### Budget (R2)
 
 - `Budget { requests, seconds }`. Zero in either part is never a budget.
-- **Top task:** `record_task_budget` records the budget the Runtime granted, once, as data. When it was not
-  recorded, the run refuses with `the task budget was not recorded; start a new task` (`TASK_BUDGET_REASON`). A second call, or a zero
-  budget, changes nothing. No guest code path picks a value. Until the Runtime hands it over (RUNTIME-BUDGET.md),
-  the guest fixture and the tests use `FIXTURE_TASK_BUDGET` and `FIXTURE_CHILD_BUDGET`; both are documented as never
-  defaults.
+- **Top task:** `record_task_budget` records the budget the Runtime granted, once, as data. It does not record a
+  budget whose request count is below the model calls the journal already holds, so an older journal cannot
+  exceed a new budget; the same counter rule is checked again when a pending call is authorized or dispatched.
+  When it was not recorded, the run refuses with `the task budget was not recorded; start a new task`
+  (`TASK_BUDGET_REASON`). A second call, or a zero budget, changes nothing. No guest code path picks a value. Until
+  the Runtime hands it over (RUNTIME-BUDGET.md), the guest fixture and the tests use `FIXTURE_TASK_BUDGET` and
+  `FIXTURE_CHILD_BUDGET`; both are documented as never defaults.
 - **Child:** `propose_child(journal, parent, resource, budget)` refuses, in this order:
   - "no parent";
   - "not a subset" (the resource is not strictly under the parent's);
@@ -146,8 +151,10 @@ child step (the parent's journal), never from a child host's own journal.
 
 - `record_child_result` and `record_tool_result` on a child step both use `child_result_ok`, over the parent's
   steps and the child host's steps: a result longer than `CHILD_RESULT_CAP` is refused, never cut, and a grant
-  string held by the host is refused as well as one held by the parent. A long result goes as a spill pointer
-  (`spill_pointer`, today's rules; the guest generates that text and has no host journal).
+  string held by the host is refused as well as one held by the parent. Child text also needs verified host
+  context (`host_binding_ok`: this task, this child, its depth, the system head); a caller with no host is refused.
+  A long result goes as a spill pointer (`spill_pointer`, today's rules). The guest generates that text at its own
+  entry point (`record_spill_result`), which is the one child result that needs no host journal.
 - A stopped child's result is kept and marked `partial (<reason>): <result>` on both entry points.
 
 ### Cancel (R5)
