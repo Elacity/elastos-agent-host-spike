@@ -7,7 +7,7 @@ Built `examples/archive-viewer` as a Bus v1 guest crate on `capsule-kit-guest`
 its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 (`src/tests.rs`), `verify.sh` and `falsify.py`.
 
-### Falsifiers done (all caught by `falsify.py`, 45 cases)
+### Falsifiers done (all caught by `falsify.py`, 50 cases)
 
 - B4 and its parts: F6, F6b, F6c.
 - Names P1 to P9: F7, F8, F9, F10, F11, F12, F13, F14, F15 (entries and names), F16 (a symlink and every other non-regular kind).
@@ -21,8 +21,10 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 - Authority stops: F42 (a denied or failed read while listing stops the run
   and writes nothing).
 - Bound tests added for the remaining refusals: multi-disk, zip64, a directory outside the object or over its cap, a record without its signature, a local header outside the object or without its signature, and an entry record past the directory; F16 now blocks every non-regular Unix kind.
-- Extra lettered falsifiers for bounds and comparisons DESIGN states but gives no row: F6d to F6f (local header readable, record inside the directory, local signature), F21b to F21e (directory inside the object, one disk, no zip64, object within 2^32), F23b to F23d (record signature, directory cap, short directory answer), F25b to F25f (L5 lengths, flags, CRC, sizes and bit 3), and F30b (a skipped entry keeps its own status reason: `encrypted` or `unsupported`). F32 covers the whole view's cap.
-- The whole view is capped in `run`: a view over `MAX_VIEW_BYTES` is replaced by a `view_too_large` refusal with no entries, not written past the cap (`src/lib.rs:131`). A short directory answer refuses as `directory_truncated` (`src/zip.rs:349`), and an object past 2^32 refuses as `object_too_large` (`src/zip.rs:240`).
+- Extra lettered falsifiers for bounds and comparisons DESIGN states but gives no row: F6d to F6f (local header readable, record inside the directory, local signature), F15b and its trailing-slash pair (the segment cap and the boundary fixture), F21b to F21e (directory inside the object, one disk, no zip64, object within 2^32), F22b (the on-disk count), F23b to F23d (record signature, directory cap, short directory answer), F25b to F25f (L5 lengths, flags, CRC, sizes and bit 3), F30b (a skipped entry keeps its own status reason: `encrypted` or `unsupported`), and F41b to F41c (the request schema and its index cap). F32 covers the whole view's cap.
+- The request refuses `.AppData` as a whole segment in any ASCII case (`src/request.rs:93`): `.appdata/` and `.APPDATA/` name the same folder on a case-insensitive filesystem.
+- A directory's permitted trailing slash is not another segment: the cap counts `trimmed` (`src/zip.rs:583`), so a 32-segment directory lists and a 33-segment one blocks.
+- The whole view is capped in `run`: a view over `MAX_VIEW_BYTES` is replaced by a `view_too_large` refusal with no entries, not written past the cap (`src/lib.rs:133`). A short directory answer refuses as `directory_truncated` (`src/zip.rs:354`), and an object past 2^32 refuses as `object_too_large` (`src/zip.rs:243`).
 
 ### Falsifiers left for the next tasks
 

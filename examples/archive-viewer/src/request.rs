@@ -19,9 +19,11 @@ use serde_json::Value;
 use crate::{MAX_REQUEST_SHOW, USERS_PREFIX};
 
 pub const REQUEST_SCHEMA: &str = "elastos.archive-viewer.open/v1";
-/// The app's own data folder. A request for anything here would reach the
-/// app's view object or another app's data, so it is refused.
-const APP_DATA_PREFIX: &str = "localhost://Users/self/.AppData/";
+/// The app's data folder, matched as a whole segment in any ASCII case: a
+/// Mac filesystem is case-insensitive, so `.appdata` names the same folder.
+/// A request for anything here would reach the app's view object or another
+/// app's data, so it is refused.
+const APP_DATA_SEGMENT: &str = ".appdata";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -80,10 +82,20 @@ pub fn parse(bytes: &[u8]) -> Result<Request, String> {
 }
 
 /// The archive is one object under the person's folders, and never under any
-/// app's data folder.
+/// app's data folder, in any ASCII case.
 fn check_uri(uri: &str) -> Result<(), String> {
-    if uri.starts_with(APP_DATA_PREFIX) {
+    if is_app_data(uri) {
         return Err("uri must not be under .AppData/".to_string());
     }
     check_object_uri(uri, USERS_PREFIX)
+}
+
+fn is_app_data(uri: &str) -> bool {
+    let Some(relative) = uri.strip_prefix(USERS_PREFIX) else {
+        return false;
+    };
+    relative
+        .split('/')
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(APP_DATA_SEGMENT))
 }

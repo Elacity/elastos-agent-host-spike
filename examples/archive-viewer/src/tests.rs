@@ -219,6 +219,15 @@ fn assert_nothing_written(bus: &FakeBus) {
     );
 }
 
+fn assert_no_archive_request(bus: &FakeBus, archive: &str) {
+    assert!(
+        !bus.calls
+            .iter()
+            .any(|call| matches!(call, Call::Request { resource, .. } if resource == archive)),
+        "the archive must not be granted"
+    );
+}
+
 fn single(name: &str) -> FakeBus {
     run_fixture(
         request(ARCHIVE, &[]),
@@ -482,6 +491,29 @@ fn a_request_for_an_appdata_uri_is_refused() {
         bus.invokes_on(app_data).is_empty(),
         "no archive byte is read"
     );
+    assert_no_archive_request(&bus, app_data);
+}
+
+#[test]
+fn a_request_for_an_appdata_case_alias_is_refused() {
+    // A Mac filesystem is case-insensitive: `.appdata` names `.AppData`.
+    for app_data in [
+        "localhost://Users/self/.appdata/App/other-app/secret.json",
+        "localhost://Users/self/.APPDATA/App/other-app/secret.json",
+        "localhost://Users/self/.AppData",
+    ] {
+        let mut bus = FakeBus::default()
+            .object(REQUEST_URI, request(app_data, &[]))
+            .allow(REQUEST_URI, "read")
+            .allow(VIEW_URI, "write")
+            .object(app_data, build(&[Spec::file("a.txt")], &[]))
+            .allow(app_data, "read");
+        let err = run(&mut bus).expect_err("an .AppData alias is refused");
+        assert!(matches!(err, Refusal::Input(_)), "{app_data}: {err:?}");
+        assert_nothing_written(&bus);
+        assert!(bus.invokes_on(app_data).is_empty(), "{app_data}");
+        assert_no_archive_request(&bus, app_data);
+    }
 }
 
 #[test]
@@ -496,6 +528,47 @@ fn a_request_with_unknown_fields_is_refused() {
     let err = run(&mut bus).expect_err("unknown fields are refused");
     assert!(matches!(err, Refusal::Input(_)), "{err:?}");
     assert_nothing_written(&bus);
+}
+
+#[test]
+fn a_request_with_a_wrong_schema_is_refused() {
+    for value in [
+        json!({"schema": "elastos.archive-viewer.open/v2", "uri": ARCHIVE, "show": []}),
+        json!({"uri": ARCHIVE, "show": []}),
+    ] {
+        let mut bus = bus_with(
+            serde_json::to_vec(&value).unwrap(),
+            ARCHIVE,
+            build(&[], &[]),
+        );
+        let err = run(&mut bus).expect_err("a wrong schema is refused");
+        assert!(matches!(err, Refusal::Input(_)), "{err:?}");
+        assert_nothing_written(&bus);
+        assert_no_archive_request(&bus, ARCHIVE);
+    }
+}
+
+#[test]
+fn a_request_with_too_many_indexes_is_refused() {
+    let show: Vec<usize> = (0..=MAX_REQUEST_SHOW).collect();
+    assert_eq!(show.len(), MAX_REQUEST_SHOW + 1);
+    let mut bus = bus_with(request(ARCHIVE, &show), ARCHIVE, build(&[], &[]));
+    let err = run(&mut bus).expect_err("more indexes than the limit is refused");
+    assert!(matches!(err, Refusal::Input(_)), "{err:?}");
+    assert_nothing_written(&bus);
+    assert_no_archive_request(&bus, ARCHIVE);
+}
+
+#[test]
+fn a_request_with_the_index_limit_is_accepted() {
+    let show: Vec<usize> = (0..MAX_REQUEST_SHOW).collect();
+    let bus = run_fixture(
+        request(ARCHIVE, &show),
+        ARCHIVE,
+        build(&[Spec::file("a.txt")], &[]),
+    );
+    assert!(view(&bus).get("refused").is_none());
+    assert_eq!(skipped(&bus).len(), MAX_REQUEST_SHOW - 1);
 }
 
 // --- Names: P1 to P9 -------------------------------------------------------
@@ -647,6 +720,42 @@ fn a_name_over_its_cap_is_blocked() {
     let fits = "a".repeat(255);
     let (status, _) = listed(&fits);
     assert_eq!(status, "listed");
+}
+
+#[test]
+fn a_directory_with_32_segments_is_listed() {
+    // A directory's permitted trailing slash is not a 33rd segment. The
+    // literal 32 pins the design's cap, not the constant's current value.
+    let file = ["d"; 32].join("/");
+    let directory = format!("{file}/");
+    let bus = run_fixture(
+        request(ARCHIVE, &[]),
+        ARCHIVE,
+        build(&[Spec::file(&file), Spec::file(&directory)], &[]),
+    );
+    assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
+    assert_eq!(entries(&bus)[0]["kind"], "file");
+    assert_eq!(status_of(&bus, 1), ("listed".to_string(), None));
+    assert_eq!(entries(&bus)[1]["kind"], "directory");
+}
+
+#[test]
+fn a_name_with_33_segments_is_blocked() {
+    let file = ["d"; 33].join("/");
+    let directory = format!("{file}/");
+    let bus = run_fixture(
+        request(ARCHIVE, &[]),
+        ARCHIVE,
+        build(&[Spec::file(&file), Spec::file(&directory)], &[]),
+    );
+    assert_eq!(
+        status_of(&bus, 0),
+        ("blocked".to_string(), Some("name_too_long".to_string()))
+    );
+    assert_eq!(
+        status_of(&bus, 1),
+        ("blocked".to_string(), Some("name_too_long".to_string()))
+    );
 }
 
 #[test]
@@ -868,6 +977,18 @@ fn a_count_that_differs_from_the_records_refuses_the_archive() {
     let at = eocd_start(&archive);
     patch_u16(&mut archive, at + 8, 2);
     patch_u16(&mut archive, at + 10, 2);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "count_mismatch");
+}
+
+#[test]
+fn an_on_disk_count_that_differs_refuses_the_archive() {
+    // On-disk count 2 and record count 1: only the on-disk comparison can
+    // refuse this archive.
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = eocd_start(&archive);
+    patch_u16(&mut archive, at + 8, 2);
+    patch_u16(&mut archive, at + 10, 1);
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     assert_eq!(refused(&bus).0, "count_mismatch");
 }

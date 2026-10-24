@@ -578,10 +578,11 @@ fn path_rules(path: &str, kind: Kind) -> Result<(), Reason> {
     if path.len() > MAX_NAME_BYTES {
         return Err("name_too_long");
     }
-    if path.split('/').count() > MAX_SEGMENTS {
+    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    // A directory's permitted trailing slash is not another segment.
+    if trimmed.split('/').count() > MAX_SEGMENTS {
         return Err("name_too_long");
     }
-    let trimmed = path.strip_suffix('/').unwrap_or(path);
     if trimmed.is_empty() && kind == Kind::Directory {
         return Err("dot_segment");
     }

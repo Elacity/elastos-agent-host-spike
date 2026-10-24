@@ -10,10 +10,11 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. The lettered cases F6d to F6f, F21b to F21e, F23b to
-F23d, F25b to F25f and F30b cover bounds and comparisons DESIGN states but
-gives no row, and F32 covers the whole view's cap. F18 (Bus v2 depth) and the
-preview falsifiers F1 to F5 and F26 to F28 wait for their slices.
+F31, F40 to F42. The lettered cases F6d to F6f, F15b, F21b to F21e, F22b,
+F23b to F23d, F25b to F25f, F30b and F41b to F41c cover bounds, comparisons
+and request fields DESIGN states but gives no row, and F32 covers the whole
+view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5 and F26 to
+F28 wait for their slices.
 """
 import pathlib
 import sys
@@ -103,6 +104,16 @@ CASES = [
      "pub const MAX_NAME_BYTES: usize = 255;",
      "pub const MAX_NAME_BYTES: usize = 510;",
      ["a_name_over_its_cap_is_blocked"]),
+    ("F15 the segment cap is doubled",
+     "src/lib.rs",
+     "pub const MAX_SEGMENTS: usize = 32;",
+     "pub const MAX_SEGMENTS: usize = 64;",
+     ["a_name_with_33_segments_is_blocked"]),
+    ("F15 the trailing slash counts as a segment",
+     "src/zip.rs",
+     "    if trimmed.split('/').count() > MAX_SEGMENTS {",
+     "    if path.split('/').count() > MAX_SEGMENTS {",
+     ["a_directory_with_32_segments_is_listed"]),
     ("F16 the mode check is removed",
      "src/zip.rs",
      "    let other = !matches!(unix, 0 | 0o100000 | 0o040000);",
@@ -129,11 +140,16 @@ CASES = [
      "    if directory_offset + directory_size != end_offset {",
      "    if false {",
      ["a_directory_that_does_not_end_at_the_end_record_refuses_the_archive"]),
-    ("F22 the counts come from the end record",
+    ("F22 the record count is not checked",
      "src/zip.rs",
-     [("    if on_disk != count {", "    if false {"),
-      ("    if entries.len() != usize::from(count) {", "    if false {")],
+     "    if entries.len() != usize::from(count) {",
+     "    if false {",
      ["a_count_that_differs_from_the_records_refuses_the_archive"]),
+    ("F22b the on-disk count is not checked",
+     "src/zip.rs",
+     "    if on_disk != count {",
+     "    if false {",
+     ["an_on_disk_count_that_differs_refuses_the_archive"]),
     ("F23 the record lengths are not bounded",
      "src/zip.rs",
      "        if next > end {",
@@ -176,9 +192,20 @@ CASES = [
     # The request's authority.
     ("F41 the .AppData/ refusal is removed",
      "src/request.rs",
-     "    if uri.starts_with(APP_DATA_PREFIX) {",
+     "    if is_app_data(uri) {",
      "    if false {",
-     ["a_request_for_an_appdata_uri_is_refused"]),
+     ["a_request_for_an_appdata_uri_is_refused",
+      "a_request_for_an_appdata_case_alias_is_refused"]),
+    ("F41b the request schema is not checked",
+     "src/request.rs",
+     "    if request.get(\"schema\").and_then(Value::as_str) != Some(REQUEST_SCHEMA) {",
+     "    if false {",
+     ["a_request_with_a_wrong_schema_is_refused"]),
+    ("F41c the request index cap is removed",
+     "src/request.rs",
+     "            if list.len() > MAX_REQUEST_SHOW {",
+     "            if false {",
+     ["a_request_with_too_many_indexes_is_refused"]),
     # Authority stops, never skips.
     ("F42 a denied read becomes a content skip",
      "src/zip.rs",
