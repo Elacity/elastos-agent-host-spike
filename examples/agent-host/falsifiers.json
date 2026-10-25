@@ -930,8 +930,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or_else(|| panic!(\"reply has no assistant content\"))\n            .to_string()",
-     "new": "        reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or_else(|| panic!(\"reply has no assistant content\"))\n            .trim()\n            .to_string()"
+     "old": "        Ok(content.to_string())",
+     "new": "        Ok(content.trim().to_string())"
     }
    ],
    "tests": [
@@ -1083,6 +1083,134 @@
    "tests": [
     "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text",
     "tests::a_restore_proposes_an_observed_version_and_does_not_apply_it"
+   ]
+  },
+  {
+   "id": "FS51",
+   "title": "a metric sample with no value is read as zero, so a missing counter passes",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                let value = rest\n                    .split_whitespace()\n                    .next()?\n                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())?;",
+     "new": "                let value = rest\n                    .split_whitespace()\n                    .next()\n                    .and_then(|value| value.parse::<f64>().ok())\n                    .unwrap_or(0.0);"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_metric_sample_without_a_numeric_value_is_not_a_counter"
+   ]
+  },
+  {
+   "id": "FS52",
+   "title": "the sample name is prefix-matched, so an unrelated suffix is read as the counter",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if sample_name != name {",
+     "new": "                if !sample_name.starts_with(name) {"
+    }
+   ],
+   "tests": [
+    "sparks_http::an_unrelated_metric_suffix_is_not_the_named_counter"
+   ]
+  },
+  {
+   "id": "FS53",
+   "title": "the value is read before the label block, so a number inside a label becomes the counter",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        match line.split_once('{') {\n            Some((head, after)) => {\n                let end = label_block_end(after)?;\n                Some((head, &line[head.len()..=head.len() + end], &after[end..]))\n            }\n            None => {",
+     "new": "        match line.split_once('{') {\n            Some((head, after)) => {\n                let (_, rest) = after.split_once(char::is_whitespace).unwrap_or((after, \"\"));\n                Some((head, \"\", rest))\n            }\n            None => {"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_number_inside_a_label_is_not_the_sample_value"
+   ]
+  },
+  {
+   "id": "FS54",
+   "title": "a non-finite value is accepted as a counter",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())",
+     "new": "                    .parse::<f64>()\n                    .ok()"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_non_finite_metric_value_is_not_a_counter"
+   ]
+  },
+  {
+   "id": "FS55",
+   "title": "the histogram accepts a sum without its count",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }",
+     "new": "                [] if sums.len() == 1 => PrefillSeconds::Histogram {\n                    sum: sums[0].1,\n                    count: 0.0,\n                },\n                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }"
+    }
+   ],
+   "tests": [
+    "sparks_http::the_prefill_histogram_requires_both_sum_and_count"
+   ]
+  },
+  {
+   "id": "FS56",
+   "title": "a model reply without assistant text is accepted as a completion",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if reply.trim().is_empty() {\n            return Err(\"reply is empty\".to_string());\n        }\n        let reply: serde_json::Value =\n            serde_json::from_str(reply).map_err(|error| format!(\"reply is not JSON: {error}\"))?;\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .ok_or_else(|| \"reply has no assistant content\".to_string())?;\n        Ok(content.to_string())",
+     "new": "        let reply: serde_json::Value = serde_json::from_str(reply).unwrap_or_default();\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or(\"\");\n        Ok(content.to_string())"
+    }
+   ],
+   "tests": [
+    "tests::a_model_reply_without_assistant_text_is_not_a_completion"
+   ]
+  },
+  {
+   "id": "FS57",
+   "title": "histogram values are paired without their labels, so different series make one pair",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    if sum_labels == count_labels {",
+     "new": "                    if true {"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_histogram_pair_requires_matching_labels"
+   ]
+  },
+  {
+   "id": "FS58",
+   "title": "an empty assistant text is accepted as a prefix completion",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let content = assistant_content(reply)?;\n        if content.trim().is_empty() {\n            return Err(\"reply has empty assistant content\".to_string());\n        }\n        Ok(content)",
+     "new": "        let content = assistant_content(reply)?;\n        Ok(content)"
+    }
+   ],
+   "tests": [
+    "tests::a_model_reply_without_assistant_text_is_not_a_completion"
    ]
   }
  ]

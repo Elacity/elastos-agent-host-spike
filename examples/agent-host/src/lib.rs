@@ -8155,11 +8155,150 @@ mod sparks_http {
 
     /// POST a JSON body and return the decoded response body, or a reason.
     pub(crate) fn post_json(base_url: &str, path: &str, body: &str) -> Result<String, String> {
-        post_json_with_timeout(base_url, path, body, READ_TIMEOUT)
+        request_with_timeout("POST", base_url, path, body, READ_TIMEOUT)
     }
 
-    /// One client path; `read_timeout` only bounds the read.
-    fn post_json_with_timeout(
+    /// GET a text body (the engine's `/metrics`) through the same connection
+    /// and response-framing path as `post_json`.
+    pub(crate) fn get_text(base_url: &str, path: &str) -> Result<String, String> {
+        request_with_timeout("GET", base_url, path, "", READ_TIMEOUT)
+    }
+
+    /// One published prefill value: the scalar sample or the histogram pair.
+    /// Both forms come from the same exact-name rule below.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) enum PrefillSeconds {
+        Scalar(f64),
+        Histogram { sum: f64, count: f64 },
+    }
+
+    /// The two counters this engine publishes for one turn.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) struct PublishedCounters {
+        pub(crate) prompt_tokens: f64,
+        pub(crate) prefill: PrefillSeconds,
+    }
+
+    /// The byte just past the closing `}` of a label block, after the `{`.
+    /// Braces inside a quoted label value do not close the block.
+    fn label_block_end(text: &str) -> Option<usize> {
+        let mut quoted = false;
+        let mut escaped = false;
+        for (at, character) in text.char_indices() {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quoted = false;
+                }
+            } else if character == '"' {
+                quoted = true;
+            } else if character == '}' {
+                return Some(at + 1);
+            }
+        }
+        None
+    }
+
+    /// Split one sample line into its exact name, complete label block, and
+    /// the rest after the block. The whole block is consumed, so a number
+    /// inside a label is not the sample value. A malformed block gives
+    /// nothing.
+    fn split_sample(line: &str) -> Option<(&str, &str, &str)> {
+        match line.split_once('{') {
+            Some((head, after)) => {
+                let end = label_block_end(after)?;
+                Some((head, &line[head.len()..=head.len() + end], &after[end..]))
+            }
+            None => {
+                let (head, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+                Some((head, "", rest))
+            }
+        }
+    }
+
+    /// Every finite numeric sample with this exact name, keyed by its complete
+    /// label block (`""` for no labels). A longer name is not this metric.
+    fn sample_series<'a>(text: &'a str, name: &str) -> Vec<(&'a str, f64)> {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let (sample_name, labels, rest) = split_sample(line)?;
+                if sample_name != name {
+                    return None;
+                }
+                let value = rest
+                    .split_whitespace()
+                    .next()?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())?;
+                Some((labels, value))
+            })
+            .collect()
+    }
+
+    /// The value of one exact Prometheus sample name. The complete label
+    /// block is consumed before the value, so a number inside a label is not
+    /// this sample's value. A longer name is not this metric. The value must
+    /// be a finite number on the same line.
+    pub(crate) fn sample_value(text: &str, name: &str) -> Option<f64> {
+        sample_series(text, name).first().map(|(_, value)| *value)
+    }
+
+    /// Read the two counters this engine publishes. `request_prefill_seconds`
+    /// is the scalar sample or a `_sum` and `_count` pair with the same label
+    /// block; every other suffix is unrelated. An absent name or value, or an
+    /// ambiguous pair, is a refusal that says why.
+    pub(crate) fn published_counters(text: &str) -> Result<PublishedCounters, String> {
+        let prompt_tokens = sample_value(text, "tensorfold:prompt_tokens_total")
+            .ok_or_else(|| "tensorfold:prompt_tokens_total has no numeric value".to_string())?;
+        let prefill = if let Some(value) = sample_value(text, "tensorfold:request_prefill_seconds")
+        {
+            PrefillSeconds::Scalar(value)
+        } else {
+            let sums = sample_series(text, "tensorfold:request_prefill_seconds_sum");
+            let counts = sample_series(text, "tensorfold:request_prefill_seconds_count");
+            let mut pairs = Vec::new();
+            for (sum_labels, sum) in &sums {
+                for (count_labels, count) in &counts {
+                    if sum_labels == count_labels {
+                        pairs.push((*sum, *count));
+                    }
+                }
+            }
+            match pairs.as_slice() {
+                [(sum, count)] => PrefillSeconds::Histogram {
+                    sum: *sum,
+                    count: *count,
+                },
+                [] => {
+                    return Err(
+                        "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+                            .to_string(),
+                    )
+                }
+                _ => {
+                    return Err(
+                        "tensorfold:request_prefill_seconds has more than one matching _sum and _count series"
+                            .to_string(),
+                    )
+                }
+            }
+        };
+        Ok(PublishedCounters {
+            prompt_tokens,
+            prefill,
+        })
+    }
+
+    /// One client path; `method` and `read_timeout` choose the request and
+    /// only bound the read.
+    fn request_with_timeout(
+        method: &str,
         base_url: &str,
         path: &str,
         body: &str,
@@ -8174,7 +8313,7 @@ mod sparks_http {
             .set_read_timeout(Some(read_timeout))
             .map_err(|error| format!("timeout setup failed: {error}"))?;
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         stream
@@ -8478,9 +8617,14 @@ mod sparks_http {
     fn a_read_error_is_returned_not_ignored() {
         let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab";
         let server = MockServer::serve_once_stalled(response, Duration::from_secs(1));
-        let error =
-            post_json_with_timeout(server.url(), "/v1/chat", "{}", Duration::from_millis(200))
-                .unwrap_err();
+        let error = request_with_timeout(
+            "POST",
+            server.url(),
+            "/v1/chat",
+            "{}",
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
         assert!(error.starts_with("read failed:"), "{error}");
         assert!(server.request().starts_with(b"POST /v1/chat HTTP/1.1"));
     }
@@ -8685,6 +8829,213 @@ mod sparks_http {
         assert_eq!(sparks_model_url(), Some("http://127.0.0.1:9".to_string()));
         std::env::remove_var("SPARKS_MODEL_URL");
         assert_eq!(sparks_model_url(), None);
+    }
+
+    #[test]
+    fn a_metric_sample_without_a_numeric_value_is_not_a_counter() {
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total{model=\"x\"} 12\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            Some(12.0)
+        );
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total not-a-number\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total\ntensorfold:request_prefill_seconds 1\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total has no numeric value"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_metric_suffix_is_not_the_named_counter() {
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total_extra 3\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            sample_value(
+                "tensorfold:request_prefill_seconds_unrelated 3\n",
+                "tensorfold:request_prefill_seconds"
+            ),
+            None
+        );
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total 1\ntensorfold:request_prefill_seconds_unrelated 3\n"
+            )
+            .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+        );
+    }
+
+    #[test]
+    fn the_prefill_metric_accepts_only_its_scalar_or_sum_and_count_forms() {
+        let base = "tensorfold:prompt_tokens_total 1\n";
+        assert_eq!(
+            published_counters(&format!("{base}tensorfold:request_prefill_seconds 2.5\n")).unwrap(),
+            PublishedCounters {
+                prompt_tokens: 1.0,
+                prefill: PrefillSeconds::Scalar(2.5),
+            }
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_sum 3\n\
+                 tensorfold:request_prefill_seconds_count 4\n"
+            ))
+            .unwrap(),
+            PublishedCounters {
+                prompt_tokens: 1.0,
+                prefill: PrefillSeconds::Histogram {
+                    sum: 3.0,
+                    count: 4.0,
+                },
+            }
+        );
+        assert_eq!(
+            published_counters(&format!("{base}tensorfold:request_prefill_seconds_sum 3\n"))
+                .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_bucket{{le=\"1\"}} 3\n"
+            ))
+            .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+        );
+    }
+
+    #[test]
+    fn a_number_inside_a_label_is_not_the_sample_value() {
+        let named = "tensorfold:prompt_tokens_total";
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total{model=\"x 999 y\"} 12\n",
+                named
+            ),
+            Some(12.0)
+        );
+        assert_eq!(
+            sample_value("tensorfold:prompt_tokens_total{model=\"x 999 y\"}\n", named),
+            None
+        );
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total{model=\"x 999 y\"}\ntensorfold:request_prefill_seconds 1\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total has no numeric value"
+        );
+        // A brace inside the quoted label value does not close the block.
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total{model=\"a}b 999\"} 12\n",
+                named
+            ),
+            Some(12.0)
+        );
+    }
+
+    #[test]
+    fn a_non_finite_metric_value_is_not_a_counter() {
+        for value in ["NaN", "inf", "-inf"] {
+            assert_eq!(
+                sample_value(
+                    &format!("tensorfold:prompt_tokens_total {value}\n"),
+                    "tensorfold:prompt_tokens_total"
+                ),
+                None,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total NaN\ntensorfold:request_prefill_seconds 1\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total has no numeric value"
+        );
+    }
+
+    #[test]
+    fn the_prefill_histogram_requires_both_sum_and_count() {
+        let base = "tensorfold:prompt_tokens_total 1\n";
+        assert_eq!(
+            published_counters(&format!("{base}tensorfold:request_prefill_seconds_sum 3\n"))
+                .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_count 4\n"
+            ))
+            .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_sum 3\n\
+                 tensorfold:request_prefill_seconds_count 4\n"
+            ))
+            .unwrap()
+            .prefill,
+            PrefillSeconds::Histogram {
+                sum: 3.0,
+                count: 4.0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_histogram_pair_requires_matching_labels() {
+        let base = "tensorfold:prompt_tokens_total 1\n";
+        let mismatched = "tensorfold:request_prefill_seconds_sum{worker=\"a\"} 3\n\
+                          tensorfold:request_prefill_seconds_count{worker=\"b\"} 4\n";
+        assert_eq!(
+            published_counters(&format!("{base}{mismatched}")).unwrap_err(),
+            "tensorfold:request_prefill_seconds has no matching _sum and _count series"
+        );
+        let matched = "tensorfold:request_prefill_seconds_sum{worker=\"a\"} 3\n\
+                       tensorfold:request_prefill_seconds_count{worker=\"a\"} 4\n";
+        assert_eq!(
+            published_counters(&format!("{base}{matched}"))
+                .unwrap()
+                .prefill,
+            PrefillSeconds::Histogram {
+                sum: 3.0,
+                count: 4.0,
+            }
+        );
+        // Two workers each publish a pair: the engine must say which one it read.
+        let two = "tensorfold:request_prefill_seconds_sum{worker=\"a\"} 3\n\
+                   tensorfold:request_prefill_seconds_count{worker=\"a\"} 4\n\
+                   tensorfold:request_prefill_seconds_sum{worker=\"b\"} 5\n\
+                   tensorfold:request_prefill_seconds_count{worker=\"b\"} 6\n";
+        assert_eq!(
+            published_counters(&format!("{base}{two}")).unwrap_err(),
+            "tensorfold:request_prefill_seconds has more than one matching _sum and _count series"
+        );
     }
 }
 
@@ -9272,6 +9623,122 @@ mod tests {
             base
         );
         assert_ne!(build(SYSTEM_HEAD, "Reply in two short paragraphs."), base);
+    }
+
+    /// Opt-in: sends the two consecutive turns whose packed prefixes are
+    /// byte-identical to the local model through the merged `post_json`
+    /// client, and records the counters the engine publishes. Ignored by
+    /// default, and it skips when `SPARKS_MODEL_URL` is unset. This engine
+    /// publishes no prefix-hit counter, so the test reads none and claims no
+    /// cache hit.
+    #[test]
+    #[ignore = "opt-in: needs SPARKS_MODEL_URL and the local DeepSeek on the Sparks"]
+    fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
+        let Some(base_url) = sparks_http::sparks_model_url() else {
+            eprintln!("skip: SPARKS_MODEL_URL is unset, so no real model is called");
+            return;
+        };
+        // The text the model sees for a turn: every node in canonical order,
+        // rendered as the packer renders it.
+        let prompt = |events: &[SurfaceNode]| -> String {
+            events
+                .iter()
+                .map(render_record)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut journal = empty_journal();
+        admit_system(&mut journal, SYSTEM_HEAD, true);
+        admit_user(&mut journal, "hello");
+        admit_system(&mut journal, "Reply in one short paragraph.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self",
+            "2026-10-12T13:44:00Z",
+            "localhost://Users/self/Documents/note.txt",
+        ));
+        let first_prefix = prefix_bytes(&journal.events);
+        let first_prompt = prompt(&journal.events);
+
+        admit_user(&mut journal, "second turn");
+        admit_system(&mut journal, "Keep the first system line unchanged.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Documents",
+            "2026-10-13T01:29:00Z",
+            "localhost://Users/self/Documents/other.txt",
+        ));
+        let second_prefix = prefix_bytes(&journal.events);
+        let second_prompt = prompt(&journal.events);
+        assert_eq!(
+            first_prefix, second_prefix,
+            "the packed prefix moved between two consecutive turns"
+        );
+
+        let describe = |prefill: sparks_http::PrefillSeconds| -> String {
+            match prefill {
+                sparks_http::PrefillSeconds::Scalar(value) => format!("value {value}"),
+                sparks_http::PrefillSeconds::Histogram { sum, count } => {
+                    format!("sum {sum} count {count}")
+                }
+            }
+        };
+
+        let before_text = sparks_http::get_text(&base_url, "/metrics")
+            .unwrap_or_else(|error| panic!("/metrics before the turns failed: {error}"));
+        let before = sparks_http::published_counters(&before_text)
+            .unwrap_or_else(|error| panic!("/metrics before the turns: {error}"));
+
+        let body = |prompt: &str| {
+            serde_json::json!({
+                "model": "deepseek-v4-flash",
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            .to_string()
+        };
+        let first_body = body(&first_prompt);
+        assert!(first_body.contains("\"deepseek-v4-flash\""));
+        let first_reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &first_body)
+            .unwrap_or_else(|error| panic!("the local model refused the first turn: {error}"));
+        let first_text = require_completion(&first_reply)
+            .unwrap_or_else(|error| panic!("the first turn is not a completion: {error}"));
+        eprintln!(
+            "real model first turn ok: {} completion bytes",
+            first_text.len()
+        );
+        let second_body = body(&second_prompt);
+        assert!(second_body.contains("\"deepseek-v4-flash\""));
+        let second_reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &second_body)
+            .unwrap_or_else(|error| panic!("the local model refused the second turn: {error}"));
+        let second_text = require_completion(&second_reply)
+            .unwrap_or_else(|error| panic!("the second turn is not a completion: {error}"));
+        eprintln!(
+            "real model second turn ok: {} completion bytes",
+            second_text.len()
+        );
+
+        let after_text = sparks_http::get_text(&base_url, "/metrics")
+            .unwrap_or_else(|error| panic!("/metrics after the turns failed: {error}"));
+        let after = sparks_http::published_counters(&after_text)
+            .unwrap_or_else(|error| panic!("/metrics after the turns: {error}"));
+
+        eprintln!(
+            "tensorfold:prompt_tokens_total: before={} after={}",
+            before.prompt_tokens, after.prompt_tokens
+        );
+        eprintln!(
+            "tensorfold:request_prefill_seconds: before={} after={}",
+            describe(before.prefill),
+            describe(after.prefill)
+        );
+
+        eprintln!(
+            "real model: both turns ok; the packed prefix is {} bytes and byte-identical across the two turns",
+            first_prefix.len()
+        );
+        eprintln!("no prefix-hit counter is read and no cache hit is claimed");
     }
 
     #[test]
@@ -11667,15 +12134,85 @@ mod tests {
         id
     }
 
-    /// The assistant text of an OpenAI-compatible reply, unchanged. The summary
-    /// check judges the model's bytes, so nothing trims or rewrites them here.
-    fn assistant_content(reply: &str) -> String {
-        let reply: serde_json::Value = serde_json::from_str(reply)
-            .unwrap_or_else(|error| panic!("reply is not JSON: {error}"));
-        reply["choices"][0]["message"]["content"]
+    /// The assistant text of an OpenAI-compatible reply, unchanged, or the
+    /// reason the body carries no assistant text. An empty body, malformed
+    /// JSON, and a body with no assistant content are refusals. Extraction is
+    /// lossless: empty assistant text comes back as `Ok("")`, so the summary
+    /// path lets `compact_refusal` own summary validity.
+    fn assistant_content(reply: &str) -> Result<String, String> {
+        if reply.trim().is_empty() {
+            return Err("reply is empty".to_string());
+        }
+        let reply: serde_json::Value =
+            serde_json::from_str(reply).map_err(|error| format!("reply is not JSON: {error}"))?;
+        let content = reply["choices"][0]["message"]["content"]
             .as_str()
-            .unwrap_or_else(|| panic!("reply has no assistant content"))
-            .to_string()
+            .ok_or_else(|| "reply has no assistant content".to_string())?;
+        Ok(content.to_string())
+    }
+
+    /// A completion for the prefix proof: the reply carries assistant text and
+    /// that text is not empty. The summary path keeps using
+    /// `assistant_content` so `compact_refusal` owns the empty-summary rule.
+    fn require_completion(reply: &str) -> Result<String, String> {
+        let content = assistant_content(reply)?;
+        if content.trim().is_empty() {
+            return Err("reply has empty assistant content".to_string());
+        }
+        Ok(content)
+    }
+
+    #[test]
+    fn a_model_reply_without_assistant_text_is_not_a_completion() {
+        assert_eq!(assistant_content(""), Err("reply is empty".to_string()));
+        assert_eq!(assistant_content(" \n"), Err("reply is empty".to_string()));
+        assert!(assistant_content("not json")
+            .unwrap_err()
+            .starts_with("reply is not JSON:"));
+        assert_eq!(
+            assistant_content(r#"{"error":{"message":"boom"}}"#),
+            Err("reply has no assistant content".to_string())
+        );
+        // Extraction is lossless; the summary path judges empty text.
+        assert_eq!(
+            assistant_content(r#"{"choices":[{"message":{"content":""}}]}"#),
+            Ok(String::new())
+        );
+        assert_eq!(
+            require_completion(r#"{"choices":[{"message":{"content":""}}]}"#),
+            Err("reply has empty assistant content".to_string())
+        );
+        assert_eq!(
+            require_completion(r#"{"choices":[{"message":{"content":"  "}}]}"#),
+            Err("reply has empty assistant content".to_string())
+        );
+        assert_eq!(
+            require_completion(r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+            Ok("ok".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_model_summary_reaches_the_canonical_refusal() {
+        let reply = r#"{"choices":[{"message":{"content":""}}]}"#;
+        let answer = assistant_content(reply).expect("a valid completion body");
+        assert_eq!(answer, "");
+        let required = ["hello".to_string(), "second turn".to_string()];
+        let facts: Vec<&str> = required.iter().map(String::as_str).collect();
+        let mut journal = summary_journal();
+        let id = dispatched_summary_step(&mut journal, &facts);
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        assert_eq!(
+            compact_refusal(&journal, &answer, &required),
+            Some("summary empty")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(answer)),
+            Err("summary empty")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
     }
 
     #[test]
@@ -11946,7 +12483,7 @@ mod tests {
             "choices": [{"message": {"content": padded}}],
         })
         .to_string();
-        let answer = assistant_content(&reply);
+        let answer = assistant_content(&reply).expect("a valid model reply");
         assert_eq!(answer, padded);
         let required = ["hello".to_string(), "second turn".to_string()];
         assert_eq!(
@@ -12000,7 +12537,8 @@ mod tests {
         let reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &body)
             .unwrap_or_else(|error| panic!("real model request failed: {error}"));
         eprintln!("real model request ok: {} response bytes", reply.len());
-        let summary = assistant_content(&reply);
+        let summary = assistant_content(&reply)
+            .unwrap_or_else(|error| panic!("real model reply is not a completion: {error}"));
         eprintln!("real model summary: {} bytes", summary.len());
 
         let expected = compact_refusal(&journal, &summary, &required);
