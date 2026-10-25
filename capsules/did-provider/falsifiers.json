@@ -1,5 +1,5 @@
 {
-  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant, and DID11 returns `parse_error` instead of the non-hex signature refusal. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
+  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant, and DID11 returns `parse_error` instead of the non-hex signature refusal. DID12 drops the child's stderr from the one startup failure message, DID13 the request, DID14 the exit status, DID15 the shared diagnostic itself, and DID16 disables the stderr drain; `startup_denial_reports_its_reason` and `stderr_is_drained_before_wait` catch them. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
   "falsifiers": [
     {
       "id": "DID01",
@@ -188,6 +188,86 @@
       ],
       "tests": [
         "verify_did_recovery_under_profile"
+      ]
+    },
+    {
+      "id": "DID12",
+      "title": "the startup failure message drops the child's stderr",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        format!(\n            \"provider did not answer request {request}{write}; child exit status: {status}; child stderr: {stderr}\"\n        )",
+          "new": "        let _ = &stderr;\n        format!(\n            \"provider did not answer request {request}{write}; child exit status: {status}\"\n        )"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID13",
+      "title": "the startup failure message drops the request",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        format!(\n            \"provider did not answer request {request}{write}; child exit status: {status}; child stderr: {stderr}\"\n        )",
+          "new": "        let _ = &request;\n        format!(\n            \"provider did not answer{write}; child exit status: {status}; child stderr: {stderr}\"\n        )"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID14",
+      "title": "the startup failure message drops the child's exit status",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        format!(\n            \"provider did not answer request {request}{write}; child exit status: {status}; child stderr: {stderr}\"\n        )",
+          "new": "        let _ = &status;\n        format!(\n            \"provider did not answer request {request}{write}; child stderr: {stderr}\"\n        )"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID15",
+      "title": "an unanswered request bypasses the shared startup diagnostic",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        let Ok(response) = self.responses.recv_timeout(DIAGNOSTIC_DEADLINE) else {\n            return Err(self.failure(&line, write.err()));\n        };",
+          "new": "        let Ok(response) = self.responses.recv_timeout(DIAGNOSTIC_DEADLINE) else {\n            let _ = write;\n            return Err(format!(\"provider exited without a response to {line}\"));\n        };"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID16",
+      "title": "the harness stops draining the child's stderr",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        thread::spawn(move || {\n            for line in BufReader::new(stderr).lines().map_while(Result::ok) {\n                if stderr_tx.send(line).is_err() {\n                    break;\n                }\n            }\n        });",
+          "new": "        thread::spawn(move || {\n            std::mem::drop((stderr, stderr_tx));\n        });"
+        }
+      ],
+      "tests": [
+        "stderr_is_drained_before_wait"
       ]
     }
   ]

@@ -100,6 +100,14 @@ the outside file to stay unchanged, the provider to report no nickname for its
 own root, and a normal request to succeed after the link is removed. Both cases
 fail when `(deny default)` becomes `(allow default)`.
 
+`startup_denial_reports_its_reason` starts the provider under a fixture profile
+that denies everything, so `sandbox-exec` cannot execute the binary. The one
+failure message must name the request, the child's exit status and the child's
+standard error. The test covers both a request that cannot be written and a
+response that never comes. `stderr_is_drained_before_wait` requires the harness
+to read standard error from spawn, before it waits for the child, so a full
+pipe cannot block the child's exit.
+
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
 no default grant. It runs on every platform, and removing `(deny network*)`
@@ -167,6 +175,14 @@ the test.
   `../wallet-provider/falsifiers.json` records it, and
   `both_file_profiles_bind_one_storage_parameter_contract` fails. No did
   confinement test fails, so did keeps this grant only for the one contract.
+- Drop the child's stderr from the one startup failure message (DID12):
+  `startup_denial_reports_its_reason` fails because `Operation not permitted`
+  is missing.
+- Drop the request from that message (DID13), the exit status (DID14) or the
+  shared diagnostic itself (DID15): the same test fails because the message
+  no longer names what the child was asked, what it returned, or why.
+- Stop draining the child's stderr (DID16): `stderr_is_drained_before_wait`
+  fails on its bounded deadline because the startup line never arrives.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
@@ -185,8 +201,12 @@ them on macOS 26.5.2 arm64:
   needed it on macOS 26.5.2 arm64.
 
 A host that needs one of the removed grants receives a sandbox denial for the
-affected access, so that operation fails closed with a reason. The grant comes
-back only together with a named test that needs it.
+affected access, so that operation fails closed with a reason. The confinement
+test failure names the provider's exit status and its standard error, so a
+startup denial shows the sandbox's own reason when it writes one
+(`Operation not permitted`) and the abort status when it writes none
+(`signal: 6 (SIGABRT)`). The grant comes back only together with a named test
+that needs it.
 
 The wallet provider keeps its own profile and tests in `../wallet-provider/`.
 Both providers present the same file-based contract to the Runtime bridge:
