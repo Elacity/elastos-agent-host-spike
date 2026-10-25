@@ -1468,6 +1468,118 @@
    "tests": [
     "tests::an_inbox_answer_never_crosses_sessions"
    ]
+  },
+  {
+   "id": "F-AH3a",
+   "title": "a hosted proposal records a model resource the declaration does not cover",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    step.kind = ProposalKind::Hosted;\n    step.resource = resource.to_string();",
+     "new": "    step.kind = ProposalKind::Hosted;\n    step.resource = \"localhost://Other/hosted\".to_string();"
+    }
+   ],
+   "tests": [
+    "tests::every_resource_the_guest_proposes_is_declared"
+   ]
+  },
+  {
+   "id": "F-AH3b",
+   "title": "the undeclared-ask check is bypassed, so any resource is admitted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .any(|ask| ask.kind == kind && ask_pattern_matches(&ask.pattern, path))",
+     "new": "        .any(|ask| ask.kind == kind && ask_pattern_matches(&ask.pattern, path))\n        || true"
+    }
+   ],
+   "tests": [
+    "tests::every_resource_the_guest_proposes_is_declared"
+   ]
+  },
+  {
+   "id": "F-AH3c",
+   "title": "a declared ask is deleted, so a proposable resource is no longer covered",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::every_resource_the_guest_proposes_is_declared"
+   ]
+  },
+  {
+   "id": "F-AH3d",
+   "title": "a declared ask carries a URL",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3e",
+   "title": "a declared ask carries a secret-shaped value",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3f",
+   "title": "a declared ask carries a Users/ path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
+     "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3g",
+   "title": "an undeclared hosted ask refuses with a different reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !declared_ask(ProposalKind::Hosted, resource) {\n        return Err(\"undeclared ask\");\n    }",
+     "new": "    if !declared_ask(ProposalKind::Hosted, resource) {\n        return Err(\"not declared\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::every_resource_the_guest_proposes_is_declared"
+   ]
   }
  ]
 }

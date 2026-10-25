@@ -1927,6 +1927,7 @@ refusals! {
     EarlierWriteOpen => "an earlier write is open",
     WrittenMismatch => "written files do not match the change",
     NoVersionLeft => "no version number left",
+    UndeclaredAsk => "undeclared ask",
 }
 
 /// Why a path is refused, or nothing. A path must be canonical (see
@@ -2357,8 +2358,13 @@ fn propose_step(journal: &mut Journal) -> u64 {
     id
 }
 
+/// Record a read proposal. A resource outside the declared read asks creates
+/// no step. This does not read.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn propose_read(journal: &mut Journal, resource: &str) -> u64 {
+fn propose_read(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {
+    if !declared_ask(ProposalKind::Read, resource) {
+        return Err("undeclared ask");
+    }
     let id = propose_step(journal);
     let step = journal
         .steps
@@ -2367,7 +2373,7 @@ fn propose_read(journal: &mut Journal, resource: &str) -> u64 {
         .expect("just pushed");
     step.kind = ProposalKind::Read;
     step.resource = resource.to_string();
-    id
+    Ok(id)
 }
 
 /// How many times the same edit that changes nothing may be proposed for one
@@ -2466,6 +2472,9 @@ fn propose_edit_checked(
     if let Some(refusal) = path_refusal(resource) {
         return Err(refusal);
     }
+    if !declared_ask(ProposalKind::Edit, resource) {
+        return Err(Refusal::UndeclaredAsk);
+    }
     let Some(row) = current_observation(&journal.events, resource) else {
         return Err(Refusal::NotObserved);
     };
@@ -2545,6 +2554,9 @@ fn propose_change_checked(
     for (index, edit) in edits.iter().enumerate() {
         if let Some(refusal) = path_refusal(edit.resource) {
             return Err((index, refusal));
+        }
+        if !declared_ask(ProposalKind::Edit, edit.resource) {
+            return Err((index, Refusal::UndeclaredAsk));
         }
         if edits[..index]
             .iter()
@@ -2948,6 +2960,9 @@ fn propose_run(
     {
         return Err("host path");
     }
+    if !declared_ask(ProposalKind::Run, resource) {
+        return Err("undeclared ask");
+    }
     let id = propose_step(journal);
     let step = journal
         .steps
@@ -3230,6 +3245,9 @@ fn propose_scaffold(
         return Err("host path");
     }
     let resource = format!("{}/{relative}", project.resource);
+    if !declared_ask(ProposalKind::Edit, &resource) {
+        return Err("undeclared ask");
+    }
     let Some(row) = current_observation(&journal.events, &resource) else {
         return Err("not observed");
     };
@@ -3264,9 +3282,193 @@ fn host_path(text: &str) -> bool {
     text.starts_with('/') || text.contains('\\') || text.split('/').any(|part| part == "..")
 }
 
+/// The declared per-step asks, compiled in from `asks.json`. The file is a
+/// lane-local stand-in for the Runtime manifest: it moves to that one place
+/// when the Runtime defines per-step asks, and until then it is the only
+/// declaration every proposal is checked against.
+#[cfg(any(test, target_arch = "wasm32"))]
+const ASKS_JSON: &str = include_str!("../asks.json");
+
+#[cfg(any(test, target_arch = "wasm32"))]
+const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+
+/// The one marker a declared resource pattern may hold: the namespace user
+/// root, `Users/<one name>`. The declaration names no person and no host path.
+#[cfg(any(test, target_arch = "wasm32"))]
+const PRINCIPAL_MARKER: &str = "<principal>";
+
+/// One declared ask: a proposal kind and the resource pattern after
+/// `localhost://` that it may name.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ask {
+    kind: ProposalKind,
+    pattern: String,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn proposal_kind(name: &str) -> Option<ProposalKind> {
+    match name {
+        "read" => Some(ProposalKind::Read),
+        "edit" => Some(ProposalKind::Edit),
+        "run" => Some(ProposalKind::Run),
+        "restore" => Some(ProposalKind::Restore),
+        "hosted" => Some(ProposalKind::Hosted),
+        "child" => Some(ProposalKind::Child),
+        "init" => Some(ProposalKind::Init),
+        "journal-append" => Some(ProposalKind::JournalAppend),
+        _ => None,
+    }
+}
+
+/// `Unspecified` has no name: a step opened without a proposal is not an ask.
+#[cfg(test)]
+fn proposal_kind_name(kind: ProposalKind) -> Option<&'static str> {
+    match kind {
+        ProposalKind::Read => Some("read"),
+        ProposalKind::Edit => Some("edit"),
+        ProposalKind::Run => Some("run"),
+        ProposalKind::Restore => Some("restore"),
+        ProposalKind::Hosted => Some("hosted"),
+        ProposalKind::Child => Some("child"),
+        ProposalKind::Init => Some("init"),
+        ProposalKind::JournalAppend => Some("journal-append"),
+        ProposalKind::Unspecified => None,
+    }
+}
+
+/// Parse the declaration with its closed shape: exactly `schema` and `asks`,
+/// and exactly `kind` and `resource` in each ask. A kind the guest cannot
+/// propose, an empty resource, or a malformed document is refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
+    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
+    let document = document.as_object().ok_or("asks json")?;
+    if document.len() != 2
+        || document.get("schema").and_then(serde_json::Value::as_str) != Some(ASKS_SCHEMA)
+    {
+        return Err("asks schema");
+    }
+    let entries = document
+        .get("asks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("asks json")?;
+    if entries.is_empty() {
+        return Err("asks empty");
+    }
+    let mut asks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry.as_object().ok_or("asks json")?;
+        if entry.len() != 2 {
+            return Err("asks field");
+        }
+        let kind = entry
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .and_then(proposal_kind)
+            .ok_or("asks kind")?;
+        let pattern = entry
+            .get("resource")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("asks resource")?;
+        if pattern.is_empty() {
+            return Err("asks resource");
+        }
+        asks.push(Ask {
+            kind,
+            pattern: pattern.to_string(),
+        });
+    }
+    Ok(asks)
+}
+
+/// The declaration, parsed once. A malformed declaration declares no ask, so
+/// every proposal is refused: fail closed (P11).
+#[cfg(any(test, target_arch = "wasm32"))]
+static DECLARED_ASKS: std::sync::LazyLock<Vec<Ask>> =
+    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON).unwrap_or_default());
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn declared_asks() -> &'static [Ask] {
+    &DECLARED_ASKS
+}
+
+/// A declared pattern is a resource path after `localhost://`. A literal
+/// pattern is a directory prefix. `<principal>` matches `Users/<one name>`,
+/// and the rest of the pattern must follow it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn ask_pattern_matches(pattern: &str, path: &str) -> bool {
+    let Some(tail) = pattern.strip_prefix(PRINCIPAL_MARKER) else {
+        return path.starts_with(pattern);
+    };
+    let Some(namespace) = path.strip_prefix("Users/") else {
+        return false;
+    };
+    let (name, below) = match namespace.split_once('/') {
+        Some((name, below)) => (name, Some(below)),
+        None => (namespace, None),
+    };
+    if name.is_empty() {
+        return false;
+    }
+    match tail {
+        "" => below.is_none(),
+        _ => tail
+            .strip_prefix('/')
+            .is_some_and(|tail| below.is_some_and(|below| below.starts_with(tail))),
+    }
+}
+
+/// The one check every proposal path uses: an ask is declared only when its
+/// kind and its resource match one entry. `Unspecified` never matches.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
+    let Some(path) = resource.strip_prefix("localhost://") else {
+        return false;
+    };
+    declared_asks()
+        .iter()
+        .any(|ask| ask.kind == kind && ask_pattern_matches(&ask.pattern, path))
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
 fn is_write(kind: ProposalKind) -> bool {
     matches!(kind, ProposalKind::Edit | ProposalKind::Restore)
+}
+
+/// Every kind the guest can put in a proposal. `Unspecified` is not here: a
+/// step opened without a proposal is not an ask.
+#[cfg(test)]
+const PROPOSABLE_KINDS: &[ProposalKind] = &[
+    ProposalKind::Read,
+    ProposalKind::Edit,
+    ProposalKind::Run,
+    ProposalKind::Restore,
+    ProposalKind::Hosted,
+    ProposalKind::Child,
+    ProposalKind::Init,
+    ProposalKind::JournalAppend,
+];
+
+/// A declaration value that reads as a credential. The declaration carries
+/// no secret, so a value that names one fails the declaration test.
+#[cfg(test)]
+fn secret_shaped(text: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "api_key",
+        "api-key",
+        "apikey",
+        "bearer ",
+        "sk-",
+        "ghp_",
+        "xox",
+        "-----begin",
+    ];
+    WORDS.iter().any(|word| text.contains(word))
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -3291,6 +3493,9 @@ fn propose_restore(
     resource: &str,
     version: u64,
 ) -> Result<u64, &'static str> {
+    if !declared_ask(ProposalKind::Restore, resource) {
+        return Err("undeclared ask");
+    }
     let Some(text) = observed_text_at(&journal.events, resource, version) else {
         return Err("unknown");
     };
@@ -3324,6 +3529,9 @@ fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static
     {
         return Err("host path");
     }
+    if !declared_ask(ProposalKind::Hosted, resource) {
+        return Err("undeclared ask");
+    }
     let id = propose_step(journal);
     let step = journal
         .steps
@@ -3348,6 +3556,9 @@ fn propose_child(
     };
     if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
         return Err("not a subset");
+    }
+    if !declared_ask(ProposalKind::Child, resource) {
+        return Err("undeclared ask");
     }
     let id = propose_step(journal);
     let step = journal
@@ -3380,6 +3591,9 @@ fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'
         return Err("host path");
     }
     let resource = format!("localhost://Users/{root}/Projects/{name}");
+    if !declared_ask(ProposalKind::Init, &resource) {
+        return Err("undeclared ask");
+    }
     let id = propose_step(journal);
     let step = journal
         .steps
@@ -3914,6 +4128,9 @@ fn propose_journal_append(
     if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
         return Err("host path");
     }
+    if !declared_ask(ProposalKind::JournalAppend, &cursor.resource) {
+        return Err("undeclared ask");
+    }
     let open = journal.steps.iter().any(|step| {
         step.kind == ProposalKind::JournalAppend
             && !step.has_result
@@ -4329,7 +4546,10 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let epoch = journal.epoch;
         let before_read = model_bytes(&journal.events);
-        let read_id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let read_id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt")
+            .map_err(|_| {
+                elastos::bus::types::BusError::Invalid("a read proposal was refused".to_string())
+            })?;
         if authorize(&mut journal, read_id, None)
             || step_state(&journal, read_id) != Some(StepState::Denied)
             || dispatch(&mut journal, read_id)
@@ -9127,7 +9347,7 @@ mod tests {
     #[test]
     fn a_child_grant_needs_a_child_step() {
         let mut journal = two_turns();
-        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(!authorize_child(&mut journal, read, Some("child-grant")));
         assert_eq!(step_state(&journal, read), Some(StepState::Prepared));
         assert!(journal.steps.iter().all(|step| step.grant.is_none()));
@@ -9141,7 +9361,7 @@ mod tests {
         let run = propose_run(&mut journal, project, &[]).unwrap();
         assert!(authorize(&mut journal, run, Some("run-grant")));
         assert!(dispatch(&mut journal, run));
-        let read = propose_read(&mut journal, project);
+        let read = propose_read(&mut journal, project).unwrap();
         assert!(authorize(&mut journal, read, Some("read-grant")));
         assert!(dispatch(&mut journal, read));
         let again = propose_run(&mut journal, project, &[]).unwrap();
@@ -9397,7 +9617,7 @@ mod tests {
     fn a_scaffold_needs_an_init_project_and_text() {
         let mut journal = empty_journal();
         let project = propose_init(&mut journal, "self", "demo").unwrap();
-        let read = propose_read(&mut journal, "localhost://Users/self/Projects/demo");
+        let read = propose_read(&mut journal, "localhost://Users/self/Projects/demo").unwrap();
         let file = "localhost://Users/self/Projects/demo/index.html";
         assert!(observe(&mut journal, file, 1, ""));
         assert_eq!(
@@ -10118,7 +10338,7 @@ mod tests {
                 .unwrap()
                 .has_result
         );
-        let read = propose_read(&mut journal, resource);
+        let read = propose_read(&mut journal, resource).unwrap();
         assert!(authorize(&mut journal, read, Some("fixture-grant")));
         assert!(!provider_write_may_be_asked(&journal, read, 1));
     }
@@ -10565,6 +10785,220 @@ mod tests {
             .events
             .iter()
             .all(|node| !node.text.contains("upload")));
+    }
+
+    fn step_ask_declared(journal: &Journal, id: u64) -> bool {
+        journal
+            .steps
+            .iter()
+            .find(|step| step.id == id)
+            .is_some_and(|step| declared_ask(step.kind, &step.resource))
+    }
+
+    #[test]
+    fn asks_declare_no_urls_secrets_or_users_paths() {
+        let document: serde_json::Value = serde_json::from_str(ASKS_JSON).unwrap();
+        let document = document.as_object().unwrap();
+        assert_eq!(
+            document.len(),
+            2,
+            "the declaration has exactly schema and asks"
+        );
+        assert_eq!(
+            document.get("schema").and_then(serde_json::Value::as_str),
+            Some(ASKS_SCHEMA)
+        );
+        let asks = document
+            .get("asks")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(!asks.is_empty());
+        for entry in asks {
+            let entry = entry.as_object().unwrap();
+            assert_eq!(entry.len(), 2, "an ask has exactly kind and resource");
+            let kind = entry
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let pattern = entry
+                .get("resource")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            assert!(proposal_kind(kind).is_some(), "unknown ask kind {kind:?}");
+            assert!(!pattern.is_empty());
+            assert!(
+                !pattern.contains("://"),
+                "an ask carries no URL: {pattern:?}"
+            );
+            assert!(
+                !pattern.to_ascii_lowercase().contains("users/"),
+                "an ask carries no Users/ path: {pattern:?}"
+            );
+            assert!(
+                !pattern.starts_with('/') && !pattern.starts_with("~/") && !pattern.contains('\\'),
+                "an ask carries no host path: {pattern:?}"
+            );
+            assert!(
+                pattern
+                    .split('/')
+                    .all(|segment| segment != "." && segment != ".."),
+                "an ask carries no dotted segment: {pattern:?}"
+            );
+            assert!(
+                !secret_shaped(&pattern.to_ascii_lowercase()),
+                "an ask carries no secret: {pattern:?}"
+            );
+            if let Some(tail) = pattern.strip_prefix(PRINCIPAL_MARKER) {
+                assert!(
+                    tail.is_empty() || tail.starts_with('/'),
+                    "the principal marker ends a segment: {pattern:?}"
+                );
+            } else {
+                assert!(
+                    pattern.ends_with('/'),
+                    "a literal ask is a directory prefix: {pattern:?}"
+                );
+            }
+        }
+        assert_eq!(
+            parse_asks(ASKS_JSON).map(|parsed| parsed.len()),
+            Ok(asks.len()),
+            "the shipped declaration parses"
+        );
+    }
+
+    #[test]
+    fn asks_json_matches_the_proposable_steps() {
+        let declared: Vec<ProposalKind> = declared_asks().iter().map(|ask| ask.kind).collect();
+        for kind in PROPOSABLE_KINDS {
+            assert!(
+                declared.contains(kind),
+                "{kind:?} is proposable and must be declared"
+            );
+            assert!(proposal_kind_name(*kind).is_some());
+        }
+        for kind in &declared {
+            assert!(
+                PROPOSABLE_KINDS.contains(kind),
+                "{kind:?} is declared but cannot be proposed"
+            );
+        }
+        assert!(!declared.contains(&ProposalKind::Unspecified));
+        assert_eq!(proposal_kind_name(ProposalKind::Unspecified), None);
+        for kind in PROPOSABLE_KINDS {
+            let name = proposal_kind_name(*kind).unwrap();
+            assert_eq!(proposal_kind(name), Some(*kind));
+        }
+    }
+
+    #[test]
+    fn every_resource_the_guest_proposes_is_declared() {
+        let mut journal = empty_journal();
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(read.is_ok(), "read: {read:?}");
+        assert!(step_ask_declared(&journal, read.unwrap()));
+        let project = propose_init(&mut journal, "self", "demo");
+        assert!(project.is_ok(), "init: {project:?}");
+        assert!(step_ask_declared(&journal, project.unwrap()));
+        let run = propose_run(&mut journal, "localhost://Users/self/Projects/demo", &[]);
+        assert!(run.is_ok(), "run: {run:?}");
+        let run = run.unwrap();
+        assert!(step_ask_declared(&journal, run));
+        let child = propose_child(
+            &mut journal,
+            run,
+            "localhost://Users/self/Projects/demo/src",
+        );
+        assert!(child.is_ok(), "child: {child:?}");
+        assert!(step_ask_declared(&journal, child.unwrap()));
+        let hosted = propose_hosted(&mut journal, "localhost://Models/hosted");
+        assert!(hosted.is_ok(), "hosted: {hosted:?}");
+        assert!(step_ask_declared(&journal, hosted.unwrap()));
+        let (_, cursor) = fake_runtime();
+        let append = propose_journal_append(&mut journal, &cursor);
+        assert!(append.is_ok(), "journal append: {append:?}");
+        assert!(step_ask_declared(&journal, append.unwrap()));
+
+        let mut files = empty_journal();
+        assert!(observe_read(
+            &mut files, NOTES, 1, "rev-1", None, false, "one\n"
+        ));
+        let edit = propose_edit(&mut files, NOTES, "one", "two", Some(1));
+        assert!(edit.is_ok(), "edit: {edit:?}");
+        assert!(step_ask_declared(&files, edit.unwrap()));
+        let restore = propose_restore(&mut files, NOTES, 1);
+        assert!(restore.is_ok(), "restore: {restore:?}");
+        assert!(step_ask_declared(&files, restore.unwrap()));
+
+        // The same kinds outside the declaration create no step.
+        let mut refused = empty_journal();
+        let before = refused.clone();
+        assert_eq!(
+            propose_read(&mut refused, "localhost://Models/hosted"),
+            Err("undeclared ask")
+        );
+        assert_eq!(
+            propose_run(&mut refused, "localhost://Models/hosted", &[]),
+            Err("undeclared ask")
+        );
+        assert_eq!(
+            propose_hosted(&mut refused, "localhost://Other/model"),
+            Err("undeclared ask")
+        );
+        assert_eq!(refused, before);
+
+        let mut observed = empty_journal();
+        assert!(observe_read(
+            &mut observed,
+            "localhost://Models/hosted",
+            1,
+            "rev-1",
+            None,
+            false,
+            "one\n"
+        ));
+        let events = observed.events.clone();
+        assert_eq!(
+            propose_edit(
+                &mut observed,
+                "localhost://Models/hosted",
+                "one",
+                "two",
+                Some(1)
+            ),
+            Err("undeclared ask")
+        );
+        assert_eq!(
+            propose_change(
+                &mut observed,
+                &[spec("localhost://Models/hosted", "rev-1", "one", "two")]
+            )
+            .map(|_| ()),
+            Err((0, "undeclared ask"))
+        );
+        assert_eq!(
+            propose_restore(&mut observed, "localhost://Models/hosted", 1),
+            Err("undeclared ask")
+        );
+        assert!(observed.steps.is_empty());
+        assert_eq!(
+            without_refusal_records(&observed.events),
+            without_refusal_records(&events)
+        );
+
+        let mut family = empty_journal();
+        let parent = propose_step(&mut family);
+        let parent_step = family
+            .steps
+            .iter_mut()
+            .find(|step| step.id == parent)
+            .unwrap();
+        parent_step.kind = ProposalKind::Run;
+        parent_step.resource = "localhost://Models".to_string();
+        assert_eq!(
+            propose_child(&mut family, parent, "localhost://Models/child"),
+            Err("undeclared ask")
+        );
     }
 
     #[test]
@@ -13008,7 +13442,7 @@ mod tests {
         assert!(observe(&mut journal, note, 1, "hello from the project"));
         let turn = open_turn(&mut journal);
         open_step(&mut journal, turn).unwrap();
-        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(cancel(&mut journal, read));
         let edit = propose_edit(&mut journal, note, "hello", "hi", Some(1)).unwrap();
         assert!(note_crash(&mut journal, edit));
@@ -13135,9 +13569,10 @@ mod tests {
     #[test]
     fn a_grant_is_never_stored() {
         let mut journal = a_rich_journal();
-        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(authorize(&mut journal, read, Some("fixture-grant")));
-        let standing = propose_read(&mut journal, "localhost://Users/self/Documents/other.txt");
+        let standing =
+            propose_read(&mut journal, "localhost://Users/self/Documents/other.txt").unwrap();
         assert!(apply_inbox(
             &mut journal,
             standing,
@@ -13323,13 +13758,14 @@ mod tests {
     #[test]
     fn a_read_with_no_grant_is_denied() {
         let mut journal = two_turns();
-        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(!authorize(&mut journal, id, None));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         assert!(!dispatch(&mut journal, id));
         assert!(!note_crash(&mut journal, id));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
-        let empty = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let empty =
+            propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(!authorize(&mut journal, empty, Some("")));
         assert_eq!(step_state(&journal, empty), Some(StepState::Denied));
     }
@@ -13337,7 +13773,7 @@ mod tests {
     #[test]
     fn a_second_authorize_stays_denied() {
         let mut journal = two_turns();
-        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(!authorize(&mut journal, id, None));
         assert!(!authorize(&mut journal, id, Some("fixture-grant")));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
@@ -13349,14 +13785,15 @@ mod tests {
     fn dispatch_without_a_grant_is_denied_even_without_authorize() {
         let mut journal = two_turns();
         let before = model_bytes(&journal.events).unwrap();
-        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(!dispatch(&mut journal, id));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         let step = journal.steps.iter().find(|step| step.id == id).unwrap();
         assert_eq!(step.grant, None);
         assert!(!dispatch(&mut journal, id));
         assert_eq!(model_bytes(&journal.events).unwrap(), before);
-        let granted = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let granted =
+            propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(authorize(&mut journal, granted, Some("fixture-grant")));
         assert!(dispatch(&mut journal, granted));
         assert_eq!(step_state(&journal, granted), Some(StepState::Dispatched));
@@ -13367,7 +13804,7 @@ mod tests {
         let mut journal = two_turns();
         let before = model_bytes(&journal.events).unwrap();
         let epoch = journal.epoch;
-        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert_eq!(step_state(&journal, id), Some(StepState::Prepared));
         let step = journal.steps.iter().find(|step| step.id == id).unwrap();
         assert_eq!(step.kind, ProposalKind::Read);
@@ -13413,7 +13850,8 @@ mod tests {
         assert!(cancel(&mut journal, id));
         assert_eq!(model_bytes(&journal.events).unwrap(), before);
         assert_eq!(journal.epoch, epoch);
-        let denied = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        let denied =
+            propose_read(&mut journal, "localhost://Users/self/Documents/note.txt").unwrap();
         assert!(!authorize(&mut journal, denied, None));
         assert!(!cancel(&mut journal, denied));
         assert_eq!(step_state(&journal, denied), Some(StepState::Denied));
@@ -18303,6 +18741,32 @@ mod tests {
                     propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "a")]).unwrap();
                 granted(&mut journal, &ids);
                 vec![(journal, result)]
+            }
+            Refusal::UndeclaredAsk => {
+                let mut observed = empty_journal();
+                assert!(observe_read(
+                    &mut observed,
+                    "localhost://Models/hosted",
+                    1,
+                    "rev-1",
+                    None,
+                    false,
+                    "alpha\n"
+                ));
+                vec![
+                    (observed.clone(), |j| {
+                        propose_edit(j, "localhost://Models/hosted", "alpha", "a", Some(1))
+                            .map(|_| ())
+                    }),
+                    (observed, |j| {
+                        propose_change(
+                            j,
+                            &[spec("localhost://Models/hosted", "rev-1", "alpha", "a")],
+                        )
+                        .map(|_| ())
+                        .map_err(|(_, why)| why)
+                    }),
+                ]
             }
         }
     }
