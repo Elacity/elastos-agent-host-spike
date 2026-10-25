@@ -55,11 +55,13 @@ Callers match the variant's fields; they never parse the Display string.
 - `Malformed` covers any bytes that fail to parse and validate as a core
   module, including unknown sections and Component bytes. The core header
   check and full validation run before the import and custom-section checks.
-- `CodeInCustomSection` refuses a custom section whose content contains the
-  Wasm magic bytes `00 61 73 6D` at any offset. Content is every byte after
-  the section id and size, read as one run: the name's length, the name and
-  the data. A section without such a run passes this check. This is a byte
-  heuristic; compressed or encoded content is not decoded.
+- `CodeInCustomSection` refuses a custom section when the Wasm magic bytes
+  `00 61 73 6D` occur at any offset in one run of its bytes: the last byte of
+  its size, then its content (the name's length, the name and the data). A size
+  may be padded, so its last byte can be `00`. Earlier size bytes are `0x80`
+  or more and cannot be part of the magic. A section without such a run passes
+  this check; padding alone is not refused. This is a byte heuristic;
+  compressed or encoded content is not decoded.
 - After validation and custom-section checks, the first undeclared import
   in section order returns `Undeclared` with its module and name.
 
