@@ -15,6 +15,32 @@ thread_local! {
     static TEST_REQUEST_IDS: RefCell<std::collections::BTreeMap<String, String>> = RefCell::default();
 }
 
+/// Adapter faults reach a run terminal as a public error without their detail.
+/// The detail stays a test-only observation, keyed by run id so one test's
+/// refusal cannot stand in for another's.
+#[allow(dead_code)]
+static ADAPTER_DETAILS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[allow(dead_code)]
+pub(crate) fn record_adapter_detail(run_id: &str, detail: Option<&str>) {
+    let Some(detail) = detail else { return };
+    ADAPTER_DETAILS
+        .lock()
+        .unwrap()
+        .push((run_id.to_string(), detail.to_string()));
+}
+
+#[allow(dead_code)]
+pub(crate) fn adapter_detail_for(run_id: &str) -> Option<String> {
+    ADAPTER_DETAILS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, _)| id == run_id)
+        .map(|(_, detail)| detail.clone())
+}
+
 /// Each named creation keeps one time and nonce across retries and changed input.
 pub(crate) fn fixture_model_request_id(label: &str) -> String {
     if elastos_model_contract::model_request_issued_ms(label).is_some() {
@@ -264,6 +290,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # A fixture tokenizer charges UTF-8 content and per-message template
             # markers. The pinned engine's endpoint owns exact production counts.
             count = sum(len(message['content'].encode('utf-8')) + 8 for message in body['messages'])
+            if mode == 'zero_count':
+                count = 0
             record('count:' + str(count))
             response = {'object': 'response.input_tokens', 'input_tokens': count}
             if mode == 'incomplete_count':

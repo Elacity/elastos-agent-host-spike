@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, and MP02-MP04 break the 60-second idle release behaviour. Files are relative to examples/agent-host.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, and MP05-MP10 weaken the context-window admission tests. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -600,6 +600,118 @@
       ],
       "tests": [
         "local_llama::tests::idle_engine_is_released_and_next_request_restarts_it"
+      ]
+    },
+    {
+      "id": "MP05",
+      "title": "the context check refuses only past the window, so the exact window runs",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        if input_tokens.saturating_add(output_tokens) >= u64::from(context_window_tokens) {",
+          "new": "        if input_tokens.saturating_add(output_tokens) > u64::from(context_window_tokens) {"
+        }
+      ],
+      "tests": [
+        "execution::tests::local_llama_refuses_input_and_output_that_reach_the_context_window"
+      ]
+    },
+    {
+      "id": "MP06",
+      "title": "the max_tokens part is dropped from the context sum",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        if input_tokens.saturating_add(output_tokens) >= u64::from(context_window_tokens) {",
+          "new": "        if input_tokens >= u64::from(context_window_tokens) {"
+        }
+      ],
+      "tests": [
+        "execution::tests::local_llama_refuses_input_and_output_that_reach_the_context_window"
+      ]
+    },
+    {
+      "id": "MP07",
+      "title": "the input token count request is skipped",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    if let Some(context_window_tokens) = context_window_tokens {",
+          "new": "    if let Some(context_window_tokens) = context_window_tokens.filter(|_| false) {"
+        }
+      ],
+      "tests": [
+        "execution::tests::local_llama_refuses_input_and_output_that_reach_the_context_window"
+      ]
+    },
+    {
+      "id": "MP08",
+      "title": "one token under the context window is refused",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        if input_tokens.saturating_add(output_tokens) >= u64::from(context_window_tokens) {",
+          "new": "        if input_tokens.saturating_add(output_tokens) >= u64::from(context_window_tokens).saturating_sub(1) {"
+        }
+      ],
+      "tests": [
+        "execution::tests::local_llama_generates_when_input_and_output_stay_under_the_context_window"
+      ]
+    },
+    {
+      "id": "MP09",
+      "title": "a missing input token count is accepted as one token",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        let live_tokens = count[\"input_tokens\"]\n            .as_u64()\n            .filter(|count| *count > 0)\n            .ok_or_else(|| {\n                AdapterFault::malformed(\n                    \"model backend returned invalid data\",\n                    \"missing chat input token count\",\n                )\n            })?;",
+          "new": "        let live_tokens = count[\"input_tokens\"]\n            .as_u64()\n            .filter(|count| *count > 0)\n            .unwrap_or(1);"
+        }
+      ],
+      "tests": [
+        "execution::tests::local_llama_missing_count_fails_before_generation"
+      ]
+    },
+    {
+      "id": "MP10",
+      "title": "a zero input token count skips its positive-count check",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": ".filter(|count| *count > 0)",
+          "new": ".filter(|_| true)"
+        }
+      ],
+      "tests": [
+        "execution::tests::local_llama_zero_count_fails_before_generation"
+      ]
+    },
+    {
+      "id": "PV34",
+      "title": "startup recovery skips the adapter target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/model-provider/src/local_llama.rs\",\n    \"capsules/model-provider/src/adapters.rs\",\n)",
+          "new": "    \"capsules/model-provider/src/local_llama.rs\",\n)"
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
       ]
     }
   ]
