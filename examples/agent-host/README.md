@@ -201,13 +201,12 @@ stays the same record.
 ## Declared asks
 
 `asks.json` lists every per-step ask this guest makes, as a proposal kind and a
-resource pattern. It is an auditable declaration, not the policy check: the
-Runtime enforces each grant, and a capsule receives only what it was granted.
-The declaration names no URL, no host route and no `Users/` path; the model
-resource is named, not routed. The host tests keep the declaration equal to
-what the guest proposes, in both directions. This file is a lane-local
-stand-in, and it retires into the Runtime manifest when the Runtime defines
-per-step asks, so one source of truth owns the asks.
+resource pattern: every routed ask names only the launching principal
+(`Users/self`), and the journal ask names only the capsule's own journal root,
+so the declaration stays no wider than the capsule's manifest. The Runtime
+enforces each grant, and this auditable declaration retires into the Runtime
+manifest when the Runtime defines per-step asks, so one source of truth owns
+the asks (P10).
 
 ## Build and test
 

@@ -1,0 +1,1 @@
+/Users/sash/code/wt-lane-agent-host/examples/agent-host/target-basecheck/wasm32-unknown-unknown/release/agent_host.wasm: /Users/sash/code/wt-lane-agent-host/elastos/wit/elastos-bus-v1.wit /Users/sash/code/wt-lane-agent-host/examples/agent-host/.tmp-base-check/nest/agent-host/src/lib.rs
