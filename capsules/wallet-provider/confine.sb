@@ -14,26 +14,17 @@
 (deny default)
 (deny network*)
 
-;; Startup: exec and the program read are pinned to the one binary the Runtime
-;; named, so the provider cannot start any other program.
+;; Startup: exec is pinned to the one binary the Runtime named, so the provider
+;; cannot start any other program.
 (allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
-(allow file-read* (literal (param "PROVIDER_EXECUTABLE")))
 
 ;; Startup: the kernel resolves every absolute path through the root directory,
 ;; so the loader can reach the binary it was given.
 (allow file-read* (literal "/"))
 
-;; Startup: dyld reads the system shared cache and system libraries; the signed
-;; bundle ships no other library.
-(allow file-read*
-  (subpath "/usr/lib")
-  (subpath "/System/Library")
-  (subpath "/Library/Apple"))
-
-;; Startup: the loader and the allocator read kernel facts and the entropy
-;; device before the stdin/stdout protocol starts.
+;; Startup: the loader and the allocator read kernel facts before the
+;; stdin/stdout protocol starts.
 (allow sysctl-read)
-(allow file-read* (literal "/dev/urandom"))
 
 ;; Startup: inspect and synchronize the existing parent when creating Wallet.
 (allow file-read* (literal (param "STORAGE_PARENT")))
