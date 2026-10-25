@@ -1388,6 +1388,22 @@
    "tests": [
     "tests::a_granted_scaffold_applies_through_the_write_path"
    ]
+  },
+  {
+   "id": "FS70",
+   "title": "an admitted skill is recorded as a snapshot, so the positive admission effect is lost",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Skill,\n    });",
+     "new": "    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Snapshot,\n    });"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_from_an_observed_read_named_by_hash_is_admitted"
+   ]
   }
  ]
 }
