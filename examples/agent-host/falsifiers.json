@@ -1580,6 +1580,54 @@
    "tests": [
     "tests::every_resource_the_guest_proposes_is_declared"
    ]
+  },
+  {
+   "id": "F-AH3h",
+   "title": "a repeated resource field hides a URL, so the discarded value is never checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3i",
+   "title": "a restored journal skips the declaration check, so a pending undeclared step loads",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    stored_paths_ok(&journal)?;\n    stored_asks_ok(&journal)?;",
+     "new": "    stored_paths_ok(&journal)?;"
+    }
+   ],
+   "tests": [
+    "tests::a_restored_pending_proposal_must_be_declared"
+   ]
+  },
+  {
+   "id": "F-AH3j",
+   "title": "a duplicate field is refused with the wrong reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        return Err(\"asks duplicate field\");",
+     "new": "        return Err(\"asks field\");"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
   }
  ]
 }

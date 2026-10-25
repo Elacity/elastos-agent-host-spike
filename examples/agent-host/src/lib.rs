@@ -891,12 +891,31 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
 }
 
 /// Decode format 2 (see `decode_bytes`), then check the stored paths (see
-/// `stored_paths_ok`). Every stored journal loads through here.
+/// `stored_paths_ok`) and the restored pending asks (see `stored_asks_ok`).
+/// Every stored journal loads through here.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
     let (journal, prev_head, head) = decode_bytes(bytes)?;
     stored_paths_ok(&journal)?;
+    stored_asks_ok(&journal)?;
     Ok((journal, prev_head, head))
+}
+
+/// A restored pending proposal passes the same declaration a fresh one does.
+/// `Prepared` is the only state `authorize` or `dispatch` accepts, so only a
+/// Prepared step can still act. `Unspecified` is a step opened without a
+/// proposal and is not an ask. Settled steps are history and stay readable.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_asks_ok(journal: &Journal) -> Result<(), &'static str> {
+    for step in &journal.steps {
+        if step.state == StepState::Prepared
+            && step.kind != ProposalKind::Unspecified
+            && !declared_ask(step.kind, &step.resource)
+        {
+            return Err("undeclared ask");
+        }
+    }
+    Ok(())
 }
 
 /// A stored journal, of any age, passes the path rule a live one does. Every
@@ -3285,7 +3304,9 @@ fn host_path(text: &str) -> bool {
 /// The declared per-step asks, compiled in from `asks.json`. The file is a
 /// lane-local stand-in for the Runtime manifest: it moves to that one place
 /// when the Runtime defines per-step asks, and until then it is the only
-/// declaration every proposal is checked against.
+/// declaration every proposal is checked against. No in-lane document fixes a
+/// token budget unit, so budget enforcement is deferred and `F-AH3b` bites
+/// the undeclared-ask check instead.
 #[cfg(any(test, target_arch = "wasm32"))]
 const ASKS_JSON: &str = include_str!("../asks.json");
 
@@ -3337,29 +3358,110 @@ fn proposal_kind_name(kind: ProposalKind) -> Option<&'static str> {
     }
 }
 
-/// Parse the declaration with its closed shape: exactly `schema` and `asks`,
-/// and exactly `kind` and `resource` in each ask. A kind the guest cannot
-/// propose, an empty resource, or a malformed document is refused.
+/// A key that appears twice in one object. `serde_json::Value` keeps only the
+/// last one, so the declaration text is scanned before any value is read: a
+/// repeated key is refused, not silently collapsed. Keys are decoded as JSON
+/// strings, so an escaped spelling is the same key.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn repeated_object_key(text: &str) -> Option<String> {
+    struct Frame {
+        keys: Vec<String>,
+        object: bool,
+        expect_key: bool,
+    }
+    let bytes = text.as_bytes();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'{' => {
+                stack.push(Frame {
+                    keys: Vec::new(),
+                    object: true,
+                    expect_key: true,
+                });
+                at += 1;
+            }
+            b'[' => {
+                stack.push(Frame {
+                    keys: Vec::new(),
+                    object: false,
+                    expect_key: false,
+                });
+                at += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                at += 1;
+            }
+            b',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object {
+                        frame.expect_key = true;
+                    }
+                }
+                at += 1;
+            }
+            b'"' => {
+                let start = at;
+                at += 1;
+                while at < bytes.len() {
+                    match bytes[at] {
+                        b'\\' => at += 2,
+                        b'"' => {
+                            at += 1;
+                            break;
+                        }
+                        _ => at += 1,
+                    }
+                }
+                if stack
+                    .last()
+                    .is_some_and(|frame| frame.object && frame.expect_key)
+                {
+                    let key = serde_json::from_str::<String>(text.get(start..at)?).ok()?;
+                    let frame = stack.last_mut()?;
+                    if frame.keys.contains(&key) {
+                        return Some(key);
+                    }
+                    frame.keys.push(key);
+                    frame.expect_key = false;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Parse the declaration with its closed shape: only `schema` and `asks`,
+/// only `kind` and `resource` in each ask, and no repeated key. A kind the
+/// guest cannot propose, an empty resource, or a malformed document is
+/// refused with its own reason.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
     let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
-    let document = document.as_object().ok_or("asks json")?;
-    if document.len() != 2
-        || document.get("schema").and_then(serde_json::Value::as_str) != Some(ASKS_SCHEMA)
-    {
+    if repeated_object_key(text).is_some() {
+        return Err("asks duplicate field");
+    }
+    let document = document.as_object().ok_or("asks field")?;
+    if document.keys().any(|key| key != "schema" && key != "asks") {
+        return Err("asks field");
+    }
+    if document.get("schema").and_then(serde_json::Value::as_str) != Some(ASKS_SCHEMA) {
         return Err("asks schema");
     }
     let entries = document
         .get("asks")
         .and_then(serde_json::Value::as_array)
-        .ok_or("asks json")?;
+        .ok_or("asks field")?;
     if entries.is_empty() {
         return Err("asks empty");
     }
     let mut asks = Vec::with_capacity(entries.len());
     for entry in entries {
-        let entry = entry.as_object().ok_or("asks json")?;
-        if entry.len() != 2 {
+        let entry = entry.as_object().ok_or("asks field")?;
+        if entry.keys().any(|key| key != "kind" && key != "resource") {
             return Err("asks field");
         }
         let kind = entry
@@ -10797,34 +10899,15 @@ mod tests {
 
     #[test]
     fn asks_declare_no_urls_secrets_or_users_paths() {
-        let document: serde_json::Value = serde_json::from_str(ASKS_JSON).unwrap();
-        let document = document.as_object().unwrap();
-        assert_eq!(
-            document.len(),
-            2,
-            "the declaration has exactly schema and asks"
-        );
-        assert_eq!(
-            document.get("schema").and_then(serde_json::Value::as_str),
-            Some(ASKS_SCHEMA)
-        );
-        let asks = document
-            .get("asks")
-            .and_then(serde_json::Value::as_array)
-            .unwrap();
+        let parsed = parse_asks(ASKS_JSON);
+        assert!(parsed.is_ok(), "the declaration parses: {parsed:?}");
+        let asks = parsed.unwrap();
         assert!(!asks.is_empty());
-        for entry in asks {
-            let entry = entry.as_object().unwrap();
-            assert_eq!(entry.len(), 2, "an ask has exactly kind and resource");
-            let kind = entry
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                .unwrap();
-            let pattern = entry
-                .get("resource")
-                .and_then(serde_json::Value::as_str)
-                .unwrap();
-            assert!(proposal_kind(kind).is_some(), "unknown ask kind {kind:?}");
+        for ask in &asks {
+            let kind = ask.kind;
+            let pattern = &ask.pattern;
+            let name = proposal_kind_name(kind).expect("every ask has a proposable kind");
+            assert_eq!(proposal_kind(name), Some(kind));
             assert!(!pattern.is_empty());
             assert!(
                 !pattern.contains("://"),
@@ -10860,10 +10943,115 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            parse_asks(ASKS_JSON).map(|parsed| parsed.len()),
-            Ok(asks.len()),
-            "the shipped declaration parses"
+    }
+
+    /// Every refusal in the one declaration parser names its own reason.
+    #[test]
+    fn asks_parser_refuses_each_shape_with_its_reason() {
+        for (text, reason) in [
+            ("", "asks json"),
+            ("not json", "asks json"),
+            ("[]", "asks field"),
+            ("{}", "asks schema"),
+            (r#"{"schema":"wrong","asks":[]}"#, "asks schema"),
+            (r#"{"schema":"elastos.agent-host.asks/v1"}"#, "asks field"),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":{}}"#,
+                "asks field",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[],"extra":1}"#,
+                "asks field",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[]}"#,
+                "asks empty",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[1]}"#,
+                "asks field",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"resource":"Models/"}]}"#,
+                "asks kind",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"unknown","resource":"Models/"}]}"#,
+                "asks kind",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read"}]}"#,
+                "asks resource",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":""}]}"#,
+                "asks resource",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":"Models/","extra":1}]}"#,
+                "asks field",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":"Models/","resource":"Models/"}]}"#,
+                "asks duplicate field",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":"Models/"}]}"#,
+                "asks duplicate field",
+            ),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","\u0072esource":"Models/","resource":"Models/"}]}"#,
+                "asks duplicate field",
+            ),
+        ] {
+            assert_eq!(parse_asks(text), Err(reason), "{text}");
+        }
+    }
+
+    /// A stored journal can only be restored when every proposal that can
+    /// still act (Prepared) is declared. A step opened without a proposal is
+    /// not an ask, and settled history stays readable.
+    #[test]
+    fn a_restored_pending_proposal_must_be_declared() {
+        let mut declared = empty_journal();
+        propose_hosted(&mut declared, "localhost://Models/hosted").unwrap();
+        let bytes = encode_journal(&declared, &[0; 32]).unwrap();
+        assert!(
+            decode_journal(&bytes).is_ok(),
+            "a declared pending ask reloads"
+        );
+
+        let mut placeholder = empty_journal();
+        propose_step(&mut placeholder);
+        let bytes = encode_journal(&placeholder, &[0; 32]).unwrap();
+        assert!(
+            decode_journal(&bytes).is_ok(),
+            "a step opened without an ask reloads"
+        );
+
+        let mut undeclared = empty_journal();
+        let id = propose_step(&mut undeclared);
+        let step = undeclared
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .unwrap();
+        step.kind = ProposalKind::Hosted;
+        step.resource = "localhost://Other/model".to_string();
+        let bytes = encode_journal(&undeclared, &[0; 32]).unwrap();
+        assert_eq!(decode_journal(&bytes).map(|_| ()), Err("undeclared ask"));
+
+        let mut settled = undeclared.clone();
+        settled
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .unwrap()
+            .state = StepState::Dispatched;
+        let bytes = encode_journal(&settled, &[0; 32]).unwrap();
+        assert!(
+            decode_journal(&bytes).is_ok(),
+            "settled history stays readable"
         );
     }
 
