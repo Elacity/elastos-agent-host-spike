@@ -1,6 +1,8 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The committed list records task 010's three storage-root refusals.
 const EXPECTED_FALSIFIERS: usize = 3;
@@ -63,18 +65,33 @@ fn declares_test(source: &str, name: &str) -> bool {
     false
 }
 
-/// The committed falsifier list describes the current source exactly.
-///
-/// Falsifier: replace one `old` snippet with text that is not in the source,
-/// or delete an entry, empty an `edits`/`tests` array, or drop a test name's
-/// module prefix; this test fails on each.
-#[test]
-fn falsifiers_list_is_honest() {
+fn harness_tests() -> HashSet<String> {
+    let executable = std::env::current_exe().expect("the test executable path must be available");
+    let output = Command::new(executable)
+        .args(["--list", "--format", "terse"])
+        .output()
+        .expect("the test executable must list its registered tests");
+    assert!(
+        output.status.success(),
+        "the test executable --list must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("the test executable --list output must be UTF-8")
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
+        .collect()
+}
+
+fn read_falsifiers_list() -> Value {
     let path = repo_root().join("capsules/wallet-provider/falsifiers.json");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("falsifier list {} must be readable: {err}", path.display()));
-    let doc: Value = serde_json::from_str(&text)
-        .unwrap_or_else(|err| panic!("falsifier list {} must be JSON: {err}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("falsifier list {} must be JSON: {err}", path.display()))
+}
+
+fn assert_falsifiers_list_is_honest(doc: &Value) {
     assert!(
         doc["about"]
             .as_str()
@@ -91,6 +108,7 @@ fn falsifiers_list_is_honest() {
     );
 
     let root = repo_root();
+    let registered_tests = harness_tests();
     let mut ids: Vec<&str> = Vec::new();
     for entry in entries {
         let id = entry["id"]
@@ -172,6 +190,39 @@ fn falsifiers_list_is_honest() {
                 "{id}: {name} must be a #[test] function in {}",
                 source_path.display()
             );
+            assert!(
+                registered_tests.contains(name),
+                "{id}: {name} must be registered in the test executable"
+            );
         }
     }
+}
+
+/// The committed falsifier list describes the current source and test harness.
+///
+/// Falsifier: replace one `old` snippet with text that is not in the source,
+/// delete an entry, empty an `edits`/`tests` array, drop a test name's module
+/// prefix, remove its module declaration, or disable it with `#[cfg(any())]`;
+/// this test fails on each.
+#[test]
+fn falsifiers_list_is_honest() {
+    assert_falsifiers_list_is_honest(&read_falsifiers_list());
+}
+
+// Keep the test declaration in source while removing it from the harness.
+#[cfg(any())]
+#[test]
+fn excluded_from_harness() {
+    panic!("this fixture must remain excluded from the test harness");
+}
+
+#[test]
+#[should_panic(
+    expected = "WP01: tests::falsifiers::excluded_from_harness must be registered in the test executable"
+)]
+fn falsifiers_list_rejects_a_test_removed_from_harness() {
+    let mut doc = read_falsifiers_list();
+    doc["falsifiers"][0]["tests"][0] =
+        Value::String("tests::falsifiers::excluded_from_harness".into());
+    assert_falsifiers_list_is_honest(&doc);
 }
