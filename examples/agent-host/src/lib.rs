@@ -3264,6 +3264,327 @@ fn host_path(text: &str) -> bool {
     text.starts_with('/') || text.contains('\\') || text.split('/').any(|part| part == "..")
 }
 
+/// The declared per-step asks, compiled in from `asks.json` in this lane. The
+/// file is an auditable declaration, not the policy check: the Runtime
+/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
+/// manifest and retires into that one place when the Runtime defines per-step
+/// asks (P10). It is read by this module's tests only, so the shipped guest
+/// keeps no new production path.
+#[cfg(test)]
+const ASKS_JSON: &str = include_str!("../asks.json");
+
+#[cfg(test)]
+const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+
+/// The one marker a declared pattern may hold: the user-namespace root,
+/// `Users/<one name>`. The declaration names no person and no host path.
+#[cfg(test)]
+const PRINCIPAL_MARKER: &str = "<principal>";
+
+/// One declared ask: a proposal kind and the resource pattern after
+/// `localhost://` that it may name.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ask {
+    kind: ProposalKind,
+    pattern: String,
+}
+
+/// The declared name of one kind. The match has no wildcard, so a new
+/// `ProposalKind` does not compile until it is named here or marked as the
+/// placeholder. `Unspecified` marks a step opened without a proposal and is
+/// not an ask.
+#[cfg(test)]
+fn ask_kind_name(kind: ProposalKind) -> Option<&'static str> {
+    match kind {
+        ProposalKind::Unspecified => None,
+        ProposalKind::Read => Some("read"),
+        ProposalKind::Edit => Some("edit"),
+        ProposalKind::Run => Some("run"),
+        ProposalKind::Restore => Some("restore"),
+        ProposalKind::Hosted => Some("hosted"),
+        ProposalKind::Child => Some("child"),
+        ProposalKind::Init => Some("init"),
+        ProposalKind::JournalAppend => Some("journal-append"),
+    }
+}
+
+#[cfg(test)]
+fn proposal_kind(name: &str) -> Option<ProposalKind> {
+    match name {
+        "read" => Some(ProposalKind::Read),
+        "edit" => Some(ProposalKind::Edit),
+        "run" => Some(ProposalKind::Run),
+        "restore" => Some(ProposalKind::Restore),
+        "hosted" => Some(ProposalKind::Hosted),
+        "child" => Some(ProposalKind::Child),
+        "init" => Some(ProposalKind::Init),
+        "journal-append" => Some(ProposalKind::JournalAppend),
+        _ => None,
+    }
+}
+
+/// Every kind the guest can propose. `ask_kind_name` names each one, so this
+/// list and that match cannot disagree without a failing test.
+#[cfg(test)]
+const PROPOSABLE_KINDS: &[ProposalKind] = &[
+    ProposalKind::Read,
+    ProposalKind::Edit,
+    ProposalKind::Run,
+    ProposalKind::Restore,
+    ProposalKind::Hosted,
+    ProposalKind::Child,
+    ProposalKind::Init,
+    ProposalKind::JournalAppend,
+];
+
+/// A key that appears twice in one object. `serde_json::Value` keeps only the
+/// last one, so the declaration text is scanned before any value is read: a
+/// repeated key is refused, not silently collapsed. Keys are decoded as JSON
+/// strings, so an escaped spelling is the same key.
+#[cfg(test)]
+fn repeated_object_key(text: &str) -> Option<String> {
+    struct Frame {
+        keys: Vec<String>,
+        object: bool,
+        expect_key: bool,
+    }
+    let bytes = text.as_bytes();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'{' => {
+                stack.push(Frame {
+                    keys: Vec::new(),
+                    object: true,
+                    expect_key: true,
+                });
+                at += 1;
+            }
+            b'[' => {
+                stack.push(Frame {
+                    keys: Vec::new(),
+                    object: false,
+                    expect_key: false,
+                });
+                at += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                at += 1;
+            }
+            b',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object {
+                        frame.expect_key = true;
+                    }
+                }
+                at += 1;
+            }
+            b'"' => {
+                let start = at;
+                at += 1;
+                while at < bytes.len() {
+                    match bytes[at] {
+                        b'\\' => at += 2,
+                        b'"' => {
+                            at += 1;
+                            break;
+                        }
+                        _ => at += 1,
+                    }
+                }
+                if stack
+                    .last()
+                    .is_some_and(|frame| frame.object && frame.expect_key)
+                {
+                    let key = serde_json::from_str::<String>(text.get(start..at)?).ok()?;
+                    let frame = stack.last_mut()?;
+                    if frame.keys.contains(&key) {
+                        return Some(key);
+                    }
+                    frame.keys.push(key);
+                    frame.expect_key = false;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// A declaration value that reads as a credential. The declaration carries
+/// no secret, so a value that names one is refused.
+#[cfg(test)]
+fn secret_shaped(text: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "api_key",
+        "api-key",
+        "apikey",
+        "bearer ",
+        "sk-",
+        "ghp_",
+        "xox",
+        "-----begin",
+    ];
+    WORDS.iter().any(|word| text.contains(word))
+}
+
+/// The one rule for a declared resource pattern: it names a resource and no
+/// URL, host path, routed `Users/` path, secret, or misplaced marker. The
+/// first match names its cause. `parse_asks` and the declaration test use
+/// this same function, so the rule has one copy.
+#[cfg(test)]
+fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
+    let lower = pattern.to_ascii_lowercase();
+    if pattern.contains("://") {
+        return Some("asks url");
+    }
+    if lower.contains("users/") {
+        return Some("asks users path");
+    }
+    if pattern.starts_with('/')
+        || pattern.starts_with('~')
+        || pattern.contains('\\')
+        || pattern
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Some("asks host path");
+    }
+    if secret_shaped(&lower) {
+        return Some("asks secret");
+    }
+    if pattern.matches(PRINCIPAL_MARKER).count() > 1
+        || (pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER))
+    {
+        return Some("asks marker");
+    }
+    let well_placed = match pattern.strip_prefix(PRINCIPAL_MARKER) {
+        Some(tail) => tail.is_empty() || tail.starts_with('/'),
+        None => pattern.ends_with('/'),
+    };
+    if !well_placed {
+        return Some("asks pattern");
+    }
+    None
+}
+
+/// Parse the declaration with its closed shape: only `schema` and `asks`,
+/// only `kind` and `resource` in each ask, and no repeated key. Each refusal
+/// names its own cause; a kind the guest cannot propose, the `unspecified`
+/// placeholder, and a forbidden resource value each have their own reason.
+#[cfg(test)]
+fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
+    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
+    if repeated_object_key(text).is_some() {
+        return Err("asks duplicate field");
+    }
+    let document = document.as_object().ok_or("asks root")?;
+    if document.keys().any(|key| key != "schema" && key != "asks") {
+        return Err("asks unknown field");
+    }
+    if document.get("schema").and_then(serde_json::Value::as_str) != Some(ASKS_SCHEMA) {
+        return Err("asks schema");
+    }
+    let entries = document
+        .get("asks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("asks list")?;
+    if entries.is_empty() {
+        return Err("asks empty");
+    }
+    let mut asks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry.as_object().ok_or("asks entry")?;
+        if entry.keys().any(|key| key != "kind" && key != "resource") {
+            return Err("asks entry field");
+        }
+        let kind = entry
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .and_then(proposal_kind)
+            .ok_or("asks kind")?;
+        let pattern = entry
+            .get("resource")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("asks resource")?;
+        if pattern.is_empty() {
+            return Err("asks resource");
+        }
+        if pattern.chars().any(char::is_whitespace) {
+            return Err("asks whitespace");
+        }
+        if let Some(reason) = ask_resource_refusal(pattern) {
+            return Err(reason);
+        }
+        asks.push(Ask {
+            kind,
+            pattern: pattern.to_string(),
+        });
+    }
+    Ok(asks)
+}
+
+/// The declaration, parsed once from the compiled-in file. Immutable after
+/// that parse, so it holds no per-session state; a malformed declaration
+/// declares no ask (fail closed, P11).
+#[cfg(test)]
+static DECLARED_ASKS: std::sync::LazyLock<Vec<Ask>> =
+    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON).unwrap_or_default());
+
+#[cfg(test)]
+fn declared_asks() -> &'static [Ask] {
+    &DECLARED_ASKS
+}
+
+/// A declared pattern is a resource path after `localhost://`. A literal
+/// pattern is a directory prefix. `<principal>` matches `Users/<one name>`,
+/// and the rest of the pattern must follow it.
+#[cfg(test)]
+fn ask_pattern_matches(pattern: &str, path: &str) -> bool {
+    let Some(tail) = pattern.strip_prefix(PRINCIPAL_MARKER) else {
+        return path.starts_with(pattern);
+    };
+    let Some(namespace) = path.strip_prefix("Users/") else {
+        return false;
+    };
+    let (name, below) = match namespace.split_once('/') {
+        Some((name, below)) => (name, Some(below)),
+        None => (namespace, None),
+    };
+    if name.is_empty() {
+        return false;
+    }
+    match tail {
+        "" => below.is_none(),
+        _ => tail
+            .strip_prefix('/')
+            .is_some_and(|tail| below.is_some_and(|below| below.starts_with(tail))),
+    }
+}
+
+/// Whether one declared ask's pattern covers a proposed resource.
+#[cfg(test)]
+fn ask_covers(ask: &Ask, resource: &str) -> bool {
+    resource
+        .strip_prefix("localhost://")
+        .is_some_and(|path| ask_pattern_matches(&ask.pattern, path))
+}
+
+/// The declaration's answer for one proposal. `Unspecified` matches nothing.
+#[cfg(test)]
+fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
+    declared_asks()
+        .iter()
+        .any(|ask| ask.kind == kind && ask_covers(ask, resource))
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
 fn is_write(kind: ProposalKind) -> bool {
     matches!(kind, ProposalKind::Edit | ProposalKind::Restore)
@@ -19482,5 +19803,280 @@ mod tests {
             .windows(b"session-a-grant".len())
             .any(|window| window == b"session-a-grant"));
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
+    }
+
+    // Task 027: the declaration of every per-step ask. `asks.json` is an
+    // auditable declaration, not the policy check: the Runtime enforces each
+    // grant (P4, P18), and this lane's file retires into the Runtime manifest
+    // when the Runtime defines per-step asks (P10). The tests below keep the
+    // declaration equal to what the guest proposes, in both directions.
+
+    fn asks_document(entries: &str) -> String {
+        format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":[{entries}]}}"#)
+    }
+
+    /// Every proposal the existing scenarios record, as (kind, resource). A
+    /// proposal lands in the journal as a step, so the scenarios are read where
+    /// the guest keeps it. A skill admission appends a journal event and
+    /// creates no step, so it is not an ask. No scenario engine is added: this
+    /// drives the scripts the host tests already own and the same proposal
+    /// functions the guest uses.
+    fn observed_proposals() -> Vec<(ProposalKind, String)> {
+        fn collect(journal: &Journal, out: &mut Vec<(ProposalKind, String)>) {
+            for step in &journal.steps {
+                if step.kind != ProposalKind::Unspecified && !step.resource.is_empty() {
+                    out.push((step.kind, step.resource.clone()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        // Read, edit, run, child and journal append: the rich-journal scenario.
+        collect(&a_rich_journal(), &mut out);
+        // Run and hosted: the interleaved-session script's proposal rounds.
+        let mut session = empty_journal();
+        for round in [2, 3] {
+            assert!(run_session_round(&mut session, 0, round), "round {round}");
+        }
+        collect(&session, &mut out);
+        // Hosted on the shared model namespace: the resource the hosted
+        // proposal tests (`a_hosted_proposal_must_name_a_localhost_resource`,
+        // `localhost://Models/hosted`) already use.
+        let mut hosted = two_turns();
+        propose_hosted(&mut hosted, "localhost://Models/hosted").unwrap();
+        collect(&hosted, &mut out);
+        // Init and restore: the resources
+        // `a_scaffolded_project_opens_again_with_the_same_tree_digest` uses.
+        let mut project = empty_journal();
+        propose_init(&mut project, "self", "demo").unwrap();
+        let page = "localhost://Users/self/Projects/demo/index.html";
+        assert!(observe_read(
+            &mut project,
+            page,
+            1,
+            "rev-1",
+            None,
+            false,
+            ""
+        ));
+        propose_restore(&mut project, page, 1).unwrap();
+        collect(&project, &mut out);
+        out
+    }
+
+    /// The declaration carries no URL scheme, no host path, no routed
+    /// `Users/` path, no secret-shaped value, and no forbidden field. Every
+    /// entry names a kind the guest can propose.
+    #[test]
+    fn asks_declare_no_urls_secrets_or_users_paths() {
+        let parsed = parse_asks(ASKS_JSON);
+        assert!(parsed.is_ok(), "the declaration parses: {parsed:?}");
+        let asks = parsed.unwrap();
+        assert!(!asks.is_empty(), "the declaration declares an ask");
+        for ask in &asks {
+            let name = ask_kind_name(ask.kind).expect("every ask has a proposable kind");
+            assert_eq!(proposal_kind(name), Some(ask.kind));
+            assert_eq!(
+                ask_resource_refusal(&ask.pattern),
+                None,
+                "{name} ask names a forbidden resource: {:?}",
+                ask.pattern
+            );
+        }
+        // A forbidden field is refused with its own reason, and so is each
+        // forbidden value.
+        for (text, reason) in [
+            (
+                asks_document(r#"{"kind":"read","resource":"<principal>/","secret":"x"}"#),
+                "asks entry field",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"https://api.example.com/"}"#),
+                "asks url",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
+                "asks host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Users/self/"}"#),
+                "asks users path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/sk-live-abc/"}"#),
+                "asks secret",
+            ),
+        ] {
+            assert_eq!(parse_asks(&text), Err(reason), "{text}");
+        }
+    }
+
+    /// Every refusal in the one declaration parser names its own reason.
+    #[test]
+    fn asks_parser_refuses_each_shape_with_its_reason() {
+        for (text, reason) in [
+            (String::new(), "asks json"),
+            ("not json".to_string(), "asks json"),
+            ("[]".to_string(), "asks root"),
+            ("1".to_string(), "asks root"),
+            (
+                r#"{"schema":"elastos.agent-host.asks/v1"}"#.to_string(),
+                "asks list",
+            ),
+            (
+                r#"{"schema":"wrong","asks":[{"kind":"read","resource":"<principal>/"}]}"#
+                    .to_string(),
+                "asks schema",
+            ),
+            (
+                format!(
+                    r#"{{"schema":"{ASKS_SCHEMA}","asks":[{{"kind":"read","resource":"<principal>/"}}],"extra":1}}"#
+                ),
+                "asks unknown field",
+            ),
+            (
+                format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":{{}}}}"#),
+                "asks list",
+            ),
+            (asks_document(""), "asks empty"),
+            (asks_document("1"), "asks entry"),
+            (
+                asks_document(r#"{"kind":"read","resource":"<principal>/","extra":1}"#),
+                "asks entry field",
+            ),
+            (asks_document(r#"{"resource":"<principal>/"}"#), "asks kind"),
+            (
+                asks_document(r#"{"kind":"unknown","resource":"<principal>/"}"#),
+                "asks kind",
+            ),
+            (
+                asks_document(r#"{"kind":"unspecified","resource":"<principal>/"}"#),
+                "asks kind",
+            ),
+            (asks_document(r#"{"kind":"read"}"#), "asks resource"),
+            (
+                asks_document(r#"{"kind":"read","resource":""}"#),
+                "asks resource",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models /"}"#),
+                "asks whitespace",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"https://api.example.com/"}"#),
+                "asks url",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
+                "asks host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Users/self/"}"#),
+                "asks users path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/sk-live-abc/"}"#),
+                "asks secret",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/<principal>/"}"#),
+                "asks marker",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models"}"#),
+                "asks pattern",
+            ),
+            (
+                format!(
+                    r#"{{"schema":"{ASKS_SCHEMA}","schema":"{ASKS_SCHEMA}","asks":[{{"kind":"read","resource":"<principal>/"}}]}}"#
+                ),
+                "asks duplicate field",
+            ),
+            (
+                asks_document(
+                    r#"{"kind":"read","resource":"<principal>/","resource":"<principal>/"}"#,
+                ),
+                "asks duplicate field",
+            ),
+            (
+                asks_document(
+                    r#"{"kind":"read","\u0072esource":"<principal>/","resource":"<principal>/"}"#,
+                ),
+                "asks duplicate field",
+            ),
+        ] {
+            assert_eq!(parse_asks(&text), Err(reason), "{text}");
+        }
+    }
+
+    /// Every kind the guest can propose has a declared ask. The kind match has
+    /// no wildcard, so a new kind does not compile until it is named. The
+    /// `unspecified` placeholder is not an ask, and a declaration of it is
+    /// refused.
+    #[test]
+    fn every_proposal_kind_has_a_declared_ask() {
+        for kind in PROPOSABLE_KINDS {
+            let name = ask_kind_name(*kind).expect("every proposable kind has a name");
+            assert_eq!(proposal_kind(name), Some(*kind), "{name} parses back");
+            assert!(
+                declared_asks().iter().any(|ask| ask.kind == *kind),
+                "{name} is proposable and must be declared"
+            );
+        }
+        assert_eq!(ask_kind_name(ProposalKind::Unspecified), None);
+        assert!(!declared_asks()
+            .iter()
+            .any(|ask| ask.kind == ProposalKind::Unspecified));
+        assert_eq!(
+            parse_asks(&asks_document(
+                r#"{"kind":"unspecified","resource":"<principal>/"}"#
+            )),
+            Err("asks kind"),
+            "the placeholder is not an ask"
+        );
+        for ask in declared_asks() {
+            assert!(
+                PROPOSABLE_KINDS.contains(&ask.kind),
+                "{:?} is declared but cannot be proposed",
+                ask.kind
+            );
+            assert!(ask_kind_name(ask.kind).is_some());
+        }
+    }
+
+    /// Every resource the guest actually proposes matches a declared pattern,
+    /// and every proposable kind appears in the scenarios that drive it. A
+    /// proposal outside the declaration fails this test.
+    #[test]
+    fn every_resource_the_guest_proposes_is_declared() {
+        let observed = observed_proposals();
+        for kind in PROPOSABLE_KINDS {
+            assert!(
+                observed.iter().any(|(other, _)| other == kind),
+                "{kind:?} is proposable and these scenarios must propose it"
+            );
+        }
+        for (kind, resource) in &observed {
+            assert!(
+                declared_ask(*kind, resource),
+                "{kind:?} proposes {resource} outside the declaration"
+            );
+        }
+    }
+
+    /// The reverse direction: every declared ask is observed. An unused
+    /// pattern is a grant wider than the guest needs, so it fails here.
+    #[test]
+    fn every_declared_ask_is_observed() {
+        let observed = observed_proposals();
+        for ask in declared_asks() {
+            assert!(
+                observed
+                    .iter()
+                    .any(|(kind, resource)| *kind == ask.kind && ask_covers(ask, resource)),
+                "{:?} ask {:?} is declared but no scenario proposes a matching resource",
+                ask.kind,
+                ask.pattern
+            );
+        }
     }
 }
