@@ -6,8 +6,9 @@ use std::process::Command;
 
 /// The committed list records the three storage-root refusals, the two
 /// profile mutations, the five shared-contract mutations, the did-profile
-/// shared-rule removal and the two network-allow check mutations.
-const EXPECTED_FALSIFIERS: usize = 13;
+/// shared-rule removal, the two network-allow check mutations and task 016's
+/// five wallet allow-rule removals.
+const EXPECTED_FALSIFIERS: usize = 18;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
