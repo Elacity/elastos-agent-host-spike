@@ -117,6 +117,10 @@ when the Runtime side does.
   `(allow network-outbound (remote ip "localhost:*"))`. The check refuses each
   profile with a reason that names `fixture-provider` and the refused form.
   The test reads no file.
+- `file_profile_contract_rejects_an_allow_default` builds the same passing
+  fixture and appends `(allow default)` after the default denial. The check
+  refuses it with a reason that names `fixture-provider` and
+  `must reject (allow default)`. The test reads no file.
 - `file_profile_contract_checks_the_model_profile_when_present` runs the same
   list function over a temporary `capsules/` directory. With no model
   profile it checks exactly the two required profiles; a model profile
@@ -142,7 +146,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   succeed and the test fail.
 - `(allow network*)` makes `profile_denies_network` and
   `both_file_profiles_bind_one_storage_parameter_contract` fail.
-- Appending `(allow default)` also makes `profile_denies_network` fail.
+- Append `(allow default)` after `(deny network*)` (WP20):
+  `profile_denies_network`,
+  `both_file_profiles_bind_one_storage_parameter_contract`,
+  `confined_outside_read_is_denied` and `confined_outside_write_is_denied`
+  fail, because the profile allows every operation and the shared check
+  refuses the rule.
 - Removing the storage-root write rule (WP18) makes `Init` fail inside the
   root, so the operations and outside-write tests fail, and the shared contract
   check fails.
