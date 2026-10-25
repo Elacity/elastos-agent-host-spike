@@ -9,6 +9,6 @@
     {"kind": "init", "resource": "<principal>/Projects/"},
     {"kind": "hosted", "resource": "Models/"},
     {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
-    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/"}
+    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
   ]
 }

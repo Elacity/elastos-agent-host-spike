@@ -205,9 +205,11 @@ resource pattern. It is an auditable declaration, not the policy check: the
 Runtime enforces each grant, and a capsule receives only what it was granted.
 The declaration names no URL, no host route and no `Users/` path; the model
 resource is named, not routed. The host tests keep the declaration equal to
-what the guest proposes, in both directions. This file is a lane-local
-stand-in, and it retires into the Runtime manifest when the Runtime defines
-per-step asks, so one source of truth owns the asks.
+what the guest proposes, in both directions. The journal ask names exactly the
+capsule's one manifest capability, `Users/self/.AppData/Agents/agent-host/`.
+Every other routed ask names only the launching principal, `Users/self`. This
+file is a lane-local stand-in, and it retires into the Runtime manifest when
+the Runtime defines per-step asks, so one source of truth owns the asks.
 
 ## Build and test
 

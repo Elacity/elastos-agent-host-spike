@@ -3269,7 +3269,8 @@ fn host_path(text: &str) -> bool {
 /// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
 /// manifest and retires into that one place when the Runtime defines per-step
 /// asks (P10). It is read by this module's tests only, so the shipped guest
-/// keeps no new production path.
+/// keeps no new production path. This test-only module sits above production
+/// code, so a line added or removed here moves the guest hash.
 #[cfg(test)]
 const ASKS_JSON: &str = include_str!("../asks.json");
 
@@ -3280,6 +3281,12 @@ const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
 /// `Users/<one name>`. The declaration names no person and no host path.
 #[cfg(test)]
 const PRINCIPAL_MARKER: &str = "<principal>";
+
+/// The one principal a declared pattern may name. The guest names only
+/// `Users/self`, which the Runtime scopes to the launching person, so the
+/// declaration covers that person and no other `Users/<name>`.
+#[cfg(test)]
+const LAUNCHING_PRINCIPAL: &str = "Users/self";
 
 /// One declared ask: a proposal kind and the resource pattern after
 /// `localhost://` that it may name.
@@ -3456,6 +3463,9 @@ fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
     }) {
         return Some("asks url scheme");
     }
+    if pattern.contains(':') {
+        return Some("asks host route");
+    }
     if lower.contains("users/") {
         return Some("asks users path");
     }
@@ -3487,6 +3497,7 @@ fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
         Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {
             return Some("asks marker tail");
         }
+        Some(tail) if !tail.ends_with('/') => return Some("asks marker directory"),
         None if !pattern.ends_with('/') => return Some("asks literal directory"),
         _ => {}
     }
@@ -3567,38 +3578,27 @@ fn declared_asks() -> &'static [Ask] {
     require_parsed_asks(&DECLARED_ASKS)
 }
 
-/// A declared pattern is a resource path after `localhost://`. A literal
-/// pattern is a directory prefix. `<principal>` matches `Users/<one name>`,
-/// and the rest of the pattern must follow it.
+/// The one root a declared pattern names: the pattern with `<principal>`
+/// expanded to the launching person, and its trailing `/` dropped so the
+/// directory itself is the prefix. `ask_covers` gives this root to
+/// `resource_covers`, so "under this pattern" has one boundary rule (P10).
 #[cfg(test)]
-fn ask_pattern_matches(pattern: &str, path: &str) -> bool {
-    let Some(tail) = pattern.strip_prefix(PRINCIPAL_MARKER) else {
-        return path.starts_with(pattern);
+fn ask_pattern_root(pattern: &str) -> String {
+    let expanded = match pattern.strip_prefix(PRINCIPAL_MARKER) {
+        Some(tail) => format!("{LAUNCHING_PRINCIPAL}{tail}"),
+        None => pattern.to_string(),
     };
-    let Some(namespace) = path.strip_prefix("Users/") else {
-        return false;
-    };
-    let (name, below) = match namespace.split_once('/') {
-        Some((name, below)) => (name, Some(below)),
-        None => (namespace, None),
-    };
-    if name.is_empty() {
-        return false;
-    }
-    match tail {
-        "" => below.is_none(),
-        _ => tail
-            .strip_prefix('/')
-            .is_some_and(|tail| below.is_some_and(|below| below.starts_with(tail))),
-    }
+    expanded.trim_end_matches('/').to_string()
 }
 
-/// Whether one declared ask's pattern covers a proposed resource.
+/// Whether one declared ask's pattern covers a proposed resource. The
+/// pattern's root is expanded once and `resource_covers` decides the
+/// boundary, so a sibling such as `ProjectsX` stays outside `Projects` (P10).
 #[cfg(test)]
 fn ask_covers(ask: &Ask, resource: &str) -> bool {
     resource
         .strip_prefix("localhost://")
-        .is_some_and(|path| ask_pattern_matches(&ask.pattern, path))
+        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))
 }
 
 /// The declaration's answer for one proposal. `Unspecified` matches nothing.
@@ -13373,7 +13373,7 @@ mod tests {
             "localhost://Users/self/Projects/demo/src",
         )
         .unwrap();
-        let mut cursor = journal_cursor("demo-agent", "task-1").unwrap();
+        let mut cursor = journal_cursor("agent-host", "task-1").unwrap();
         cursor.revision = Some("fixture-revision".to_string());
         let append = propose_journal_append(&mut journal, &cursor).unwrap();
         assert!(note_crash(&mut journal, append));
@@ -19930,6 +19930,14 @@ mod tests {
                 "asks url scheme",
             ),
             (
+                asks_document(r#"{"kind":"read","resource":"127.0.0.1:8080/v1/"}"#),
+                "asks host route",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"[::1]:8080/"}"#),
+                "asks host route",
+            ),
+            (
                 asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
                 "asks absolute host path",
             ),
@@ -20049,6 +20057,14 @@ mod tests {
                 "asks url scheme",
             ),
             (
+                asks_document(r#"{"kind":"read","resource":"127.0.0.1:8080/v1/"}"#),
+                "asks host route",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"[::1]:8080/"}"#),
+                "asks host route",
+            ),
+            (
                 asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
                 "asks absolute host path",
             ),
@@ -20083,6 +20099,14 @@ mod tests {
             (
                 asks_document(r#"{"kind":"read","resource":"<principal>Models/"}"#),
                 "asks marker tail",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"<principal>/Projects"}"#),
+                "asks marker directory",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"<principal>"}"#),
+                "asks marker directory",
             ),
             (
                 asks_document(r#"{"kind":"read","resource":"Models/<principal>/"}"#),
@@ -20206,5 +20230,82 @@ mod tests {
                 ask.pattern
             );
         }
+    }
+
+    /// The journal ask is exactly the capsule's one declared capability: its
+    /// own task journal root under the launching person. A sibling agent's
+    /// journal stays outside the declaration.
+    #[test]
+    fn the_journal_ask_is_the_capsules_own_root() {
+        let capsule: serde_json::Value =
+            serde_json::from_str(include_str!("../capsule.json")).expect("capsule.json parses");
+        let capabilities = capsule["capabilities"]
+            .as_array()
+            .expect("the capsule declares its capabilities");
+        assert_eq!(capabilities.len(), 1, "the capsule declares one capability");
+        let own_root = capabilities[0]
+            .as_str()
+            .expect("a capability is a string")
+            .strip_suffix('*')
+            .expect("the capability ends with a directory wildcard");
+        let journal = declared_asks()
+            .iter()
+            .find(|ask| ask.kind == ProposalKind::JournalAppend)
+            .expect("the declaration declares the journal append");
+        let declared = format!(
+            "localhost://{}",
+            journal.pattern.replacen(PRINCIPAL_MARKER, "Users/self", 1)
+        );
+        assert_eq!(declared, own_root);
+        assert!(
+            !declared_ask(
+                ProposalKind::JournalAppend,
+                "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal"
+            ),
+            "the journal ask names this capsule's own root only"
+        );
+    }
+
+    /// `<principal>` is the one person the guest launches as. The declaration
+    /// covers that person's resources and no other `Users/<name>`.
+    #[test]
+    fn a_declared_ask_names_only_the_launching_principal() {
+        assert!(declared_ask(
+            ProposalKind::Read,
+            "localhost://Users/self/Documents/note.txt"
+        ));
+        assert!(!declared_ask(
+            ProposalKind::Read,
+            "localhost://Users/other/Documents/note.txt"
+        ));
+        assert!(!declared_ask(
+            ProposalKind::Init,
+            "localhost://Users/other/Projects/demo"
+        ));
+    }
+
+    /// A declared pattern covers only at a path boundary: `ProjectsX` stays
+    /// outside `Projects`, and `ModelsX` stays outside `Models`. The shipped
+    /// declaration still covers the resources the scenarios above observe.
+    #[test]
+    fn a_declared_pattern_covers_only_at_a_path_boundary() {
+        let run = Ask {
+            kind: ProposalKind::Run,
+            pattern: format!("{PRINCIPAL_MARKER}/Projects"),
+        };
+        assert!(!ask_covers(&run, "localhost://Users/self/ProjectsX/a"));
+        let models = Ask {
+            kind: ProposalKind::Hosted,
+            pattern: "Models/".to_string(),
+        };
+        assert!(!ask_covers(&models, "localhost://ModelsX/a"));
+        assert!(declared_ask(
+            ProposalKind::Run,
+            "localhost://Users/self/Projects/demo"
+        ));
+        assert!(declared_ask(
+            ProposalKind::Hosted,
+            "localhost://Models/compaction"
+        ));
     }
 }
