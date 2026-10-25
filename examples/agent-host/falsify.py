@@ -289,23 +289,19 @@ def run(argv, cwd):
     return done.returncode, output
 
 
-def list_path(argv):
-    """The one list a run reads: the file after --list, else the default."""
-    if "--list" in argv:
-        at = argv.index("--list")
-        if at + 1 < len(argv) and not argv[at + 1].startswith("--"):
-            return pathlib.Path(argv[at + 1])
-    return DATA
-
-
-def list_args(argv):
-    """The id or prefix arguments, without --list and the path it selected."""
-    args = [arg for arg in argv if not arg.startswith("--")]
-    if "--list" in argv:
-        at = argv.index("--list")
-        if at + 1 < len(argv) and not argv[at + 1].startswith("--"):
-            args.remove(argv[at + 1])
-    return args
+def run_mode(argv):
+    """(mode, path, ids): `--list` alone shows the default list (`display`);
+    `--list FILE` runs FILE, and a run with no `--list` reads the default
+    (`run`). ids are the id or prefix arguments, without the option or the
+    path it selected."""
+    if "--list" not in argv:
+        return "run", DATA, [arg for arg in argv if not arg.startswith("--")]
+    at = argv.index("--list")
+    if at + 1 >= len(argv) or argv[at + 1].startswith("--"):
+        return "display", DATA, []
+    return "run", pathlib.Path(argv[at + 1]), [
+        arg for index, arg in enumerate(argv)
+        if not arg.startswith("--") and index != at + 1]
 
 
 def harness_results(output):
@@ -904,40 +900,50 @@ def a_survivor_is_proved_by_its_named_tests():
 
 def provider_spec_uses_locked_manifest():
     """The provider command builds and runs the provider crate's own tests,
-    with the lock held, one named test at a time."""
+    with the lock held, and names the provider manifest as the option's own
+    value, one named test at a time."""
     how = spec("provider")
     build = how["build"][0][0]
     one = how["one"][0]
     manifest = str(REPO / "capsules/model-provider/Cargo.toml")
-    ok = ("--locked" in build and "--locked" in one
-          and manifest in build and manifest in one)
+
+    def pins_manifest(argv):
+        if "--manifest-path" not in argv:
+            return False
+        at = argv.index("--manifest-path")
+        return at + 1 < len(argv) and argv[at + 1] == manifest
+
+    ok = "--locked" in build and "--locked" in one and pins_manifest(build) and pins_manifest(one)
     print(f"self-test: provider build argv: {' '.join(build)}")
     print(f"self-test: provider run argv: {' '.join(one)}")
     return ok
 
 
 def list_option_selects_path():
-    """--list <path> selects that path; a run with neither reads the default.
-    The argv is the only input, so this proves the routing, not just load()."""
-    chosen = SELF_TEST_DIR / "chosen.json"
-    got = list_path(["--list", str(chosen)])
-    print(f"self-test: --list path selected: {got}")
-    return got == chosen and list_path([]) == DATA and list_path(["FS01"]) == DATA
+    """--list FILE runs FILE for a relative or an absolute path; the argv is
+    the only input, so this proves the routing, not just load()."""
+    absolute = str(REPO / "capsules/model-provider/falsifiers.json")
+    relative = "capsules/model-provider/falsifiers.json"
+    got = (run_mode(["--list", relative]), run_mode(["--list", absolute]))
+    want = (("run", pathlib.Path(relative), []), ("run", pathlib.Path(absolute), []))
+    print(f"self-test: --list paths: {got}")
+    return got == want
 
 
 def the_selected_path_is_not_a_falsifier_id():
     """The path --list selected is not an id or a prefix to match."""
     path = str(REPO / "capsules/model-provider/falsifiers.json")
-    got = list_args(["--list", path, "MP01"])
+    got = (run_mode(["--list", path, "MP01"]), run_mode([]), run_mode(["FS01"]))
+    want = (("run", pathlib.Path(path), ["MP01"]), ("run", DATA, []), ("run", DATA, ["FS01"]))
     print(f"self-test: ids beside --list: {got}")
-    return got == ["MP01"] and list_args([]) == [] and list_args(["FS01"]) == ["FS01"]
+    return got == want
 
 
 def bare_list_option_behavior():
-    """A bare --list still shows the default list."""
-    got = list_path(["--list"])
-    print(f"self-test: bare --list path: {got}")
-    return got == DATA
+    """A bare --list shows the default list and does not run it."""
+    got = run_mode(["--list"])
+    print(f"self-test: bare --list: {got}")
+    return got == ("display", DATA, [])
 
 
 def refusal_reason(path):
@@ -982,6 +988,23 @@ def missing_list_file_is_refused():
         reason = refusal_reason(path)
         print(f"self-test: missing list file: {reason}")
         return reason == f"{path}: the list file does not exist"
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def load_reads_the_given_list():
+    """load() reads the file it is given, not the default list."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "given.json"
+        path.write_text(json.dumps({"falsifiers": [
+            {"id": "XY01", "command": "host", "expect": "caught", "edits": [], "tests": ["t"]},
+            {"id": "XY02", "command": "selftest", "expect": "survives", "edits": [], "tests": ["t"]},
+        ]}), encoding="utf-8")
+        got = [entry["id"] for entry in load(path)]
+        print(f"self-test: ids from the given list: {got}")
+        return got == ["XY01", "XY02"]
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
 
@@ -1033,6 +1056,7 @@ SELF_TEST_CASES = {
     "list option selects its path": list_option_selects_path,
     "the selected path is not a falsifier id": the_selected_path_is_not_a_falsifier_id,
     "bare list option behavior": bare_list_option_behavior,
+    "load reads the given list": load_reads_the_given_list,
     "a missing list file is refused": missing_list_file_is_refused,
     "a list that is not JSON is refused": a_list_that_is_not_json_is_refused,
     "a list without falsifiers is refused": a_list_without_falsifiers_is_refused,
@@ -1092,12 +1116,13 @@ def main(argv):
     # file: the backup belongs to the caller's mutation, not to a killed run.
     if "--keep-backups" not in argv:
         recover_backups()
+    mode, path, wanted = run_mode(argv)
     try:
-        entries = load(list_path(argv))
+        entries = load(path)
     except ListError as error:
         print(f"falsify.py: {error}", file=sys.stderr)
         return error.exit_status
-    if "--list" in argv and list_path(argv) == DATA:
+    if mode == "display":
         for entry in entries:
             print(f"{entry['id']:6} {entry['command']:8} {entry['expect']:13} {entry['title']}")
         return 0
@@ -1123,7 +1148,6 @@ def main(argv):
         return CASE_PASSED if ok else CASE_FAILED
     if "--self-test" in argv:
         return 0 if self_test(entries, "--with-repo" in argv) else 1
-    wanted = list_args(argv)
     chosen = [entry for entry in entries if not wanted or any(
         entry["id"] == arg or entry["id"].startswith(arg) for arg in wanted)]
     if not chosen:

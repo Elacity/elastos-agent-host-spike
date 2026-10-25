@@ -25,8 +25,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return pathlib.Path(argv[at + 1])\n    return DATA",
-     "new": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return DATA\n    return DATA"
+     "old": "    return \"run\", pathlib.Path(argv[at + 1]), [",
+     "new": "    return \"run\", DATA, ["
     }
    ],
    "tests": [
@@ -41,8 +41,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return pathlib.Path(argv[at + 1])\n    return DATA",
-     "new": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return pathlib.Path(argv[at + 1])\n        return pathlib.Path(argv[0])\n    return DATA"
+     "old": "    if at + 1 >= len(argv) or argv[at + 1].startswith(\"--\"):\n        return \"display\", DATA, []",
+     "new": "    if at + 1 >= len(argv) or argv[at + 1].startswith(\"--\"):\n        return \"run\", DATA, []"
     }
    ],
    "tests": [
@@ -170,12 +170,44 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            args.remove(argv[at + 1])\n    return args",
-     "new": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            pass\n    return args"
+     "old": "    return \"run\", pathlib.Path(argv[at + 1]), [\n        arg for index, arg in enumerate(argv)\n        if not arg.startswith(\"--\") and index != at + 1]",
+     "new": "    return \"run\", pathlib.Path(argv[at + 1]), [\n        arg for arg in argv if not arg.startswith(\"--\")]"
     }
    ],
    "tests": [
     "the selected path is not a falsifier id"
+   ]
+  },
+  {
+   "id": "ST12",
+   "title": "load ignores the list it is given",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "def load(path=DATA):",
+     "new": "def load(path=DATA):\n    path = DATA"
+    }
+   ],
+   "tests": [
+    "load reads the given list"
+   ]
+  },
+  {
+   "id": "ST13",
+   "title": "the provider manifest option keeps the repository value",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "                 str(manifest or REPO / \"capsules/model-provider/Cargo.toml\")]",
+     "new": "                 str(manifest or REPO)]"
+    }
+   ],
+   "tests": [
+    "provider spec uses the locked manifest"
    ]
   }
  ]
