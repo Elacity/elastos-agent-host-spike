@@ -55,10 +55,11 @@ Callers match the variant's fields; they never parse the Display string.
 - `Malformed` covers any bytes that fail to parse and validate as a core
   module, including unknown sections and Component bytes. The core header
   check and full validation run before the import and custom-section checks.
-- `CodeInCustomSection` covers a custom section whose payload contains the
-  Wasm magic bytes `00 61 73 6D` at any offset, including an embedded module
-  or component. A custom section without these bytes is allowed. This check
-  scans payload bytes; it does not decode compressed or encoded content.
+- `CodeInCustomSection` refuses a custom section whose content contains the
+  Wasm magic bytes `00 61 73 6D` at any offset. Content is every byte after
+  the section id and size, read as one run: the name's length, the name and
+  the data. A section without such a run passes this check. This is a byte
+  heuristic; compressed or encoded content is not decoded.
 - After validation and custom-section checks, the first undeclared import
   in section order returns `Undeclared` with its module and name.
 
@@ -93,9 +94,8 @@ The non-exhaustive `Refusal` enum gains two variants with these exact strings:
   modules and nested components get their imports from inside the Component;
   the audit does not apply the core-module import rules to them.
 - The shared v1 custom-section rule applies at every depth: the Component's
-  own sections, embedded core modules and nested components. A payload that
-  contains Wasm magic `00 61 73 6D` at any offset returns `CodeInCustomSection`
-  with v1's string `code in custom section`. Plain-text payloads pass this check.
+  own sections, embedded core modules and nested components. Each uses the
+  `CodeInCustomSection` rule above and v1's string `code in custom section`.
 - After validation and custom-section checks, the first undeclared interface
   in section order returns `UndeclaredInterface` with its full name. Callers
   match the variant's field and use its Display string for people to read.
