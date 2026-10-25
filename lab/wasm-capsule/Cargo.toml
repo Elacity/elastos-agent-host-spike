@@ -1,0 +1,33 @@
+# wc-001 lab capsule. Its own workspace (empty `[workspace]`) and Cargo.lock,
+# kept out of the root ElastOS workspace so the Runtime core never grows for lab
+# tooling. One package: the guest lives in capsule/src, the host-side build and
+# verification tooling lives in tests/ (never compiled into the capsule).
+#
+# `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
+# act on this single package, so they need no `--all`/`--workspace`.
+[package]
+name = "capsule"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "capsule/src/lib.rs"
+# cdylib is the Wasm artifact; rlib lets the host test harness link the shared
+# `digest_impl`. The capsule has no dependencies: it brings its own logic and a
+# minimal surface (Rong's DigitCapsule; PRINCIPLES P18).
+crate-type = ["cdylib", "rlib"]
+
+# The reproducible-build knobs the capsule is compiled with (Cargo honours
+# `[profile.*]` only in the workspace root): one codegen unit, LTO, a stripped
+# binary, and `panic = "abort"` (a capsule traps down, it does not unwind a
+# host).
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Stay out of the root ElastOS workspace.
+[workspace]

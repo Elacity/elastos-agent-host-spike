@@ -1,0 +1,5 @@
+# Build output is never committed (no large files, P7): the artifact and its
+# receipt are rebuilt from source by tools/build.
+/target/
+/capsule.wasm
+/receipt.txt
