@@ -793,6 +793,22 @@
       "tests": [
         "a backup this run did not make is refused"
       ]
+    },
+    {
+      "id": "PV39",
+      "title": "released local backups are inherited again from the published environment",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    return OWNED_BACKUPS | INHERITED_BACKUPS",
+          "new": "    return OWNED_BACKUPS | {pathlib.Path(name) for name in os.environ.get(OWNED_BACKUPS_ENV, \"\").split(os.pathsep) if name}"
+        }
+      ],
+      "tests": [
+        "released backups are recovered again"
+      ]
     }
   ]
 }

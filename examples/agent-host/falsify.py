@@ -57,10 +57,13 @@ DATA = HERE / "falsifiers.json"
 # The provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 BACKUP_SUFFIX = ".falsify-original"
-# Backups this process holds, and their names in the environment so every
-# nested run inherits the ownership. A caller's live mutation restores its own
-# backup, so a nested run must never put one back.
+# Capture ancestor ownership once. The environment then publishes that set
+# plus this process's live backups to children; it is not a local ownership
+# source after publication. Each live mutation restores its own backup.
 OWNED_BACKUPS_ENV = "FALSIFY_OWNED_BACKUPS"
+INHERITED_BACKUPS = frozenset(
+    pathlib.Path(name).resolve()
+    for name in os.environ.get(OWNED_BACKUPS_ENV, "").split(os.pathsep) if name)
 OWNED_BACKUPS = set()
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
 COMMANDS = ("host", "provider", "e2e", "selftest")
@@ -241,9 +244,7 @@ def owned_backups():
     """The backup paths held by this process or handed down by a caller. The
     environment carries them into nested runs, so each one knows which
     backups belong to a live mutation instead of a killed run."""
-    inherited = os.environ.get(OWNED_BACKUPS_ENV, "")
-    return OWNED_BACKUPS | {pathlib.Path(name)
-                            for name in inherited.split(os.pathsep) if name}
+    return OWNED_BACKUPS | INHERITED_BACKUPS
 
 
 def publish_owned_backups():
@@ -1609,6 +1610,61 @@ def a_nested_run_keeps_the_callers_backup():
     return ok
 
 
+def released_backups_are_recovered_again():
+    """Two killed-edit recoveries run in one child interpreter. Local
+    ownership ends after restore, while the child's recovery and subsequent
+    ownership publications keep the active ancestor's backup protected."""
+    ok = True
+    before = owned_backups()
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "ancestor.txt"
+        original = b"ancestor original\n"
+        path.write_bytes(original)
+        backup = path.with_name(path.name + BACKUP_SUFFIX)
+        entry = {"edits": [{"file": path.name, "old": "ancestor original",
+                            "new": "ancestor mutation"}]}
+        child = """import os, pathlib, runpy, sys
+from unittest import mock
+runner = runpy.run_path(sys.argv[1])
+state = runner['main'].__globals__
+root = pathlib.Path(sys.argv[2])
+state['SELF_TEST_DIR'] = root / 'recovery'
+inherited = runner['owned_backups']()
+ok = True
+for attempt in range(2):
+    recovered = runner['a_killed_provider_edit_is_recovered']()
+    published = {pathlib.Path(name).resolve()
+                 for name in os.environ.get(runner['OWNED_BACKUPS_ENV'], '').split(os.pathsep)
+                 if name}
+    released = runner['owned_backups']() == inherited and published == inherited
+    with mock.patch.dict(state, HERE=root, REPO=root):
+        runner['recover_backups']()
+    print(f'self-test: recovery cycle {attempt + 1}: recovered={recovered}, released={released}')
+    if not recovered or not released:
+        ok = False
+sys.exit(0 if ok else 1)
+"""
+        with Mutation(entry, SELF_TEST_DIR):
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", child, str(HERE / "falsify.py"),
+                 str(SELF_TEST_DIR)], capture_output=True, text=True, timeout=30)
+            kept = (path.read_bytes() == b"ancestor mutation\n"
+                    and backup.exists() and backup.read_bytes() == original)
+            print(result.stdout, end="")
+            print(f"self-test: repeated recovery: exit={result.returncode}, "
+                  f"ancestor kept={kept}")
+            if result.returncode != 0 or not kept:
+                print(result.stderr, end="")
+                ok = False
+        if path.read_bytes() != original or backup.exists() or owned_backups() != before:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def a_backup_this_run_did_not_make_is_refused():
     """A competing backup appears inside os.link(). The link decides
     ownership: the edit stops with its own reason and result, the caller's
@@ -1725,6 +1781,7 @@ SELF_TEST_CASES = {
     "prefix token still selects": prefix_token_still_selects,
     "a nested list is listed": a_nested_list_is_listed,
     "a nested run keeps the caller's backup": a_nested_run_keeps_the_callers_backup,
+    "released backups are recovered again": released_backups_are_recovered_again,
     "a backup this run did not make is refused": a_backup_this_run_did_not_make_is_refused,
 }
 
