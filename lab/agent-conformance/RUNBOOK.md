@@ -21,7 +21,7 @@ or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
 remain open in [GAPS.md](GAPS.md).
 
 - `home_is_throwaway`: checks the Mac data path, fresh root, path guard, symlink refusals and removal after success.
-- `launch_env_is_only_the_throwaway_home`: checks the three allowed environment entries, null stdin, exit status and both output streams.
+- `launch_env_is_only_the_throwaway_home`: checks the four allowed environment entries, including `ELASTOS_CARRIER_MDNS=0`, null stdin, exit status and both output streams.
 - `launch_stops_a_child_past_its_bound`: checks that a one-second bound stops a three-second sleep with the exact timeout reason.
 - `run_without_operator_is_refused_with_reason`: runs the probe through the bounded launch primitive in a fresh Home and requires a nonzero exit with `This command requires a running runtime.` on stderr.
 - `runtime_data_dir_is_under_throwaway_home`: places a dummy coordinates file in the guarded data directory and requires Runtime to remove it and return the same refusal reason. Its documentation-address URL is rejected before any network call.
@@ -37,8 +37,8 @@ remain open in [GAPS.md](GAPS.md).
 
 The harness owns each fresh root under this lane's ignored `target/`. It checks
 HOME and the derived data path before reading those paths or starting a child.
-The launch primitive clears the parent environment and sets HOME, TMPDIR and
-the fixed system PATH. The environment test checks that complete allowlist.
+The launch primitive clears the parent environment and sets HOME, TMPDIR,
+the fixed system PATH and `ELASTOS_CARRIER_MDNS=0`. The environment test checks that complete allowlist.
 F-ac1c selects the inherited HOME and proves the guard refuses it before any
 read. These checks protect the real Home by construction; they never read its
 data. The fixture stores a selector, rather than a user's Home path.
@@ -49,12 +49,14 @@ Runtime and localhost-provider share the build settings, SHA-256 helper and
 `target/runtime`; warm runs reuse Cargo's cached artifacts. All live checks share
 the Runtime build.
 The build keeps the developer's toolchain environment. Each Runtime launch uses
-`harness::ThrowawayHome::launch` and its cleared environment. The operator lookup
-returns before the storage constructor; AC-006-STORAGE remains open. Ready operator,
-grant, effect and bundle-CID checks still need their own proof.
+`harness::ThrowawayHome::launch` or `start`, which share one spawn site and
+cleared environment. The operator lookup
+returns before the storage constructor; AC-006-STORAGE remains open. The
+ready-operator rows below prove the operator fixture;
+grant, effect and bundle-CID checks belong to later tasks.
 
 `tests/common::write_operator_home` owns the operator fixture for this test and
-later operator tests. It checks the Home guard, installs an executable copy, and
+the ready-operator tests. It checks the Home guard, installs an executable copy, and
 writes a manifest containing only the repository's `external.localhost-provider`
 entry and an empty `profiles` map. It stamps the current Mac platform with the
 copy's checksum, size and install path. The repository entry owns all other fields.
@@ -67,7 +69,7 @@ bind (`server_infra.rs:768-776,1547`; `serve_cmd.rs:295,462`). F-ac1i changes th
 writer's destination to `bin/localhost-provider-copy` while the manifest keeps
 the required path. Runtime then reports the provider as missing, so the test
 fails on its reason check. Both cases stop before network startup. Task 013
-owns ready-operator proof and the AC-010-OFFLINE decision.
+adds the matching-byte ready operator and closes AC-010-OFFLINE below.
 
 F-ac1f changes the single data-dir rule to the Linux form. The decoy must remain
 and `runtime_data_dir_is_under_throwaway_home` must fail. F-ac1g changes only the
@@ -85,3 +87,31 @@ Keep each failed root only until its result is reviewed, then remove that root.
 The [falsifier list](falsifiers.json) owns the exact mutations; [LOG.md](LOG.md)
 records their local runs. The provider lane owns the shared runner's `lab` arm;
 until it is available, apply and restore each mutation by hand.
+
+Task 013 adds these rows to the same Cargo-derived table:
+
+- `fixture_operator_starts_ready_and_stops_cleanly`: installs matching provider bytes, copies the two-setting config, checks coordinates existence and HTTP 200 within 60 seconds, checks sockets, and requires group exit within the ten-second stop bound. This is the positive control for 012's native platform key.
+- `fixture_operator_sockets_are_loopback_only`: measures every internet socket in the operator group at readiness and at least three seconds later. Both samples require the loopback API listener. `run.sh` also prints their socket counts.
+- `socket_census_requires_parseable_loopback_endpoints_and_api_listener`: checks field-format parsing with IPv4/IPv6, connected sockets, wildcard and remote addresses, malformed listings and missing API visibility.
+- `managed_child_stop_reaps_its_process_group`: checks SIGTERM and group cleanup with a parent and child fixture.
+- `managed_child_drop_kills_its_group_and_keeps_root`: checks emergency group cleanup and root retention when a handle is dropped before stop.
+
+The [operator recipe](GAPS.md#operator-in-a-throwaway-home) owns the ordered
+setup and its measurement limits. `fixtures/operator-config.toml` selects
+unsigned admission and a loopback Carrier bind. Admission grants no resource.
+The coordinates file is checked for existence only; the harness leaves its
+contents and operator captures unread. System `kill`, `pgrep` and `lsof` use
+the same guarded spawn site, null stdin, capture files and fixed environment.
+Census failures stop the operator immediately and fail with a reason. The
+census samples internet sockets in the group; it is not a packet capture.
+
+Run F-ac1j only against `fixture_operator_sockets_are_loopback_only`: it changes
+the committed API host to a wildcard for that short test, while Carrier stays
+on loopback with mDNS disabled. Readiness requests still use loopback. Require
+the wildcard-socket refusal, then restore the fixture and require PASS.
+Run F-ac1k only against `launch_env_is_only_the_throwaway_home`; it removes the
+mDNS-off entry for that environment test alone. Restore it before any operator
+launch. F-census-a removes the API visibility requirement. F-managed-stop omits
+SIGTERM and checks the timeout failure and forced cleanup. F-managed-drop omits
+the retained-root marker. Their exact edits and named tests are in
+`falsifiers.json`; each named test must fail planted and pass restored.
