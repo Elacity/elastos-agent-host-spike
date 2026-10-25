@@ -104,6 +104,7 @@ fn inspect(
             Payload::CustomSection(section) => {
                 let range = section.range();
                 let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;
+                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;
                 let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;
                 let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;
                 if content.windows(4).any(|bytes| bytes == b"\0asm") {
