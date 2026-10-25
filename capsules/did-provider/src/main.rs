@@ -25,6 +25,13 @@ const DID_RECOVERY_PROOF_SCHEMA: &str = "elastos.did.recovery-proof/v1";
 const DID_RECOVERY_MAX_TTL_SECS: u64 = 15 * 60;
 const PROVIDER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Refusal reason when `Init` carries no storage root.
+const STORAGE_PATH_NOT_SET: &str = "did-provider: storage path is not set";
+/// Refusal reason when the storage root is not absolute.
+const STORAGE_PATH_NOT_ABSOLUTE: &str = "did-provider: storage path is not absolute";
+/// Error code for every storage-root refusal.
+const STORAGE_ERROR_CODE: &str = "storage_error";
+
 // === Wire protocol types ===
 
 #[derive(Debug, Deserialize)]
@@ -180,8 +187,17 @@ impl DidProvider {
     }
 
     fn init(&mut self, config: serde_json::Value) -> Response {
-        if let Some(bp) = config.get("base_path").and_then(|v| v.as_str()) {
-            self.storage_path = bp.to_string();
+        // Every Init must name its own root. A confined provider can only write
+        // under that root, so it never guesses one and never inherits an older
+        // one. A refused Init leaves no usable root behind.
+        self.storage_path = config
+            .get("base_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Err(reason) = self.base_dir() {
+            self.storage_path.clear();
+            return Response::error(STORAGE_ERROR_CODE, &reason);
         }
 
         if let Some(key_hex) = config.get("encryption_key").and_then(|v| v.as_str()) {
@@ -201,7 +217,9 @@ impl DidProvider {
             }
         }
 
-        self.try_load_nickname();
+        if let Err(reason) = self.try_load_nickname() {
+            return Response::error(STORAGE_ERROR_CODE, &reason);
+        }
 
         Response::ok(serde_json::json!({
             "protocol_version": "1.0",
@@ -367,8 +385,10 @@ impl DidProvider {
         if self.device_key.is_none() {
             return Response::error("not_init", "No device key provided");
         }
+        if let Err(reason) = self.save_nickname(nickname) {
+            return Response::error(STORAGE_ERROR_CODE, &reason);
+        }
         self.nickname = Some(nickname.to_string());
-        self.save_nickname(nickname);
         Response::ok(serde_json::json!({"nickname": nickname}))
     }
 
@@ -396,7 +416,10 @@ impl DidProvider {
         }
 
         let normalized = name.to_ascii_lowercase();
-        let dir = self.did_dir().join("personas");
+        let dir = match self.did_dir() {
+            Ok(dir) => dir.join("personas"),
+            Err(reason) => return Response::error(STORAGE_ERROR_CODE, &reason),
+        };
         let key_path = dir.join(format!("{}.enc", normalized));
         let storage_key = derive_storage_key(dk);
 
@@ -458,33 +481,45 @@ impl DidProvider {
 
     // === Storage helpers ===
 
-    fn base_dir(&self) -> std::path::PathBuf {
-        if self.storage_path.is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-        } else {
-            std::path::PathBuf::from(&self.storage_path)
+    /// Resolve the storage root the provider was given, or refuse.
+    ///
+    /// This is the single rule for root validity: `Init`, nickname persistence
+    /// and persona storage all reach the filesystem through it. A missing,
+    /// empty or relative root is refused with a named reason; the provider
+    /// never falls back to the current directory or `/tmp`.
+    fn base_dir(&self) -> Result<std::path::PathBuf, String> {
+        if self.storage_path.trim().is_empty() {
+            return Err(STORAGE_PATH_NOT_SET.to_string());
         }
-    }
-
-    fn did_dir(&self) -> std::path::PathBuf {
-        self.base_dir().join("did")
-    }
-
-    fn try_load_nickname(&mut self) {
-        if let Some(ref dk) = self.device_key {
-            if let Ok(Some(nick)) =
-                elastos_identity::load_nickname_with_device_key(&self.base_dir(), dk)
-            {
-                self.nickname = Some(nick);
-            }
+        let base = std::path::PathBuf::from(&self.storage_path);
+        if !base.is_absolute() {
+            return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());
         }
+        Ok(base)
     }
 
-    fn save_nickname(&self, nickname: &str) {
-        let Some(ref dk) = self.device_key else {
-            return;
+    fn did_dir(&self) -> Result<std::path::PathBuf, String> {
+        Ok(self.base_dir()?.join("did"))
+    }
+
+    fn try_load_nickname(&mut self) -> Result<(), String> {
+        let Some(dk) = self.device_key else {
+            return Ok(());
         };
-        let _ = elastos_identity::save_nickname_with_device_key(&self.base_dir(), dk, nickname);
+        let base_dir = self.base_dir()?;
+        if let Ok(Some(nick)) = elastos_identity::load_nickname_with_device_key(&base_dir, &dk) {
+            self.nickname = Some(nick);
+        }
+        Ok(())
+    }
+
+    fn save_nickname(&self, nickname: &str) -> Result<(), String> {
+        let Some(dk) = self.device_key else {
+            return Ok(());
+        };
+        let base_dir = self.base_dir()?;
+        elastos_identity::save_nickname_with_device_key(&base_dir, &dk, nickname)
+            .map_err(|e| format!("did-provider: failed to save nickname: {e}"))
     }
 }
 
@@ -748,6 +783,261 @@ mod tests {
         match response {
             Response::Error { code, .. } => assert_eq!(code, "invalid_recovery_proof"),
             other => panic!("Expected invalid_recovery_proof error, got {:?}", other),
+        }
+    }
+
+    fn assert_storage_error(response: Response, expected_reason: &str) {
+        match response {
+            Response::Error { code, message } => {
+                assert_eq!(code, STORAGE_ERROR_CODE);
+                assert_eq!(message, expected_reason);
+            }
+            other => panic!(
+                "Expected storage refusal {expected_reason:?}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    fn current_dir_entries() -> Vec<String> {
+        let cwd = std::env::current_dir().unwrap();
+        let mut entries: Vec<String> = std::fs::read_dir(&cwd)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// A storage root is required even when Init carries no encryption key.
+    ///
+    /// Falsifier: move the root validation inside `if self.device_key.is_some()`
+    /// in `init`; this Init then succeeds and the test fails.
+    #[test]
+    fn init_requires_storage_without_key() {
+        let before = current_dir_entries();
+        let mut provider = DidProvider::new();
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({}),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_SET);
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "refused Init must not create files in the current directory"
+        );
+    }
+
+    /// An empty or blank root is the same refusal as a missing one.
+    ///
+    /// Falsifier: restore the old empty-path fallback in `base_dir`; Init then
+    /// succeeds by guessing the current directory and the test fails.
+    #[test]
+    fn empty_storage_path_is_refused() {
+        let before = current_dir_entries();
+        for base_path in ["", "   "] {
+            let mut provider = DidProvider::new();
+            let response = provider.handle(Request::Init {
+                config: serde_json::json!({
+                    "base_path": base_path,
+                    "encryption_key": hex::encode(make_device_key()),
+                }),
+            });
+            assert_storage_error(response, STORAGE_PATH_NOT_SET);
+        }
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "an empty root must not create files in the current directory"
+        );
+    }
+
+    /// A relative root is refused with its own reason, before any write.
+    ///
+    /// Falsifier: remove only the `is_absolute` check in `base_dir`; this Init
+    /// then accepts the relative root and the test fails. Restoring the
+    /// empty-path fallback alone does not make this test pass.
+    #[test]
+    fn relative_storage_is_refused() {
+        let relative = "did-provider-relative-root";
+        let before = current_dir_entries();
+        let mut provider = DidProvider::new();
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({
+                "base_path": relative,
+                "encryption_key": hex::encode(make_device_key()),
+            }),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_ABSOLUTE);
+        assert!(!std::path::Path::new(relative).exists());
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "a relative root must not create files in the current directory"
+        );
+    }
+
+    /// Each Init must name its own root; a later Init never inherits the old one.
+    ///
+    /// Falsifier: restore the old `if let Some(bp) = config.get("base_path")`
+    /// assignment in `init`, so a second Init without `base_path` quietly keeps
+    /// the first root and returns ok.
+    #[test]
+    fn reinit_requires_explicit_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap().to_string();
+        let mut provider = init_provider(Some(&bp));
+        assert!(provider.signing_key.is_some());
+
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({
+                "encryption_key": hex::encode(make_device_key()),
+            }),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_SET);
+
+        let before = current_dir_entries();
+        let response = provider.handle(Request::SetNickname {
+            nickname: "alice".to_string(),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_SET);
+        assert!(
+            provider.nickname.is_none(),
+            "refused re-init must not leave a writable nickname path"
+        );
+        assert!(
+            !dir.path().join("did").join("nickname.enc").exists(),
+            "refused re-init must not write through the previous root"
+        );
+        assert_eq!(before, current_dir_entries());
+    }
+
+    /// Storage refusals reach the callers of every storage helper.
+    ///
+    /// Falsifier: swallow the `base_dir` error in `save_nickname` (the old
+    /// `let _ =` behaviour) or in the persona path; the operation then reports
+    /// success and the state assertions fail.
+    #[test]
+    fn storage_refusals_reach_callers() {
+        let mut provider = DidProvider::new();
+        // Test seam: a device key without any storage root, which a refused
+        // Init also produces.
+        provider.device_key = Some(make_device_key());
+
+        let before = current_dir_entries();
+        assert_storage_error(
+            provider.handle(Request::SetNickname {
+                nickname: "alice".to_string(),
+            }),
+            STORAGE_PATH_NOT_SET,
+        );
+        assert!(
+            provider.nickname.is_none(),
+            "refused nickname write must not change provider state"
+        );
+        assert_storage_error(
+            provider.handle(Request::GetPersonaDid {
+                name: "bot".to_string(),
+            }),
+            STORAGE_PATH_NOT_SET,
+        );
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "refused storage operations must not write in the current directory"
+        );
+    }
+
+    /// A refused root neither reads, overwrites nor changes existing state.
+    ///
+    /// Falsifier: restore any fallback root (the old `base_dir` fallback) or
+    /// retain the previous root on a later Init; the nickname file, persona key
+    /// or loaded nickname then changes before the refusal.
+    #[test]
+    fn invalid_storage_preserves_files_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap().to_string();
+        let nickname_path = dir.path().join("did").join("nickname.enc");
+        let persona_path = dir.path().join("did").join("personas").join("bot.enc");
+
+        let persona_did = {
+            let mut provider = init_provider(Some(&bp));
+            match provider.handle(Request::SetNickname {
+                nickname: "alice".to_string(),
+            }) {
+                Response::Ok { .. } => {}
+                other => panic!("Expected nickname write to succeed, got {:?}", other),
+            }
+            match provider.get_persona_did("bot") {
+                Response::Ok { data: Some(d) } => d["did"].as_str().unwrap().to_string(),
+                other => panic!("Expected persona DID, got {:?}", other),
+            }
+        };
+        let nickname_bytes = std::fs::read(&nickname_path).unwrap();
+        let persona_bytes = std::fs::read(&persona_path).unwrap();
+
+        let mut provider = init_provider(Some(&bp));
+        match provider.get_nickname() {
+            Response::Ok { data: Some(d) } => assert_eq!(d["nickname"], "alice"),
+            other => panic!("Expected loaded nickname alice, got {:?}", other),
+        }
+
+        let before = current_dir_entries();
+        for bad_base_path in ["", "relative-root"] {
+            let response = provider.handle(Request::Init {
+                config: serde_json::json!({
+                    "base_path": bad_base_path,
+                    "encryption_key": hex::encode(make_device_key()),
+                }),
+            });
+            match response {
+                Response::Error { .. } => {}
+                other => panic!("Expected Init to refuse {bad_base_path:?}, got {:?}", other),
+            }
+
+            assert_storage_error(
+                provider.handle(Request::SetNickname {
+                    nickname: "bob".to_string(),
+                }),
+                STORAGE_PATH_NOT_SET,
+            );
+            match provider.get_nickname() {
+                Response::Ok { data: Some(d) } => assert_eq!(
+                    d["nickname"], "alice",
+                    "refused storage must not change nickname state"
+                ),
+                other => panic!(
+                    "Expected nickname alice to survive refusal, got {:?}",
+                    other
+                ),
+            }
+            assert_storage_error(
+                provider.handle(Request::GetPersonaDid {
+                    name: "bot".to_string(),
+                }),
+                STORAGE_PATH_NOT_SET,
+            );
+            assert_eq!(
+                std::fs::read(&nickname_path).unwrap(),
+                nickname_bytes,
+                "refused storage must not overwrite the nickname"
+            );
+            assert_eq!(
+                std::fs::read(&persona_path).unwrap(),
+                persona_bytes,
+                "refused storage must not overwrite the persona key"
+            );
+        }
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "refused storage must not write in the current directory"
+        );
+
+        let mut provider = init_provider(Some(&bp));
+        match provider.get_persona_did("bot") {
+            Response::Ok { data: Some(d) } => assert_eq!(d["did"].as_str().unwrap(), persona_did),
+            other => panic!("Expected the original persona DID, got {:?}", other),
         }
     }
 
