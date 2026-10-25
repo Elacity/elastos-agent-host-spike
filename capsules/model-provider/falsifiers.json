@@ -481,12 +481,45 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    for backup in HERE.rglob(\"*\" + BACKUP_SUFFIX):",
-          "new": "    for backup in REPO.rglob(\"*\" + BACKUP_SUFFIX):"
+          "old": "    backups = set(HERE.rglob(\"*\" + BACKUP_SUFFIX))",
+          "new": "    backups = set(REPO.rglob(\"*\" + BACKUP_SUFFIX))"
         }
       ],
       "tests": [
         "another lane's backup is not recovered"
+      ]
+    },
+    {
+      "id": "PV31",
+      "title": "startup recovery skips MP01's exact provider target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))",
+          "new": "    pass  # leave MP01's backup behind"
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV32",
+      "title": "startup recovery takes backups from other model-provider files",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))",
+          "new": "    backups.update(provider_target.parent.glob(\"*\" + BACKUP_SUFFIX))"
+        }
+      ],
+      "tests": [
+        "another lane's backup is not recovered",
+        "a killed provider edit is recovered"
       ]
     },
     {

@@ -221,10 +221,13 @@ def load(path=DATA):
 
 
 def recover_backups():
-    """Put back any original left by a killed run of this runner. Only the
-    agent-host directory belongs to this runner; a backup in another lane is
-    not ours to restore."""
-    for backup in HERE.rglob("*" + BACKUP_SUFFIX):
+    """Restore this runner's originals: agent-host files and MP01's exact
+    provider target. Other provider files stay with their owning runners.
+    Recovery is independent of the data file selected for the next run."""
+    backups = set(HERE.rglob("*" + BACKUP_SUFFIX))
+    provider_target = REPO / "capsules/model-provider/src/local_memory.rs"
+    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))
+    for backup in sorted(backups):
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
         os.utime(target)
@@ -866,8 +869,8 @@ def interruption_at_the_end_of_the_edit():
 
 
 def another_lanes_backup_is_not_recovered():
-    """Recovery restores only this runner's directory. A backup in another
-    lane, left by a killed run elsewhere, is not ours to restore."""
+    """Recovery keeps foreign backups, including a neighbour of MP01's
+    source file. The runner owns that exact provider target."""
     ok = True
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
@@ -880,7 +883,9 @@ def another_lanes_backup_is_not_recovered():
         owned = here / "owned.txt"
         foreign = repo / "capsules" / "wallet-provider" / "src" / "lib.rs"
         foreign.parent.mkdir(parents=True)
-        for target in (owned, foreign):
+        neighbour = repo / "capsules" / "model-provider" / "src" / "lib.rs"
+        neighbour.parent.mkdir(parents=True)
+        for target in (owned, foreign, neighbour):
             target.write_text("mutated bytes\n", encoding="utf-8")
             target.with_name(target.name + BACKUP_SUFFIX).write_text(
                 "original bytes\n", encoding="utf-8")
@@ -896,10 +901,96 @@ def another_lanes_backup_is_not_recovered():
                           and not owned.with_name(owned.name + BACKUP_SUFFIX).exists())
         foreign_kept = (foreign.read_text() == "mutated bytes\n"
                         and foreign.with_name(foreign.name + BACKUP_SUFFIX).exists())
+        neighbour_kept = (neighbour.read_text() == "mutated bytes\n"
+                          and neighbour.with_name(neighbour.name + BACKUP_SUFFIX).read_text()
+                          == "original bytes\n")
         print(f"self-test: another lane's backup on restart: exit={code}, "
               f"owned restored={owned_restored}, foreign kept={foreign_kept}")
         if code != 0 or not owned_restored or not foreign_kept:
             ok = False
+        if not neighbour_kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_killed_provider_edit_is_recovered():
+    """Kill a real MP01 edit in an isolated tree, restart through main(),
+    and repeat the edit. Foreign backups stay with their owners."""
+    mp01 = next(entry for entry in load(REPO / "capsules/model-provider/falsifiers.json")
+                if entry["id"] == "MP01")
+    originals = {edit["file"]: (HERE / edit["file"]).read_bytes()
+                 for edit in mp01["edits"]}
+    originals["owned.txt"] = b"original bytes\n"
+    entry = dict(mp01, edits=mp01["edits"] + [
+        {"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"}])
+    child = """import json, os, pathlib, runpy, signal, sys
+runner = runpy.run_path(sys.argv[1])
+runner['Mutation'](json.loads(sys.argv[2]), pathlib.Path(sys.argv[3])).__enter__()
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        for mode in ("provider", "default"):
+            repo = SELF_TEST_DIR / mode
+            here = repo / "examples/agent-host"
+            here.mkdir(parents=True)
+            data = here / "falsifiers.json"
+            data.write_text('{"falsifiers": []}', encoding="utf-8")
+            provider_data = repo / "capsules/model-provider/falsifiers.json"
+            provider_data.parent.mkdir(parents=True)
+            provider_data.write_text(json.dumps({"falsifiers": [mp01]}), encoding="utf-8")
+            for name, original in originals.items():
+                target = here / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(original)
+                os.utime(target, (1, 1))
+            foreign_targets = [repo / "capsules/wallet-provider/src/local_memory.rs",
+                               repo / "capsules/model-provider/src/lib.rs"]
+            for target in foreign_targets:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"foreign mutation\n")
+                target.with_name(target.name + BACKUP_SUFFIX).write_bytes(b"foreign original\n")
+            killed = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", child, str(HERE / "falsify.py"),
+                 json.dumps(entry), str(here)], capture_output=True, text=True, timeout=10)
+            planted = all(
+                (here / name).read_bytes() != original
+                and (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).read_bytes()
+                == original for name, original in originals.items())
+            if killed.returncode != -signal.SIGKILL or not planted:
+                print(f"self-test: MP01 kill: exit={killed.returncode}, planted={planted}")
+                return False
+            argv = ["--from", str(provider_data), "--list"] if mode == "provider" else ["--list"]
+            with mock.patch.dict(globals(), HERE=here, REPO=repo, DATA=data):
+                code = main(argv)
+            restored = all(
+                (here / name).read_bytes() == original
+                and not (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).exists()
+                and (here / name).stat().st_mtime_ns > 1_000_000_000
+                for name, original in originals.items())
+            foreign_kept = all(
+                target.read_bytes() == b"foreign mutation\n"
+                and target.with_name(target.name + BACKUP_SUFFIX).read_bytes() == b"foreign original\n"
+                for target in foreign_targets)
+            print(f"self-test: MP01 {mode} restart: exit={code}, restored={restored}, "
+                  f"foreign kept={foreign_kept}")
+            if code != 0 or not restored or not foreign_kept:
+                ok = False
+                continue
+            with Mutation(entry, here):
+                if any((here / name).read_bytes() == original
+                       for name, original in originals.items()):
+                    ok = False
+            if any((here / name).read_bytes() != original
+                   or (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).exists()
+                   for name, original in originals.items()):
+                ok = False
+    except Exception as error:
+        print(f"self-test: MP01 restart raised {type(error).__name__}: {error}")
+        return False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
@@ -1366,6 +1457,7 @@ SELF_TEST_CASES = {
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
     "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
+    "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
     "a missing data file is refused": a_missing_data_file_is_refused,
     "an unreadable data file is refused": an_unreadable_data_file_is_refused,
     "an unreadable data path is refused": an_unreadable_data_path_is_refused,
