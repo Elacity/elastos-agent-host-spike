@@ -9,17 +9,20 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The lane root: the directory holding `Cargo.toml`, `capsule/` and `tools/`.
-/// For an integration test, `CARGO_MANIFEST_DIR` is that package root.
+/// The lane root: the directory holding `Cargo.toml`, `capsule/`, `audit/` and
+/// `tools/`. For an integration test, `CARGO_MANIFEST_DIR` is that package root.
 pub fn lane_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// The source entries `tools/build` needs, never a `target/` directory.
+/// `audit` is a workspace member: Cargo loads every member's manifest, so the
+/// build fails without it even though `tools/build` compiles only `capsule`.
 const LANE_SOURCE_ENTRIES: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
+    "audit",
     "capsule",
     "tools",
 ];
@@ -102,8 +105,9 @@ pub fn run_build_with_env(lane: &Path, out_dir: &Path, env: &[(&str, &str)]) {
 }
 
 /// The lowercase hex sha256 of a file, from the system tool (the same one the
-/// receipt records with). Independent of any Rust crate, so the lane's lockfile
-/// stays free of the network.
+/// receipt records with). Independent of any Rust crate, so `capsule` and its
+/// tests stay dependency-free: the lockfile's only registry crates are the
+/// audit's `wasmparser`/`wat` and their dependencies.
 pub fn sha256_file(path: &Path) -> String {
     for (bin, args) in [("sha256sum", &[][..]), ("shasum", &["-a", "256"][..])] {
         let Ok(output) = Command::new(bin).args(args).arg(path).output() else {

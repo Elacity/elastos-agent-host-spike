@@ -2,7 +2,8 @@
 
 This lane is falsifiable lab tooling, not a second Runtime. It claims no
 Agent-Host grade row (Rong spec, section 3). wc-001 gives a reproducible
-zero-import core-Wasm capsule and a receipt; wc-002..005 build on it.
+zero-import core-Wasm capsule and a receipt; wc-003..005 build on it. wc-002,
+the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 
 ## What you can take
 
@@ -13,7 +14,13 @@ zero-import core-Wasm capsule and a receipt; wc-002..005 build on it.
   reproducible-build recipe.
 - `tests/common/wasm_shape.rs` — a tiny dependency-free reader that checks an
   artifact is core Wasm, imports nothing, and has an expected export signature.
-  It is NOT a validator; wc-002 grows it into the static import audit.
+  It is NOT a validator, and it is not grown into an import audit. Moving its
+  zero-import check onto `audit/` after cwa-001 is an open item for Flint.
+- `audit/` — the `wasm-capsule-audit` crate, owned by the cx-wasm-audit lane and
+  a member of this workspace (wc-000). It is the one static import-audit path
+  (PRINCIPLES P10): wc-004's verifier will call `wasm_capsule_audit::audit`
+  through a path dependency and parse no imports itself. Today it is only the v1
+  signature (`audit` is `unimplemented!`); cwa-001 implements it.
 
 ## Requirements (what the claim rests on)
 
@@ -21,9 +28,13 @@ zero-import core-Wasm capsule and a receipt; wc-002..005 build on it.
   `rust-toolchain.toml`). The receipt records the exact version.
 - `bash`, and a sha256 tool: `sha256sum` or `shasum -a 256` (both present on the
   Mac). `tools/build` and the tests prefer `sha256sum`, then `shasum`.
-- No network: the lane has no external crates, so `cargo build --locked` builds
-  from clean caches offline. Keep it that way — a dependency would put the
-  lockfile on the network and widen the surface.
+- The cargo cache: `capsule` has no dependencies; keep it that way (P18). The
+  `audit` member pins `wasmparser` 0.258.0 and the dev-only `wat` 1.258.0, and
+  the committed `Cargo.lock` holds them and their transitive dependencies,
+  resolved offline from this Mac's cargo cache. Cargo resolves the whole
+  workspace, so every build, `tools/build` included, needs those crates in the
+  local cargo cache. On an empty cache the first build needs the network. Their
+  versions and features are the cx-wasm-audit lane's to change.
 
 ## Claim scope — do not overstate
 

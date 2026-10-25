@@ -23,8 +23,10 @@ there is one path for the behaviour (P10).
 ## Layout
 
 ```
-Cargo.toml            one package `capsule`, its own [workspace] + Cargo.lock
+Cargo.toml            root package `capsule` + member `audit`, its own [workspace]
+Cargo.lock            committed; the one lockfile for both members
 capsule/src/lib.rs    the guest (no_std on wasm32) + the digest host test
+audit/                the `wasm-capsule-audit` crate (owned by the cx-wasm-audit lane)
 tools/build           the reproducible build script (bash)
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver + minimal wasm shape reader
@@ -32,10 +34,21 @@ falsifiers.json       planted bugs, each caught by a named test (provider format
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
 ```
 
-The lane is a single Cargo package (not a virtual workspace) so the lane gates —
-`cargo fmt`/`cargo test --manifest-path .../Cargo.toml` — act on it without
-`--all`/`--workspace`. It has **no external dependencies**, so `Cargo.lock` holds
-only this package and `cargo build --locked` needs no network.
+The lane is a Cargo workspace whose root is the package `capsule` (not a virtual
+workspace), so the lane gates — `cargo fmt`/`cargo test --manifest-path
+.../Cargo.toml` — act on `capsule` without `--all`/`--workspace`. Its other
+member is `audit/`, the `wasm-capsule-audit` crate: the one import-audit path
+(P10) that wc-004's verifier will call through a path dependency. The
+cx-wasm-audit lane owns it; this lane does not edit it. Test it from this
+directory with `cargo test -p wasm-capsule-audit --locked`.
+
+`capsule` itself has **no dependencies**. `Cargo.lock` also pins the audit's
+crates: `wasmparser` 0.258.0, the dev-only `wat` 1.258.0, and their transitive
+dependencies. `tools/build` compiles only `capsule`, so none of them is in the
+artifact. But Cargo resolves the whole workspace, so every build, `tools/build`
+included, needs those crates in the local cargo cache. They are cached on this
+Mac, so the lane builds offline here; on a machine with an empty cargo cache the
+first build needs the network.
 
 ## Build
 
