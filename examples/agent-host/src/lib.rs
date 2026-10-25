@@ -2612,7 +2612,8 @@ struct BoundEdit {
 /// its path must pass `path_refusal` and name a file no other step of the
 /// change names; no write outside this change may still be open; the file's
 /// current read must be the version the step was made against, carry a
-/// revision, and still show the old text exactly once. One miss refuses the
+/// revision, and still show the old text exactly once. An empty old text is
+/// the first write of a whole read that showed no text. One miss refuses the
 /// whole change.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn bind_change(journal: &Journal, effect_id: u64) -> Result<Vec<BoundEdit>, Refusal> {
@@ -2653,15 +2654,25 @@ fn bind_change(journal: &Journal, effect_id: u64) -> Result<Vec<BoundEdit>, Refu
         let Some(revision) = row.revision.clone() else {
             return Err(Refusal::NoRevision);
         };
-        if step.old.is_empty() {
-            return Err(Refusal::Empty);
-        }
-        let (first_line, run) =
-            find_in_seen(&journal.events, &step.resource, row.version, &step.old)?;
-        let whole = seen_runs(&journal.events, &step.resource, row.version)
-            .is_some_and(|runs| runs.len() == 1)
-            && first_line == 1
-            && events_show_whole(&journal.events, &step.resource, row.version);
+        // An empty old text names the first write of a file whose whole read
+        // showed no text: one empty run at line 1. Any other empty old text
+        // has nothing to replace, so it is refused.
+        let (first_line, run, whole) = if step.old.is_empty() {
+            if observed_text_at(&journal.events, &step.resource, row.version).as_deref() != Some("")
+                || !events_show_whole(&journal.events, &step.resource, row.version)
+            {
+                return Err(Refusal::Empty);
+            }
+            (1, String::new(), true)
+        } else {
+            let (first_line, run) =
+                find_in_seen(&journal.events, &step.resource, row.version, &step.old)?;
+            let whole = seen_runs(&journal.events, &step.resource, row.version)
+                .is_some_and(|runs| runs.len() == 1)
+                && first_line == 1
+                && events_show_whole(&journal.events, &step.resource, row.version);
+            (first_line, run, whole)
+        };
         edit_keeps_its_window(&run, whole, &step.old, &step.new)?;
         bound.push(BoundEdit {
             step_id: step.id,
@@ -3193,7 +3204,10 @@ fn project_tree_hash(files: &[(&str, &str)]) -> Option<[u8; 32]> {
 }
 
 /// Propose the first write of an empty observed file under a project.
-/// Unread, stale, or already-present text creates no step. This does not write.
+/// The step keeps the observed version and the empty text it replaces, so a
+/// granted dispatch applies it through the same `bind_change` and
+/// `note_change_wrote` path an edit uses. Unread, stale, or already-present
+/// text creates no step. This does not write.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_scaffold(
     journal: &mut Journal,
@@ -3239,7 +3253,9 @@ fn propose_scaffold(
         .expect("just pushed");
     step.kind = ProposalKind::Edit;
     step.resource = resource;
+    step.old = observed;
     step.new = text.to_string();
+    step.seen_version = Some(row.version);
     Ok(id)
 }
 
@@ -10980,6 +10996,273 @@ mod tests {
             ),
             Err("not empty")
         );
+    }
+
+    #[test]
+    fn a_granted_scaffold_applies_through_the_write_path() {
+        let file = "localhost://Users/self/Projects/demo/index.html";
+        let mut journal = empty_journal();
+        let init = propose_init(&mut journal, "self", "demo").unwrap();
+        assert!(observe_read(
+            &mut journal,
+            file,
+            1,
+            "rev-1",
+            None,
+            false,
+            ""
+        ));
+        let scaffold =
+            propose_scaffold(&mut journal, init, "index.html", "<h1>demo</h1>", Some(1)).unwrap();
+        let step = journal
+            .steps
+            .iter()
+            .find(|step| step.id == scaffold)
+            .unwrap();
+        assert_eq!(step.kind, ProposalKind::Edit);
+        assert!(is_write(step.kind));
+        assert_eq!(step.old, "");
+        assert_eq!(step.new, "<h1>demo</h1>");
+        assert_eq!(step.seen_version, Some(1));
+        let effect = step.effect_id;
+        let refusals = refusal_records(&journal).len();
+        granted(&mut journal, &[scaffold]);
+        let bound = bind_change(&journal, effect).expect("one bound write");
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].resource, file);
+        assert_eq!(bound[0].revision, "rev-1");
+        assert_eq!(bound[0].first_line, 1);
+        assert_eq!(bound[0].run, "");
+        assert!(bound[0].whole);
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&mut journal, effect).unwrap()).unwrap();
+        assert_eq!(body["op"], "edit");
+        assert_eq!(body["all_or_none"], true);
+        let sent = &body["files"][0];
+        assert_eq!(sent["path"], file);
+        assert_eq!(sent["if_revision"], "rev-1");
+        assert_eq!(sent["first_line"], 1);
+        assert_eq!(sent["line_count"], 0);
+        assert_eq!(sent["old"], "");
+        assert_eq!(sent["new"], "<h1>demo</h1>");
+        assert_eq!(
+            note_change_wrote(&mut journal, effect, &[(file, "rev-2")]),
+            Ok(())
+        );
+        assert_eq!(
+            current_observed_text(&journal.events, file).as_deref(),
+            Some("<h1>demo</h1>")
+        );
+        let row = current_observation(&journal.events, file).unwrap();
+        assert_eq!(row.version, 2);
+        assert_eq!(row.revision.as_deref(), Some("rev-2"));
+        let step = journal
+            .steps
+            .iter()
+            .find(|step| step.id == scaffold)
+            .unwrap();
+        assert!(step.has_result);
+        assert_eq!(step.state, StepState::Dispatched);
+        assert_eq!(refusal_records(&journal).len(), refusals);
+    }
+
+    #[test]
+    fn a_scaffolded_project_opens_again_with_the_same_tree_digest() {
+        let project = "localhost://Users/self/Projects/demo";
+        let page = "localhost://Users/self/Projects/demo/index.html";
+        let notes = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = empty_journal();
+        let init = propose_init(&mut journal, "self", "demo").unwrap();
+        assert!(observe_read(
+            &mut journal,
+            page,
+            1,
+            "rev-1",
+            None,
+            false,
+            ""
+        ));
+        assert!(observe_read(
+            &mut journal,
+            notes,
+            1,
+            "rev-2",
+            None,
+            false,
+            "hello from the project"
+        ));
+        let scaffold =
+            propose_scaffold(&mut journal, init, "index.html", "<h1>demo</h1>", Some(1)).unwrap();
+        granted(&mut journal, &[scaffold]);
+        let effect = journal
+            .steps
+            .iter()
+            .find(|step| step.id == scaffold)
+            .unwrap()
+            .effect_id;
+        assert!(edit_request(&mut journal, effect).is_ok());
+        assert_eq!(
+            note_change_wrote(&mut journal, effect, &[(page, "rev-3")]),
+            Ok(())
+        );
+        // The provider reads the scaffolded project back at the version it
+        // wrote: what the person opens again.
+        assert!(observe_read(
+            &mut journal,
+            page,
+            2,
+            "rev-3",
+            None,
+            false,
+            "<h1>demo</h1>"
+        ));
+        assert_eq!(
+            current_observed_text(&journal.events, page).as_deref(),
+            Some("<h1>demo</h1>")
+        );
+        let files = observed_project_files(&journal.events, project).expect("the opened project");
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let opened = project_tree_hash(&refs).expect("the opened tree");
+        let scaffolded = project_tree_hash(&[
+            ("index.html", "<h1>demo</h1>"),
+            ("notes.txt", "hello from the project"),
+        ])
+        .expect("the scaffolded tree");
+        assert_eq!(opened, scaffolded);
+        assert!(quoted_digest_matches(
+            &journal.events,
+            project,
+            &format!("project demo {}", hex_digest(&opened))
+        ));
+        let before =
+            project_tree_hash(&[("index.html", ""), ("notes.txt", "hello from the project")])
+                .expect("the tree before the scaffold");
+        assert_ne!(before, scaffolded);
+        assert!(!quoted_digest_matches(
+            &journal.events,
+            project,
+            &format!("project demo {}", hex_digest(&before))
+        ));
+    }
+
+    #[test]
+    fn a_scaffold_without_a_grant_is_refused_and_records_nothing() {
+        let file = "localhost://Users/self/Projects/demo/index.html";
+        let mut journal = empty_journal();
+        let init = propose_init(&mut journal, "self", "demo").unwrap();
+        assert!(observe_read(
+            &mut journal,
+            file,
+            1,
+            "rev-1",
+            None,
+            false,
+            ""
+        ));
+        let id =
+            propose_scaffold(&mut journal, init, "index.html", "<h1>demo</h1>", Some(1)).unwrap();
+        assert!(!provider_write_may_be_asked(&journal, id, 1));
+        assert!(!dispatch(&mut journal, id));
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.state, StepState::Denied);
+        assert!(step.grant.is_none());
+        assert!(!step.has_result);
+        let observed = without_refusal_records(&journal.events);
+        let refusals = refusal_records(&journal).len();
+        assert_eq!(edit_request(&mut journal, id), Err("not dispatched"));
+        assert_eq!(
+            note_change_wrote(&mut journal, id, &[(file, "rev-2")]),
+            Err("not dispatched")
+        );
+        assert_eq!(without_refusal_records(&journal.events), observed);
+        assert_eq!(refusal_records(&journal).len(), refusals + 2);
+        assert!(
+            !journal
+                .steps
+                .iter()
+                .find(|step| step.id == id)
+                .unwrap()
+                .has_result
+        );
+
+        // A stored journal can hold a dispatched scaffold with no grant. The
+        // shared write path refuses it and records nothing.
+        let mut stored = empty_journal();
+        let init = propose_init(&mut stored, "self", "demo").unwrap();
+        assert!(observe_read(&mut stored, file, 1, "rev-1", None, false, ""));
+        let id =
+            propose_scaffold(&mut stored, init, "index.html", "<h1>demo</h1>", Some(1)).unwrap();
+        let step = stored.steps.iter_mut().find(|step| step.id == id).unwrap();
+        step.state = StepState::Dispatched;
+        step.grant = None;
+        assert!(!provider_write_may_be_asked(&stored, id, 1));
+        let observed = without_refusal_records(&stored.events);
+        assert_eq!(edit_request(&mut stored, id), Err("not dispatched"));
+        assert_eq!(
+            note_change_wrote(&mut stored, id, &[(file, "rev-2")]),
+            Err("not dispatched")
+        );
+        assert_eq!(without_refusal_records(&stored.events), observed);
+        let step = stored.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.state, StepState::Denied);
+        assert!(!step.has_result);
+    }
+
+    #[test]
+    fn an_empty_old_binds_only_the_first_write_of_an_empty_file() {
+        let file = "localhost://Users/self/Projects/demo/index.html";
+        fn stored_scaffold(journal: &mut Journal, file: &str, text: &str) -> u64 {
+            let id = propose_step(journal);
+            let step = journal.steps.iter_mut().find(|step| step.id == id).unwrap();
+            step.kind = ProposalKind::Edit;
+            step.resource = file.to_string();
+            step.new = text.to_string();
+            step.seen_version = Some(1);
+            step.state = StepState::Dispatched;
+            step.grant = Some("fixture-grant".to_string());
+            id
+        }
+
+        // A file that shows text has nothing for an empty old text to replace.
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            file,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha\n"
+        ));
+        let id = stored_scaffold(&mut journal, file, "<h1>demo</h1>");
+        assert!(matches!(bind_change(&journal, id), Err(Refusal::Empty)));
+        let observed = without_refusal_records(&journal.events);
+        assert_eq!(edit_request(&mut journal, id), Err("empty"));
+        assert_eq!(without_refusal_records(&journal.events), observed);
+        assert_eq!(refusal_records(&journal).len(), 1);
+
+        // A window over an empty file did not show it whole.
+        let mut windowed = empty_journal();
+        windowed.events.push(bound_observation_record(
+            file,
+            1,
+            "rev-1",
+            Some((1, 0)),
+            false,
+            "",
+        ));
+        assert!(current_observation(&windowed.events, file).is_some());
+        let id = stored_scaffold(&mut windowed, file, "<h1>demo</h1>");
+        assert_eq!(edit_request(&mut windowed, id), Err("empty"));
+
+        // A whole read that showed no text is the first write it names.
+        let mut empty = empty_journal();
+        assert!(observe_read(&mut empty, file, 1, "rev-1", None, false, ""));
+        let id = stored_scaffold(&mut empty, file, "<h1>demo</h1>");
+        assert!(bind_change(&empty, id).is_ok());
     }
 
     #[test]
