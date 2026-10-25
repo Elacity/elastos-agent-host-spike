@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Reproducible build of the wc-001 capsule.
+#
+#   tools/build [OUT_DIR]
+#
+# Writes OUT_DIR/capsule.wasm and OUT_DIR/receipt.txt (OUT_DIR defaults to the
+# lane root). The build is pinned so two clean builds of the same source, in
+# different paths, are byte-identical on this one Mac (PRINCIPLES P13): one
+# codegen unit, LTO, a stripped binary and panic=abort (the release profile in
+# the workspace root), a fixed SOURCE_DATE_EPOCH, no incremental cache, a fresh
+# isolated target dir, and --remap-path-prefix for the source tree, CARGO_HOME
+# and the toolchain sysroot so no absolute build path is embedded.
+#
+# The claim is narrow: reproducible on this one Mac, across paths and clean
+# caches only. Cross-machine reproduction is unverified (symbol hashes depend
+# on the build machine).
+set -euo pipefail
+
+LANE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT_DIR="${1:-$LANE_DIR}"
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+
+# Build from the lane root so that, when $RUSTC is unset, the lane's
+# rust-toolchain.toml selects the compiler and the sysroot/version queries below
+# name that same toolchain.
+cd "$LANE_DIR"
+
+# A fixed timestamp: nothing in the build may depend on the wall clock.
+export SOURCE_DATE_EPOCH=1700000000
+# No incremental caches: a clean build every time.
+export CARGO_INCREMENTAL=0
+
+# A fresh isolated target dir keeps the build out of any shared cache and off
+# any path that differs between runs. It is removed on exit.
+TARGET_DIR="$(mktemp -d)"
+export CARGO_TARGET_DIR="$TARGET_DIR"
+trap 'rm -rf "$TARGET_DIR"' EXIT
+
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+
+# Cargo compiles with the rustc named by $RUSTC (its default is `rustc` on
+# PATH). Resolve that one compiler here, and export it, so the sysroot remap and
+# the receipt below describe the exact compiler that built the artifact, never a
+# different `rustc` that happens to be on PATH.
+RUSTC_BIN="${RUSTC:-rustc}"
+export RUSTC="$RUSTC_BIN"
+SYSROOT="$("$RUSTC_BIN" --print sysroot)"
+
+# --remap-path-prefix rewrites the three absolute roots that would otherwise
+# leak into the artifact to fixed tokens. Removing these flags is F-WC1.
+# CARGO_ENCODED_RUSTFLAGS (not RUSTFLAGS) carries each flag as one whole
+# argument separated by the 0x1f unit separator, so a build path containing a
+# space is not torn in two the way Cargo splits RUSTFLAGS on whitespace.
+us=$'\x1f'
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule${us}--remap-path-prefix=${CARGO_HOME_DIR}=/cargo${us}--remap-path-prefix=${SYSROOT}=/rustc"
+
+cargo build \
+  --locked \
+  --manifest-path "$LANE_DIR/Cargo.toml" \
+  --package capsule \
+  --release \
+  --target wasm32-unknown-unknown
+
+cp "$TARGET_DIR/wasm32-unknown-unknown/release/capsule.wasm" "$OUT_DIR/capsule.wasm"
+
+# The receipt binds this artifact to the exact toolchain and inputs so a
+# rebuild can be checked. Hashes come from the system tool.
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+ARTIFACT_SHA="$(sha256 "$OUT_DIR/capsule.wasm")"
+LOCK_SHA="$(sha256 "$LANE_DIR/Cargo.lock")"
+RUSTC_VERSION="$("$RUSTC_BIN" --version)"
+
+cat > "$OUT_DIR/receipt.txt" <<EOF
+schema: wc-001.receipt/v1
+artifact: capsule.wasm
+artifact_sha256: ${ARTIFACT_SHA}
+rustc_version: ${RUSTC_VERSION}
+target: wasm32-unknown-unknown
+lockfile_sha256: ${LOCK_SHA}
+source_date_epoch: ${SOURCE_DATE_EPOCH}
+EOF
+
+echo "built ${OUT_DIR}/capsule.wasm ${ARTIFACT_SHA}"
