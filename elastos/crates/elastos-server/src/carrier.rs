@@ -173,6 +173,11 @@ const CARRIER_GOSSIP_PULL_REPLY_MAX_BYTES: u64 =
 const CARRIER_PROVIDER_REPLY_MAX_BYTES: u64 =
     (MAX_CARRIER_OBJECT_IMPORT_BYTES as u64).div_ceil(3) * 4 + CARRIER_PEER_ENVELOPE_BYTES;
 const _: () = assert!(CARRIER_PROVIDER_REPLY_MAX_BYTES >= GOSSIP_PEEK_MAX_BATCH_BYTES as u64);
+/// Largest whole-content answer: one file of the shared whole-content limit as
+/// base64 stream chunks, plus room for the chunk fields (under 100 bytes per
+/// 64 KiB chunk) and the reply envelope.
+const CARRIER_WHOLE_CONTENT_REPLY_MAX_BYTES: u64 =
+    (crate::content::MAX_WHOLE_CONTENT_BYTES as u64).div_ceil(3) * 4 + 1024 * 1024;
 /// How long a peer may take to send one complete request line.
 const CARRIER_PEER_LINE_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 /// How long Runtime waits for an open-ended provider answer. Long model runs
@@ -9155,8 +9160,8 @@ impl CarrierClient {
         request: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let bounded = request.get("bounded_read") == Some(&serde_json::Value::Bool(true));
-        // A whole-object content reply has no size limit of its own (the
-        // object arrives as one line), so only two run at once and one per peer.
+        // A whole-object content reply arrives as one line, bounded by the
+        // shared whole-content limit; only two run at once and one per peer.
         let whole_content = !bounded && invocation.target == "content" && invocation.op == "fetch";
         let _content_slots = if whole_content {
             Some(acquire_content_reply_slots(self.conn.remote_id()).await?)
@@ -9185,17 +9190,14 @@ impl CarrierClient {
             Some(crate::collaboration_transport::MAX_SHARED_CARRIER_REPLY_BYTES as u64)
         } else if bounded {
             Some(CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES)
+        } else if whole_content {
+            Some(CARRIER_WHOLE_CONTENT_REPLY_MAX_BYTES)
         } else {
             None
         };
         let (line, _budget) = if let Some(limit) = reply_bound {
             let line = read_peer_line(&mut reader, limit, CARRIER_PROVIDER_REPLY_WAIT).await;
             (line, None)
-        } else if whole_content {
-            (
-                read_peer_line(&mut reader, u64::MAX - 1, CARRIER_PROVIDER_REPLY_WAIT).await,
-                None,
-            )
         } else {
             match read_budgeted_reply(
                 &mut reader,
@@ -9551,6 +9553,78 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         drop(again);
+    }
+
+    #[tokio::test]
+    async fn whole_content_reply_past_the_shared_limit_is_refused_while_reading() {
+        let limit = CARRIER_WHOLE_CONTENT_REPLY_MAX_BYTES;
+        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![CARRIER_ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let runtime = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind()
+            .await
+            .unwrap();
+        let address = wait_for_direct_endpoint_addr(&server).await;
+        let server_endpoint = server.clone();
+        // The peer offers one unterminated line of three times the limit and
+        // stops when Runtime stops reading.
+        let serving = tokio::spawn(async move {
+            let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+            let (mut send, recv) = connection.accept_bi().await.unwrap();
+            let mut request = String::new();
+            BufReader::new(recv).read_line(&mut request).await.unwrap();
+            let piece = vec![b'a'; 1024 * 1024];
+            let mut sent = 0u64;
+            while sent < 3 * limit {
+                if send.write_all(&piece).await.is_err() {
+                    break;
+                }
+                sent += piece.len() as u64;
+            }
+            let _ = send.finish();
+            connection.closed().await;
+            sent
+        });
+        let client = CarrierClient::connect_known_endpoint(&runtime, address, 5)
+            .await
+            .unwrap();
+        let invocation = ProviderInvocation {
+            source: "carrier-availability".into(),
+            target: "content".into(),
+            op: "fetch".into(),
+            request: serde_json::json!({}),
+            transfer: ProviderTransfer::Stream,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Local,
+        };
+        let request =
+            serde_json::json!({"op": "fetch", "cid": "bafyfixture", "transfer": "stream"});
+        let err = tokio::time::timeout(
+            Duration::from_secs(120),
+            client.invoke_provider(&invocation, request),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&format!("exceeds {limit} bytes")),
+            "{err:#}"
+        );
+        client.close().await;
+        runtime.close().await;
+        let sent = tokio::time::timeout(Duration::from_secs(30), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            sent < 2 * limit,
+            "Runtime stopped reading near the limit, not at the offered size ({sent} bytes sent)"
+        );
+        server.close().await;
     }
 
     #[tokio::test]

@@ -89,13 +89,14 @@ allocate before that check. Size checks after reading do not bound memory use
 or an incomplete frame's lifetime. Add bounds while reading, with oversized
 and slow-frame tests.
 
-### Whole-object Carrier fetch replies are not size-bounded
+### Whole-object Carrier fetch replies are held in memory
 
 **Files:** `elastos/crates/elastos-server/src/carrier.rs`
 **Status:** Open ([#341](https://github.com/Elacity/elastos-runtime/issues/341))
 
-A whole-object content fetch reply arrives as one line without a size cap.
-Only two such fetches run at once, and one per peer.
+A whole-object content fetch reply arrives as one line. It is refused while
+reading once it passes one 100 MiB file as base64 (about 134 MiB). Only two
+such fetches run at once, and one per peer.
 
 ## Resolved Findings
 
@@ -123,8 +124,9 @@ requests, read before their signature is checked, allow 64 KiB within 10
 seconds. Replies are capped by what the request can return: a full gossip
 topic for a pull, one importable object for a provider call, update metadata
 for an operator answer. Provider replies share a 256 MiB in-flight budget.
-Whole-object content fetch replies are the open exception below. Relays close after five minutes without bytes in
-either direction, and stream acknowledgements have deadlines.
+Whole-object content fetch replies allow one 100 MiB file as base64; the open
+item above tracks streaming them. Relays close after five minutes without bytes
+in either direction, and stream acknowledgements have deadlines.
 
 ## Architecture
 
