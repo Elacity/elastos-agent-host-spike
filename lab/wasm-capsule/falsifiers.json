@@ -1,5 +1,5 @@
 {
-  "about": "wc-001 lab falsifiers. Each one plants a bug in the capsule source or the build script and requires its named test to FAIL (error-free). F-WC1 embeds an absolute build path so the two clean builds differ; the rest change the digest result, retain an import, alter the digest signature, or record a wrong toolchain/hash in the receipt. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001 lab falsifiers. Each one plants a bug in the capsule source or the build script and requires its named test to FAIL (error-free). F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -30,7 +30,7 @@
         }
       ],
       "tests": [
-        "digest_returns_the_fixed_value"
+        "tests::digest_returns_the_fixed_value"
       ]
     },
     {
@@ -73,7 +73,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/build",
-          "old": "RUSTC_VERSION=\"$(rustc --version)\"",
+          "old": "RUSTC_VERSION=\"$(\"$RUSTC_BIN\" --version)\"",
           "new": "RUSTC_VERSION=\"rustc 1.0.0 (0000000000 2000-01-01)\""
         }
       ],
@@ -111,6 +111,38 @@
       ],
       "tests": [
         "receipt_hashes_match_artifact_and_lockfile"
+      ]
+    },
+    {
+      "id": "F-WC1-SPACED-PATH",
+      "title": "whitespace-split RUSTFLAGS breaks the build when the path has a space",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/build",
+          "old": "us=$'\\x1f'\nexport CARGO_ENCODED_RUSTFLAGS=\"--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule${us}--remap-path-prefix=${CARGO_HOME_DIR}=/cargo${us}--remap-path-prefix=${SYSROOT}=/rustc\"",
+          "new": "export RUSTFLAGS=\"--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule --remap-path-prefix=${CARGO_HOME_DIR}=/cargo --remap-path-prefix=${SYSROOT}=/rustc\""
+        }
+      ],
+      "tests": [
+        "two_clean_builds_in_different_paths_are_byte_identical"
+      ]
+    },
+    {
+      "id": "F-WC1-RUSTC-OVERRIDE",
+      "title": "the receipt queries a bare rustc, not the compiler Cargo was told to use",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/build",
+          "old": "RUSTC_VERSION=\"$(\"$RUSTC_BIN\" --version)\"",
+          "new": "RUSTC_VERSION=\"$(rustc --version)\""
+        }
+      ],
+      "tests": [
+        "the_receipt_names_an_overridden_compiler"
       ]
     }
   ]

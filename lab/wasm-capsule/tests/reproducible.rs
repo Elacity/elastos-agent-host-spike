@@ -12,9 +12,11 @@ fn two_clean_builds_in_different_paths_are_byte_identical() {
     let a = TempDir::new("repro-a");
     let b = TempDir::new("repro-b");
 
-    // Two copies of the lane source at two different absolute paths.
-    let lane_a = a.path().join("lane");
-    let lane_b = b.path().join("lane");
+    // Two copies of the lane source at two different absolute paths, each under
+    // a directory whose name has a space, so the build must not split that path
+    // on whitespace when it passes --remap-path-prefix to rustc.
+    let lane_a = a.path().join("capsule lab");
+    let lane_b = b.path().join("capsule lab");
     fs::create_dir_all(&lane_a).expect("create lane_a");
     fs::create_dir_all(&lane_b).expect("create lane_b");
     copy_lane_source(&lane, &lane_a);

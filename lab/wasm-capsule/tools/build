@@ -21,8 +21,9 @@ OUT_DIR="${1:-$LANE_DIR}"
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
-# Build from the lane root so the lane's rust-toolchain.toml selects the
-# compiler and `rustc --print sysroot`/`--version` name that same toolchain.
+# Build from the lane root so that, when $RUSTC is unset, the lane's
+# rust-toolchain.toml selects the compiler and the sysroot/version queries below
+# name that same toolchain.
 cd "$LANE_DIR"
 
 # A fixed timestamp: nothing in the build may depend on the wall clock.
@@ -37,11 +38,22 @@ export CARGO_TARGET_DIR="$TARGET_DIR"
 trap 'rm -rf "$TARGET_DIR"' EXIT
 
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-SYSROOT="$(rustc --print sysroot)"
+
+# Cargo compiles with the rustc named by $RUSTC (its default is `rustc` on
+# PATH). Resolve that one compiler here, and export it, so the sysroot remap and
+# the receipt below describe the exact compiler that built the artifact, never a
+# different `rustc` that happens to be on PATH.
+RUSTC_BIN="${RUSTC:-rustc}"
+export RUSTC="$RUSTC_BIN"
+SYSROOT="$("$RUSTC_BIN" --print sysroot)"
 
 # --remap-path-prefix rewrites the three absolute roots that would otherwise
 # leak into the artifact to fixed tokens. Removing these flags is F-WC1.
-export RUSTFLAGS="--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule --remap-path-prefix=${CARGO_HOME_DIR}=/cargo --remap-path-prefix=${SYSROOT}=/rustc"
+# CARGO_ENCODED_RUSTFLAGS (not RUSTFLAGS) carries each flag as one whole
+# argument separated by the 0x1f unit separator, so a build path containing a
+# space is not torn in two the way Cargo splits RUSTFLAGS on whitespace.
+us=$'\x1f'
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule${us}--remap-path-prefix=${CARGO_HOME_DIR}=/cargo${us}--remap-path-prefix=${SYSROOT}=/rustc"
 
 cargo build \
   --locked \
@@ -64,7 +76,7 @@ sha256() {
 
 ARTIFACT_SHA="$(sha256 "$OUT_DIR/capsule.wasm")"
 LOCK_SHA="$(sha256 "$LANE_DIR/Cargo.lock")"
-RUSTC_VERSION="$(rustc --version)"
+RUSTC_VERSION="$("$RUSTC_BIN" --version)"
 
 cat > "$OUT_DIR/receipt.txt" <<EOF
 schema: wc-001.receipt/v1

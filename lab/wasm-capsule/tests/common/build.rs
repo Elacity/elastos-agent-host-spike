@@ -78,12 +78,20 @@ pub fn copy_lane_source(src: &Path, dst: &Path) {
 /// Run `tools/build` for `lane`, writing the artifact and receipt into
 /// `out_dir`. Panics with the captured output on failure, so a test sees why.
 pub fn run_build(lane: &Path, out_dir: &Path) {
+    run_build_with_env(lane, out_dir, &[]);
+}
+
+/// Like [`run_build`], but with extra environment variables set on the build
+/// process, used to pass an explicit `RUSTC` override. There is one build path
+/// (PRINCIPLES P10): `run_build` is this with no extra environment.
+pub fn run_build_with_env(lane: &Path, out_dir: &Path, env: &[(&str, &str)]) {
     let script = lane.join("tools").join("build");
-    let output = Command::new("bash")
-        .arg(&script)
-        .arg(out_dir)
-        .output()
-        .expect("spawn tools/build");
+    let mut command = Command::new("bash");
+    command.arg(&script).arg(out_dir);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("spawn tools/build");
     assert!(
         output.status.success(),
         "tools/build failed ({}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -143,11 +151,14 @@ impl Receipt {
     }
 }
 
-/// The exact compiler the lane builds with, as `rustc --version` reports it
-/// from the lane root (so the lane's rust-toolchain.toml selects it, matching
-/// what `tools/build` records).
+/// The exact compiler the lane builds with, as `--version` reports it. Honours
+/// `$RUSTC` the way Cargo and `tools/build` do, so an explicit override is read
+/// back from the same compiler, not a different `rustc` on PATH. With no
+/// override it queries bare `rustc` from the lane root, so the lane's
+/// rust-toolchain.toml selects the toolchain `tools/build` records.
 pub fn rustc_version(lane: &Path) -> String {
-    let output = Command::new("rustc")
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let output = Command::new(&rustc)
         .arg("--version")
         .current_dir(lane)
         .output()
