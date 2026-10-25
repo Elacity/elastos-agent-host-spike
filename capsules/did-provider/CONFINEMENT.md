@@ -50,8 +50,16 @@ For message signing the test calls `sign_chat_message`, which returns the
 payload it signed next to the signature. The test feeds both back to `verify`
 unchanged and expects `valid: true`, then flips one character of the provider's
 signature and expects `valid: false`. The test renders no signing payload and
-constructs no signature. Recovery-proof verification has its own case and is
-not exercised here.
+constructs no signature.
+
+`verify_did_recovery_under_profile` covers the recovery operation. No provider
+operation produces a recovery proof, so the case builds none: it would copy the
+signing path into the test (P10). It sends a complete request with valid
+bindings and timestamps and a signature that is not hex, and expects
+`invalid_signature` with an `Invalid hex sig:` reason from the running confined
+provider, then a further `get_did` to prove the refusal left the service up.
+Genuine-proof correctness is covered by the in-process unit tests in
+`src/main.rs`.
 
 Two symlink cases check the boundary. `outside_write_denied` points the granted
 nickname file at an unrelated directory and expects `storage_error`, no file
@@ -81,6 +89,11 @@ the test.
 - Remove `(deny network*)`: `profile_denies_network` fails.
 - Restore the `if let Ok(Some(nick))` swallow in `try_load_nickname`:
   `outside_read_denied` fails because the denied read becomes "no nickname".
+- Panic in the `hex::decode(sig_hex)` error branch of `verify_did_recovery` in
+  `src/main.rs`: `verify_did_recovery_under_profile` fails because the confined
+  process dies without a response.
+- Return `parse_error` instead of the signature refusal: the same case fails
+  because the response does not name `invalid_signature`.
 
 The wallet provider keeps its own profile and tests in `../wallet-provider/`
 with the same launch and subtree-grant pattern.
