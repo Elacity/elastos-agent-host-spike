@@ -10,9 +10,9 @@ The command uses cached dependencies, the pinned Rust toolchain and its
 `wasm32-unknown-unknown` target and the macOS `shasum` tool. Reserve 12 GiB for
 builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
-The command prints `elastos sha256:<hex>` above one table from Cargo's test
-inventory and result lines. The hash identifies the binary built and used by
-the tests. It is computed for this machine and toolchain, as with the probe
+The command prints `elastos sha256:<hex>` and `localhost-provider sha256:<hex>`
+above one table from Cargo's test inventory and result lines. Each hash identifies
+the binary built for the tests. It is computed for this machine and toolchain, as with the probe
 hash; it is an identifier, rather than a graded rule. Successful test output
 supplies the hash through Cargo's `--show-output`, which preserves result lines.
 `ok` becomes PASS. `ignored, blocked: <id> …` becomes BLOCKED with that ID.
@@ -25,6 +25,7 @@ remain open in [GAPS.md](GAPS.md).
 - `launch_stops_a_child_past_its_bound`: checks that a one-second bound stops a three-second sleep with the exact timeout reason.
 - `run_without_operator_is_refused_with_reason`: runs the probe through the bounded launch primitive in a fresh Home and requires a nonzero exit with `This command requires a running runtime.` on stderr.
 - `runtime_data_dir_is_under_throwaway_home`: places a dummy coordinates file in the guarded data directory and requires Runtime to remove it and return the same refusal reason. Its documentation-address URL is rejected before any network call.
+- `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
 - `foreign_and_wrong_version_imports_are_refused`: rejects imports outside the probe's Bus subset.
 - `non_component_and_invalid_component_are_refused`: rejects a core module and invalid component bytes.
@@ -42,13 +43,31 @@ F-ac1c selects the inherited HOME and proves the guard refuses it before any
 read. These checks protect the real Home by construction; they never read its
 data. The fixture stores a selector, rather than a user's Home path.
 
-These rows prove the harness, probe artifact and no-operator launch rules.
-The Runtime build runs once per test process, with outputs under `target/runtime`;
-warm runs reuse Cargo's cached artifacts. Both live checks share that build.
+These rows prove the harness, probe artifact and Runtime refusal rules.
+Each native binary builds at most once per test process, with failures cached too.
+Runtime and localhost-provider share the build settings, SHA-256 helper and
+`target/runtime`; warm runs reuse Cargo's cached artifacts. All live checks share
+the Runtime build.
 The build keeps the developer's toolchain environment. Each Runtime launch uses
 `harness::ThrowawayHome::launch` and its cleared environment. The operator lookup
-returns before the storage constructor; AC-006-STORAGE remains open. Operator,
+returns before the storage constructor; AC-006-STORAGE remains open. Ready operator,
 grant, effect and bundle-CID checks still need their own proof.
+
+`tests/common::write_operator_home` owns the operator fixture for this test and
+later operator tests. It checks the Home guard, installs an executable copy, and
+writes a manifest containing only the repository's `external.localhost-provider`
+entry and an empty `profiles` map. It stamps the current Mac platform with the
+copy's checksum, size and install path. The repository entry owns all other fields.
+The writer supports `darwin-arm64` and `darwin-amd64` and refuses other platforms
+with a reason. Exclusive creation keeps existing paths and symlinks intact.
+
+The checksum test passes both `--addr 127.0.0.1:<free port>` and an in-root
+`--storage-path`. Provider verification stops startup before Carrier and HTTP
+bind (`server_infra.rs:768-776,1547`; `serve_cmd.rs:295,462`). F-ac1i changes the
+writer's destination to `bin/localhost-provider-copy` while the manifest keeps
+the required path. Runtime then reports the provider as missing, so the test
+fails on its reason check. Both cases stop before network startup. Task 013
+owns ready-operator proof and the AC-010-OFFLINE decision.
 
 F-ac1f changes the single data-dir rule to the Linux form. The decoy must remain
 and `runtime_data_dir_is_under_throwaway_home` must fail. F-ac1g changes only the

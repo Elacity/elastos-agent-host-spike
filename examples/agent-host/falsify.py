@@ -241,20 +241,27 @@ def load(path=DATA):
 
 # The provider files this runner's falsifiers mutate, relative to REPO. Each
 # exact target is restored on startup; every other provider file stays with
-# its owning runner. The model provider's confinement profile is a target
-# because cc-model-confine's list mutates it through the `provider` command.
-# The did and wallet files are the confine lane's edit files, which its
-# `did` and `wallet` lists name from the repository root.
+# its owning runner. The model provider's confinement profile and its
+# confinement test harness are targets because cc-model-confine's list mutates
+# them through the `provider` command (F-cc1e edits tests/confine/main.rs).
+# The did and wallet files are the confine lane's edit files, which its `did`
+# and `wallet` lists name from the repository root; every DID12 and later
+# entry edits tests/confine.rs. Wallet's falsifier honesty test is a target
+# because wallet's list mutates it (WP25). A killed run therefore restores a
+# harness instead of leaving a weakened confinement test behind.
 PROVIDER_TARGETS = (
     "capsules/model-provider/src/local_memory.rs",
     "capsules/model-provider/src/journal.rs",
     "capsules/model-provider/src/contract.rs",
     "capsules/model-provider/confine.sb",
+    "capsules/model-provider/tests/confine/main.rs",
     "capsules/did-provider/src/main.rs",
     "capsules/did-provider/confine.sb",
+    "capsules/did-provider/tests/confine.rs",
     "capsules/wallet-provider/src/main.rs",
     "capsules/wallet-provider/confine.sb",
     "capsules/wallet-provider/tests/confine.rs",
+    "capsules/wallet-provider/src/tests/falsifiers.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -1024,23 +1031,30 @@ def another_lanes_backup_is_not_recovered():
 
 def a_killed_provider_edit_is_recovered():
     """Kill real and synthetic provider edits in an isolated tree, restart
-    through main(), and repeat the edit. This lane's model-provider targets
-    and the confine lane's five did/wallet targets all come back in either
-    startup mode. Foreign backups, including the model provider's and the did
-    provider's confinement documents, stay with their owners."""
+    through main(), and repeat the edit. This lane's model-provider targets,
+    the model provider's confinement test harness, and the confine lane's five
+    did/wallet targets plus its did confinement test harness and wallet's
+    falsifier honesty test all come back in either startup mode. Foreign
+    backups, including both providers' confinement documents, each harness's
+    support neighbour and wallet's test support neighbour, stay with their
+    owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
     profile = "../../capsules/model-provider/confine.sb"
-    # The did and wallet targets are named here, not read from the table, so
-    # a target dropped from PROVIDER_TARGETS is caught (PV44, PV45). Their
-    # original bytes are written in the isolated tree, never read from the
-    # real crates.
-    synthetic = ("../../capsules/did-provider/src/main.rs",
+    # The did and wallet targets, both confinement test harnesses and
+    # wallet's falsifier honesty test are named here, not read from the table,
+    # so a target dropped from PROVIDER_TARGETS is caught (PV44, PV45, PV47,
+    # PV48, PV49). Their original bytes are written in the isolated tree,
+    # never read from the real crates.
+    synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
+                 "../../capsules/did-provider/src/main.rs",
                  "../../capsules/did-provider/confine.sb",
+                 "../../capsules/did-provider/tests/confine.rs",
                  "../../capsules/wallet-provider/src/main.rs",
                  "../../capsules/wallet-provider/confine.sb",
-                 "../../capsules/wallet-provider/tests/confine.rs")
+                 "../../capsules/wallet-provider/tests/confine.rs",
+                 "../../capsules/wallet-provider/src/tests/falsifiers.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -1079,7 +1093,10 @@ os.kill(os.getpid(), signal.SIGKILL)
             foreign_targets = [repo / "capsules/wallet-provider/src/local_memory.rs",
                                repo / "capsules/model-provider/src/lib.rs",
                                repo / "capsules/model-provider/CONFINEMENT.md",
-                               repo / "capsules/did-provider/CONFINEMENT.md"]
+                               repo / "capsules/did-provider/CONFINEMENT.md",
+                               repo / "capsules/model-provider/tests/confine/support.rs",
+                               repo / "capsules/did-provider/tests/support.rs",
+                               repo / "capsules/wallet-provider/src/tests/support.rs"]
             for target in foreign_targets:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"foreign mutation\n")

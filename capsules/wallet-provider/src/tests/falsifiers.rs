@@ -5,11 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The committed list records the three storage-root refusals, the two
-/// profile mutations, the five shared-contract mutations, the did-profile
+/// profile mutations, the shared-contract mutations, the did-profile
 /// shared-rule removal, the two network-allow check mutations, task 016's
 /// five wallet allow-rule removals, task 020's allow-default check removal
-/// and appended profile rule, and task 021's canonical-token check removal
-/// with the wallet rename, the did rename and the sibling-read allowance.
+/// and appended profile rule, task 021's canonical-token check removal
+/// with the wallet rename, the did rename and the sibling-read allowance,
+/// WP25, which resolves edit paths from the repository root again, and
+/// task 026's re-anchored WP07 on the one required list with WP26's missing
+/// model profile skip. Task 026 also retires WP08 and WP10, whose model-only
+/// branch is gone.
 const EXPECTED_FALSIFIERS: usize = 24;
 
 fn repo_root() -> PathBuf {
@@ -118,6 +122,10 @@ fn assert_falsifiers_list_is_honest(doc: &Value) {
     );
 
     let root = repo_root();
+    // The one runner applies every edit relative to examples/agent-host, so
+    // the list names files by that rule and this test resolves them by the
+    // same rule (P10).
+    let edit_base = root.join("examples/agent-host");
     let registered_tests = harness_tests();
     let mut ids: Vec<&str> = Vec::new();
     for entry in entries {
@@ -158,13 +166,14 @@ fn assert_falsifiers_list_is_honest(doc: &Value) {
             assert_ne!(old, new, "{id}: new must differ from old");
             assert!(
                 !Path::new(file).is_absolute(),
-                "{id}: {file} must be repository-relative"
+                "{id}: {file} must not be absolute; \
+                 edit paths are relative to examples/agent-host"
             );
-            let source_path = root.join(file);
+            let source_path = edit_base.join(file);
             let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
                 panic!(
-                    "{id}: edit file {} must exist and be readable: {err}",
-                    source_path.display()
+                    "{id}: {file}: edit paths are relative to examples/agent-host; \
+                     the edit file must exist and be readable: {err}"
                 )
             });
             let occurrences = source.matches(old).count();
@@ -275,4 +284,48 @@ fn falsifiers_list_rejects_invalid_integration_test() {
         );
         assert_eq!(refusal.downcast_ref::<String>(), Some(&expected));
     }
+}
+
+/// The list names edit files by the runner's rule, not the repository root.
+///
+/// Regression: writing every edit path from the repository root must be
+/// refused for WP01, the first entry, in the runner's own words.
+///
+/// Falsifier: resolve edits from `repo_root()` again (WP25); this test fails
+/// because the repository-relative list is accepted.
+#[test]
+fn falsifiers_list_rejects_a_repository_relative_path() {
+    let mut doc = read_falsifiers_list();
+    let entries = doc["falsifiers"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("the falsifier list must carry a falsifiers array"));
+    for entry in entries {
+        let id = entry["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("every falsifier needs an id"))
+            .to_owned();
+        let edits = entry["edits"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("{id}: edits must be a list"));
+        for edit in edits {
+            let file = edit["file"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
+            let repository_relative = file.strip_prefix("../../").unwrap_or_else(|| {
+                panic!("{id}: {file} must name a path under examples/agent-host")
+            });
+            edit["file"] = Value::String(repository_relative.to_owned());
+        }
+    }
+    let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+        .expect_err("the list must refuse paths written from the repository root");
+    let message = refusal
+        .downcast_ref::<String>()
+        .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+    let expected = "WP01: capsules/wallet-provider/src/main.rs: \
+                    edit paths are relative to examples/agent-host";
+    assert!(
+        message.contains(expected),
+        "the refusal must name WP01, its file and the runner's path rule; got: {message}"
+    );
 }

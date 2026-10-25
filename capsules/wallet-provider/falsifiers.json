@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. File paths are relative to the repository root. This list records the three storage-root refusals, the two profile mutations above, and the five shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, WP07 stops checking the model profile, WP08 skips the model profile on any read error, WP09 skips a missing required did profile, and WP10 removes the absent-model skip message. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, WP07 drops the model profile from the one required list, and WP09 skips a missing required did profile. Task 026 retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` accepts the repository-relative list. Run the whole list from the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -8,7 +8,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/src/main.rs",
+          "file": "../../capsules/wallet-provider/src/main.rs",
           "old": "    let Some(raw) = config.get(\"base_path\").and_then(Value::as_str) else {\n        return Err(STORAGE_PATH_NOT_SET.to_string());\n    };",
           "new": "    let Some(raw) = config.get(\"base_path\").and_then(Value::as_str) else {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    };"
         }
@@ -24,7 +24,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/src/main.rs",
+          "file": "../../capsules/wallet-provider/src/main.rs",
           "old": "    if raw.trim().is_empty() {\n        return Err(STORAGE_PATH_EMPTY.to_string());\n    }",
           "new": "    if raw.trim().is_empty() {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    }"
         }
@@ -40,7 +40,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/src/main.rs",
+          "file": "../../capsules/wallet-provider/src/main.rs",
           "old": "    if !root.is_absolute() {\n        return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n    }",
           "new": "    if !root.is_absolute() {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    }"
         }
@@ -56,7 +56,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(deny default)",
           "new": "(allow default)"
         }
@@ -73,7 +73,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(deny network*)",
           "new": "(deny network*)\n(allow network*)"
         }
@@ -90,7 +90,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "    if !forms.iter().any(|form| form == \"(deny network*)\") {\n        return Err(format!(\n            \"{name} must deny the network explicitly with (deny network*)\"\n        ));\n    }",
           "new": "    // falsifier: the explicit network denial is no longer required"
         }
@@ -102,30 +102,14 @@
     },
     {
       "id": "WP07",
-      "title": "the model profile is dropped from the shared contract check",
+      "title": "the model profile is dropped from the one required list",
       "command": "wallet",
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
-          "old": "        Ok(profile) => {\n            check_profile_contract(MODEL_PROFILE, &profile)?;\n            checked.push(MODEL_PROFILE);\n        }",
-          "new": "        Ok(_profile) => {}"
-        }
-      ],
-      "tests": [
-        "file_profile_contract_checks_the_model_profile_when_present"
-      ]
-    },
-    {
-      "id": "WP08",
-      "title": "an unreadable model profile is skipped like an absent one",
-      "command": "wallet",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "capsules/wallet-provider/tests/confine.rs",
-          "old": "        Err(err) if err.kind() == std::io::ErrorKind::NotFound => eprintln!(",
-          "new": "        Err(_) => eprintln!("
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const FILE_PROFILES: [&str; 3] = [\"did-provider\", \"wallet-provider\", \"model-provider\"];",
+          "new": "const FILE_PROFILES: [&str; 2] = [\"did-provider\", \"wallet-provider\"];"
         }
       ],
       "tests": [
@@ -139,7 +123,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "            Err(err) => {\n                return Err(format!(\n                    \"{name} profile {} must be readable: {err}\",\n                    path.display()\n                ))\n            }",
           "new": "            Err(_) => continue,"
         }
@@ -149,29 +133,13 @@
       ]
     },
     {
-      "id": "WP10",
-      "title": "the absent model profile is skipped without a printed reason",
-      "command": "wallet",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "capsules/wallet-provider/tests/confine.rs",
-          "old": "        Err(err) if err.kind() == std::io::ErrorKind::NotFound => eprintln!(\n            \"SKIP model-provider profile {}: the file is absent; the one contract check \\\n             runs over it as soon as it exists\",\n            path.display()\n        ),",
-          "new": "        Err(err) if err.kind() == std::io::ErrorKind::NotFound => drop(err),"
-        }
-      ],
-      "tests": [
-        "file_profile_contract_reports_absent_model"
-      ]
-    },
-    {
       "id": "WP11",
       "title": "the did profile drops the shared STORAGE_PARENT read the one contract requires",
       "command": "wallet",
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
           "new": ";; Removed: shared STORAGE_PARENT read grant."
         }
@@ -187,7 +155,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "        if is_network_allow(form) {\n            return Err(format!(\n                \"{name} must not grant network access; a network allow is refused: {form}\"\n            ));\n        }",
           "new": "        // falsifier: the check no longer refuses a network allow"
         }
@@ -203,7 +171,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "fn is_network_allow(form: &str) -> bool {\n    form.starts_with(\"(allow \") && form.contains(\"network\")\n}",
           "new": "fn is_network_allow(form: &str) -> bool {\n    form == \"(allow network*)\"\n}"
         }
@@ -219,7 +187,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
           "new": ";; Removed: shared process-exec grant."
         }
@@ -238,7 +206,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(allow file-read* (literal \"/\"))",
           "new": ";; Removed: root-directory read grant."
         }
@@ -256,7 +224,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(allow sysctl-read)",
           "new": ";; Removed: sysctl-read grant."
         }
@@ -274,7 +242,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
           "new": ";; Removed: shared STORAGE_PARENT read grant."
         }
@@ -292,7 +260,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
           "new": ";; Removed: storage-root state grant."
         }
@@ -310,7 +278,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "        if is_default_allow(form) {\n            return Err(format!(\"{name} must reject (allow default): {form}\"));\n        }",
           "new": "        // falsifier: the check no longer refuses (allow default)"
         }
@@ -326,7 +294,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(deny network*)",
           "new": "(deny network*)\n(allow default)"
         }
@@ -345,7 +313,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "            if !CANONICAL_PARAMS.contains(&token) {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
           "new": "            // falsifier: the check no longer refuses a non-canonical parameter token"
         }
@@ -361,7 +329,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(subpath (param \"STORAGE_ROOT\"))",
           "new": "(subpath (param \"WALLET_STORAGE_ROOT\"))"
         }
@@ -377,7 +345,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(subpath (param \"STORAGE_ROOT\"))",
           "new": "(subpath (param \"DID_STORAGE_ROOT\"))"
         }
@@ -393,7 +361,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/wallet-provider/confine.sb",
+          "file": "../../capsules/wallet-provider/confine.sb",
           "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
           "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal (param \"READ_FIXTURE_KEY\")))"
         }
@@ -401,6 +369,39 @@
       "tests": [
         "confined_outside_read_is_denied",
         "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP25",
+      "title": "the honesty test resolves edit paths from the repository root again",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/tests/falsifiers.rs",
+          "old": "    let edit_base = root.join(\"examples/agent-host\");",
+          "new": "    let edit_base = root;"
+        }
+      ],
+      "tests": [
+        "tests::falsifiers::falsifiers_list_is_honest",
+        "tests::falsifiers::falsifiers_list_rejects_a_repository_relative_path"
+      ]
+    },
+    {
+      "id": "WP26",
+      "title": "a missing model profile is skipped again instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let profile = match fs::read_to_string(&path) {\n            Ok(profile) => profile,\n            Err(err) => {",
+          "new": "        let profile = match fs::read_to_string(&path) {\n            Ok(profile) => profile,\n            Err(err) if name == \"model-provider\" && err.kind() == std::io::ErrorKind::NotFound => continue,\n            Err(err) => {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_checks_the_model_profile_when_present"
       ]
     }
   ]

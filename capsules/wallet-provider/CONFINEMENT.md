@@ -45,8 +45,8 @@ The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
 confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
 parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
 bridge work, parameterized by the profile path and the storage root, starts
-`did-provider` and `wallet-provider`, so the Runtime has one path for starting
-a provider under its profile (P10). The Runtime loads `confine.sb` only from
+`did-provider`, `wallet-provider` and `model-provider`, so the Runtime has one
+path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
 the signed provider bundle, checks its hash, refuses any profile with
 `(allow default)` or a network allow, and fails closed with a reason; the
 provider proposes, the Runtime checks (P4, P11).
@@ -66,6 +66,9 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The model provider's own file profile, `../model-provider/confine.sb`,
+presents this contract and the shared test requires it; moving the Runtime
+from its inline policy to that file is part of the same bridge change.
 
 ## Host-OS status
 
@@ -102,11 +105,10 @@ when the Runtime side does.
   `STORAGE_ROOT` / `STORAGE_PARENT` parameter tokens, no `(allow default)`
   rule, and the three shared rules verbatim. One list function runs that check over
   `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
-  and `capsules/model-provider/confine.sb`: the did and wallet profiles are
-  required, and the model profile is checked whenever that file exists and
-  skipped with a printed reason while it is absent. The test runs on every
-  platform because it reads files and starts no process. It does not claim
-  that the model provider meets the contract today.
+  and `capsules/model-provider/confine.sb`. All three profiles are required,
+  and a missing or unreadable profile fails the check with a reason that names
+  its path. The test runs on every platform because it reads files and starts
+  no process.
 - `file_profile_contract_rejects_a_profile_without_deny_network` builds a
   minimal profile from the contract's own head forms and shared rules inside
   the test. The check accepts it, then refuses the same profile without
@@ -127,15 +129,13 @@ when the Runtime side does.
   it with a reason that names `fixture-provider` and
   `non-canonical parameter token READ_FIXTURE_KEY`. The test reads no file.
 - `file_profile_contract_checks_the_model_profile_when_present` runs the same
-  list function over a temporary `capsules/` directory. With no model
-  profile it checks exactly the two required profiles; a model profile
-  without `(deny network*)` fails, naming the model provider and that rule; a
-  passing one is checked; a model profile that is a directory fails as a read
-  error naming its path; and a missing did profile fails, naming did-provider.
-- `file_profile_contract_reports_absent_model` runs the list function in a
-  child harness over a `capsules/` directory without a model profile and
-  requires the printed skip reason to name the model profile and the absent
-  file.
+  list function over a temporary `capsules/` directory that holds the passing
+  fixture for all three required profiles. It checks exactly did-provider,
+  wallet-provider and model-provider, in that order; a model profile without
+  `(deny network*)` fails, naming the model provider and that rule; a removed
+  model profile fails, naming model-provider and its path; a model profile
+  that is a directory fails as a read error naming its path; and a missing did
+  profile fails, naming did-provider.
 
 The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent.
 
@@ -193,3 +193,8 @@ back only together with a named test that needs it.
 
 Run `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml`
 from the repository root. The existing 102 unit tests remain part of this gate.
+
+The one runner applies and restores each registered falsifier with
+`python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`
+from the repository root; the list's edit paths are relative to
+`examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.

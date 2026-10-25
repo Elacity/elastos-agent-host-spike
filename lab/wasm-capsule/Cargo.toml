@@ -1,13 +1,17 @@
 # wc-001 lab capsule. Its own workspace and Cargo.lock, kept out of the root
-# ElastOS workspace so the Runtime core never grows for lab tooling. Two
+# ElastOS workspace so the Runtime core never grows for lab tooling. Three
 # members. The root package `capsule`: the guest lives in capsule/src, the
 # host-side build and verification tooling lives in tests/ (never compiled into
-# the capsule). And `audit/`: the cx-wasm-audit lane's `wasm-capsule-audit`
-# crate, the one import-audit path (PRINCIPLES P10) for wc-004's verifier.
+# the capsule). `audit/`: the cx-wasm-audit lane's `wasm-capsule-audit` crate,
+# the one import-audit path (PRINCIPLES P10) for wc-004's verifier. And
+# `tools/`: `wasm-capsule-tools`, the lab's host-side library, which holds the
+# one rule that names a lab bundle (wc-003a).
 #
 # `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
-# act on the root package `capsule` only (there is no `default-members`). Test
-# the audit from this directory with `cargo test -p wasm-capsule-audit --locked`.
+# act on the root package `capsule` only (there is no `default-members`), so
+# every named test lives in tests/. Test the audit from this directory with
+# `cargo test -p wasm-capsule-audit --locked`, and check the tools crate's
+# format with `cargo fmt -p wasm-capsule-tools -- --check`.
 [package]
 name = "capsule"
 version = "0.1.0"
@@ -21,6 +25,12 @@ path = "capsule/src/lib.rs"
 # minimal surface (Rong's DigitCapsule; PRINCIPLES P18).
 crate-type = ["cdylib", "rlib"]
 
+# The named tests in tests/ call the lab-name rule in the tools crate. Cargo
+# builds a dev-dependency only for tests, never for the capsule, and `capsule`
+# keeps no `[dependencies]` (P18).
+[dev-dependencies]
+wasm-capsule-tools = { path = "tools" }
+
 # The reproducible-build knobs the capsule is compiled with (Cargo honours
 # `[profile.*]` only in the workspace root): one codegen unit, LTO, a stripped
 # binary, and `panic = "abort"` (a capsule traps down, it does not unwind a
@@ -33,6 +43,7 @@ panic = "abort"
 strip = true
 
 # Stay out of the root ElastOS workspace. The root package `capsule` is always
-# a member; `audit` declares no `[workspace]` of its own and shares Cargo.lock.
+# a member; `audit` and `tools` declare no `[workspace]` of their own and share
+# Cargo.lock.
 [workspace]
-members = ["audit"]
+members = ["audit", "tools"]

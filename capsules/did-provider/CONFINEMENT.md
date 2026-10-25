@@ -11,8 +11,8 @@ The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
 confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
 parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
 bridge work, parameterized by the profile path and the storage root, starts
-`did-provider` and `wallet-provider`, so the Runtime has one path for starting
-a provider under its profile (P10). The Runtime loads `confine.sb` only from
+`did-provider`, `wallet-provider` and `model-provider`, so the Runtime has one
+path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
 the signed provider bundle, checks its hash, refuses any profile with
 `(allow default)` or a network allow, and fails closed with a reason; the
 provider proposes, the Runtime checks (P4, P11).
@@ -34,6 +34,9 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The model provider's own file profile, `../model-provider/confine.sb`,
+presents this contract and the shared test requires it; moving the Runtime
+from its inline policy to that file is part of the same bridge change.
 
 ## Host-OS status
 
@@ -100,6 +103,19 @@ the outside file to stay unchanged, the provider to report no nickname for its
 own root, and a normal request to succeed after the link is removed. Both cases
 fail when `(deny default)` becomes `(allow default)`.
 
+`startup_denial_reports_its_reason` covers the failure path. It starts the
+provider under a fixture profile that holds `(version 1)` and `(deny default)`,
+so `sandbox-exec` cannot exec it, waits for that child to exit, and sends
+`init`. The one harness failure names the request, the child's exit status and
+`sandbox-exec`'s own denial, `Operation not permitted`, from standard error. A
+second fixture child reads one request and exits without answering, so the
+response-stream branch reports the same three facts. The harness drains
+standard error on its own thread while the child runs, so a child that fills
+the pipe still reaches its own exit. `stderr_is_drained_before_wait` writes
+128 KiB to standard error and expects every byte plus the child's own exit
+status. The startup case skips with its printed reason when `sandbox-exec` is
+absent.
+
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
 no default grant. It runs on every platform, and removing `(deny network*)`
@@ -114,11 +130,10 @@ contract: `(version 1)` first, `(deny default)` second, an explicit
 `STORAGE_ROOT` / `STORAGE_PARENT` parameter tokens, no `(allow default)` rule,
 and the three shared rules verbatim. One list function runs that check over
 `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
-and `capsules/model-provider/confine.sb`: the did and wallet profiles are
-required, and the model profile is checked whenever that file exists and
-skipped with a printed reason while it is absent. The test runs on every
-platform because it reads files and starts no process. It does not claim
-that the model provider meets the contract today.
+and `capsules/model-provider/confine.sb`. All three profiles are required,
+and a missing or unreadable profile fails the check with a reason that names
+its path. The test runs on every platform because it reads files and starts
+no process.
 
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
 the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
@@ -167,6 +182,24 @@ the test.
   `../wallet-provider/falsifiers.json` records it, and
   `both_file_profiles_bind_one_storage_parameter_contract` fails. No did
   confinement test fails, so did keeps this grant only for the one contract.
+- Drop the child's standard error from the harness failure (DID12):
+  `startup_denial_reports_its_reason` fails because the failure no longer
+  carries `sandbox-exec`'s `Operation not permitted`.
+- Drop the stderr pipe instead of draining it (DID13):
+  `stderr_is_drained_before_wait` fails because the child dies on a closed
+  pipe, so the collected text is empty and the exit status is not its own.
+- Omit the request from the harness failure (DID14):
+  `startup_denial_reports_its_reason` fails because the failure does not name
+  the `init` request.
+- Omit the exit status from the harness failure (DID15):
+  `startup_denial_reports_its_reason` fails because the failure does not name
+  the child's exit status.
+- Return a fixed message from the failed-write branch instead of the shared
+  diagnostic (DID16): `startup_denial_reports_its_reason` fails because the
+  denied-provider failure names no request, exit status or standard error.
+- Return a fixed message from the response-stream branch instead of the shared
+  diagnostic (DID17): `startup_denial_reports_its_reason` fails because the
+  response-stream failure names no request, exit status or standard error.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
@@ -185,11 +218,15 @@ them on macOS 26.5.2 arm64:
   needed it on macOS 26.5.2 arm64.
 
 A host that needs one of the removed grants receives a sandbox denial for the
-affected access, so that operation fails closed with a reason. The grant comes
-back only together with a named test that needs it.
+affected access, so that operation fails closed with a reason. In the
+confinement tests that reason appears in the failure of the request the
+provider never answered: the message names the request, the provider's exit
+status and all the provider wrote to standard error. The grant comes back only
+together with a named test that needs it.
 
 The wallet provider keeps its own profile and tests in `../wallet-provider/`.
-Both providers present the same file-based contract to the Runtime bridge:
+did-provider, wallet-provider and model-provider present the same file-based
+contract to the Runtime bridge:
 `(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT` /
 `STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the
 `/usr/bin/sandbox-exec -f confine.sb` launch shape.
