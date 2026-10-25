@@ -8025,6 +8025,233 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
 #[cfg(target_arch = "wasm32")]
 export!(AgentHost);
 
+/// Test-only HTTP client and skip-guard for the local Sparks model.
+///
+/// One client, one skip-guard. `post_json` reads exactly one response framing:
+/// `Transfer-Encoding` must be the single exact coding `chunked`, or the body
+/// must carry `Content-Length`. `gzip`, `xchunked`, mixed framings and short
+/// reads are refused with their reason, never decoded as a plain body.
+///
+/// This is task 011's client, carried into this task's base unchanged because
+/// task 011 is not merged yet. No second client and no second skip-guard exist.
+#[cfg(test)]
+mod sparks_http {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    /// The single opt-in decision: no `SPARKS_MODEL_URL` means the model is
+    /// skipped. No other code in this crate reads that variable.
+    pub(crate) fn sparks_model_url() -> Option<String> {
+        std::env::var("SPARKS_MODEL_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// POST a JSON body and return the decoded response body, or a reason.
+    pub(crate) fn post_json(base_url: &str, path: &str, body: &str) -> Result<String, String> {
+        post_json_with_timeout(base_url, path, body, READ_TIMEOUT)
+    }
+
+    /// One client path; `read_timeout` only bounds the read.
+    fn post_json_with_timeout(
+        base_url: &str,
+        path: &str,
+        body: &str,
+        read_timeout: Duration,
+    ) -> Result<String, String> {
+        let address = base_url
+            .strip_prefix("http://")
+            .ok_or_else(|| format!("unsupported url {base_url}"))?;
+        let mut stream =
+            TcpStream::connect(address).map_err(|error| format!("connect failed: {error}"))?;
+        stream
+            .set_read_timeout(Some(read_timeout))
+            .map_err(|error| format!("timeout setup failed: {error}"))?;
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("write failed: {error}"))?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|error| format!("read failed: {error}"))?;
+        decode_response(&response)
+    }
+
+    /// Decode one HTTP/1.1 response. Framing is decided once, before the body.
+    fn decode_response(response: &[u8]) -> Result<String, String> {
+        let headers_end = find_subslice(response, b"\r\n\r\n")
+            .ok_or_else(|| "response headers are incomplete".to_string())?;
+        for (at, byte) in response[..headers_end].iter().enumerate() {
+            match *byte {
+                b'\r' if response.get(at + 1) != Some(&b'\n') => {
+                    return Err("malformed header line break".to_string())
+                }
+                b'\n' if at == 0 || response[at - 1] != b'\r' => {
+                    return Err("malformed header line break".to_string())
+                }
+                _ => {}
+            }
+        }
+        let head = String::from_utf8(response[..headers_end].to_vec())
+            .map_err(|_| "response headers are not UTF-8".to_string())?;
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .ok_or_else(|| "response status line is missing".to_string())?;
+        let mut parts = status.split_whitespace();
+        let version = parts
+            .next()
+            .ok_or_else(|| "response status line is missing".to_string())?;
+        if version != "HTTP/1.1" && version != "HTTP/1.0" {
+            return Err(format!("unsupported http version {version:?}"));
+        }
+        let code_text = parts
+            .next()
+            .ok_or_else(|| "response status code is missing".to_string())?;
+        if code_text.len() != 3 || !code_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("malformed http status code {code_text:?}"));
+        }
+        let code = code_text
+            .parse::<u16>()
+            .map_err(|_| format!("malformed http status code {code_text:?}"))?;
+        if !(200..300).contains(&code) {
+            return Err(format!("http status {code}"));
+        }
+        let mut transfer_codings = Vec::new();
+        let mut content_lengths = Vec::new();
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                return Err("malformed header syntax".to_string());
+            };
+            if name.is_empty() || !name.bytes().all(is_header_name_byte) {
+                return Err("malformed header syntax".to_string());
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                for coding in value.split(',') {
+                    transfer_codings.push(coding.trim().to_string());
+                }
+            } else if name.eq_ignore_ascii_case("content-length") {
+                let length = value.trim();
+                if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(format!("invalid content-length {length:?}"));
+                }
+                content_lengths.push(
+                    length
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid content-length {length:?}"))?,
+                );
+            }
+        }
+        let body = &response[headers_end + 4..];
+        if !transfer_codings.is_empty() && !content_lengths.is_empty() {
+            return Err("conflicting framing: transfer-encoding and content-length".to_string());
+        }
+        if !transfer_codings.is_empty() {
+            if transfer_codings.len() != 1 {
+                return Err(format!(
+                    "conflicting transfer codings: {}",
+                    transfer_codings.join(", ")
+                ));
+            }
+            let coding = &transfer_codings[0];
+            if !coding.eq_ignore_ascii_case("chunked") {
+                return Err(format!("unsupported transfer coding {coding:?}"));
+            }
+            return decode_chunked(body);
+        }
+        if content_lengths.len() > 1 {
+            return Err("conflicting content-length values".to_string());
+        }
+        let Some(length) = content_lengths.first().copied() else {
+            return Err("response has no framing".to_string());
+        };
+        if body.len() < length {
+            return Err(format!("short read: {} of {length} body bytes", body.len()));
+        }
+        String::from_utf8(body[..length].to_vec())
+            .map_err(|_| "response body is not UTF-8".to_string())
+    }
+
+    /// RFC 9110 tchar: the only bytes a header field name may carry.
+    fn is_header_name_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    }
+
+    /// Decode a chunked body. Every chunk must be complete, with its CRLF.
+    fn decode_chunked(body: &[u8]) -> Result<String, String> {
+        let mut decoded = Vec::new();
+        let mut at = 0;
+        loop {
+            let line_end = body[at..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .map(|offset| at + offset)
+                .ok_or_else(|| "short read: chunk size line is incomplete".to_string())?;
+            let line = String::from_utf8(body[at..line_end].to_vec())
+                .map_err(|_| "chunk size line is not UTF-8".to_string())?;
+            let size_text = line.split(';').next().unwrap_or("").trim();
+            if size_text.is_empty() || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(format!("invalid chunk size {size_text:?}"));
+            }
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
+            at = line_end + 2;
+            if size == 0 {
+                if body.len() < at.saturating_add(2) {
+                    return Err("short read: chunked body is not terminated".to_string());
+                }
+                if &body[at..at + 2] != b"\r\n" {
+                    return Err("trailers are not accepted".to_string());
+                }
+                return String::from_utf8(decoded)
+                    .map_err(|_| "response body is not UTF-8".to_string());
+            }
+            let end = at
+                .checked_add(size)
+                .and_then(|end| end.checked_add(2))
+                .ok_or_else(|| "chunk size is too large".to_string())?;
+            if body.len() < end {
+                return Err("short read: chunk data is incomplete".to_string());
+            }
+            if &body[end - 2..end] != b"\r\n" {
+                return Err("chunk is not ended by CRLF".to_string());
+            }
+            decoded.extend_from_slice(&body[at..end - 2]);
+            at = end;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11040,6 +11267,93 @@ mod tests {
             .events
             .iter()
             .any(|node| node.text == "a new instruction"));
+    }
+
+    /// The opt-in real-model check. The local DeepSeek writes the summary and
+    /// the existing `compact_refusal` / `record_compact_summary` judge it, with
+    /// the same prompt and the same facts the fake-model tests use. The test is
+    /// ignored by default and also skips cleanly when `SPARKS_MODEL_URL` is
+    /// unset, so the normal gates never call the model.
+    #[test]
+    #[ignore = "opt-in: needs SPARKS_MODEL_URL and the local DeepSeek on the Sparks"]
+    fn a_real_model_compaction_summary_is_judged_by_the_same_check() {
+        let Some(base_url) = sparks_http::sparks_model_url() else {
+            eprintln!("skip: SPARKS_MODEL_URL is unset, so no real model is called");
+            return;
+        };
+        let required: Vec<String> = ["hello", "second turn"]
+            .iter()
+            .map(|fact| (*fact).to_string())
+            .collect();
+        let facts: Vec<&str> = required.iter().map(String::as_str).collect();
+        let mut journal = summary_journal();
+        let head = journal.events[0].clone();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &facts);
+        let prompt = compact_summary_prompt(&journal, id).expect("a summary prompt");
+        let body = serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        .to_string();
+        assert!(body.contains("\"deepseek-v4-flash\""));
+        let reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &body)
+            .unwrap_or_else(|error| panic!("real model request failed: {error}"));
+        eprintln!("real model request ok: {} response bytes", reply.len());
+        let reply: serde_json::Value = serde_json::from_str(&reply)
+            .unwrap_or_else(|error| panic!("real model reply is not JSON: {error}"));
+        let summary = reply["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_else(|| panic!("real model reply has no assistant content"))
+            .trim()
+            .to_string();
+        eprintln!("real model summary: {} bytes", summary.len());
+
+        let expected = compact_refusal(&journal, &summary, &required);
+        let recorded = record_compact_summary(&mut journal, id, Ok(summary.clone()));
+        match expected {
+            None => {
+                assert_eq!(recorded, Ok(()));
+                assert_eq!(journal.events.len(), 2);
+                assert_eq!(journal.events[0], head);
+                assert_eq!(journal.events[1].role, Role::User);
+                assert_eq!(journal.events[1].source, NodeSource::CompactionCheckpoint);
+                assert_eq!(journal.events[1].text, summary);
+                assert_eq!(journal.epoch, epoch + 1);
+                eprintln!("check verdict: recorded");
+            }
+            Some(reason) => {
+                assert_eq!(recorded, Err(reason));
+                assert_eq!(journal.events, before);
+                assert_eq!(journal.epoch, epoch);
+                eprintln!("check verdict: refused: {reason}");
+            }
+        }
+
+        // The same check judges a failing summary: the real summary with its
+        // first required fact changed is refused for the existing reason and
+        // leaves the history unchanged.
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &facts);
+        let without_fact = if summary.contains("hello") {
+            summary.replace("hello", "greeting")
+        } else {
+            format!("{summary} greeting")
+        };
+        assert!(!contains_whole_fact(&without_fact, "hello"));
+        let reason = compact_refusal(&journal, &without_fact, &required)
+            .expect("a summary that changes a required fact is refused");
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(without_fact)),
+            Err(reason)
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+        eprintln!("check verdict: a summary that fails the check is refused: {reason}");
     }
 
     #[test]
