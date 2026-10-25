@@ -514,39 +514,26 @@ impl DidProvider {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        // Read once with explicit metadata and data errors. The identity
-        // library's path-based loader treats denied metadata as absence.
-        let nickname = (|| {
-            let Some(encrypted) = read_optional_file(&base_dir.join("did/nickname.enc"))? else {
-                return Ok(None);
-            };
-            // Preserve the identity library's JSON envelope and key derivation.
-            #[derive(Deserialize)]
-            struct Envelope {
-                #[serde(rename = "version")]
-                _version: u8,
-                nonce: String,
-                ciphertext: String,
+        let nickname_path = base_dir.join("did").join("nickname.enc");
+        // Only a confirmed missing file is "no nickname". The identity library's
+        // path check treats a denied metadata lookup as absence, so the presence
+        // check stays here and every decode rule stays in the library.
+        match std::fs::metadata(&nickname_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.nickname = None;
+                return Ok(());
             }
-            let envelope: Envelope = serde_json::from_slice(&encrypted)
-                .map_err(|e| format!("Invalid nickname envelope: {e}"))?;
-            let mut data =
-                hex::decode(envelope.nonce).map_err(|e| format!("Invalid nickname nonce: {e}"))?;
-            if data.len() != NONCE_LEN {
-                return Err(format!("Invalid nickname nonce length: {}", data.len()));
+            Err(error) => {
+                return Err(format!(
+                    "did-provider: failed to load nickname: Metadata lookup failed: {error}"
+                ))
             }
-            data.extend(
-                hex::decode(envelope.ciphertext)
-                    .map_err(|e| format!("Invalid nickname ciphertext: {e}"))?,
-            );
-            let plaintext = decrypt_data(&derive_storage_key(&dk), &data)
-                .map_err(|e| format!("Nickname decrypt failed: {e}"))?;
-            let nickname =
-                String::from_utf8(plaintext).map_err(|e| format!("Invalid nickname UTF-8: {e}"))?;
-            let nickname = nickname.trim().to_string();
-            Ok((!nickname.is_empty()).then_some(nickname))
-        })()
-        .map_err(|e| format!("did-provider: failed to load nickname: {e}"))?;
+        }
+        // Envelope parsing, nonce validation, decryption, UTF-8 conversion,
+        // trimming and empty-value handling belong to `elastos_identity`.
+        let nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+            .map_err(|e| format!("did-provider: failed to load nickname: {e}"))?;
         self.nickname = nickname;
         Ok(())
     }
@@ -1602,22 +1589,25 @@ mod tests {
         })
         .to_string();
         let cases = [
-            ("{".to_string(), "Invalid nickname envelope: EOF while parsing an object at line 1 column 1"),
-            ("{}".to_string(), "Invalid nickname envelope: missing field `version` at line 1 column 2"),
-            (serde_json::json!({"version": 1, "nonce": "zz", "ciphertext": ""}).to_string(),
-                "Invalid nickname nonce: Invalid character 'z' at position 0"),
-            (serde_json::json!({"version": 1, "nonce": "00", "ciphertext": ""}).to_string(),
-                "Invalid nickname nonce length: 1"),
-            (serde_json::json!({"version": 1, "nonce": "00".repeat(NONCE_LEN), "ciphertext": "zz"}).to_string(),
-                "Invalid nickname ciphertext: Invalid character 'z' at position 0"),
-            (serde_json::json!({"version": 1, "nonce": "00".repeat(NONCE_LEN), "ciphertext": ""}).to_string(),
-                "Nickname decrypt failed: Decryption failed: aead::Error"),
-            (invalid_utf8, "Invalid nickname UTF-8: invalid utf-8 sequence of 1 bytes from index 0"),
+            "{".to_string(),
+            "{}".to_string(),
+            serde_json::json!({"version": 1, "nonce": "zz", "ciphertext": ""}).to_string(),
+            serde_json::json!({"version": 1, "nonce": "00", "ciphertext": ""}).to_string(),
+            serde_json::json!({"version": 1, "nonce": "00".repeat(NONCE_LEN), "ciphertext": "zz"})
+                .to_string(),
+            serde_json::json!({"version": 1, "nonce": "00".repeat(NONCE_LEN), "ciphertext": ""})
+                .to_string(),
+            invalid_utf8,
         ];
-        for (bytes, reason) in cases {
+        for bytes in cases {
             std::fs::write(&path, bytes).unwrap();
+            // The identity library owns every decode rule. The provider must
+            // return that exact refusal, not a second interpretation of it.
+            let library_error =
+                elastos_identity::load_nickname_with_device_key(dir.path(), &make_device_key())
+                    .expect_err("the identity library must reject this fixture");
+            let expected = format!("did-provider: failed to load nickname: {library_error}");
             let mut provider = DidProvider::new();
-            let expected = format!("did-provider: failed to load nickname: {reason}");
             assert_storage_error(
                 provider.init(serde_json::json!({
                     "base_path": bp, "encryption_key": hex::encode(make_device_key()),

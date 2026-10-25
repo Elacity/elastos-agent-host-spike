@@ -92,21 +92,43 @@ storage root:
   return the exact storage error. Restoring the file and repeating `Init`
   restores normal nickname access.
 
-The provider reads nickname bytes once after a fallible metadata lookup. It
-decodes the existing identity JSON envelope with the same key derivation and
-encryption. Lookup, read, envelope, nonce, ciphertext, decryption and UTF-8
-errors retain distinct reasons. Unit tests check those reasons and the existing
-identity-library compatibility tests check the storage format.
+Nickname presence is confirmed with one metadata check, so a denied lookup is
+not mistaken for absence. Every decode rule then belongs to `elastos_identity`:
+envelope parsing, nonce validation, decryption, UTF-8 conversion, trimming and
+empty-value handling. A metadata denial reports `Metadata lookup failed: ...`;
+a read denial or malformed envelope returns the identity library's exact error
+under `did-provider: failed to load nickname: ...`. The provider unit test
+compares `Init`'s reason with
+`elastos_identity::load_nickname_with_device_key` for seven malformed fixtures,
+so a second interpretation fails the test.
 
 The tests write skip reasons directly to stderr when `/usr/bin/sandbox-exec`
 is unavailable, so ordinary successful `cargo test` output shows which
 confinement checks were skipped.
 
-To check the falsifiers, replace `(deny default)` with `(allow default)` while
-keeping `(version 1)` first: `outside_write_denied` must fail because
-`set_nickname` succeeds. Granting `file-read-data` on `FIXTURE_METADATA_ROOT`
-in the read fixture must make `outside_read_denied` fail because the existing
-persona is returned. Separately tamper the positive `verify` and
-`verify_did_recovery` requests: `all_operations_under_profile` must fail at
-`genuine signature must verify` and `genuine recovery proof must verify`,
-respectively. Restore each mutation before running the next check.
+## Falsifier runs
+
+Executed on 2026-10-25 from this worktree. Each mutation was restored before
+the next run; the final tree passes the full gates.
+
+1. Replaced `(deny default)` with `(allow default)`, keeping `(version 1)`
+   first. The profile loaded, the provider printed
+   `did-provider: starting v0.1.0 (did:key)`, and `outside_write_denied` failed
+   at `expected an error response, got {"data":{"nickname":"alice"},"status":"ok"}`
+   because the outside write succeeded.
+2. Added `(allow file-read-data (subpath (param "FIXTURE_METADATA_ROOT")))` to
+   the read fixture. The profile loaded and `outside_read_denied` failed at
+   `expected an error response, got {"data":{"did":"did:key:z6Mk...","name":"bot",...},"status":"ok"}`
+   because the outside persona key was returned.
+3. Replaced the positive `verify` signature with a tampered one. The profile
+   loaded and the provider started; `all_operations_under_profile` failed at
+   `genuine signature must verify` (`left: Bool(false)`, `right: true`).
+4. Replaced the positive `verify_did_recovery` signature with a tampered one.
+   The profile loaded and the provider started; `all_operations_under_profile`
+   failed at `genuine recovery proof must verify` (`left: Bool(false)`,
+   `right: true`).
+5. Replaced the identity library refusal with a provider-invented reason.
+   `nickname_load_refusals_keep_their_reasons` failed with
+   `left: "did-provider: failed to load nickname: rejected"`,
+   `right: "did-provider: failed to load nickname: EOF while parsing an object at line 1 column 1"`,
+   proving the provider must return the library's refusal.

@@ -171,10 +171,15 @@ fn assert_refusal(response: &Value, code: &str, reason: &str) {
     assert_eq!(message, reason, "wrong refusal reason: {response}");
 }
 
+fn permission_error() -> String {
+    // Seatbelt returns EPERM on macOS.
+    std::io::Error::from_raw_os_error(1).to_string()
+}
+
 fn permission_reason(operation: &str) -> String {
-    // Seatbelt returns EPERM on macOS. Assert the entire reason, including the
-    // operation, so a denied write cannot stand in for a denied read.
-    format!("{operation}: {}", std::io::Error::from_raw_os_error(1))
+    // Assert the entire reason, including the operation, so a denied write
+    // cannot stand in for a denied read.
+    format!("{operation}: {}", permission_error())
 }
 
 fn tamper_signature(signature: &str) -> String {
@@ -575,15 +580,18 @@ fn nickname_read_refusal(allow_metadata: bool) {
     } else {
         ConfinedProvider::spawn(&storage)
     };
-    let operation = if allow_metadata {
-        "Read failed"
+    let reason = if allow_metadata {
+        // The identity library reads the file and returns the OS refusal.
+        format!(
+            "did-provider: failed to load nickname: {}",
+            permission_error()
+        )
     } else {
-        "Metadata lookup failed"
+        format!(
+            "did-provider: failed to load nickname: {}",
+            permission_reason("Metadata lookup failed")
+        )
     };
-    let reason = format!(
-        "did-provider: failed to load nickname: {}",
-        permission_reason(operation)
-    );
     assert_refusal(&provider.init(&storage), "storage_error", &reason);
     assert_refusal(
         &provider.request(json!({"op": "get_nickname"})),
