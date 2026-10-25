@@ -17,10 +17,11 @@ cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -- --nocapt
 ```
 
 Use the repository's shared heavy-build lease for the test command. Reserve
-2 GiB for generated files plus the required 2 GiB of free space. The test needs
+8 GiB for the Runtime and lane build outputs plus the required 2 GiB of free space. The test needs
 the pinned Rust toolchain, its `wasm32-unknown-unknown` target and cached Cargo
-dependencies. Its child builds run offline and treat compiler warnings as
-errors. A missing build tool, target or dependency fails the check.
+dependencies. Both child builds use `build::offline_build`; the probe build
+treats compiler warnings as errors. The Runtime build keeps its normal flags
+and disables development debug info. A missing build tool, target or dependency fails the check.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
 imports against the task's three-interface Bus subset. `probe_hash_is_stable` makes two
@@ -50,6 +51,10 @@ not count. Restore the source bytes before running the normal suite again.
 
 The [runbook](RUNBOOK.md) gives the one-command table: `lab/agent-conformance/run.sh`.
 The `harness` module owns fresh Homes and the one bounded launch primitive.
-Task 008 exercises that primitive with system tools; Runtime launch proof belongs
-to task 009. Passing tests remove their Homes, and failing tests retain their
+The Runtime tests use that same primitive to check the no-operator refusal
+and the data directory inside the throwaway root. `runtime::runtime_under_test`
+builds once per test process in `target/runtime`, hashes the binary with the
+Mac's `/usr/bin/shasum`, and returns its absolute path and SHA-256. Build
+failures retain Cargo's output and fail the tests. Its hash, like the probe's,
+is specific to the machine and toolchain. Passing tests remove their Homes, and failing tests retain their
 roots inside this lane's ignored `target/` and print their paths.

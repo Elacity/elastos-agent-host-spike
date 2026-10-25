@@ -30,8 +30,9 @@ appends `elastos` (`elastos/crates/elastos-server/src/sources.rs:12-17`). On thi
 Mac the platform rule is `$HOME/Library/Application Support/elastos`;
 `XDG_DATA_HOME` does not move it. The comment above that function describes the
 Linux rule. A child-process `HOME="$AC_HOME"` moves the Mac data directory to
-`$AC_HOME/Library/Application Support/elastos`. Task 007 must verify that resolved
-path under its fresh temporary root. `run` has no `--data-dir` option
+`$AC_HOME/Library/Application Support/elastos`. Task 009 verifies that resolved
+path with `runtime_data_dir_is_under_throwaway_home`: Runtime removes a decoy
+from the guarded data directory under a fresh temporary root. `run` has no `--data-dir` option
 (`main.rs:90-113`). Both the operator and its `run` child need the same fixture
 Home. Clear inherited `ELASTOS_RUNTIME_COORDS_FILE`, which otherwise overrides
 coordinate lookup (`runtime_control.rs:446-450`), and select the fixture's
@@ -169,12 +170,17 @@ requested import scope.
 
 The existing tests cover component bytes, manifest/WIT agreement, imports and
 two independent builds on this machine. They grade artifact properties only.
-Signed-bundle identity, Runtime admission, launch and effect evidence remain
-with 003/007; the harness half of stopped 001 is now 007. These prerequisites
-are outstanding work, not additional Runtime API blockers or passing grades.
+Task 008 adds the guarded launch primitive. Task 009 adds the Runtime build
+and the no-operator launch checks. Signed-bundle identity, Runtime admission
+and effect evidence remain with the later tasks; all listed blockers remain open.
 
 Task 006 made zero spike launches and skipped the full Runtime build: source
 evidence is sufficient for this discovery, and AC-006-STORAGE needs resolution
-before an isolated launch. Mac data-root resolution, real-Home byte identity,
-grant delivery and refusal stderr are **to confirm in 003**, after 007's safety
-guard. No real Home was inspected or started for this discovery.
+before an operator launch. Task 009 now checks Mac data-root resolution with
+`runtime_data_dir_is_under_throwaway_home` and the no-operator refusal stderr
+with `run_without_operator_is_refused_with_reason`. Both use 008's guarded Home
+and launch primitive. Runtime refuses before the AC-006-STORAGE constructor;
+that blocker remains open. Real-Home safety is proved by construction and the
+decoy test; the dropped real-Home digest is outside the lane's read scope.
+Grant delivery and guest refusal stderr remain **to confirm in 003**, subject
+to operator isolation. [LOG.md](LOG.md) records the measured task 009 results.

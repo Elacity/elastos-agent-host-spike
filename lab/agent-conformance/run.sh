@@ -22,7 +22,8 @@ if ! cargo test --locked --manifest-path "$manifest" -- --list >"$run_dir/list" 
     exit 1
 fi
 status=0
-cargo test --locked --no-fail-fast --manifest-path "$manifest" -- --format pretty --color never >"$run_dir/results" 2>"$run_dir/build" || status=$?
+cargo test --locked --no-fail-fast --manifest-path "$manifest" -- --format pretty --color never --show-output >"$run_dir/results" 2>"$run_dir/build" || status=$?
+sed -n '/^elastos sha256:[0-9a-f]\{64\}$/p' "$run_dir/results"
 if "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status"; then
     rm -rf -- "$run_dir"
 else

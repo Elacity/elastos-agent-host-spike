@@ -161,6 +161,38 @@
       "tests": [
         "run_table_requires_cargo_results"
       ]
+    },
+    {
+      "id": "F-ac1f",
+      "title": "use the Linux data directory on the Mac",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "    Ok(home.join(\"Library/Application Support/elastos\"))",
+          "new": "    Ok(home.join(\".local/share/elastos\"))"
+        }
+      ],
+      "tests": [
+        "runtime_data_dir_is_under_throwaway_home"
+      ]
+    },
+    {
+      "id": "F-ac1g",
+      "title": "make the probe manifest use a non-component Runtime ABI",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/capsule.json",
+          "old": "\"runtime_abi\": \"elastos.component/v1\"",
+          "new": "\"runtime_abi\": \"wasi-preview1\""
+        }
+      ],
+      "tests": [
+        "run_without_operator_is_refused_with_reason"
+      ]
     }
   ]
 }

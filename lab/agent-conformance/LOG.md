@@ -311,3 +311,252 @@ Principles check (paths below are relative to this lane):
 | 5. Does refusal fail closed with a reason? | Yes. `src/harness.rs:165` returns distinct guard reasons; `tests/harness.rs:7` asserts them, and `tests/harness.rs:128` asserts the timeout reason. |
 | 6. Does capsule logic stay inside and trap down? | Yes. The probe stays unchanged with typed Bus bindings at `probe/src/lib.rs:8` and its internal refusal at `probe/src/lib.rs:14`. |
 | 7. Do new rules have tests and caught falsifiers? | Yes. `tests/harness.rs:7`, `tests/harness.rs:82`, `tests/harness.rs:124` and `tests/report.rs:4` passed, failed under their listed mutations, and passed after restoration; exact results are above. |
+
+## 009 — Runtime identity and contained refusal
+
+- 009: Added the cached `runtime_under_test` build, shared `offline_build` setup, two Runtime refusal tests, the hash above the existing table, F-ac1f/F-ac1g, and the measured Home-path evidence in GAPS and RUNBOOK.
+
+`src/build.rs:offline_build` owns the offline environment shared by the probe
+and Runtime builds. `src/runtime.rs:runtime_under_test` caches either the build
+result or its Cargo failure once per test process. The Runtime build uses the
+normal toolchain environment, development debug info disabled and the one
+`target/runtime` directory, including its `build/` and `tmp/` children. Its
+absolute binary path and computed SHA-256 identify the bytes exercised. The
+Mac's existing `/usr/bin/shasum -a 256` hashes the binary through stdin; Cargo
+manifests, dependencies and lockfiles stay unchanged. Like the probe hash,
+this identity is specific to the machine and toolchain.
+
+The initial cold check held the existing shared heavy-build lease, opened
+read-only and locked with `fcntl.flock(lease, LOCK_EX | LOCK_NB)`. Before the
+build, `df -k .` reported 49,298,252 KiB available, enough for the 8 GiB build
+budget plus 2 GiB free. The Cargo command run by the helper was:
+
+```sh
+cargo build --locked --offline --manifest-path elastos/Cargo.toml -p elastos-server --bin elastos
+```
+
+It ran from `elastos/` with an absolute manifest path. The cold Runtime build
+and SHA-256 computation took **118.46 seconds**, measured by the helper's
+`Instant`; this elapsed value includes hashing. The cold full test command was
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -- --show-output`.
+It passed all 12 tests, with 0 failed and 0 ignored. Both Runtime tests shared
+that one build. The source Runtime and providers have zero edits.
+
+`du -sk lab/agent-conformance/target/runtime` reported **2,102,056 KiB**
+(2.005 GiB allocated) after verification. The warmed build files
+remain for supervisor verification; the local lifecycle inventory sets removal
+after that check. They are rebuildable output, rather than an installed Runtime.
+
+Both new tests use `ThrowawayHome::launch`. Their relative probe argument is
+computed from the guarded Home to the lane, so Runtime's own log carries no
+operator-local checkout path. The first test requires the nonzero exit and
+operator refusal reason. The second creates a coordinates decoy at
+`home.data()/runtime-coords.json`, checks it exists, launches through the same
+primitive, then requires its removal and the same refusal reason. The fixture
+uses only dummy values and a documentation address, which Runtime rejects
+before a network client is created. Every launch exited within its ten-second
+bound. Passing tests removed their Homes.
+
+Exact stderr from the restored refusal test follows as a JSON string, including
+ANSI escapes and newlines. JSON decoding reproduces the captured bytes:
+
+```json
+"\u001b[2m2026-10-25T15:33:00.593653Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2melastos::run_cmd\u001b[0m\u001b[2m:\u001b[0m Running capsule from: ../../../probe\nError: This command requires a running runtime.\n\n  elastos serve\n\nThen run this command again.\n"
+```
+
+### Falsifier commands and observed results
+
+These runs held the same shared build lease and used this environment in
+addition to the normal developer toolchain environment:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/check-tmp"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+For each ID, the manual Python invocation selected its one entry from
+`falsifiers.json`, loaded the original bytes, asserted exactly one `old` match,
+and wrote `original.replace(old, new, 1)`. It ran the command below with
+`subprocess.run(command, env=env, stdout=PIPE, stderr=STDOUT, text=True)` and
+restored `path.write_bytes(original)` in `finally`. It then ran the identical
+command after restoration. Every named test ran. Each planted run returned
+101 at the intended assertion; each restored run returned 0. The shared runner
+and Git state were unchanged.
+
+The output blocks below preserve captured stdout/stderr, with each ESC byte
+rendered as the literal `\u001b` for readable Markdown. Other bytes are unchanged.
+
+**F-ac1f.** The single data-dir rule used by the guard and decoy was changed to
+`<home>/.local/share/elastos`. The Runtime refused as before, but the decoy
+survived, so its named test failed at the removal assertion.
+
+```sh
+cargo test --quiet --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime runtime_data_dir_is_under_throwaway_home -- --exact --nocapture --color never
+```
+
+Planted (exit 101):
+
+```text
+
+running 1 test
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+Runtime build and hash: 0.57s
+Runtime refusal stderr:
+\u001b[2m2026-10-25T15:32:55.074899Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2melastos::run_cmd\u001b[0m\u001b[2m:\u001b[0m Running capsule from: ../../../probe
+Error: This command requires a running runtime.
+
+  elastos serve
+
+Then run this command again.
+
+
+thread 'runtime_data_dir_is_under_throwaway_home' (21435793) panicked at tests/runtime.rs:58:5:
+Runtime must remove the decoy from the guarded data directory
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: lab/agent-conformance/target/home-4271-1792942373411904000-0
+runtime_data_dir_is_under_throwaway_home --- FAILED
+
+failures:
+
+failures:
+    runtime_data_dir_is_under_throwaway_home
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.68s
+
+error: test failed, to rerun pass `-p agent-conformance --test runtime`
+```
+
+Restored (exit 0):
+
+```text
+
+running 1 test
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+Runtime build and hash: 0.56s
+Runtime refusal stderr:
+\u001b[2m2026-10-25T15:32:57.158222Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2melastos::run_cmd\u001b[0m\u001b[2m:\u001b[0m Running capsule from: ../../../probe
+Error: This command requires a running runtime.
+
+  elastos serve
+
+Then run this command again.
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.68s
+
+```
+
+**F-ac1g.** Only the probe manifest ABI was changed to `wasi-preview1`. Runtime
+returned the invalid-manifest reason shown below, so its named test failed at
+the reason assertion. This checkout validates the manifest before the ABI
+branch in `run_cmd.rs`; the observed error comes from that validation.
+
+```sh
+cargo test --quiet --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime run_without_operator_is_refused_with_reason -- --exact --nocapture --color never
+```
+
+Planted (exit 101):
+
+```text
+
+running 1 test
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+Runtime build and hash: 0.55s
+
+thread 'run_without_operator_is_refused_with_reason' (21436165) panicked at tests/runtime.rs:31:5:
+Runtime must give the operator refusal reason; stderr:
+\u001b[2m2026-10-25T15:32:58.878854Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2melastos::run_cmd\u001b[0m\u001b[2m:\u001b[0m Running capsule from: ../../../probe
+Error: Invalid manifest: WASI Preview 1 is not a supported product capsule ABI; use elastos.component/v1 or elastos.runtime-projection/v1
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: lab/agent-conformance/target/home-4325-1792942377236483000-0
+run_without_operator_is_refused_with_reason --- FAILED
+
+failures:
+
+failures:
+    run_without_operator_is_refused_with_reason
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.66s
+
+error: test failed, to rerun pass `-p agent-conformance --test runtime`
+```
+
+Restored (exit 0):
+
+```text
+
+running 1 test
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+Runtime build and hash: 0.54s
+Runtime refusal stderr:
+\u001b[2m2026-10-25T15:33:00.593653Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2melastos::run_cmd\u001b[0m\u001b[2m:\u001b[0m Running capsule from: ../../../probe
+Error: This command requires a running runtime.
+
+  elastos serve
+
+Then run this command again.
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.65s
+
+```
+
+The two failed Homes retain only fixture data and captured output. Their
+private local lifecycle entries keep them for supervisor review and set removal
+after that review. The unchanged task 008 failed roots keep their existing
+retention decisions. All 12 falsifier IDs are unique, and all exact edit anchors
+match the restored source. The earlier falsifiers were unchanged and were
+checked for matching anchors; this task ran F-ac1f and F-ac1g.
+
+### Final checks
+
+With `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, the lane formatting check and
+full `run.sh` passed. The script lists Cargo's tests, runs the full locked suite
+with `--no-fail-fast -- --format pretty --color never --show-output`, then
+prints the computed Runtime identity above its existing table:
+
+```text
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+test | PASS/FAIL/BLOCKED (id)
+foreign_and_wrong_version_imports_are_refused | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+non_component_and_invalid_component_are_refused | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+```
+
+The warmed full run took **33.67 seconds**, exit 0.
+
+`git diff --check`, `bash -n lab/agent-conformance/run.sh`, the product-data
+check (42 capsules, 2 profiles, 28 method contracts), its 99 tests, and Runtime
+and chain-provider formatting also passed. A before/after comparison of source
+SHA-256 values and `git status --porcelain` showed the full run changed neither.
+Generated files are ignored. Source edits remain for the supervisor's commit;
+the task forbids builder Git mutations, so the final worktree is intentionally
+dirty only under this lane. Its cached upstream divergence is 0 ahead / 0 behind;
+remote freshness is unverified because this task runs offline. The supervisor
+owns the PR and independent review; these commands and results supply its PR
+evidence. Every GAPS blocker remains open.
+
+Principles check (file references are relative to this lane):
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No. `src/runtime.rs:52` hashes the built bytes; `src/runtime.rs:70` prints that identity. Paths locate local build inputs, and the decoy URL is test data. |
+| 2. New ambient or UI authority? | No. `tests/runtime.rs:20` uses the guarded launch primitive, whose environment is cleared at `src/harness.rs:204`. The probe and UI stay unchanged. |
+| 3. A second operation path or rule copy? | No. `src/build.rs:10` owns shared build setup; `tests/artifact.rs:23` and `src/runtime.rs:30` call it. `tests/runtime.rs:48` uses the existing data-dir rule through `home.data()`. |
+| 4. Does the trusted core grow? | No. `src/lib.rs:3` exposes lane modules only; the Runtime and provider trees have zero edits. |
+| 5. Does refusal fail closed with a reason? | Yes. `tests/runtime.rs:27` requires a failed exit, and `tests/runtime.rs:31` requires Runtime's operator reason. |
+| 6. Does capsule logic stay inside and trap down? | Yes. `probe/src/lib.rs:8` keeps its typed Bus bindings and internal logic; this task changes neither the probe nor its imports. |
+| 7. Do new rules have tests and caught falsifiers? | Yes. `tests/runtime.rs:39` and `tests/runtime.rs:46` passed, failed under their named mutations, and passed after restoration, as recorded above. The Runtime hash is identification evidence. |
