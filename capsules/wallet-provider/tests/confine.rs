@@ -718,6 +718,29 @@ fn file_profile_contract_rejects_an_allow_default() {
     );
 }
 
+/// The one contract check refuses a profile that binds a parameter token the
+/// Runtime bridge does not supply, and names the profile and that token. The
+/// fixtures are built in the test; no file is read.
+///
+/// Falsifier: remove the canonical-token refusal from
+/// `check_profile_contract`; this test fails because the extra-token fixture
+/// passes.
+#[test]
+fn file_profile_contract_rejects_a_non_canonical_token() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+    let profile = format!("{complete}(allow file-read* (literal (param \"READ_FIXTURE_KEY\")))\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a profile with a non-canonical parameter token must fail");
+    assert!(
+        refusal.contains("fixture-provider")
+            && refusal.contains("non-canonical parameter token READ_FIXTURE_KEY"),
+        "the refusal must name the profile and the token: {refusal}"
+    );
+}
+
 /// The list function runs the one contract check over the model profile
 /// whenever it exists, skips it only while the file is absent, and refuses a
 /// missing required profile.

@@ -149,7 +149,9 @@ the test.
 - Return `parse_error` instead of the signature refusal in the non-hex branch
   of `verify_did_recovery` (DID11): `verify_did_recovery_under_profile` fails
   because the response does not name `invalid_signature`.
-- Rename `STORAGE_ROOT` to `DID_STORAGE_ROOT` in either provider's `confine.sb`:
+- Rename `STORAGE_ROOT` to `DID_STORAGE_ROOT` in
+  `capsules/did-provider/confine.sb` (WP23 in
+  `../wallet-provider/falsifiers.json`):
   `both_file_profiles_bind_one_storage_parameter_contract` fails on the
   non-canonical token.
 - Remove `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` (DID07):
