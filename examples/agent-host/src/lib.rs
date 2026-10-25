@@ -8179,20 +8179,46 @@ mod sparks_http {
         pub(crate) prefill: PrefillSeconds,
     }
 
-    /// The value of one exact Prometheus sample name. A label set after the
-    /// name is ignored; a longer name is not this metric. The value must be a
-    /// finite number on the same line.
+    /// The byte just past the closing `}` of a label block, after the `{`.
+    /// Braces inside a quoted label value do not close the block.
+    fn label_block_end(text: &str) -> Option<usize> {
+        let mut quoted = false;
+        let mut escaped = false;
+        for (at, character) in text.char_indices() {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quoted = false;
+                }
+            } else if character == '"' {
+                quoted = true;
+            } else if character == '}' {
+                return Some(at + 1);
+            }
+        }
+        None
+    }
+
+    /// The value of one exact Prometheus sample name. The complete label
+    /// block is consumed before the value, so a number inside a label is not
+    /// this sample's value. A longer name is not this metric. The value must
+    /// be a finite number on the same line.
     pub(crate) fn sample_value(text: &str, name: &str) -> Option<f64> {
         text.lines()
             .filter(|line| !line.trim_start().starts_with('#'))
             .find_map(|line| {
-                let mut fields = line.split_whitespace();
-                let sample = fields.next()?;
-                let sample_name = sample.split('{').next().unwrap_or(sample);
+                let line = line.trim_start();
+                let (sample_name, rest) = match line.split_once('{') {
+                    Some((head, after)) => (head, &after[label_block_end(after)?..]),
+                    None => line.split_once(char::is_whitespace).unwrap_or((line, "")),
+                };
                 if sample_name != name {
                     return None;
                 }
-                fields
+                rest.split_whitespace()
                     .next()?
                     .parse::<f64>()
                     .ok()
@@ -8857,6 +8883,87 @@ mod sparks_http {
             ))
             .unwrap_err(),
             "tensorfold:request_prefill_seconds has no numeric value"
+        );
+    }
+
+    #[test]
+    fn a_number_inside_a_label_is_not_the_sample_value() {
+        let named = "tensorfold:prompt_tokens_total";
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total{model=\"x 999 y\"} 12\n",
+                named
+            ),
+            Some(12.0)
+        );
+        assert_eq!(
+            sample_value("tensorfold:prompt_tokens_total{model=\"x 999 y\"}\n", named),
+            None
+        );
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total{model=\"x 999 y\"}\ntensorfold:request_prefill_seconds 1\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total has no numeric value"
+        );
+        // A brace inside the quoted label value does not close the block.
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total{model=\"a}b 999\"} 12\n",
+                named
+            ),
+            Some(12.0)
+        );
+    }
+
+    #[test]
+    fn a_non_finite_metric_value_is_not_a_counter() {
+        for value in ["NaN", "inf", "-inf"] {
+            assert_eq!(
+                sample_value(
+                    &format!("tensorfold:prompt_tokens_total {value}\n"),
+                    "tensorfold:prompt_tokens_total"
+                ),
+                None,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total NaN\ntensorfold:request_prefill_seconds 1\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total has no numeric value"
+        );
+    }
+
+    #[test]
+    fn the_prefill_histogram_requires_both_sum_and_count() {
+        let base = "tensorfold:prompt_tokens_total 1\n";
+        assert_eq!(
+            published_counters(&format!("{base}tensorfold:request_prefill_seconds_sum 3\n"))
+                .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no numeric value"
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_count 4\n"
+            ))
+            .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no numeric value"
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_sum 3\n\
+                 tensorfold:request_prefill_seconds_count 4\n"
+            ))
+            .unwrap()
+            .prefill,
+            PrefillSeconds::Histogram {
+                sum: 3.0,
+                count: 4.0,
+            }
         );
     }
 }

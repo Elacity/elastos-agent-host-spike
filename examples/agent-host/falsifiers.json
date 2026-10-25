@@ -1093,8 +1093,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                fields\n                    .next()?\n                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())",
-     "new": "                Some(\n                    fields\n                        .next()\n                        .and_then(|value| value.parse::<f64>().ok())\n                        .unwrap_or(0.0),\n                )"
+     "old": "                rest.split_whitespace()\n                    .next()?\n                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())",
+     "new": "                Some(\n                    rest.split_whitespace()\n                        .next()\n                        .and_then(|value| value.parse::<f64>().ok())\n                        .unwrap_or(0.0),\n                )"
     }
    ],
    "tests": [
@@ -1115,6 +1115,54 @@
    ],
    "tests": [
     "sparks_http::an_unrelated_metric_suffix_is_not_the_named_counter"
+   ]
+  },
+  {
+   "id": "FS53",
+   "title": "the value is read before the label block, so a number inside a label becomes the counter",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                let (sample_name, rest) = match line.split_once('{') {\n                    Some((head, after)) => (head, &after[label_block_end(after)?..]),\n                    None => line.split_once(char::is_whitespace).unwrap_or((line, \"\")),\n                };",
+     "new": "                let (sample_name, rest) = match line.split_once('{') {\n                    Some((head, after)) => {\n                        let (_, rest) =\n                            after.split_once(char::is_whitespace).unwrap_or((after, \"\"));\n                        (head, rest)\n                    }\n                    None => line.split_once(char::is_whitespace).unwrap_or((line, \"\")),\n                };"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_number_inside_a_label_is_not_the_sample_value"
+   ]
+  },
+  {
+   "id": "FS54",
+   "title": "a non-finite value is accepted as a counter",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())",
+     "new": "                    .parse::<f64>()\n                    .ok()"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_non_finite_metric_value_is_not_a_counter"
+   ]
+  },
+  {
+   "id": "FS55",
+   "title": "the histogram accepts a sum without its count",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                (Some(sum), Some(count)) => PrefillSeconds::Histogram { sum, count },\n                _ => {",
+     "new": "                (Some(sum), count) => PrefillSeconds::Histogram {\n                    sum,\n                    count: count.unwrap_or(0.0),\n                },\n                _ => {"
+    }
+   ],
+   "tests": [
+    "sparks_http::the_prefill_histogram_requires_both_sum_and_count"
    ]
   }
  ]
