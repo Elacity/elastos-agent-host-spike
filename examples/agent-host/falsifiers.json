@@ -1292,6 +1292,102 @@
    "tests": [
     "tests::a_skill_from_unobserved_content_is_refused"
    ]
+  },
+  {
+   "id": "FS64",
+   "title": "the scaffold does not keep the observed version, so the write path calls it stale",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    step.old = observed;\n    step.new = text.to_string();\n    step.seen_version = Some(row.version);",
+     "new": "    step.old = observed;\n    step.new = text.to_string();"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scaffold_applies_through_the_write_path"
+   ]
+  },
+  {
+   "id": "FS65",
+   "title": "the edit request sends the replaced text, so the scaffold text is never written",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                \"new\": edit.new,",
+     "new": "                \"new\": edit.old,"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scaffold_applies_through_the_write_path"
+   ]
+  },
+  {
+   "id": "FS66",
+   "title": "a quoted project digest passes without being compared with the observed tree",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    quoted == hex_digest(&digest)",
+     "new": "    quoted == quoted"
+    }
+   ],
+   "tests": [
+    "tests::a_scaffolded_project_opens_again_with_the_same_tree_digest"
+   ]
+  },
+  {
+   "id": "FS67",
+   "title": "the shared write path drops the grant check, so a stored scaffold writes without a grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if step.state != StepState::Dispatched\n            || step.grant.as_deref().is_none_or(str::is_empty)\n            || step.has_result",
+     "new": "        if step.state != StepState::Dispatched\n            || step.has_result"
+    }
+   ],
+   "tests": [
+    "tests::a_scaffold_without_a_grant_is_refused_and_records_nothing"
+   ]
+  },
+  {
+   "id": "FS68",
+   "title": "an empty old text binds a file that shows text, so a scaffold overwrites it",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if observed_text_at(&journal.events, &step.resource, row.version).as_deref() != Some(\"\")\n                || !events_show_whole(&journal.events, &step.resource, row.version)\n            {\n                return Err(Refusal::Empty);\n            }",
+     "new": "            if observed_text_at(&journal.events, &step.resource, row.version).is_none() {\n                return Err(Refusal::Empty);\n            }"
+    }
+   ],
+   "tests": [
+    "tests::an_empty_old_binds_only_the_first_write_of_an_empty_file"
+   ]
+  },
+  {
+   "id": "FS69",
+   "title": "the first write of an empty file is recorded as a window, so the project does not open whole",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            (1, String::new(), true)",
+     "new": "            (1, String::new(), false)"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scaffold_applies_through_the_write_path"
+   ]
   }
  ]
 }
