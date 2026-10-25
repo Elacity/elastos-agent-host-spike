@@ -15,3 +15,14 @@
   `two_clean_builds_in_different_paths_are_byte_identical` fails); README,
   ADOPTION and comments corrected (P12). `cargo test -p wasm-capsule-audit
   --locked` green; `capsule.wasm` unchanged (`6dd9af1a…`). No new rule.
+- wc-003a (task 007): the lab-name rule as a library, the new member crate
+  `wasm-capsule-tools` (`tools/`; `sha2` =0.10.9 and `libc` =0.2.189, the
+  Runtime's pins). It holds `read_bundle`, `canonical_closure`, an infallible
+  in-process `lab_name` and `name_bundle`; each closure file is opened once by
+  `open_regular` (`O_NOFOLLOW | O_NONBLOCK` from `libc`) and read from that
+  handle. `Cargo.lock` re-resolved offline (21 → 31 registry crates, all new
+  ones at the Runtime's versions), sha256 `039aee94…` → `7056522c…`. 16 named
+  tests in `tests/lab_name.rs`; 20 falsifiers proved by break → named test
+  fails → revert (falsify.py `lab` pending R1). Discovery re-checked: the name
+  is `lab-sha256:<hex>`, never a CID. Pinned vector re-computed with
+  `printf | shasum -a 256`; `capsule.wasm` unchanged (`6dd9af1a…`).

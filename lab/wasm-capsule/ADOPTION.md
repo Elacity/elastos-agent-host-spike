@@ -19,22 +19,45 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 - `audit/` — the `wasm-capsule-audit` crate, owned by the cx-wasm-audit lane and
   a member of this workspace (wc-000). It is the one static import-audit path
   (PRINCIPLES P10): wc-004's verifier will call `wasm_capsule_audit::audit`
-  through a path dependency and parse no imports itself. Today it is only the v1
-  signature (`audit` is `unimplemented!`); cwa-001 implements it.
+  through a path dependency and parse no imports itself. cwa-001 implemented
+  its API v1 (`audit/INTERFACE.md`).
+- `tools/` — the `wasm-capsule-tools` crate (wc-003a), a library with no
+  command and no writes. `tools/src/lab_name.rs` is the one rule that names a
+  lab bundle, through one entry point, `name_bundle(dir)`. It has a closure
+  check that fails closed: exactly `capsule.json` and `capsule.wasm`, regular
+  files only, and an extra or missing entry, a symlink, a FIFO, directory or
+  device, a directory that cannot be listed and a file that cannot be opened or
+  read are each refused with the path and their own reason. Each file gets one
+  no-follow open that checks, then reads, the same handle (`open_regular`, with
+  `O_NOFOLLOW | O_NONBLOCK` from `libc`, the Runtime's own pattern in
+  `elastos/crates/elastos-runtime/src/provider/bridge.rs:118-124`). Then a
+  length-framed canonical byte stream over sorted paths and exact bytes, an
+  in-process `sha2` hash, and a pinned test vector. Take the closure check and
+  the refusals; replace the hash with the Runtime's CID rule (see the wc-003
+  discovery below).
 
 ## Requirements (what the claim rests on)
 
 - rustc **1.91.0** with the `wasm32-unknown-unknown` target (pinned in
   `rust-toolchain.toml`). The receipt records the exact version.
-- `bash`, and a sha256 tool: `sha256sum` or `shasum -a 256` (both present on the
-  Mac). `tools/build` and the tests prefer `sha256sum`, then `shasum`.
-- The cargo cache: `capsule` has no dependencies; keep it that way (P18). The
-  `audit` member pins `wasmparser` 0.258.0 and the dev-only `wat` 1.258.0, and
-  the committed `Cargo.lock` holds them and their transitive dependencies,
-  resolved offline from this Mac's cargo cache. Cargo resolves the whole
-  workspace, so every build, `tools/build` included, needs those crates in the
-  local cargo cache. On an empty cache the first build needs the network. Their
+- `bash`, and a sha256 tool for `tools/build`'s receipt: `sha256sum` or
+  `shasum -a 256` (both present on the Mac). `tools/build` and the tests that
+  check its receipt prefer `sha256sum`, then `shasum`. The lab name needs no
+  system tool: `tools/src/lab_name.rs` hashes in-process with `sha2`.
+- The cargo cache: `capsule` has no `[dependencies]`; keep it that way (P18).
+  Its tests dev-depend on the `tools` member, which pins `sha2` 0.10.9 and
+  `libc` 0.2.189 exactly, the versions the Runtime locks (`elastos/Cargo.lock`).
+  The `audit` member pins `wasmparser` 0.258.0 and the dev-only `wat` 1.258.0.
+  The committed `Cargo.lock` holds all of them and their transitive
+  dependencies, 31 registry crates, resolved offline from this Mac's cargo
+  cache. The 10 that `sha2` and `libc` add carry the exact versions and
+  checksums `elastos/Cargo.lock` has. Cargo resolves the whole workspace, so
+  every build, `tools/build` included, needs those crates in the local cargo
+  cache. On an empty cache the first build needs the network. The audit's
   versions and features are the cx-wasm-audit lane's to change.
+- Unix for the lab name: `open_regular` takes `O_NOFOLLOW`, `O_NONBLOCK` and
+  `ELOOP` from `libc` and uses `std::os::unix`, so the tools crate builds only
+  on Unix. It is tested on this Mac only.
 
 ## Claim scope — do not overstate
 
@@ -42,11 +65,83 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   Cross-machine reproduction is **unverified**: symbol hashes depend on the
   build machine. Do not call a cross-machine match proven without a test.
 - The capsule is a **core** module, not a Component. It declares no
-  `elastos:bus` world and uses no `wit-bindgen`. Do not call its name a CID
-  unless the Runtime's content-identity rule is reproduced exactly lab-side
-  (wc-003 does the hash-naming; wc-004 the signature).
+  `elastos:bus` world and uses no `wit-bindgen`.
+- wc-003a did not reproduce the Runtime's content-identity rule (the discovery
+  below), so a bundle's name is a **lab name**, `lab-sha256:<hex>`. Never call
+  it a CID, and never use it as a package identity. wc-004 is to sign it.
+- The no-follow open covers each closure file's own path. The bundle directory
+  given to `name_bundle` is used as given (a link in its own path is followed),
+  and a swap of that directory by another process while it is read is not
+  covered: that needs directory-relative opens (`openat`, as
+  `capsules/ipfs-provider/src/directory_hash.rs` does), which this library does
+  not do.
 - `digest` is a placeholder pure function to anchor identity and portability
   work. It is not a product capability.
+
+## wc-003 discovery: how the Runtime names an artifact
+
+A proposal for Anders, not a contract. First written for wc-003 (task 003).
+Every fact below was re-checked, read-only, for wc-003a on base `a8cfd6494`
+(2026-10-26), and each still holds at the cited lines.
+
+**What the docs say.** `docs/CAPSULE_MODEL.md:53` (the Artifact row): an
+artifact is an "Immutable manifest-and-payload closure, normally named by
+content ID". `docs/CAPSULE_MODEL.md:67-71`: the "canonical package identity is
+the CID of the complete manifest-and-payload closure", and catalog entries,
+availability receipts and installed inventories "must not become competing
+package identities". `docs/CONTENT_CAPSULE_DISTRIBUTION.md:49-52` adds that
+payload hashes in the manifest "do not create a second package identity", and
+`:94-96` that the hashed closure does not contain its own CID.
+`docs/GLOSSARY.md:318-320` defines a CID only as "a content-addressed identifier
+(hash of the content)". None of them gives a byte canonicalization, a codec or a
+hash profile.
+
+**What the code does (read only).** The Runtime does not compute the CID itself.
+`elastos/crates/elastos-runtime/src/provider/registry.rs:1492-1507`
+(`hash_local_ipfs_directory`) sends the staged closure to the IPFS provider as
+`runtime_hash_staged_directory`, and `:150-165` accepts only "a CIDv1 dag-pb
+sha2-256 in base32" root (`bafybei…`, 59 characters). The provider,
+`capsules/ipfs-provider/src/directory_hash.rs:19-43` (`ADD_OPTIONS`), sends the
+files to Kubo's `/api/v0/add` (`:820-829`) under a pinned UnixFS import
+profile: CIDv1, sha2-256, raw leaves, 256 KiB chunks, a balanced DAG with at
+most 174 links per file node, a wrapping directory, and no mode or mtime.
+`:526-546` refuses any Kubo but v0.40.1 and checks the two HAMT settings that
+have no flag, and `:275-282` requires an `_elastos_object.json` index beside
+`capsule.json` in every closure.
+
+**Reproducible lab-side without touching `elastos/`?** No. The exact rule is
+Kubo v0.40.1's UnixFS importer under that profile. Reproducing it in lab code
+means porting that importer (the chunker, the balanced DAG layout, dag-pb and
+UnixFS encoding, the HAMT thresholds, multihash and base32 CIDs), which is the
+porting the task rules out. Running Kubo from a lab test would put an IPFS
+daemon and its repository into the lane. And the lab closure has no
+`_elastos_object.json`, so it is not a Runtime closure anyway.
+
+**Decision.** The lab names a bundle `lab-sha256:<hex>` over its own documented
+closure (README.md, "wc-003a"). This is a proposal to Anders, not a contract. It
+is labelled a lab name in code and docs, never a CID, and it is never a package
+identity.
+
+No lab tool sits in any admission or launch path: no tracked file outside
+`lab/` refers to `lab-sha256` or to the lab tools. Checked on 2026-10-26 with
+`git grep -n -I -F -e <pattern> -- ':!lab/'` for each of `lab-sha256`,
+`wasm-capsule-tools`, `wasm_capsule_tools`, `lab_name`, `name_bundle`,
+`lab-closure`, `lab/wasm-capsule` and `tools/bundle`. The one hit is
+`elastos/crates/elastos-server/src/setup.rs:4919`, where `tools/bundle` is a
+path in a temp data directory in the Setup test
+`replacement_suffix_is_reserved_for_scratch`. It is unrelated to the lab.
+
+**Proposal.**
+
+1. If the Runtime adopts this rule, keep the closure check and its fail-closed
+   refusals, and swap the hash: name the same closure through the IPFS
+   provider's directory hash, so there is one package identity (P10, P13).
+   wc-004's signature would then cover that CID, not a lab name.
+2. Until then, keep the `lab-sha256:` label, so a lab name can never pass as a
+   CID.
+3. For a verifier to recompute the Runtime's CID without Kubo, the import
+   profile above (and the required files) would need a byte-level spec in
+   `docs/`. Today it lives only in code.
 
 ## Not yet wired
 
