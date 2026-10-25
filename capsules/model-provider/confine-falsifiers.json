@@ -1,0 +1,117 @@
+{
+  "about": "Model-provider confinement falsifiers (cc-model-confine lane, task 006). Every entry edits capsules/model-provider/confine.sb, which sandbox-exec reads at each launch, so a mutated profile needs no rebuild. F-cc1a turns (deny default) into (allow default) and F-cc1b widens the journal read/write grant from STORAGE_ROOT to STORAGE_PARENT; model_outside_write_denied then fails because the redirected journal write succeeds. Each F-cc1-rm entry removes one allow rule and model_provider_ops_under_profile fails. The (deny network*) rule is held by the shared contract check in the wallet crate, which a provider-command list cannot run. The confined tests need /usr/bin/sandbox-exec and skip without it, so this list is a Mac gate. Files are relative to examples/agent-host.",
+  "falsifiers": [
+    {
+      "id": "F-cc1a",
+      "title": "the profile allows every operation by default",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(deny default)",
+          "new": "(allow default)"
+        }
+      ],
+      "tests": [
+        "model_outside_write_denied"
+      ]
+    },
+    {
+      "id": "F-cc1b",
+      "title": "the journal read/write grant covers STORAGE_PARENT instead of STORAGE_ROOT",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(subpath (param \"STORAGE_ROOT\"))",
+          "new": "(subpath (param \"STORAGE_PARENT\"))"
+        }
+      ],
+      "tests": [
+        "model_outside_write_denied"
+      ]
+    },
+    {
+      "id": "F-cc1-rm-exec",
+      "title": "the profile no longer lets the provider binary execute",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "model_provider_ops_under_profile"
+      ]
+    },
+    {
+      "id": "F-cc1-rm-rootdir",
+      "title": "the profile no longer lets startup read the root directory",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(allow file-read-data (literal \"/\"))",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "model_provider_ops_under_profile"
+      ]
+    },
+    {
+      "id": "F-cc1-rm-sysctl",
+      "title": "the profile no longer lets startup read kernel facts",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(allow sysctl-read)",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "model_provider_ops_under_profile"
+      ]
+    },
+    {
+      "id": "F-cc1-rm-parent",
+      "title": "the profile no longer lets init inspect STORAGE_PARENT",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "model_provider_ops_under_profile"
+      ]
+    },
+    {
+      "id": "F-cc1-rm-storage",
+      "title": "the profile no longer grants read/write under STORAGE_ROOT",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "model_provider_ops_under_profile"
+      ]
+    }
+  ]
+}
