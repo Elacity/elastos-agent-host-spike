@@ -190,6 +190,17 @@ fn audit_refusals_follow_the_documented_order() {
     let refusal = audit(&invalid, &[]).unwrap_err();
     assert_eq!(refusal, Refusal::Malformed);
     assert_eq!(refusal.to_string(), "malformed module");
+
+    // (d) The core header check precedes the custom-section check.
+    let component = wat::parse_str(r#"(component (@custom "x" "\00asm"))"#).unwrap();
+    Validator::new().validate_all(&component).unwrap();
+    assert_eq!(
+        audit_component(&component, &[]),
+        Err(Refusal::CodeInCustomSection)
+    );
+    let refusal = audit(&component, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::Malformed);
+    assert_eq!(refusal.to_string(), "malformed module");
 }
 
 #[test]

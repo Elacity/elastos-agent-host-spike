@@ -1,4 +1,4 @@
-use wasm_capsule_audit::{audit_component, Refusal};
+use wasm_capsule_audit::{audit, audit_component, Refusal};
 use wasmparser::{Parser, Payload, Validator};
 
 fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
@@ -176,6 +176,14 @@ fn component_refusals_follow_the_documented_order() {
     );
     assert!(Validator::new().validate_all(&invalid).is_err());
     let refusal = audit_component(&invalid, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::NotAComponent);
+    assert_eq!(refusal.to_string(), "not a component");
+
+    // (d) The Component encoding check precedes the custom-section check.
+    let module = wat::parse_str(r#"(module (@custom "x" "\00asm"))"#).unwrap();
+    Validator::new().validate_all(&module).unwrap();
+    assert_eq!(audit(&module, &[]), Err(Refusal::CodeInCustomSection));
+    let refusal = audit_component(&module, &[]).unwrap_err();
     assert_eq!(refusal, Refusal::NotAComponent);
     assert_eq!(refusal.to_string(), "not a component");
 }
