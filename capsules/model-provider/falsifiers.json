@@ -175,6 +175,118 @@
       "tests": [
         "provider spec uses locked manifest"
       ]
+    },
+    {
+      "id": "PV12",
+      "title": "modifier-only arguments select every falsifier",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if mode == \"run\" and not filters and not from_selected and (keep_backups or with_repo):\n        refuse(\"--keep-backups and --with-repo need a mode, --from PATH, or an id prefix\")",
+          "new": "    if False:\n        refuse(\"--keep-backups and --with-repo need a mode, --from PATH, or an id prefix\")"
+        }
+      ],
+      "tests": [
+        "modifier only invocation is refused"
+      ]
+    },
+    {
+      "id": "PV13",
+      "title": "--list stops validation of the remaining arguments",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token == \"--list\":\n            want_list = True",
+          "new": "        elif token == \"--list\":\n            want_list = True\n            break"
+        }
+      ],
+      "tests": [
+        "unknown option is refused"
+      ]
+    },
+    {
+      "id": "PV14",
+      "title": "the provider test command drops only --manifest-path",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_MANIFEST)]",
+          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or PROVIDER_MANIFEST)]"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV15",
+      "title": "--self-test-case accepts a missing name",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv) or argv[at + 1].startswith(\"-\"):",
+          "new": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv):\n                case_name = \"\"\n                break\n            if argv[at + 1].startswith(\"-\"):"
+        }
+      ],
+      "tests": [
+        "self-test case without a name is refused"
+      ]
+    },
+    {
+      "id": "PV16",
+      "title": "--self-test-case takes the next option for its name",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv) or argv[at + 1].startswith(\"-\"):",
+          "new": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv):"
+        }
+      ],
+      "tests": [
+        "self-test case without a name is refused"
+      ]
+    },
+    {
+      "id": "PV17",
+      "title": "the provider manifest precedes its flag instead of following it",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_MANIFEST)]",
+          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or PROVIDER_MANIFEST), \"--manifest-path\"]"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV18",
+      "title": "--from with the default path loses its explicit selection",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "            from_selected = True",
+          "new": "            from_selected = path != DATA"
+        }
+      ],
+      "tests": [
+        "modifiers preserve explicit selection"
+      ]
     }
   ]
 }

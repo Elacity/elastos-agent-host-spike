@@ -119,6 +119,7 @@ def parse_argv(argv):
     its own reason, so a typo can never select work.
     """
     path = DATA
+    from_selected = False
     filters = []
     keep_backups = False
     with_repo = False
@@ -134,6 +135,7 @@ def parse_argv(argv):
                 refuse("--from needs a path, not an option")
             at += 1
             path = pathlib.Path(argv[at])
+            from_selected = True
         elif token.startswith("--from="):
             refuse("--from=PATH is not supported; use --from PATH")
         elif token == "--list":
@@ -166,6 +168,8 @@ def parse_argv(argv):
         mode = "self-test"
     else:
         mode = "run"
+    if mode == "run" and not filters and not from_selected and (keep_backups or with_repo):
+        refuse("--keep-backups and --with-repo need a mode, --from PATH, or an id prefix")
     return ParsedArgv(path, mode, case_name, filters, keep_backups, with_repo)
 
 
@@ -976,6 +980,8 @@ def unknown_option_is_refused():
         print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
         if code != 2 or option not in reason:
             ok = False
+        if reason != f"usage: unknown option {option}\n":
+            ok = False
     return ok
 
 
@@ -987,6 +993,8 @@ def equals_form_is_refused():
         print(f"self-test: {argv[0]} -> exit {code}: {reason.strip()}")
         if code != 2 or "use --from PATH" not in reason:
             ok = False
+        if reason != "usage: --from=PATH is not supported; use --from PATH\n":
+            ok = False
     return ok
 
 
@@ -997,6 +1005,67 @@ def from_without_a_path_is_refused():
         code, reason = refusal(argv)
         print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
         if code != 2 or "--from needs a path" not in reason:
+            ok = False
+        if reason != "usage: --from needs a path, not an option\n":
+            ok = False
+    return ok
+
+
+def modifier_only_invocation_is_refused():
+    """Modifiers need an explicit mode, data file, or id prefix."""
+    ok = True
+    for argv in (["--with-repo"], ["--keep-backups"],
+                 ["--with-repo", "--keep-backups"],
+                 ["--keep-backups", "--with-repo"],
+                 ["--with-repo", "--with-repo"],
+                 ["--keep-backups", "--keep-backups"]):
+        code, reason = refusal(argv)
+        print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
+        if (code != 2 or reason != "usage: --keep-backups and --with-repo need a mode, "
+                "--from PATH, or an id prefix\n"):
+            ok = False
+    return ok
+
+
+def modifiers_preserve_explicit_selection():
+    """Each modifier remains available beside an explicit selection."""
+    ok = True
+    for modifiers in (["--with-repo"], ["--keep-backups"],
+                      ["--keep-backups", "--with-repo"]):
+        for selection, mode, name, filters in (
+            (["--from", str(DATA)], "run", None, []),
+            (["FS01"], "run", None, ["FS01"]),
+            (["--list"], "list", None, []),
+            (["--self-test-cases"], "self-test-cases", None, []),
+            (["--self-test"], "self-test", None, []),
+            (["--self-test-case", "from option selects path"],
+             "self-test-case", "from option selects path", []),
+        ):
+            for argv in (modifiers + selection, selection + modifiers):
+                try:
+                    parsed = parse_argv(argv)
+                except SystemExit as stop:
+                    print(f"self-test: {argv} -> unexpected exit {stop.code}")
+                    ok = False
+                    continue
+                if parsed != ParsedArgv(DATA, mode, name, filters,
+                                        "--keep-backups" in modifiers,
+                                        "--with-repo" in modifiers):
+                    print(f"self-test: {argv} -> {parsed}")
+                    ok = False
+    return ok
+
+
+def self_test_case_without_a_name_is_refused():
+    """A named case requires a value; another option cannot supply it."""
+    ok = True
+    for argv in (["--self-test-case"], ["--self-test-case", "--typo"],
+                 ["--self-test-case", "--list"],
+                 ["--list", "--self-test-case"],
+                 ["--list", "--self-test-case", "--self-test"]):
+        code, reason = refusal(argv)
+        print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
+        if (code != 2 or reason != "usage: --self-test-case needs a case name, not an option\n"):
             ok = False
     return ok
 
@@ -1017,19 +1086,35 @@ def argv_refusal_precedes_work():
 
     globals()["recover_backups"] = stub_recover
     globals()["load"] = stub_load
-    code = None
-    message = io.StringIO()
     try:
-        with contextlib.redirect_stderr(message):
-            try:
-                main(["--typo"])
-            except SystemExit as stop:
-                code = stop.code
+        for argv, reason in (
+            (["--typo"], "unknown option --typo"),
+            (["--list", "--typo"], "unknown option --typo"),
+            (["--from=path"], "--from=PATH is not supported; use --from PATH"),
+            (["--from"], "--from needs a path, not an option"),
+            (["--from", "--list"], "--from needs a path, not an option"),
+            (["--self-test-case"], "--self-test-case needs a case name, not an option"),
+            (["--self-test-case", "--list"], "--self-test-case needs a case name, not an option"),
+            (["--with-repo"], "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
+            (["--keep-backups"], "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
+            (["--with-repo", "--keep-backups"],
+             "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
+        ):
+            touched.clear()
+            code = None
+            message = io.StringIO()
+            with contextlib.redirect_stderr(message):
+                try:
+                    main(argv)
+                except SystemExit as stop:
+                    code = stop.code
+            print(f"self-test: main {' '.join(argv)} -> exit {code}, touched={touched}")
+            if code != 2 or touched:
+                ok = False
+            if message.getvalue() != f"usage: {reason}\n":
+                ok = False
     finally:
         globals()["recover_backups"], globals()["load"] = saved
-    print(f"self-test: main --typo -> exit {code}, touched={touched}")
-    if code != 2 or touched:
-        ok = False
     return ok
 
 
@@ -1053,8 +1138,16 @@ def provider_spec_uses_locked_manifest():
         if (argv[:2] != ["cargo", "test"] or "--locked" not in argv
                 or manifest not in argv or "--no-run" not in argv):
             ok = False
+        if ("--manifest-path" not in argv
+                or argv[argv.index("--manifest-path") + 1:argv.index("--manifest-path") + 2]
+                != [manifest]):
+            ok = False
     if (one[:2] != ["cargo", "test"] or "--locked" not in one
             or manifest not in one or "--" not in one or "--no-run" in one):
+        ok = False
+    if ("--manifest-path" not in one
+            or one[one.index("--manifest-path") + 1:one.index("--manifest-path") + 2]
+            != [manifest]):
         ok = False
     return ok
 
@@ -1102,6 +1195,9 @@ SELF_TEST_CASES = {
     "unknown option is refused": unknown_option_is_refused,
     "equals form is refused": equals_form_is_refused,
     "from without a path is refused": from_without_a_path_is_refused,
+    "modifier only invocation is refused": modifier_only_invocation_is_refused,
+    "modifiers preserve explicit selection": modifiers_preserve_explicit_selection,
+    "self-test case without a name is refused": self_test_case_without_a_name_is_refused,
     "argv refusal precedes work": argv_refusal_precedes_work,
     "provider spec uses locked manifest": provider_spec_uses_locked_manifest,
     "list mode displays": list_mode_displays,
