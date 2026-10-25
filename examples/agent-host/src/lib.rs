@@ -1222,23 +1222,35 @@ fn admit_skill(journal: &mut Journal, text: &str) -> bool {
 }
 
 /// Admit a skill only from text the journal observed whole at `version`, and
-/// only when that text's SHA-256 equals `cid`. A read that never landed, a
-/// windowed or other-version read, and a wrong CID leave the journal
-/// unchanged. The budget, the host-path rule, and the head-first rule stay in
+/// only when that text's SHA-256 equals `cid`. Each refusal names its cause:
+/// `not observed`, `stale`, `not whole`, `wrong cid`, or `not admissible`.
+/// The budget, the host-path rule, and the head-first rule stay in
 /// `admit_skill`: this function adds the named-by-hash, from-a-granted-read
 /// gate and no second copy of those rules.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn admit_skill_from_read(journal: &mut Journal, resource: &str, version: u64, cid: &str) -> bool {
+fn admit_skill_from_read(
+    journal: &mut Journal,
+    resource: &str,
+    version: u64,
+    cid: &str,
+) -> Result<(), &'static str> {
     let Some(text) = current_observation(&journal.events, resource)
         .filter(|row| row.version == version)
         .and_then(|_| current_observed_text(&journal.events, resource))
     else {
-        return false;
+        return Err(match current_observation(&journal.events, resource) {
+            None => "not observed",
+            Some(row) if row.version != version => "stale",
+            Some(_) => "not whole",
+        });
     };
     if hex_digest(&sha256(text.as_bytes())) != cid {
-        return false;
+        return Err("wrong cid");
     }
-    admit_skill(journal, &text)
+    if !admit_skill(journal, &text) {
+        return Err("not admissible");
+    }
+    Ok(())
 }
 
 /// The nodes compaction keeps after one summary, in order. Nothing when the
@@ -4438,7 +4450,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let skill_file = "localhost://Users/self/Projects/demo/SKILL.md";
         let skill_cid = hex_digest(&sha256(skill.as_bytes()));
         if !observe(&mut read_skill, skill_file, 1, skill)
-            || !admit_skill_from_read(&mut read_skill, skill_file, 1, &skill_cid)
+            || admit_skill_from_read(&mut read_skill, skill_file, 1, &skill_cid).is_err()
             || read_skill.events.last().map(|node| node.source.clone()) != Some(NodeSource::Skill)
             || admit_skill_from_read(
                 &mut read_skill,
@@ -4446,7 +4458,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 1,
                 &hex_digest(&sha256(b"other")),
             )
-            || admit_skill_from_read(&mut read_skill, skill_file, 2, &skill_cid)
+            .is_ok()
+            || admit_skill_from_read(&mut read_skill, skill_file, 2, &skill_cid).is_ok()
             || read_skill.events.len() != journal.events.len() + 2
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -13268,7 +13281,10 @@ mod tests {
         let text = "Prefer the Runtime grant.";
         assert!(observe(&mut journal, resource, 1, text));
         let cid = hex_digest(&sha256(text.as_bytes()));
-        assert!(admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Ok(())
+        );
         let last = journal.events.last().unwrap();
         assert_eq!(last.text, text);
         assert_eq!(last.role, Role::User);
@@ -13284,12 +13300,21 @@ mod tests {
         assert!(observe(&mut journal, resource, 1, text));
         let before = journal.clone();
         let other = hex_digest(&sha256(b"Another skill."));
-        assert!(!admit_skill_from_read(&mut journal, resource, 1, &other));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &other),
+            Err("wrong cid")
+        );
         assert_eq!(journal, before);
-        assert!(!admit_skill_from_read(&mut journal, resource, 1, ""));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, ""),
+            Err("wrong cid")
+        );
         assert_eq!(journal, before);
         let padded = hex_digest(&sha256(format!("{text} ").as_bytes()));
-        assert!(!admit_skill_from_read(&mut journal, resource, 1, &padded));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &padded),
+            Err("wrong cid")
+        );
         assert_eq!(journal, before);
     }
 
@@ -13302,20 +13327,46 @@ mod tests {
         admit_user(&mut journal, text);
         let before = journal.clone();
         let resource = "localhost://Users/self/Projects/demo/SKILL.md";
-        assert!(!admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Err("not observed")
+        );
         assert_eq!(journal, before);
         // A read of another version is not a read of this one.
         assert!(observe(&mut journal, resource, 2, text));
         let seen = journal.clone();
-        assert!(!admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Err("stale")
+        );
         assert_eq!(journal, seen);
         // A host path cannot be observed, so it cannot supply a skill.
-        assert!(!admit_skill_from_read(
+        assert_eq!(
+            admit_skill_from_read(&mut journal, "/tmp/SKILL.md", 1, &cid),
+            Err("not observed")
+        );
+        assert_eq!(journal, seen);
+        // A windowed read does not show the whole text, so it cannot.
+        let windowed = "localhost://Users/self/Projects/demo/window.md";
+        assert!(observe_read(
             &mut journal,
-            "/tmp/SKILL.md",
+            windowed,
             1,
-            &cid
+            "rn-1",
+            Some(2),
+            true,
+            "beta\ngam"
         ));
+        let seen = journal.clone();
+        assert_eq!(
+            admit_skill_from_read(
+                &mut journal,
+                windowed,
+                1,
+                &hex_digest(&sha256(b"beta\ngam"))
+            ),
+            Err("not whole")
+        );
         assert_eq!(journal, seen);
     }
 
@@ -13327,13 +13378,19 @@ mod tests {
         assert!(observe(&mut journal, resource, 1, &long));
         let before = journal.clone();
         let cid = hex_digest(&sha256(long.as_bytes()));
-        assert!(!admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Err("not admissible")
+        );
         assert_eq!(journal, before);
         let host = "/tmp";
         assert!(observe(&mut journal, resource, 2, host));
         let before = journal.clone();
         let cid = hex_digest(&sha256(host.as_bytes()));
-        assert!(!admit_skill_from_read(&mut journal, resource, 2, &cid));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 2, &cid),
+            Err("not admissible")
+        );
         assert_eq!(journal, before);
     }
 
