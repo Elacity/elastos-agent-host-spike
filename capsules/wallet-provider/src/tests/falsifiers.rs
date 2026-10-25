@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The committed list records task 010's three storage-root refusals.
-const EXPECTED_FALSIFIERS: usize = 3;
+/// The committed list records the three storage-root refusals and the two
+/// profile falsifiers.
+const EXPECTED_FALSIFIERS: usize = 5;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -63,6 +64,11 @@ fn declares_test(source: &str, name: &str) -> bool {
         }
     }
     false
+}
+
+/// The integration test source that bare test names resolve against.
+fn integration_test_source() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs")
 }
 
 fn harness_tests() -> HashSet<String> {
@@ -173,15 +179,27 @@ fn assert_falsifiers_list_is_honest(doc: &Value) {
                 .as_str()
                 .unwrap_or_else(|| panic!("{id}: every test name must be a string"));
             assert!(!name.is_empty(), "{id}: test names must not be empty");
-            let (module, function) = name.rsplit_once("::").unwrap_or_else(|| {
-                panic!("{id}: {name} must be a fully qualified test, such as tests::<module>::<fn>")
-            });
-            let source_path = test_module_source(module).unwrap_or_else(|| {
-                panic!("{id}: {name} must name a module of this crate, such as tests::<module>")
-            });
+            // A unit test lives under `src/tests/` and must be registered in
+            // this binary. An integration test lives in `tests/confine.rs`,
+            // a separate binary that cannot appear in this one's `--list`.
+            let (source_path, function, unit_test) = if name.starts_with("tests::") {
+                let (module, function) = name.rsplit_once("::").unwrap_or_else(|| {
+                    panic!("{id}: {name} must name a function, such as tests::<module>::<fn>")
+                });
+                let source_path = test_module_source(module).unwrap_or_else(|| {
+                    panic!("{id}: {name} must name a module of this crate, such as tests::<module>")
+                });
+                (source_path, function, true)
+            } else if name.contains("::") {
+                panic!(
+                    "{id}: {name} must be a unit test under tests:: or a bare integration test name"
+                );
+            } else {
+                (integration_test_source(), name, false)
+            };
             let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
                 panic!(
-                    "{id}: test module {} must be readable: {err}",
+                    "{id}: test source {} must be readable: {err}",
                     source_path.display()
                 )
             });
@@ -190,19 +208,25 @@ fn assert_falsifiers_list_is_honest(doc: &Value) {
                 "{id}: {name} must be a #[test] function in {}",
                 source_path.display()
             );
-            assert!(
-                registered_tests.contains(name),
-                "{id}: {name} must be registered in the test executable"
-            );
+            if unit_test {
+                assert!(
+                    registered_tests.contains(name),
+                    "{id}: {name} must be registered in the test executable"
+                );
+            }
         }
     }
 }
 
 /// The committed falsifier list describes the current source and test harness.
 ///
+/// Unit-test names must be registered in this binary; bare integration-test
+/// names must be `#[test]` functions in `tests/confine.rs`, a separate binary.
+///
 /// Falsifier: replace one `old` snippet with text that is not in the source,
 /// delete an entry, empty an `edits`/`tests` array, drop a test name's module
-/// prefix, remove its module declaration, or disable it with `#[cfg(any())]`;
+/// prefix, remove its module declaration, disable it with `#[cfg(any())]`, or
+/// name a bare function that `tests/confine.rs` does not declare as a test;
 /// this test fails on each.
 #[test]
 fn falsifiers_list_is_honest() {
@@ -225,4 +249,26 @@ fn falsifiers_list_rejects_a_test_removed_from_harness() {
     doc["falsifiers"][0]["tests"][0] =
         Value::String("tests::falsifiers::excluded_from_harness".into());
     assert_falsifiers_list_is_honest(&doc);
+}
+
+/// A bare integration name must be a `#[test]` function in `tests/confine.rs`.
+///
+/// Regression: an unknown bare name, and `profile_forms`, which is a helper
+/// there but not a test, must both be refused. Bypassing the integration
+/// `declares_test` check makes this test fail because nothing panics.
+#[test]
+fn falsifiers_list_rejects_invalid_integration_test() {
+    let manifest = integration_test_source();
+    for selector in ["not_a_confine_test", "profile_forms"] {
+        let mut doc = read_falsifiers_list();
+        assert_eq!(doc["falsifiers"][3]["id"], "WP04");
+        doc["falsifiers"][3]["tests"][0] = Value::String(selector.into());
+        let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+            .expect_err("the list must refuse a bare name that is not a confine #[test]");
+        let expected = format!(
+            "WP04: {selector} must be a #[test] function in {}",
+            manifest.display()
+        );
+        assert_eq!(refusal.downcast_ref::<String>(), Some(&expected));
+    }
 }
