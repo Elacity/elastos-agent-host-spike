@@ -1,4 +1,5 @@
 {
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, and MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -286,6 +287,255 @@
       ],
       "tests": [
         "modifiers preserve explicit selection"
+      ]
+    },
+    {
+      "id": "PV19",
+      "title": "the missing-file refusal is bypassed, so the read reason replaces it",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if not path.is_file():\n            load_refuse(path, \"the data file does not exist\")",
+          "new": "        if False:\n            load_refuse(path, \"the data file does not exist\")"
+        }
+      ],
+      "tests": [
+        "a missing data file is refused"
+      ]
+    },
+    {
+      "id": "PV20",
+      "title": "the non-JSON refusal is bypassed, so a JSON error escapes",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    try:\n        doc = json.loads(text)\n    except json.JSONDecodeError:\n        load_refuse(path, \"the data file is not JSON\")",
+          "new": "    try:\n        doc = json.loads(text)\n    except json.JSONDecodeError:\n        pass"
+        }
+      ],
+      "tests": [
+        "a non-json data file is refused"
+      ]
+    },
+    {
+      "id": "PV21",
+      "title": "a non-object document skips the object check",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if not isinstance(doc, dict):\n        load_refuse(path, \"the document is not an object\")",
+          "new": "    if False:\n        load_refuse(path, \"the document is not an object\")"
+        }
+      ],
+      "tests": [
+        "a data document must be an object"
+      ]
+    },
+    {
+      "id": "PV22",
+      "title": "a document without falsifiers skips the key check",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if \"falsifiers\" not in doc:\n        load_refuse(path, \"the document has no falsifiers list\")",
+          "new": "    if False:\n        load_refuse(path, \"the document has no falsifiers list\")"
+        }
+      ],
+      "tests": [
+        "a data document needs a falsifiers list"
+      ]
+    },
+    {
+      "id": "PV23",
+      "title": "a non-list falsifiers value skips the list check",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if not isinstance(entries, list):\n        load_refuse(path, \"falsifiers is not a list\")",
+          "new": "    if False:\n        load_refuse(path, \"falsifiers is not a list\")"
+        }
+      ],
+      "tests": [
+        "falsifiers must be a list"
+      ]
+    },
+    {
+      "id": "PV24",
+      "title": "a duplicate id skips the duplicate check",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if len(ids) != len(set(ids)):\n        load_refuse(path, \"an id is used twice\")",
+          "new": "    if False:\n        load_refuse(path, \"an id is used twice\")"
+        }
+      ],
+      "tests": [
+        "a duplicate id is refused"
+      ]
+    },
+    {
+      "id": "PV25",
+      "title": "an unknown command skips the command check",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if entry[\"command\"] not in COMMANDS:\n            load_refuse(path, f\"{entry['id']}: unknown command {entry['command']!r}\")",
+          "new": "        if False:\n            load_refuse(path, f\"{entry['id']}: unknown command {entry['command']!r}\")"
+        }
+      ],
+      "tests": [
+        "an unknown command is refused"
+      ]
+    },
+    {
+      "id": "PV26",
+      "title": "an unknown expect skips the expect check",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if entry[\"expect\"] not in (\"caught\", \"compile_error\", \"survives\"):\n            load_refuse(path, f\"{entry['id']}: unknown expect {entry['expect']!r}\")",
+          "new": "        if False:\n            load_refuse(path, f\"{entry['id']}: unknown expect {entry['expect']!r}\")"
+        }
+      ],
+      "tests": [
+        "an unknown expect is refused"
+      ]
+    },
+    {
+      "id": "PV27",
+      "title": "a data refusal exits 1 instead of 2",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    print(f\"{path}: {reason}\", file=sys.stderr)\n    raise SystemExit(CASE_USAGE)",
+          "new": "    print(f\"{path}: {reason}\", file=sys.stderr)\n    raise SystemExit(1)"
+        }
+      ],
+      "tests": [
+        "a missing data file is refused",
+        "an unreadable data file is refused",
+        "an unreadable data path is refused",
+        "an invalid utf8 data file is refused",
+        "a duplicate id is refused",
+        "an unknown command is refused",
+        "an unknown expect is refused",
+        "a survivor needs its named test to run"
+      ]
+    },
+    {
+      "id": "PV28",
+      "title": "the read-error refusal is bypassed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    except OSError:\n        load_refuse(path, \"the data file cannot be read\")",
+          "new": "    except OSError:\n        raise"
+        }
+      ],
+      "tests": [
+        "an unreadable data file is refused",
+        "an unreadable data path is refused"
+      ]
+    },
+    {
+      "id": "PV29",
+      "title": "the invalid-UTF-8 refusal is bypassed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    except UnicodeDecodeError:\n        load_refuse(path, \"the data file is not JSON\")",
+          "new": "    except UnicodeDecodeError:\n        raise"
+        }
+      ],
+      "tests": [
+        "an invalid utf8 data file is refused"
+      ]
+    },
+    {
+      "id": "PV30",
+      "title": "startup recovery searches every repository lane",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    backups = set(HERE.rglob(\"*\" + BACKUP_SUFFIX))",
+          "new": "    backups = set(REPO.rglob(\"*\" + BACKUP_SUFFIX))"
+        }
+      ],
+      "tests": [
+        "another lane's backup is not recovered"
+      ]
+    },
+    {
+      "id": "PV31",
+      "title": "startup recovery skips MP01's exact provider target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))",
+          "new": "    pass  # leave MP01's backup behind"
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV32",
+      "title": "startup recovery takes backups from other model-provider files",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))",
+          "new": "    backups.update(provider_target.parent.glob(\"*\" + BACKUP_SUFFIX))"
+        }
+      ],
+      "tests": [
+        "another lane's backup is not recovered",
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "MP01",
+      "title": "counted_input_tokens wraps an overflowing repeated prefix instead of refusing",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_memory.rs",
+          "old": "    live.checked_add(cached_prefix)",
+          "new": "    Some(live.wrapping_add(cached_prefix))"
+        }
+      ],
+      "tests": [
+        "local_memory::tests::admission_counts_a_repeated_prefix"
       ]
     }
   ]

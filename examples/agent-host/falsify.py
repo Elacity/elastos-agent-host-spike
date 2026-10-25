@@ -49,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -177,27 +178,56 @@ class DiskFull(Exception):
     pass
 
 
+def load_refuse(path, reason):
+    """Stop on a data file that cannot load: status 2 and one clear reason. A
+    refusal never selects work and never counts as zero falsifiers run."""
+    print(f"{path}: {reason}", file=sys.stderr)
+    raise SystemExit(CASE_USAGE)
+
+
 def load(path=DATA):
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    """The entries, or a refusal with status 2 when the data file is missing,
+    is not JSON, or has the wrong document shape."""
+    try:
+        if not path.is_file():
+            load_refuse(path, "the data file does not exist")
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        load_refuse(path, "the data file cannot be read")
+    except UnicodeDecodeError:
+        load_refuse(path, "the data file is not JSON")
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError:
+        load_refuse(path, "the data file is not JSON")
+    if not isinstance(doc, dict):
+        load_refuse(path, "the document is not an object")
+    if "falsifiers" not in doc:
+        load_refuse(path, "the document has no falsifiers list")
     entries = doc["falsifiers"]
+    if not isinstance(entries, list):
+        load_refuse(path, "falsifiers is not a list")
     ids = [entry["id"] for entry in entries]
     if len(ids) != len(set(ids)):
-        sys.exit("falsifiers.json: an id is used twice")
+        load_refuse(path, "an id is used twice")
     for entry in entries:
-        if entry["command"] not in COMMANDS or entry["expect"] not in (
-            "caught",
-            "compile_error",
-            "survives",
-        ):
-            sys.exit(f"falsifiers.json: {entry['id']}: unknown command or expect")
+        if entry["command"] not in COMMANDS:
+            load_refuse(path, f"{entry['id']}: unknown command {entry['command']!r}")
+        if entry["expect"] not in ("caught", "compile_error", "survives"):
+            load_refuse(path, f"{entry['id']}: unknown expect {entry['expect']!r}")
         if entry["expect"] in ("caught", "survives") and not entry["tests"]:
-            sys.exit(f"falsifiers.json: {entry['id']}: no named tests")
+            load_refuse(path, f"{entry['id']}: no named tests")
     return entries
 
 
 def recover_backups():
-    """Put back any original left by a run that was killed mid-falsifier."""
-    for backup in HERE.rglob("*" + BACKUP_SUFFIX):
+    """Restore this runner's originals: agent-host files and MP01's exact
+    provider target. Other provider files stay with their owning runners.
+    Recovery is independent of the data file selected for the next run."""
+    backups = set(HERE.rglob("*" + BACKUP_SUFFIX))
+    provider_target = REPO / "capsules/model-provider/src/local_memory.rs"
+    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))
+    for backup in sorted(backups):
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
         os.utime(target)
@@ -838,6 +868,134 @@ def interruption_at_the_end_of_the_edit():
     return interrupted and restored and not backup.exists()
 
 
+def another_lanes_backup_is_not_recovered():
+    """Recovery keeps foreign backups, including a neighbour of MP01's
+    source file. The runner owns that exact provider target."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        repo = SELF_TEST_DIR / "lanes"
+        here = repo / "examples" / "agent-host"
+        here.mkdir(parents=True)
+        data = here / "falsifiers.json"
+        data.write_text('{"falsifiers": []}', encoding="utf-8")
+        owned = here / "owned.txt"
+        foreign = repo / "capsules" / "wallet-provider" / "src" / "lib.rs"
+        foreign.parent.mkdir(parents=True)
+        neighbour = repo / "capsules" / "model-provider" / "src" / "lib.rs"
+        neighbour.parent.mkdir(parents=True)
+        for target in (owned, foreign, neighbour):
+            target.write_text("mutated bytes\n", encoding="utf-8")
+            target.with_name(target.name + BACKUP_SUFFIX).write_text(
+                "original bytes\n", encoding="utf-8")
+        saved = HERE, REPO, DATA, SELF_TEST_DIR
+        globals().update(HERE=here, REPO=repo, DATA=data,
+                         SELF_TEST_DIR=repo / "self-test")
+        try:
+            code = main(["--from", str(data), "--list"])
+        finally:
+            globals().update(HERE=saved[0], REPO=saved[1], DATA=saved[2],
+                             SELF_TEST_DIR=saved[3])
+        owned_restored = (owned.read_text() == "original bytes\n"
+                          and not owned.with_name(owned.name + BACKUP_SUFFIX).exists())
+        foreign_kept = (foreign.read_text() == "mutated bytes\n"
+                        and foreign.with_name(foreign.name + BACKUP_SUFFIX).exists())
+        neighbour_kept = (neighbour.read_text() == "mutated bytes\n"
+                          and neighbour.with_name(neighbour.name + BACKUP_SUFFIX).read_text()
+                          == "original bytes\n")
+        print(f"self-test: another lane's backup on restart: exit={code}, "
+              f"owned restored={owned_restored}, foreign kept={foreign_kept}")
+        if code != 0 or not owned_restored or not foreign_kept:
+            ok = False
+        if not neighbour_kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_killed_provider_edit_is_recovered():
+    """Kill a real MP01 edit in an isolated tree, restart through main(),
+    and repeat the edit. Foreign backups stay with their owners."""
+    mp01 = next(entry for entry in load(REPO / "capsules/model-provider/falsifiers.json")
+                if entry["id"] == "MP01")
+    originals = {edit["file"]: (HERE / edit["file"]).read_bytes()
+                 for edit in mp01["edits"]}
+    originals["owned.txt"] = b"original bytes\n"
+    entry = dict(mp01, edits=mp01["edits"] + [
+        {"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"}])
+    child = """import json, os, pathlib, runpy, signal, sys
+runner = runpy.run_path(sys.argv[1])
+runner['Mutation'](json.loads(sys.argv[2]), pathlib.Path(sys.argv[3])).__enter__()
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        for mode in ("provider", "default"):
+            repo = SELF_TEST_DIR / mode
+            here = repo / "examples/agent-host"
+            here.mkdir(parents=True)
+            data = here / "falsifiers.json"
+            data.write_text('{"falsifiers": []}', encoding="utf-8")
+            provider_data = repo / "capsules/model-provider/falsifiers.json"
+            provider_data.parent.mkdir(parents=True)
+            provider_data.write_text(json.dumps({"falsifiers": [mp01]}), encoding="utf-8")
+            for name, original in originals.items():
+                target = here / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(original)
+                os.utime(target, (1, 1))
+            foreign_targets = [repo / "capsules/wallet-provider/src/local_memory.rs",
+                               repo / "capsules/model-provider/src/lib.rs"]
+            for target in foreign_targets:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"foreign mutation\n")
+                target.with_name(target.name + BACKUP_SUFFIX).write_bytes(b"foreign original\n")
+            killed = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", child, str(HERE / "falsify.py"),
+                 json.dumps(entry), str(here)], capture_output=True, text=True, timeout=10)
+            planted = all(
+                (here / name).read_bytes() != original
+                and (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).read_bytes()
+                == original for name, original in originals.items())
+            if killed.returncode != -signal.SIGKILL or not planted:
+                print(f"self-test: MP01 kill: exit={killed.returncode}, planted={planted}")
+                return False
+            argv = ["--from", str(provider_data), "--list"] if mode == "provider" else ["--list"]
+            with mock.patch.dict(globals(), HERE=here, REPO=repo, DATA=data):
+                code = main(argv)
+            restored = all(
+                (here / name).read_bytes() == original
+                and not (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).exists()
+                and (here / name).stat().st_mtime_ns > 1_000_000_000
+                for name, original in originals.items())
+            foreign_kept = all(
+                target.read_bytes() == b"foreign mutation\n"
+                and target.with_name(target.name + BACKUP_SUFFIX).read_bytes() == b"foreign original\n"
+                for target in foreign_targets)
+            print(f"self-test: MP01 {mode} restart: exit={code}, restored={restored}, "
+                  f"foreign kept={foreign_kept}")
+            if code != 0 or not restored or not foreign_kept:
+                ok = False
+                continue
+            with Mutation(entry, here):
+                if any((here / name).read_bytes() == original
+                       for name, original in originals.items()):
+                    ok = False
+            if any((here / name).read_bytes() != original
+                   or (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).exists()
+                   for name, original in originals.items()):
+                ok = False
+    except Exception as error:
+        print(f"self-test: MP01 restart raised {type(error).__name__}: {error}")
+        return False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def the_streams_keep_their_own_lines():
     """stdout and stderr are joined at a line boundary, so a marker at the
     start of stderr is still at the start of a line when stdout ends without
@@ -883,6 +1041,125 @@ def a_self_test_case_counts_only_when_it_ran():
     return ok
 
 
+def load_refused(path, reason):
+    """True only when load(path) stops with status 2 and exactly `reason`.
+    A bypass that lets a read, JSON or shape exception escape fails the case,
+    so that falsifier is caught instead of the case erroring out."""
+    message = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(message):
+            load(path)
+    except SystemExit as stop:
+        code = stop.code
+    except Exception as error:
+        print(f"self-test: load({path}) raised {type(error).__name__}: {error}")
+        return False
+    else:
+        print(f"self-test: load({path}) returned without a refusal")
+        return False
+    print(f"self-test: load({path}) -> exit {code}: {message.getvalue().strip()}")
+    return code == CASE_USAGE and message.getvalue() == f"{path}: {reason}\n"
+
+
+def a_data_file_refusal(name, text, reason):
+    """One crafted data file under the self-test dir: load() stops with status
+    2 and exactly reason. No file is written when text is None."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        path = SELF_TEST_DIR / name
+        if text is not None:
+            SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+            if isinstance(text, bytes):
+                path.write_bytes(text)
+            else:
+                path.write_text(text, encoding="utf-8")
+        return load_refused(path, reason)
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def a_missing_data_file_is_refused():
+    """A path with no file is a refusal, not an empty run."""
+    return a_data_file_refusal("missing.json", None, "the data file does not exist")
+
+
+def an_unreadable_data_file_is_refused():
+    """An existing file whose read fails gives the exact read refusal."""
+    with mock.patch.object(pathlib.Path, "read_text", side_effect=PermissionError("denied")):
+        return a_data_file_refusal("unreadable.json", '{"falsifiers": []}',
+                                   "the data file cannot be read")
+
+
+def an_unreadable_data_path_is_refused():
+    """An inaccessible parent makes the initial stat fail: the shared OSError
+    refusal gives exit 2 and the read reason, not a traceback."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "stat-denied.json"
+        path.write_text('{"falsifiers": []}', encoding="utf-8")
+        with mock.patch.object(pathlib.Path, "stat",
+                               side_effect=PermissionError("denied")):
+            return load_refused(path, "the data file cannot be read")
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def an_invalid_utf8_data_file_is_refused():
+    """Invalid UTF-8 reaches the decode refusal before JSON parsing."""
+    return a_data_file_refusal("invalid-utf8.json", b'{"falsifiers": []}\xff',
+                               "the data file is not JSON")
+
+
+def a_non_json_data_file_is_refused():
+    """Text that is not JSON is a refusal, not an empty run."""
+    return a_data_file_refusal("not-json.json", "this is not JSON\n",
+                               "the data file is not JSON")
+
+
+def a_data_document_must_be_an_object():
+    """A JSON body that is not an object is a refusal with its own reason."""
+    return a_data_file_refusal("root-list.json", json.dumps(["falsifiers"]),
+                               "the document is not an object")
+
+
+def a_data_document_needs_a_falsifiers_list():
+    """An object without a falsifiers key is a refusal with its own reason."""
+    return a_data_file_refusal("no-falsifiers.json", json.dumps({"entries": []}),
+                               "the document has no falsifiers list")
+
+
+def falsifiers_must_be_a_list():
+    """A falsifiers value that is not a list is a refusal with its own reason."""
+    return a_data_file_refusal("falsifiers-object.json",
+                               json.dumps({"falsifiers": {}}),
+                               "falsifiers is not a list")
+
+
+def a_duplicate_id_is_refused():
+    """Two entries with one id are a refusal with status 2."""
+    entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::x"]}
+    return a_data_file_refusal("duplicate.json",
+                               json.dumps({"falsifiers": [entry, dict(entry)]}),
+                               "an id is used twice")
+
+
+def an_unknown_command_is_refused():
+    """A command outside COMMANDS is a refusal with its own reason."""
+    entry = {"id": "ST", "command": "bogus", "expect": "caught", "tests": ["tests::x"]}
+    return a_data_file_refusal("unknown-command.json",
+                               json.dumps({"falsifiers": [entry]}),
+                               "ST: unknown command 'bogus'")
+
+
+def an_unknown_expect_is_refused():
+    """An expect outside the known values is a refusal with its own reason."""
+    entry = {"id": "ST", "command": "host", "expect": "bogus", "tests": ["tests::x"]}
+    return a_data_file_refusal("unknown-expect.json",
+                               json.dumps({"falsifiers": [entry]}),
+                               "ST: unknown expect 'bogus'")
+
+
 def a_survivor_needs_its_named_test_to_run():
     """A survives entry whose named test did not run is NOT RUN, never a
     survivor. load() refuses a survives entry with no named test, the same as
@@ -895,13 +1172,7 @@ def a_survivor_needs_its_named_test_to_run():
         data.write_text(json.dumps({"falsifiers": [
             {"id": "ST", "title": "no test", "command": "host",
              "expect": "survives", "edits": [], "tests": []}]}), encoding="utf-8")
-        refused = False
-        try:
-            load(data)
-        except SystemExit as error:
-            refused = "no named tests" in str(error)
-        print(f"self-test: a survives entry with no named test: refused={refused}")
-        if not refused:
+        if not load_refused(data, "ST: no named tests"):
             ok = False
         entry = {"id": "ST", "command": "host", "expect": "survives",
                  "tests": ["tests::planted_check"]}
@@ -1185,6 +1456,19 @@ SELF_TEST_CASES = {
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
+    "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
+    "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
+    "a missing data file is refused": a_missing_data_file_is_refused,
+    "an unreadable data file is refused": an_unreadable_data_file_is_refused,
+    "an unreadable data path is refused": an_unreadable_data_path_is_refused,
+    "an invalid utf8 data file is refused": an_invalid_utf8_data_file_is_refused,
+    "a non-json data file is refused": a_non_json_data_file_is_refused,
+    "a data document must be an object": a_data_document_must_be_an_object,
+    "a data document needs a falsifiers list": a_data_document_needs_a_falsifiers_list,
+    "falsifiers must be a list": falsifiers_must_be_a_list,
+    "a duplicate id is refused": a_duplicate_id_is_refused,
+    "an unknown command is refused": an_unknown_command_is_refused,
+    "an unknown expect is refused": an_unknown_expect_is_refused,
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
     "the streams keep their own lines": the_streams_keep_their_own_lines,
     "a real catch counts": real_catch_counts,
