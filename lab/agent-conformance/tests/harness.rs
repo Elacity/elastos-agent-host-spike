@@ -1,4 +1,4 @@
-use agent_conformance::harness::{data_dir, ThrowawayHome};
+use agent_conformance::harness::{data_dir, RunningChild, ThrowawayHome};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -91,13 +91,14 @@ fn launch_env_is_only_the_throwaway_home() {
     // Do not print captured values on failure: a broken env_clear could have
     // passed private parent values. F-ac1d runs with a synthetic parent env.
     assert!(
-        lines.len() == 3,
-        "child environment must have exactly three entries"
+        lines.len() == 4,
+        "child environment must have exactly four entries"
     );
     for expected in [
         format!("HOME={}", owned.home().display()),
         format!("TMPDIR={}", owned.temp().display()),
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
+        "ELASTOS_CARRIER_MDNS=0".to_owned(),
     ] {
         assert!(
             lines.contains(&expected.as_str()),
@@ -131,4 +132,66 @@ fn launch_stops_a_child_past_its_bound() {
         "child must be stopped within a few seconds"
     );
     owned.finish().unwrap();
+}
+
+fn child_group(home: &ThrowawayHome) -> RunningChild<'_> {
+    let child = home
+        .start(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "trap 'kill -TERM \"$child\"; wait; exit 0' TERM; /bin/sleep 30 & child=$!; wait",
+            ],
+        )
+        .unwrap();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        let output = home
+            .launch(
+                Path::new("/usr/bin/pgrep"),
+                &["-g", &child.pgid().to_string()],
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        if output.status.success()
+            && std::str::from_utf8(&output.stdout).unwrap().lines().count() == 2
+        {
+            return child;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("fixture parent and child must share the managed process group");
+}
+
+#[test]
+fn managed_child_stop_reaps_its_process_group() {
+    let home = ThrowawayHome::new().unwrap();
+    let mut child = child_group(&home);
+    assert!(child.is_alive().unwrap());
+    let pgid = child.pgid();
+    child
+        .stop()
+        .expect("SIGTERM must stop the parent and its child");
+    assert!(!child.is_alive().unwrap());
+    assert!(!home.group_is_alive(pgid).unwrap());
+    drop(child);
+    home.finish().unwrap();
+}
+
+#[test]
+fn managed_child_drop_kills_its_group_and_keeps_root() {
+    let home = ThrowawayHome::new().unwrap();
+    let root = home.root().to_path_buf();
+    let child = child_group(&home);
+    let pgid = child.pgid();
+    drop(child);
+    assert!(!home.group_is_alive(pgid).unwrap());
+    assert!(root.is_dir());
+    assert_eq!(
+        home.finish(),
+        Err("keep the root after an unstopped child or failed stop")
+    );
+    assert!(root.is_dir());
+    // This test has now verified the retained-root policy and empty group.
+    fs::remove_dir_all(root).unwrap();
 }

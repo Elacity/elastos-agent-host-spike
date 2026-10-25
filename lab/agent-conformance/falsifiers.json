@@ -209,6 +209,86 @@
       "tests": [
         "serve_refuses_provider_whose_bytes_differ_from_its_hash"
       ]
+    },
+    {
+      "id": "F-ac1j",
+      "title": "bind the fixture API to a wildcard so the real socket census refuses it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/operator-api-host.txt",
+          "old": "127.0.0.1\n",
+          "new": "0.0.0.0\n"
+        }
+      ],
+      "tests": [
+        "fixture_operator_sockets_are_loopback_only"
+      ]
+    },
+    {
+      "id": "F-ac1k",
+      "title": "drop the fixed mDNS-off environment entry; run only the environment test",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            .env(\"ELASTOS_CARRIER_MDNS\", \"0\")\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "launch_env_is_only_the_throwaway_home"
+      ]
+    },
+    {
+      "id": "F-census-a",
+      "title": "accept socket samples without the API listener positive control",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/operator.rs",
+          "old": "    if count == 0 || !api_seen {",
+          "new": "    if false && (count == 0 || !api_seen) {"
+        }
+      ],
+      "tests": [
+        "socket_census_requires_parseable_loopback_endpoints_and_api_listener"
+      ]
+    },
+    {
+      "id": "F-managed-stop",
+      "title": "omit SIGTERM and require the stop bound to refuse and clean up",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            self.signal(\"-TERM\", false)?;",
+          "new": "            // planted: omit SIGTERM"
+        }
+      ],
+      "tests": [
+        "managed_child_stop_reaps_its_process_group"
+      ]
+    },
+    {
+      "id": "F-managed-drop",
+      "title": "discard the root after dropping an unstopped managed child",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "        if !self.stopped {\n            self.home.keep.set(true);",
+          "new": "        if !self.stopped {\n            // planted: allow root removal"
+        }
+      ],
+      "tests": [
+        "managed_child_drop_kills_its_group_and_keeps_root"
+      ]
     }
   ]
 }

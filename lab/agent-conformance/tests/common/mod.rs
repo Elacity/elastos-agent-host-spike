@@ -6,7 +6,10 @@ use agent_conformance::runtime::{localhost_provider_under_test, sha256_file};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
+
+pub mod operator;
 
 pub fn operator_platform() -> Result<&'static str, &'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -49,5 +52,7 @@ pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Erro
         File::create_new(home.data().join("components.json"))?,
         &manifest,
     )?;
+    File::create_new(home.data().join("config.toml"))?
+        .write_all(include_bytes!("../../fixtures/operator-config.toml"))?;
     Ok(installed)
 }

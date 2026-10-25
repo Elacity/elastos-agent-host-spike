@@ -933,3 +933,276 @@ check; passing Homes removed themselves. Ignored build and proof outputs stay
 for the supervisor rerun, with its cleanup condition in the local inventory.
 The fetched upstream is 0 ahead / 0 behind; remote freshness awaits the
 supervisor's network-enabled check. This builder kept Git state unchanged.
+
+## 013 — ready operator in an offline throwaway Home
+
+- 013: Extended the one launch primitive with fixed mDNS-off environment and managed process groups; added the matching-provider operator recipe, measured socket census, stop proof and five caught falsifiers.
+
+`ThrowawayHome::spawn` owns the guard, four-entry environment, null stdin,
+capture files and `process_group(0)` for both launch forms. `start` returns a
+`RunningChild`; its stop path sends SIGTERM, checks the ten-second bound and
+requires the whole group to exit. Timeout and abandoned-handle paths kill the
+group and retain the root. `kill`, `pgrep` and `lsof` use that same primitive.
+The shared writer adds the committed two-setting config. `Operator::ready`
+checks coordinates existence and loopback HTTP 200 while the child stays alive.
+The coordinates and operator capture contents stay unread.
+
+Both operator tests passed. The census saw two loopback internet sockets in
+each sample, including the API listener, at least three seconds apart. This
+closes AC-010-OFFLINE for this fixture. It also closes 012's platform-key
+positive-control gap: matching installed provider bytes reached readiness.
+The census samples the process group's internet sockets at those times; it
+is not a packet capture. AC-006-STORAGE remains open for `run`.
+
+Five new tests are named in `tests/runtime.rs` and `tests/harness.rs`:
+`fixture_operator_starts_ready_and_stops_cleanly`,
+`fixture_operator_sockets_are_loopback_only`,
+`socket_census_requires_parseable_loopback_endpoints_and_api_listener`,
+`managed_child_stop_reaps_its_process_group`, and
+`managed_child_drop_kills_its_group_and_keeps_root`.
+The existing environment test now requires exactly four entries.
+
+The volume had 34 GiB free before the runs, above the 12 GiB build estimate
+plus 2 GiB reserve. Builds used the existing native cache. Every Cargo run
+held the repository's shared heavy-build lease. The initial sandbox loopback
+preflight returned `Operation not permitted` before any Runtime launch; the
+approved local-bind rerun passed. This was a builder-sandbox result only.
+All Cargo runs used these settings from the repository root:
+
+```sh
+export CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-013/tmp"
+```
+
+The first live command was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime fixture_operator_ -- --nocapture --test-threads=1
+```
+
+It exited 0: `2 passed; 0 failed; 0 ignored`, 11.41 s in the test process
+(12.37 s including Cargo). The harness-only baseline passed five tests and
+the parser baseline passed one test before their mutations.
+
+The exact test commands below each ran twice, planted then restored. The
+mutation driver selected each record from `falsifiers.json`, required one
+exact old-text match, and applied this byte operation in order:
+
+```python
+edit = item['edits'][0]
+path = lane / edit['file']
+original = path.read_bytes()
+old, new = edit['old'].encode(), edit['new'].encode()
+assert original.count(old) == 1
+try:
+    path.write_bytes(original.replace(old, new, 1))
+    result = subprocess.run(cmd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=600)
+    assert result.returncode == 101
+    assert b'test result: FAILED. 0 passed; 1 failed;' in result.stdout
+finally:
+    path.write_bytes(original)
+result = subprocess.run(cmd, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=600)
+assert result.returncode == 0
+assert b'test result: ok. 1 passed; 0 failed;' in result.stdout
+```
+
+F-ac1k ran only the environment test. Its source was restored before any
+further operator launch. F-ac1j changed only the API fixture host; Carrier
+kept its loopback bind and fixed mDNS-off environment. Readiness requests
+continued to use loopback. The operator stopped as soon as its census refused
+the wildcard. These were the only fixture network calls.
+
+**F-ac1j**
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime fixture_operator_sockets_are_loopback_only -- --exact --nocapture
+```
+
+Planted output:
+
+```text
+first operator socket census: "socket census refused TCP IPv4 non-loopback address"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 5.16s
+```
+
+Restored output:
+
+```text
+operator census: 2 then 2 loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 7.88s
+```
+
+Cargo exit 101 planted (5.80 s), then exit 0 restored (8.34 s).
+
+**F-ac1k**
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness launch_env_is_only_the_throwaway_home -- --exact --nocapture
+```
+
+Planted output:
+
+```text
+child environment must have exactly four entries
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.02s
+```
+
+Restored output:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.03s
+```
+
+Cargo exit 101 planted (0.77 s), then exit 0 restored (0.43 s).
+
+**F-census-a**
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime socket_census_requires_parseable_loopback_endpoints_and_api_listener -- --exact --nocapture
+```
+
+Planted output:
+
+```text
+census must refuse incomplete or non-loopback evidence
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+```
+
+Restored output:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+```
+
+Cargo exit 101 planted (0.65 s), then exit 0 restored (0.35 s).
+
+**F-managed-stop**
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_child_stop_reaps_its_process_group -- --exact --nocapture
+```
+
+Planted output:
+
+```text
+SIGTERM must stop the parent and its child: "managed child or its group exceeded the 10 second stop bound"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 10.11s
+```
+
+Restored output:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.09s
+```
+
+Cargo exit 101 planted (10.78 s), then exit 0 restored (0.63 s).
+
+**F-managed-drop**
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_child_drop_kills_its_group_and_keeps_root -- --exact --nocapture
+```
+
+Planted output:
+
+```text
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("keep the root after an unstopped child or failed stop")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.13s
+```
+
+Restored output:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.11s
+```
+
+Cargo exit 101 planted (0.79 s), then exit 0 restored (0.52 s).
+
+Every named test ran and failed under its mutation, then passed with the
+original bytes restored. All 18 falsifier IDs are unique and all edit anchors
+match exactly once. The five new falsifiers ran here; earlier falsifiers keep
+their previous evidence, and their normal tests passed in this gate.
+
+Native binary identities from the runs:
+
+```text
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+```
+
+Final lane gates:
+
+| Command | Exit | Result | Elapsed |
+| --- | --- | --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | PASS | 0.07 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 18 passed, 0 failed, 0 ignored | 43.90 s |
+| `lab/agent-conformance/run.sh` | 0 | 18 PASS rows; binary hashes and both socket counts printed | 38.24 s |
+
+The full table output was:
+
+```text
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+operator census: 2 then 2 loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped
+test | PASS/FAIL/BLOCKED (id)
+fixture_operator_sockets_are_loopback_only | PASS
+fixture_operator_starts_ready_and_stops_cleanly | PASS
+foreign_and_wrong_version_imports_are_refused | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+managed_child_drop_kills_its_group_and_keeps_root | PASS
+managed_child_stop_reaps_its_process_group | PASS
+non_component_and_invalid_component_are_refused | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+serve_refuses_provider_whose_bytes_differ_from_its_hash | PASS
+socket_census_requires_parseable_loopback_endpoints_and_api_listener | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+```
+
+The repository's basic gate passed: `git diff --check`,
+`node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method
+contracts), `node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+`bash -n lab/agent-conformance/run.sh` also passed.
+
+Gate runs preserved all lane source bytes and `git status --porcelain`.
+The worktree began clean; only this task's candidate remains uncommitted.
+The builder leaves Git mutations to the supervisor, so an empty status awaits
+its commit. The cached upstream moved during this task: the final comparison
+is 0 ahead / 10 behind, with an empty `git diff --stat HEAD..@{upstream} --
+lab/agent-conformance`. Remote freshness and integration remain with the
+supervisor; this builder made zero Git mutations or network calls. The supervisor owns the PR and can
+copy the exact command/output blocks above into its review record.
+
+The three retained failure roots were removed after review and an empty
+`lsof -nP +D <root> -Fp` check for each. Passing roots removed themselves,
+including the root-retention unit test after it verified that policy. A final
+`pgrep -f` check of the lane's Runtime/provider executable paths returned exit
+1 and empty output: zero suite processes remained. Existing earlier-task roots
+were preserved. The local lifecycle inventory records the active candidate
+and build/proof cleanup conditions for the supervisor rerun.
+
+Principles check (paths relative to this lane):
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name/URL in place of a code/content hash? | No. `tests/common/mod.rs:47` stamps the installed bytes' SHA-256; the API address in `tests/common/operator.rs:34` selects transport only. |
+| 2. New ambient or UI authority? | No. `src/harness.rs:206` clears inherited environment and `src/harness.rs:210` fixes mDNS off; `fixtures/operator-config.toml:1` selects fixture admission only. |
+| 3. A second operation path or rule copy? | No. `src/harness.rs:194` remains the sole spawn site, used by `launch`, `start` and process tools. |
+| 4. Does the Runtime core grow? | No. `tests/common/operator.rs:18` reuses the existing Runtime build; all edits stay in this lane. |
+| 5. Do refusals fail closed with a reason? | Yes. `tests/common/operator.rs:98` refuses census errors, `tests/common/operator.rs:227` requires API visibility, and `src/harness.rs:367` cleans up failed stops. |
+| 6. Does capsule logic stay inside and trap down through grants? | Yes. `probe/src/lib.rs:8` retains the typed Bus bindings unchanged; this task adds fixture support only. |
+| 7. Do tests and caught falsifiers prove the new rules? | Yes. `tests/runtime.rs:164`, `tests/runtime.rs:185`, `tests/runtime.rs:206`, `tests/harness.rs:82`, `tests/harness.rs:167` and `tests/harness.rs:182` passed; `falsifiers.json:214` onward owns the five planted failures recorded above. |

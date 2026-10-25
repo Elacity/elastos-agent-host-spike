@@ -1,12 +1,13 @@
 # Agent conformance discovery and gaps
 
 This is the lane's single gap record. Source evidence establishes the available
-interfaces; it does not prove a live effect. Every blocker below remains open.
+interfaces; live results below name their tests. Open blockers remain separate from
+the closed AC-010-OFFLINE prerequisite.
 Task 006 used the supplied Mission, backlog and task text. `MISSION.md`, the
 lane's `BACKLOG.md` and stopped task 001 are absent from this checkout; the
 external queue was outside the permitted read scope.
 
-Task 010 settles the operator prerequisite in [Operator in a throwaway
+Tasks 010 and 013 settle the operator prerequisite in [Operator in a throwaway
 home](#operator-in-a-throwaway-home). Its verdict gates the earlier 006 launch
 and grant examples. Tasks 008/009 now own the guard and data-directory proof;
 the later grant-controller task owns positive-grant acceptance.
@@ -43,17 +44,10 @@ Home. Clear inherited `ELASTOS_RUNTIME_COORDS_FILE`, which otherwise overrides
 coordinate lookup (`runtime_control.rs:446-450`), and select the fixture's
 operator kind (`elastos/crates/elastos-server/src/serve_cmd.rs:415-418`).
 
-Commands for the future fixture, after its isolation gate is met: `AC_ELASTOS`
-is the absolute candidate binary, `AC_HOME` is its temporary Home, `AC_PORT` is
-its reserved loopback port, and `AC_PROBE` is its verified component directory.
-The fixture owns and stops the long-running first process; the second exits.
-
-```sh
-env -u ELASTOS_RUNTIME_COORDS_FILE HOME="$AC_HOME" ELASTOS_RUNTIME_KIND=operator \
-  "$AC_ELASTOS" serve --addr "127.0.0.1:$AC_PORT" --storage-path "$AC_HOME/storage"
-env -u ELASTOS_RUNTIME_COORDS_FILE HOME="$AC_HOME" \
-  "$AC_ELASTOS" run "$AC_PROBE"
-```
+The fixture uses `tests/common/operator.rs::Operator::start` and the single
+`ThrowawayHome` spawn primitive. The ordered operator recipe below contains
+`serve`. A later `run` also needs AC-006-STORAGE resolved before it can claim
+complete throwaway-root isolation.
 
 Admission is a separate prerequisite. A source fixture can set `dev_mode = true`
 in its own data directory's `config.toml` for the unsigned 002 probe; this selects
@@ -69,7 +63,7 @@ at lines 62 and 70. `create_runtime` constructs `LocalFSProvider`
 (`elastos/crates/elastos-server/src/main.rs:2297-2300`), whose constructor calls
 `create_dir_all` (`elastos/crates/elastos-storage/src/providers/local.rs:18-20`).
 Changing `HOME` or the operator's `serve --storage-path` does not relocate this
-second storage constructor. Thus the commands above establish the launch API,
+second storage constructor. Thus the source trace establishes the launch API,
 not complete throwaway-root isolation. This gate stays BLOCKED until the path
 is contained. Task 009's `run_without_operator_is_refused_with_reason` reaches
 the operator lookup at `run_cmd.rs:230` and returns before this constructor.
@@ -85,14 +79,49 @@ AC-006-STORAGE remains the separate `run` blocker above.
 
 ## Operator in a throwaway home
 
-blocked: AC-010-OFFLINE — Runtime change: read a typed `carrier_mdns = false` setting from the selected Home's `config.toml` in the existing Carrier startup path and skip mDNS construction before it opens discovery sockets; combine it with the existing loopback bind and empty peer configuration. Task 003 keeps the operator-dependent tests BLOCKED until this home-config control and its zero-off-box-traffic evidence exist.
+operator recipe: create a fresh guarded Home; install the matching localhost-provider fixture; write the two-setting config; start through the fixed four-entry environment with loopback API and in-root storage; require live readiness and two loopback socket samples; stop and verify the whole process group before removing the root.
 
-This is a source-derived fixture prerequisite, not a live result. References
-without a directory below are relative to
-`elastos/crates/elastos-server/src/`. The scope is plain `serve` on this Mac,
-with only the required provider installed, an empty peer inventory and the
-008 launch environment (`lab/agent-conformance/src/harness.rs:201-207`).
-Runtime and provider builds and launches were excluded from task 010.
+1. `ThrowawayHome::new` owns a fresh root under this lane's ignored `target/`.
+   `HOME`, `TMPDIR`, the captures and storage stay inside that root; the fixed
+   `PATH` selects system tools and `ELASTOS_CARRIER_MDNS=0` disables discovery.
+   Every launch uses that same four-entry environment.
+2. `write_operator_home` installs the built localhost-provider bytes into
+   `D/bin/localhost-provider`, where `D` is the guarded Mac data directory.
+   Its minimal `components.json` stamps those bytes' SHA-256, size and native
+   platform. It copies `fixtures/operator-config.toml` to `D/config.toml`:
+   `dev_mode = true` and `carrier_bind_addr = "127.0.0.1:0"`.
+3. `Operator::start` reads the API host from `fixtures/operator-api-host.txt`
+   (`127.0.0.1`), selects a free loopback port and starts
+   `elastos serve --addr <host>:<port> --storage-path <root>/storage` through
+   `ThrowawayHome::start`. The child leads its own process group.
+4. Within 60 seconds, while the child stays alive, require that
+   `D/runtime-coords.json` exists and loopback `GET /api/health` returns HTTP
+   200. The harness checks file existence; Runtime owns its attach data.
+5. Through the same launch primitive, take a group internet-socket census at
+   readiness and again at least three seconds later, just before stop. Both
+   require the API listener and loopback local and remote endpoints. Empty,
+   unparseable and non-loopback listings stop the operator and fail.
+6. Send SIGTERM to `serve`, allow at most ten seconds for exit and group drain,
+   then require an empty process group. A timeout kills the group and fails.
+   Dropping an unstopped handle kills its group and retains the root. A passed
+   test removes its root only after stop succeeds.
+
+AC-010-OFFLINE is closed by `fixture_operator_starts_ready_and_stops_cleanly`
+and `fixture_operator_sockets_are_loopback_only`. The measured census saw two
+loopback sockets in each sample, including the API listener. F-ac1j's wildcard
+API listener was refused by that real census; F-ac1k checks the fixed mDNS
+setting without launching an operator under the mutation. The matching-byte
+ready operator is also 012's positive control for the native platform key.
+
+The census takes point-in-time samples of the process group's internet sockets;
+it is not a packet capture. It covers this Mac fixture, rather than capsule
+effects or other hosts. AC-006-STORAGE stays open for `run`.
+A Home-config mDNS key remains a possible Runtime improvement for Anders,
+rather than a blocker for this recipe.
+
+Source references without a directory below are relative to
+`elastos/crates/elastos-server/src/`. Task 010 supplied the source trace;
+task 013 adds the measured fixture results.
 
 ### Files and startup ownership
 
@@ -130,7 +159,7 @@ of files later effects could create.
 
 ### Native artifacts and the installed manifest
 
-Task 012 shows the provider fixture and checksum refusal in `serve_refuses_provider_whose_bytes_differ_from_its_hash`; ready-operator proof remains with 013.
+Task 012 shows checksum refusal in `serve_refuses_provider_whose_bytes_differ_from_its_hash`; task 013 adds the matching-byte ready-operator control named above.
 
 Plain `serve` uses `setup_server_infrastructure_impl(true, ...)`
 (`serve_cmd.rs:295`; `server_infra.rs:430-431`). Only `localhost-provider` is
@@ -212,14 +241,11 @@ LAN mDNS discovery is a separate startup service. It defaults on and reads only
 `ELASTOS_CARRIER_MDNS`; `0`, `false` or `no` disable it
 (`carrier.rs:1209-1221`). The node constructs and adds that lookup after binding
 the endpoint (`carrier.rs:2024-2035`). Thus a loopback Carrier listener does not
-by itself establish zero LAN discovery traffic. There is no Home-file switch
-in these selectors that disables mDNS or the whole Carrier node. The existing
-environment switch is real, but 008 deliberately supplies exactly HOME,
-TMPDIR and PATH (`src/harness.rs:201-207`, `tests/harness.rs:82-105` in this lane).
-An `env` wrapper or a second launch path would change that contract. Task 010
-therefore records AC-010-OFFLINE, rather than asserting that all offline
-operator use is impossible. The Runtime change is named in the verdict above;
-this task adds neither a config parser nor a network workaround.
+by itself establish zero LAN discovery traffic. Task 013 extends the one launch
+primitive with the documented
+`ELASTOS_CARRIER_MDNS=0` entry, as 008's extension rule permits. The environment
+test checks exactly HOME, TMPDIR, PATH and that entry. The two live operator
+tests above close AC-010-OFFLINE with the existing Runtime control.
 
 The other minimal-start surfaces have local roles: the HTTP API binds the
 explicit `--addr 127.0.0.1:<port>` (`api/server.rs:538-547`; its CLI default is
@@ -228,8 +254,9 @@ wildcard at `main.rs:118-120`); localhost-provider uses stdio
 `hostname -I` and falls back to loopback addresses (`elastos/crates/elastos-tls/src/lib.rs:188-210`).
 Collaboration stays isolated as above, optional network providers stay absent,
 and the content repair worker defaults off (`server_infra.rs:2005-2012`). This
-is a source trace, not a socket census or packet capture. The later live gate
-must measure zero off-box traffic before it can accept an operator recipe.
+source trace is supplemented by the two socket samples above. Their scope is
+process-group internet sockets at those times; packet traffic remains outside
+this measurement.
 
 ### Readiness, stop and unsigned admission
 
@@ -250,8 +277,8 @@ handler forwards SIGTERM to the group and escalates to SIGKILL after two
 seconds (`main.rs:71-75,1284-1322`). This is the existing bounded stop path,
 not proof that every async destructor runs. Normal server return additionally
 shuts down collaboration and Carrier (`serve_cmd.rs:484-495`). The fixture
-verifies child termination and lock release before removing its root; residual
-coords are fixture state, not a readiness claim for a later run.
+verifies child termination and an empty process group before removing its root.
+Residual coords are fixture state, not a readiness claim for a later run.
 
 The unsigned probe requires `dev_mode = true` in this Home's `config.toml`
 before both `serve` and `run` construct Runtime (`main.rs:2323-2336`). This
@@ -259,7 +286,7 @@ applies to a source fixture with no installed signed-release source: installed
 release admission takes precedence over `dev_mode`
 (`runtime.rs:181-227`). Admission changes neither capability grants nor
 provider checksums. AC-006-STORAGE still gates the attached `run` constructor,
-even after AC-010-OFFLINE is resolved. No blocker here receives a passing grade.
+after this operator recipe is accepted. Open blockers retain their BLOCKED grade.
 
 ## Positive-grant decision for 003
 
@@ -363,8 +390,7 @@ The existing tests cover component bytes, manifest/WIT agreement, imports and
 two independent builds on this machine. They grade artifact properties only.
 Signed-bundle identity, Runtime admission and effect evidence remain with later
 tasks. Stopped 007 split into 008's harness and 009's contained refusal; 010
-owns operator discovery for 003. These prerequisites
-are outstanding work, not additional Runtime API blockers or passing grades.
+supplied operator discovery and 013 now proves the ready-operator recipe.
 
 Task 006 made zero spike launches and skipped the full Runtime build. Task 009
 checks Mac data-root resolution in `tests/runtime.rs::runtime_data_dir_is_under_throwaway_home`
@@ -372,5 +398,6 @@ and no-operator refusal stderr in `tests/runtime.rs::run_without_operator_is_ref
 Task 008's guard and cleared launch environment protect the real Home by
 construction; this lane reads only its fixture Home. The real-Home digest was
 dropped when 007 split into 008 and 009. Grant delivery and component-effect
-refusal stderr remain **to confirm in 003** after the operator prerequisites.
-Every blocker above remains open.
+refusal stderr remain with the later effect and grant tasks.
+AC-010-OFFLINE is closed by the two named operator tests; AC-006-STORAGE and
+AC-002-ARGS remain open.
