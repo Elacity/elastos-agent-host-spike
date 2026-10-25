@@ -1,16 +1,18 @@
-;; Seatbelt profile for wallet-provider.
-;;
-;; This file is the single source for the profile. The Runtime loads it from
-;; the signed provider bundle and passes resolved paths:
+;; Seatbelt profile for wallet-provider; the signed bundle owns this single source.
+;; The Runtime starts this provider with /usr/bin/sandbox-exec -f confine.sb and
+;; passes resolved paths:
 ;;   PROVIDER_EXECUTABLE  - the signed provider binary it starts
-;;   WALLET_STORAGE_ROOT  - Init.base_path/ElastOS/SystemServices/Wallet
-;;   WALLET_STORAGE_PARENT - the existing parent of WALLET_STORAGE_ROOT
+;;   STORAGE_ROOT         - Init.base_path/ElastOS/SystemServices/Wallet
+;;   STORAGE_PARENT       - the existing parent of STORAGE_ROOT
+;; did-provider binds the same three parameter names, so the Runtime has one
+;; parameterized launch for both file-profile providers.
 ;; Everything else is denied, including every network operation.
 (version 1)
 
 ;; Deny by default: a file, device, socket or process operation that no rule
 ;; below grants is refused, so an unexpected request fails closed.
 (deny default)
+(deny network*)
 
 ;; Startup: exec and the program read are pinned to the one binary the Runtime
 ;; named, so the provider cannot start any other program.
@@ -34,7 +36,7 @@
 (allow file-read* (literal "/dev/urandom"))
 
 ;; Startup: inspect and synchronize the existing parent when creating Wallet.
-(allow file-read* (literal (param "WALLET_STORAGE_PARENT")))
+(allow file-read* (literal (param "STORAGE_PARENT")))
 
 ;; Wallet state: one grant covers account, key, challenge and approval files.
-(allow file-read* file-write* (subpath (param "WALLET_STORAGE_ROOT")))
+(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))

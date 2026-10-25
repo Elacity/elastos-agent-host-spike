@@ -5,18 +5,45 @@ provider. It starts with `(version 1)` and `(deny default)`, and it denies every
 network operation. The process reads line-delimited JSON from stdin and writes
 one JSON response per line to stdout; it opens no listener or socket.
 
-The Runtime owns the profile: it loads `confine.sb` only from the signed
-provider bundle, checks its hash, refuses any profile with `(allow default)` or
-a network allow, and fails closed with a reason; the provider proposes, the
-Runtime checks (P4, P11). The bridge integration loads this file and binds its
-parameters when it launches the provider. This document specifies the Runtime
-half; the reference files exercise the provider directly.
+## The Runtime bridge change
+
+The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
+confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
+parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
+bridge work, parameterized by the profile path and the storage root, starts
+`did-provider` and `wallet-provider`, so the Runtime has one path for starting
+a provider under its profile (P10). The Runtime loads `confine.sb` only from
+the signed provider bundle, checks its hash, refuses any profile with
+`(allow default)` or a network allow, and fails closed with a reason; the
+provider proposes, the Runtime checks (P4, P11).
 
 Runtime binds three parameters and creates the base before launch:
 
 - `PROVIDER_EXECUTABLE`: the canonical provider binary path.
 - `STORAGE_ROOT`: `Init.base_path/did`.
 - `STORAGE_PARENT`: `Init.base_path`.
+
+## The model provider's inline profile
+
+`elastos/crates/elastos-runtime/src/provider/bridge.rs` builds a third,
+pre-existing convention for the model provider. Four facts differ from the
+contract above: it starts `(allow default)` instead of `(deny default)`; it
+interpolates storage paths into `(regex ...)` rules rather than binding a
+`(param ...)` token; it grants an explicit
+`(allow network-outbound (literal ...))` socket; and it passes its policy
+inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
+the file-profile contract and this document does not claim it does. Aligning
+the model provider is future Runtime work in `elastos/`, outside this lane.
+
+## Host-OS status
+
+These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On Linux
+the providers are not confined yet; the `sandbox-exec` integration tests print
+a skip reason and do not run. The rule for provider-status documents is that a
+provider is marked "confined" only for a host OS where a test proves its
+profile, so no status document records `did-provider` or `wallet-provider` as
+confined on Linux until that test exists (P10, P11). The status change lands
+when the Runtime side does.
 
 ## What the profile allows
 
@@ -77,6 +104,14 @@ makes it fail. The test runs no TCP probe: the provider has no network path, so
 a probe would test the host network stack while the profile rule is the
 property that must hold.
 
+`both_file_profiles_bind_one_storage_parameter_contract` lives in
+`../wallet-provider/tests/confine.rs`. It reads this profile and the wallet
+profile and asserts the one contract both present to the Runtime bridge:
+`(version 1)` first, `(deny default)` second, an explicit `(deny network*)`,
+the same `PROVIDER_EXECUTABLE` / `STORAGE_ROOT` / `STORAGE_PARENT` parameter
+tokens, and no `(allow default)` rule. It runs on every platform because it
+reads files and starts no process.
+
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
 the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
 print a skip reason; a present sandbox that refuses to launch the child fails
@@ -94,6 +129,12 @@ the test.
   process dies without a response.
 - Return `parse_error` instead of the signature refusal: the same case fails
   because the response does not name `invalid_signature`.
+- Rename `STORAGE_ROOT` to `DID_STORAGE_ROOT` in either provider's `confine.sb`:
+  `both_file_profiles_bind_one_storage_parameter_contract` fails on the
+  non-canonical token.
 
-The wallet provider keeps its own profile and tests in `../wallet-provider/`
-with the same launch and subtree-grant pattern.
+The wallet provider keeps its own profile and tests in `../wallet-provider/`.
+Both providers present the same file-based contract to the Runtime bridge:
+`(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT` /
+`STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the
+`/usr/bin/sandbox-exec -f confine.sb` launch shape.
