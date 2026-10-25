@@ -8155,11 +8155,19 @@ mod sparks_http {
 
     /// POST a JSON body and return the decoded response body, or a reason.
     pub(crate) fn post_json(base_url: &str, path: &str, body: &str) -> Result<String, String> {
-        post_json_with_timeout(base_url, path, body, READ_TIMEOUT)
+        request_with_timeout("POST", base_url, path, body, READ_TIMEOUT)
     }
 
-    /// One client path; `read_timeout` only bounds the read.
-    fn post_json_with_timeout(
+    /// GET a text body (the engine's `/metrics`) through the same connection
+    /// and response-framing path as `post_json`.
+    pub(crate) fn get_text(base_url: &str, path: &str) -> Result<String, String> {
+        request_with_timeout("GET", base_url, path, "", READ_TIMEOUT)
+    }
+
+    /// One client path; `method` and `read_timeout` choose the request and
+    /// only bound the read.
+    fn request_with_timeout(
+        method: &str,
         base_url: &str,
         path: &str,
         body: &str,
@@ -8174,7 +8182,7 @@ mod sparks_http {
             .set_read_timeout(Some(read_timeout))
             .map_err(|error| format!("timeout setup failed: {error}"))?;
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         stream
@@ -8478,9 +8486,14 @@ mod sparks_http {
     fn a_read_error_is_returned_not_ignored() {
         let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab";
         let server = MockServer::serve_once_stalled(response, Duration::from_secs(1));
-        let error =
-            post_json_with_timeout(server.url(), "/v1/chat", "{}", Duration::from_millis(200))
-                .unwrap_err();
+        let error = request_with_timeout(
+            "POST",
+            server.url(),
+            "/v1/chat",
+            "{}",
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
         assert!(error.starts_with("read failed:"), "{error}");
         assert!(server.request().starts_with(b"POST /v1/chat HTTP/1.1"));
     }
@@ -9272,6 +9285,143 @@ mod tests {
             base
         );
         assert_ne!(build(SYSTEM_HEAD, "Reply in two short paragraphs."), base);
+    }
+
+    /// Opt-in: sends the two consecutive turns whose packed prefixes are
+    /// byte-identical to the local model through the merged `post_json`
+    /// client, and records the counters the engine publishes. Ignored by
+    /// default, and it skips when `SPARKS_MODEL_URL` is unset. This engine
+    /// publishes no prefix-hit counter, so the test reads none and claims no
+    /// cache hit.
+    #[test]
+    #[ignore = "opt-in: needs SPARKS_MODEL_URL and the local DeepSeek on the Sparks"]
+    fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
+        let Some(base_url) = sparks_http::sparks_model_url() else {
+            eprintln!("skip: SPARKS_MODEL_URL is unset, so no real model is called");
+            return;
+        };
+        // The text the model sees for a turn: every node in canonical order,
+        // rendered as the packer renders it.
+        let prompt = |events: &[SurfaceNode]| -> String {
+            events
+                .iter()
+                .map(render_record)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut journal = empty_journal();
+        admit_system(&mut journal, SYSTEM_HEAD, true);
+        admit_user(&mut journal, "hello");
+        admit_system(&mut journal, "Reply in one short paragraph.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self",
+            "2026-10-12T13:44:00Z",
+            "localhost://Users/self/Documents/note.txt",
+        ));
+        let first_prefix = prefix_bytes(&journal.events);
+        let first_prompt = prompt(&journal.events);
+
+        admit_user(&mut journal, "second turn");
+        admit_system(&mut journal, "Keep the first system line unchanged.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Documents",
+            "2026-10-13T01:29:00Z",
+            "localhost://Users/self/Documents/other.txt",
+        ));
+        let second_prefix = prefix_bytes(&journal.events);
+        let second_prompt = prompt(&journal.events);
+        assert_eq!(
+            first_prefix, second_prefix,
+            "the packed prefix moved between two consecutive turns"
+        );
+
+        // Only the two names this engine publishes. A prefix-hit counter is
+        // not read, so its absence cannot fail the test.
+        fn sample_name(line: &str) -> &str {
+            line.split_whitespace()
+                .next()
+                .unwrap_or("")
+                .split('{')
+                .next()
+                .unwrap_or("")
+        }
+        let wanted = |name: &str| {
+            name == "tensorfold:prompt_tokens_total"
+                || name == "tensorfold:request_prefill_seconds"
+                || name.starts_with("tensorfold:request_prefill_seconds_")
+        };
+        let samples = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+                .filter(|line| wanted(sample_name(line)))
+                .map(|line| line.trim().to_string())
+                .collect()
+        };
+
+        let before_text = sparks_http::get_text(&base_url, "/metrics")
+            .unwrap_or_else(|error| panic!("/metrics before the turns failed: {error}"));
+        let before_samples = samples(&before_text);
+
+        let body = |prompt: &str| {
+            serde_json::json!({
+                "model": "deepseek-v4-flash",
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            .to_string()
+        };
+        let first_body = body(&first_prompt);
+        assert!(first_body.contains("\"deepseek-v4-flash\""));
+        let first_reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &first_body)
+            .unwrap_or_else(|error| panic!("the local model refused the first turn: {error}"));
+        eprintln!(
+            "real model first turn ok: {} response bytes",
+            first_reply.len()
+        );
+        let second_body = body(&second_prompt);
+        assert!(second_body.contains("\"deepseek-v4-flash\""));
+        let second_reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &second_body)
+            .unwrap_or_else(|error| panic!("the local model refused the second turn: {error}"));
+        eprintln!(
+            "real model second turn ok: {} response bytes",
+            second_reply.len()
+        );
+
+        let after_text = sparks_http::get_text(&base_url, "/metrics")
+            .unwrap_or_else(|error| panic!("/metrics after the turns failed: {error}"));
+        let after_samples = samples(&after_text);
+
+        let published = |lines: &[String], name: &str| {
+            lines.iter().any(|line| {
+                let sample = sample_name(line);
+                sample == name
+                    || (name == "tensorfold:request_prefill_seconds"
+                        && sample.starts_with("tensorfold:request_prefill_seconds_"))
+            })
+        };
+        for (when, lines) in [("before", &before_samples), ("after", &after_samples)] {
+            assert!(
+                published(lines, "tensorfold:prompt_tokens_total"),
+                "tensorfold:prompt_tokens_total is absent {when} the turns"
+            );
+            assert!(
+                published(lines, "tensorfold:request_prefill_seconds"),
+                "tensorfold:request_prefill_seconds is absent {when} the turns"
+            );
+            eprintln!("tensorfold counters {when} the turns:");
+            for line in lines {
+                eprintln!("  {line}");
+            }
+        }
+
+        eprintln!(
+            "real model: both turns ok; the packed prefix is {} bytes and byte-identical across the two turns",
+            first_prefix.len()
+        );
+        eprintln!("no prefix-hit counter is read and no cache hit is claimed");
     }
 
     #[test]
