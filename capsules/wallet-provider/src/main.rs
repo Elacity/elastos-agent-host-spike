@@ -67,7 +67,7 @@ const BITCOIN_CHALLENGE_SCHEMA: &str = "elastos.wallet.bitcoin_challenge/v1";
 
 struct WalletProvider {
     store_path: Option<PathBuf>,
-    storage_root: Option<PathBuf>,
+    storage_root: Option<WalletStorage>,
     storage_key: Option<[u8; 32]>,
     store: WalletStore,
     defer_save: bool,
@@ -384,14 +384,15 @@ impl WalletProvider {
 
         let wallet_dir = wallet_dir_for_base(&base_path);
         let store_path = store_path_for_wallet_dir(&wallet_dir);
-        if let Err(err) = create_wallet_dir_durable(&wallet_dir) {
-            return Response::error("storage_error", err);
-        }
-        let storage_key = match load_or_create_storage_key(&wallet_dir) {
+        let storage_root = match create_wallet_dir_durable(&wallet_dir) {
+            Ok(root) => root,
+            Err(err) => return Response::error("storage_error", err),
+        };
+        let storage_key = match load_or_create_storage_key(&storage_root) {
             Ok(key) => key,
             Err(err) => return Response::error("storage_error", err),
         };
-        let store = match load_store_if_present_under_root(&wallet_dir, &store_path) {
+        let store = match load_store_if_present_under_root(&storage_root, &store_path) {
             Ok(store) => store.unwrap_or_default(),
             Err(err) => return Response::error("storage_error", err),
         };
@@ -399,11 +400,11 @@ impl WalletProvider {
         let mut store = prune_store(store, now);
         let pre_v2_approvals_rejected = reject_pre_v2_pending_approvals(&mut store, now);
         if pre_v2_approvals_rejected > 0 {
-            if let Err(err) = save_store_under_root(&wallet_dir, &store_path, &store) {
+            if let Err(err) = save_store_under_root(&storage_root, &store_path, &store) {
                 return Response::error("storage_error", err);
             }
         }
-        self.storage_root = Some(wallet_dir);
+        self.storage_root = Some(storage_root);
         self.store_path = Some(store_path);
         self.storage_key = Some(storage_key);
         self.store = store;

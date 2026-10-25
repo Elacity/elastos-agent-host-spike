@@ -1,3 +1,4 @@
+use super::io_observer::{run_observed_child, Observation};
 use super::support::*;
 use super::*;
 use std::collections::BTreeSet;
@@ -39,12 +40,23 @@ fn assert_within_wallet_root(paths: &[PathBuf], root: &Path, base: &Path) {
 
 #[test]
 fn wallet_operations_stay_under_root() {
+    if run_observed_child("tests::storage_boundary::wallet_operations_stay_under_root") {
+        return;
+    }
     let parent = tempfile::tempdir().unwrap();
     let base = parent.path().join("home");
     let cwd_before = entries(Path::new("."));
 
+    let root_path = parent
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("home/ElastOS/SystemServices/Wallet");
+    let bootstrap_observation = Observation::begin(&root_path, true);
     reset_accessed_paths();
     let mut provider = init_provider(&base);
+    bootstrap_observation.finish();
+    let operation_observation = Observation::begin(&root_path, false);
     let principal_id = "person:local:alice";
 
     let created = invoke_wallet(
@@ -69,6 +81,7 @@ fn wallet_operations_stay_under_root() {
     );
     assert!(matches!(listed, Response::Ok { .. }), "{listed:?}");
 
+    operation_observation.finish();
     let root = wallet_root(&base);
     let accessed = take_accessed_paths();
     assert_within_wallet_root(&accessed, &root, &base);
@@ -105,17 +118,35 @@ fn wallet_operations_stay_under_root() {
 
 #[test]
 fn outside_root_access_is_detected() {
+    if run_observed_child("tests::storage_boundary::outside_root_access_is_detected") {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("home");
-    let _provider = init_provider(&base);
+    let mut provider = init_provider(&base);
     let root = wallet_root(&base);
     let outside = dir.path().join("outside-state.json");
     let sentinel = b"outside sentinel";
     fs::write(&outside, sentinel).unwrap();
     let before = entries(dir.path());
+    let observation = Observation::begin(&root.canonicalize().unwrap(), false);
+    // Exercise the real decoder and account mutation while the independent
+    // observer is active. A direct read or transient write here is detectable.
+    let created = invoke_wallet(
+        &mut provider,
+        "person:local:alice",
+        "wallet",
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".into(),
+            label: None,
+            create_new: true,
+        },
+    );
+    assert!(matches!(created, Response::Ok { .. }), "{created:?}");
+    observation.finish();
 
     reset_accessed_paths();
-    let read = load_store_if_present_under_root(&root, &outside);
+    let read = load_store_if_present_under_root(provider.storage_root.as_ref().unwrap(), &outside);
     assert!(read
         .unwrap_err()
         .contains("must stay inside the configured wallet directory"));
@@ -125,7 +156,11 @@ fn outside_root_access_is_detected() {
     );
 
     reset_accessed_paths();
-    let write = save_store_under_root(&root, &outside, &WalletStore::default());
+    let write = save_store_under_root(
+        provider.storage_root.as_ref().unwrap(),
+        &outside,
+        &WalletStore::default(),
+    );
     assert!(write
         .unwrap_err()
         .contains("must stay inside the configured wallet directory"));
@@ -137,17 +172,22 @@ fn outside_root_access_is_detected() {
     assert_eq!(entries(dir.path()), before);
 
     let escaping = root.join("..").join("outside-state.json");
-    assert!(
-        save_store_under_root(&root, &escaping, &WalletStore::default())
-            .unwrap_err()
-            .contains("must stay inside the configured wallet directory")
-    );
+    assert!(save_store_under_root(
+        provider.storage_root.as_ref().unwrap(),
+        &escaping,
+        &WalletStore::default()
+    )
+    .unwrap_err()
+    .contains("must stay inside the configured wallet directory"));
     assert_eq!(fs::read(&outside).unwrap(), sentinel);
     assert_eq!(entries(dir.path()), before);
 }
 
 #[test]
 fn bootstrap_access_is_bounded() {
+    if run_observed_child("tests::storage_boundary::bootstrap_access_is_bounded") {
+        return;
+    }
     let parent = tempfile::tempdir().unwrap();
     let unrelated = parent.path().join("unrelated.txt");
     let unrelated_bytes = b"unrelated ancestor file";
@@ -156,8 +196,15 @@ fn bootstrap_access_is_bounded() {
     fs::create_dir(&other).unwrap();
     let base = parent.path().join("home");
 
+    let root_path = parent
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("home/ElastOS/SystemServices/Wallet");
+    let observation = Observation::begin(&root_path, true);
     reset_accessed_paths();
     create_wallet_dir_durable(&wallet_root(&base)).unwrap();
+    observation.finish();
     let accessed = take_accessed_paths();
     for path in &accessed {
         assert!(
@@ -314,5 +361,221 @@ fn filesystem_calls_stay_in_storage() {
     assert!(
         offenders.is_empty(),
         "filesystem access outside storage.rs: {offenders:#?}"
+    );
+}
+
+#[test]
+fn init_creates_missing_base_path_chain() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("new/home");
+    assert!(!base.parent().unwrap().exists());
+    let provider = init_provider(&base);
+    assert!(provider.storage_root.is_some());
+    assert!(wallet_root(&base).is_dir());
+    assert!(wallet_root(&base).join(WALLET_KEY_FILE).is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn wallet_operations_are_bound_to_initialized_directory() {
+    use std::os::unix::fs::symlink;
+
+    // Exercise every ancestor, including the configured base, and both reads
+    // and writes. The original directory handle retains ownership after rename.
+    for ancestor in [
+        "",
+        "ElastOS",
+        "ElastOS/SystemServices",
+        "ElastOS/SystemServices/Wallet",
+    ] {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("home");
+        let mut provider = init_provider(&base);
+        let original_store = provider.store_path.clone().unwrap();
+        let replaced = if ancestor.is_empty() {
+            base.clone()
+        } else {
+            base.join(ancestor)
+        };
+        let held = parent.path().join("held");
+        fs::rename(&replaced, &held).unwrap();
+        let external = parent.path().join("external");
+        let suffix = wallet_root(&base)
+            .strip_prefix(&replaced)
+            .unwrap()
+            .to_path_buf();
+        let external_wallet = external.join(&suffix);
+        fs::create_dir_all(&external_wallet).unwrap();
+        let external_store = external_wallet.join("wallet-state.json");
+        let sentinel = b"outside wallet sentinel";
+        fs::write(&external_store, sentinel).unwrap();
+        symlink(&external, &replaced).unwrap();
+
+        let created = invoke_wallet(
+            &mut provider,
+            "person:local:alice",
+            "wallet",
+            WalletProviderOperationV2::CreateManagedAccount {
+                chain_namespace: "eip155:20".into(),
+                label: None,
+                create_new: true,
+            },
+        );
+        assert!(
+            matches!(created, Response::Ok { .. }),
+            "{ancestor}: {created:?}"
+        );
+        assert_eq!(fs::read(&external_store).unwrap(), sentinel);
+        let bound = load_store_if_present_under_root(
+            provider.storage_root.as_ref().unwrap(),
+            &original_store,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(bound.accounts.len(), 1);
+        assert!(held.join(&suffix).join("wallet-state.json").is_file());
+        assert_eq!(
+            entries(&external_wallet),
+            BTreeSet::from([OsString::from("wallet-state.json")])
+        );
+        // Key reads use the same root, even after ancestor replacement.
+        assert_eq!(
+            load_or_create_storage_key(provider.storage_root.as_ref().unwrap()).unwrap(),
+            provider.storage_key.unwrap()
+        );
+        assert_eq!(fs::read(&external_store).unwrap(), sentinel);
+    }
+}
+
+#[test]
+fn unchecked_storage_helpers_are_private() {
+    let source = include_str!("../storage.rs");
+    for name in [
+        "load_store",
+        "load_store_if_present",
+        "save_store",
+        "read_storage_key",
+        "read_storage_key_if_present",
+        "open_regular_file_if_present",
+        "read_regular_file_if_present",
+    ] {
+        let signature = format!("fn {name}(");
+        let line = source
+            .lines()
+            .find(|line| line.contains(&signature))
+            .unwrap();
+        assert!(
+            line.starts_with(&signature),
+            "unchecked helper is visible to callers: {line}"
+        );
+    }
+    assert!(source.contains("fn bind<'a>"));
+    assert!(!source.contains("pub(super) fn bind"));
+    assert!(!source.contains("pub(super) struct Leaf"));
+}
+
+#[test]
+fn raw_storage_helpers_are_inaccessible_to_provider() {
+    // Compile the actual production modules with attempted calls from the
+    // provider's scope. Reuse already-built dependencies; this does no build.
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut source = fs::read_to_string(source_dir.join("main.rs")).unwrap();
+    source.push_str("\nfn unchecked_route_probe() { let _ = storage::save_store; let _ = storage::load_store_if_present; }\n");
+    let fixture = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    collect_rust_files(&source_dir, &mut files);
+    for file in files {
+        let relative = file.strip_prefix(&source_dir).unwrap();
+        if relative.starts_with("tests") {
+            continue;
+        }
+        let copy = fixture.path().join(relative);
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::copy(file, copy).unwrap();
+    }
+    let probe = fixture.path().join("main.rs");
+    fs::write(&probe, source).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let dependencies = executable.parent().unwrap();
+    let mut rustc = std::process::Command::new("rustc");
+    rustc
+        .args([
+            "--edition=2021",
+            "--emit=metadata",
+            "--crate-name=wallet_storage_privacy",
+        ])
+        .arg(&probe)
+        .arg("--out-dir")
+        .arg(fixture.path())
+        .arg("-L")
+        .arg(format!("dependency={}", dependencies.display()))
+        .env("CARGO_PKG_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"));
+    for name in [
+        "aes_gcm",
+        "base64",
+        "bitcoin",
+        "elastos_auth",
+        "elastos_protected_content_contracts",
+        "elastos_wallet_contract",
+        "hex",
+        "k256",
+        "rand",
+        "rustix",
+        "serde",
+        "serde_json",
+        "sha2",
+        "sha3",
+    ] {
+        let mut candidates: Vec<_> = fs::read_dir(dependencies)
+            .unwrap()
+            .map(Result::unwrap)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let filename = path.file_name().unwrap().to_string_lossy();
+                filename.starts_with(&format!("lib{name}-")) && filename.ends_with(".rlib")
+            })
+            .collect();
+        if name == "sha3" {
+            candidates.retain(|path| {
+                let depfile = dependencies.join(format!(
+                    "{}.d",
+                    path.file_stem()
+                        .unwrap()
+                        .to_string_lossy()
+                        .trim_start_matches("lib")
+                ));
+                fs::read_to_string(depfile).unwrap().contains("/sha3-0.10.")
+            });
+        }
+        // Cargo can leave artifacts from older runs. Select the newest complete
+        // library for this dependency, as the current test build just emitted it.
+        candidates.sort_by_key(|path| fs::metadata(path).unwrap().modified().unwrap());
+        let library = candidates
+            .last()
+            .unwrap_or_else(|| panic!("missing compiled {name}"));
+        rustc
+            .arg("--extern")
+            .arg(format!("{name}={}", library.display()));
+    }
+    let output = rustc.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "provider selected unchecked storage helpers"
+    );
+    for name in ["save_store", "load_store_if_present"] {
+        assert!(
+            stderr.contains(&format!("function `{name}` is private")),
+            "{stderr}"
+        );
+    }
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.starts_with("error["))
+            .count(),
+        2,
+        "{stderr}"
     );
 }

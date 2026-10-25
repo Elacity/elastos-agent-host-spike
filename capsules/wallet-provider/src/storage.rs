@@ -1,8 +1,11 @@
 use super::*;
-use std::fs::{self, File, Metadata, OpenOptions};
+use rustix::fs::{self as at, AtFlags, FileType, Mode, OFlags, Stat};
+use rustix::io::Errno;
+use std::ffi::OsStr;
+use std::fs::{self, File};
 use std::io::Read;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_WALLET_STORE_BYTES: usize = 64 * 1024 * 1024;
@@ -68,53 +71,94 @@ pub(super) fn store_path_for_wallet_dir(wallet_dir: &Path) -> PathBuf {
     wallet_dir.join("wallet-state.json")
 }
 
-/// Refuse any path that is not lexically below the configured wallet directory.
-pub(super) fn ensure_path_within_root(root: &Path, path: &Path, label: &str) -> Result<(), String> {
-    if !root.is_absolute() || !path.is_absolute() {
-        return Err(format!(
-            "{label} must be an absolute path inside the configured wallet directory"
-        ));
+/// An open directory owns all wallet effects for the lifetime of an Init.
+/// Renaming or replacing any ancestor cannot redirect its descriptor-relative IO.
+pub(super) struct WalletStorage {
+    path: PathBuf,
+    directory: File,
+}
+
+impl WalletStorage {
+    /// This is the single path admission point for store and key operations.
+    fn bind<'a>(&'a self, path: &'a Path, label: &str) -> Result<Leaf<'a>, String> {
+        if !path.is_absolute() {
+            return Err(format!(
+                "{label} must be an absolute path inside the configured wallet directory"
+            ));
+        }
+        let relative = path.strip_prefix(&self.path).ok();
+        let name = relative
+            .and_then(|relative| {
+                let mut components = relative.components();
+                match (components.next(), components.next()) {
+                    (Some(Component::Normal(name)), None) => Some(name),
+                    _ => None,
+                }
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{label} must stay inside the configured wallet directory: {}",
+                    path.display()
+                )
+            })?;
+        Ok(Leaf {
+            root: self,
+            name,
+            path,
+        })
     }
-    let relative = path.strip_prefix(root).map_err(|_| {
-        format!(
-            "{label} must stay inside the configured wallet directory: {}",
-            path.display()
+}
+
+struct Leaf<'a> {
+    root: &'a WalletStorage,
+    name: &'a OsStr,
+    path: &'a Path,
+}
+
+impl Leaf<'_> {
+    fn stat(&self) -> Result<Stat, Errno> {
+        record_access(self.path);
+        at::statat(&self.root.directory, self.name, AtFlags::SYMLINK_NOFOLLOW)
+    }
+
+    fn open(&self, flags: OFlags) -> Result<File, Errno> {
+        record_access(self.path);
+        at::openat(
+            &self.root.directory,
+            self.name,
+            flags | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::RUSR | Mode::WUSR,
         )
-    })?;
-    if relative
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!(
-            "{label} must stay inside the configured wallet directory: {}",
-            path.display()
-        ));
+        .map(File::from)
     }
-    Ok(())
+
+    fn remove(&self) -> Result<(), Errno> {
+        record_access(self.path);
+        at::unlinkat(&self.root.directory, self.name, AtFlags::empty())
+    }
 }
 
 pub(super) fn load_store_if_present_under_root(
-    root: &Path,
+    root: &WalletStorage,
     path: &Path,
 ) -> Result<Option<WalletStore>, String> {
-    ensure_path_within_root(root, path, "wallet store")?;
-    load_store_if_present(path)
+    load_store_if_present(&root.bind(path, "wallet store")?)
 }
 
 pub(super) fn save_store_under_root(
-    root: &Path,
+    root: &WalletStorage,
     path: &Path,
     store: &WalletStore,
 ) -> Result<(), String> {
-    ensure_path_within_root(root, path, "wallet store")?;
-    save_store(path, store)
+    save_store(&root.bind(path, "wallet store")?, store)
 }
 
-pub(super) fn load_store(path: &Path) -> Result<WalletStore, String> {
+#[cfg(test)]
+fn load_store(path: &Leaf<'_>) -> Result<WalletStore, String> {
     Ok(load_store_if_present(path)?.unwrap_or_default())
 }
 
-pub(super) fn load_store_if_present(path: &Path) -> Result<Option<WalletStore>, String> {
+fn load_store_if_present(path: &Leaf<'_>) -> Result<Option<WalletStore>, String> {
     let Some(bytes) = read_regular_file_if_present(path, "wallet store", MAX_WALLET_STORE_BYTES)?
     else {
         return Ok(None);
@@ -124,39 +168,31 @@ pub(super) fn load_store_if_present(path: &Path) -> Result<Option<WalletStore>, 
         .map_err(|err| err.to_string())
 }
 
-fn metadata_is_regular_leaf(metadata: &Metadata) -> bool {
-    metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+fn metadata_is_regular_leaf(metadata: &Stat) -> bool {
+    FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
 }
 
-#[cfg(unix)]
-fn same_file(left: &Metadata, right: &Metadata) -> bool {
-    left.dev() == right.dev() && left.ino() == right.ino()
+fn same_file(left: &Stat, right: &Stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
-#[cfg(not(unix))]
-fn same_file(_left: &Metadata, _right: &Metadata) -> bool {
-    true
-}
-
-fn open_regular_file_if_present(path: &Path, label: &str) -> Result<Option<File>, String> {
-    record_access(path);
-    let before = match fs::symlink_metadata(path) {
+fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<File>, String> {
+    let before = match path.stat() {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(Errno::NOENT) => return Ok(None),
         Err(err) => return Err(format!("failed to inspect {label}: {err}")),
     };
     if !metadata_is_regular_leaf(&before) {
         return Err(format!("{label} must be a regular non-symlink file"));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .open(path)
+    let file = path
+        .open(OFlags::RDONLY)
         .map_err(|err| format!("failed to open {label}: {err}"))?;
-    let opened = file
-        .metadata()
-        .map_err(|err| format!("failed to inspect open {label}: {err}"))?;
-    let after =
-        fs::symlink_metadata(path).map_err(|err| format!("failed to re-inspect {label}: {err}"))?;
+    let opened =
+        at::fstat(&file).map_err(|err| format!("failed to inspect open {label}: {err}"))?;
+    let after = path
+        .stat()
+        .map_err(|err| format!("failed to re-inspect {label}: {err}"))?;
     if !metadata_is_regular_leaf(&opened)
         || !metadata_is_regular_leaf(&after)
         || !same_file(&before, &opened)
@@ -167,12 +203,10 @@ fn open_regular_file_if_present(path: &Path, label: &str) -> Result<Option<File>
     Ok(Some(file))
 }
 
-fn verify_open_file_is_current(path: &Path, file: &File, label: &str) -> Result<(), String> {
-    record_access(path);
-    let opened = file
-        .metadata()
-        .map_err(|err| format!("failed to inspect open {label}: {err}"))?;
-    let current = fs::symlink_metadata(path)
+fn verify_open_file_is_current(path: &Leaf<'_>, file: &File, label: &str) -> Result<(), String> {
+    let opened = at::fstat(file).map_err(|err| format!("failed to inspect open {label}: {err}"))?;
+    let current = path
+        .stat()
         .map_err(|err| format!("failed to inspect current {label}: {err}"))?;
     if !metadata_is_regular_leaf(&opened)
         || !metadata_is_regular_leaf(&current)
@@ -210,7 +244,7 @@ fn ensure_size_within_limit(label: &str, size: u64, max_bytes: usize) -> Result<
 }
 
 fn read_regular_file_if_present(
-    path: &Path,
+    path: &Leaf<'_>,
     label: &str,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>, String> {
@@ -222,121 +256,130 @@ fn read_regular_file_if_present(
     Ok(Some(bytes))
 }
 
-fn ensure_regular_file_or_absent(path: &Path, label: &str) -> Result<(), String> {
-    record_access(path);
-    match fs::symlink_metadata(path) {
+fn ensure_regular_file_or_absent(path: &Leaf<'_>, label: &str) -> Result<(), String> {
+    match path.stat() {
         Ok(metadata) if metadata_is_regular_leaf(&metadata) => Ok(()),
         Ok(_) => Err(format!("{label} must be a regular non-symlink file")),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(Errno::NOENT) => Ok(()),
         Err(err) => Err(format!("failed to inspect {label}: {err}")),
     }
 }
 
-fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
-    record_access(path);
-    let metadata =
-        fs::symlink_metadata(path).map_err(|err| format!("failed to inspect {label}: {err}"))?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!("{label} must be a non-symlink directory"));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path, label: &str) -> Result<(), String> {
-    record_access(path);
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
+fn sync_directory(root: &WalletStorage, label: &str) -> Result<(), String> {
+    record_access(&root.path);
+    root.directory
+        .sync_all()
         .map_err(|err| format!("failed to sync {label}: {err}"))
 }
 
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path, _label: &str) -> Result<(), String> {
-    Ok(())
-}
-
-pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String> {
+/// Bootstrap may inspect the configured base's ancestors to find the nearest
+/// existing directory, open that directory, and create/sync only the missing
+/// chain to Wallet. Existing OS aliases above the base are resolved once.
+/// Ancestor files and sibling trees are outside this bounded exception.
+/// All subsequent effects use the returned directory handle.
+pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<WalletStorage, String> {
     if !wallet_dir.is_absolute() {
         return Err("wallet storage directory must be an absolute path".to_string());
     }
-    // The configured base directory is the bootstrap bound: this function may
-    // inspect or create the base and its descendants, and never opens a
-    // sibling or an ancestor of the base. The wallet directory is always
-    // base_path/ElastOS/SystemServices/Wallet, so the base is three levels up.
     let base_path = wallet_dir.ancestors().nth(3).ok_or_else(|| {
         "wallet storage directory must be base_path/ElastOS/SystemServices/Wallet".to_string()
     })?;
-    match fs::symlink_metadata(base_path) {
-        Ok(metadata) => {
-            record_access(base_path);
-            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "wallet storage base directory must be a non-symlink directory: {}",
-                    base_path.display()
-                ));
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            record_access(base_path);
-            fs::create_dir(base_path).map_err(|err| {
-                format!(
-                    "failed to create wallet storage base directory {}: {err}",
-                    base_path.display()
-                )
-            })?;
-            sync_directory(base_path, "wallet storage base directory")?;
-        }
-        Err(err) => {
-            return Err(format!(
-                "failed to inspect wallet storage base directory {}: {err}",
-                base_path.display()
-            ))
-        }
-    }
-
-    let mut cursor = base_path.to_path_buf();
-    for component in ["ElastOS", "SystemServices", "Wallet"] {
-        cursor = cursor.join(component);
-        record_access(&cursor);
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-                    return Err(format!(
-                        "wallet storage ancestor directory must be a non-symlink directory: {}",
-                        cursor.display()
-                    ));
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&cursor).map_err(|err| {
-                    format!(
-                        "failed to create wallet storage directory {}: {err}",
-                        cursor.display()
-                    )
-                })?;
-                sync_directory(&cursor, "wallet storage directory")?;
-                let parent = cursor.parent().ok_or_else(|| {
-                    "wallet storage directory has no parent to synchronize".to_string()
-                })?;
-                ensure_directory(parent, "wallet storage parent directory")?;
-                sync_directory(parent, "wallet storage parent directory")?;
-            }
-            Err(err) => {
-                return Err(format!(
-                    "failed to inspect wallet storage directory {}: {err}",
-                    cursor.display()
-                ))
-            }
-        }
-    }
-    if cursor != wallet_dir {
+    if wallet_dir_for_base(base_path) != wallet_dir
+        || wallet_dir
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+    {
         return Err(format!(
             "wallet storage directory must be base_path/ElastOS/SystemServices/Wallet: {}",
             wallet_dir.display()
         ));
     }
-    ensure_directory(wallet_dir, "wallet storage directory")?;
-    sync_directory(wallet_dir, "wallet storage directory")
+    let mut existing = base_path;
+    let validated = loop {
+        match fs::symlink_metadata(existing) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "wallet storage base directory must be a non-symlink directory: {}",
+                        existing.display()
+                    ));
+                }
+                break metadata;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or_else(|| {
+                    "wallet storage base directory has no existing ancestor".to_string()
+                })?;
+            }
+            Err(err) => {
+                return Err(format!(
+                    "failed to inspect wallet storage base directory: {err}"
+                ))
+            }
+        }
+    };
+    let canonical = fs::canonicalize(existing)
+        .map_err(|err| format!("failed to resolve wallet storage base directory: {err}"))?;
+    let directory = at::open(
+        &canonical,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|err| format!("failed to open wallet storage base directory: {err}"))?;
+    let opened = directory
+        .metadata()
+        .map_err(|err| format!("failed to inspect open wallet storage base directory: {err}"))?;
+    if opened.dev() != validated.dev() || opened.ino() != validated.ino() {
+        return Err("wallet storage base directory changed during bootstrap".to_string());
+    }
+    let mut root = WalletStorage {
+        path: existing.to_path_buf(),
+        directory,
+    };
+    for component in wallet_dir.strip_prefix(existing).unwrap().components() {
+        let Component::Normal(name) = component else {
+            return Err("wallet storage directory contains an invalid component".to_string());
+        };
+        let path = root.path.join(name);
+        // Keep the legacy log for its existing assertions; the independent
+        // syscall observer covers the bootstrap ancestor exception as well.
+        record_access(&path);
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let directory = match at::openat(&root.directory, name, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => {
+                match at::mkdirat(&root.directory, name, Mode::from_raw_mode(0o777)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(err) => {
+                        return Err(format!("failed to create wallet storage directory: {err}"))
+                    }
+                }
+                let fd =
+                    at::openat(&root.directory, name, flags, Mode::empty()).map_err(|err| {
+                        format!("failed to open created wallet storage directory: {err}")
+                    })?;
+                root.directory.sync_all().map_err(|err| {
+                    format!("failed to sync wallet storage parent directory: {err}")
+                })?;
+                fd
+            }
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                return Err(format!(
+                    "wallet storage ancestor directory must be a non-symlink directory: {}",
+                    path.display()
+                ))
+            }
+            Err(err) => return Err(format!("failed to open wallet storage directory: {err}")),
+        };
+        root = WalletStorage {
+            path,
+            directory: File::from(directory),
+        };
+        sync_directory(&root, "wallet storage directory")?;
+    }
+    sync_directory(&root, "wallet storage directory")?;
+    Ok(root)
 }
 
 pub(super) fn prune_store(mut store: WalletStore, now: u64) -> WalletStore {
@@ -426,54 +469,40 @@ pub(super) fn expire_approval_if_elapsed(request: &mut WalletApprovalRequest, no
     }
 }
 
-pub(super) fn save_store(path: &Path, store: &WalletStore) -> Result<(), String> {
+fn save_store(path: &Leaf<'_>, store: &WalletStore) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(store).map_err(|err| err.to_string())?;
     ensure_size_within_limit("wallet store", bytes.len() as u64, MAX_WALLET_STORE_BYTES)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "wallet store path has no parent directory".to_string())?;
-    ensure_directory(parent, "wallet store parent directory")?;
     ensure_regular_file_or_absent(path, "wallet store")?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "wallet store path has an invalid file name".to_string())?;
-    let tmp = parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
+    let tmp_path = path.root.path.join(format!(
+        ".{}.{}.{}.tmp",
+        path.name.to_string_lossy(),
         std::process::id(),
         rand::thread_rng().next_u64()
     ));
+    let tmp = path.root.bind(&tmp_path, "wallet staging store")?;
     let result = (|| {
-        record_access(&tmp);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&tmp).map_err(|err| err.to_string())?;
-        #[cfg(unix)]
-        {
-            let mut permissions = file
-                .metadata()
-                .map_err(|err| err.to_string())?
-                .permissions();
-            permissions.set_mode(0o600);
-            file.set_permissions(permissions)
-                .map_err(|err| err.to_string())?;
-        }
+        let mut file = tmp
+            .open(OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL)
+            .map_err(|err| err.to_string())?;
+        at::fchmod(&file, Mode::RUSR | Mode::WUSR).map_err(|err| err.to_string())?;
         file.write_all(&bytes).map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())?;
         ensure_regular_file_or_absent(path, "wallet store")?;
-        record_access(&tmp);
-        fs::rename(&tmp, path).map_err(|err| err.to_string())?;
+        at::renameat(
+            &path.root.directory,
+            tmp.name,
+            &path.root.directory,
+            path.name,
+        )
+        .map_err(|err| err.to_string())?;
         verify_open_file_is_current(path, &file, "wallet store")?;
-        sync_directory(parent, "wallet store parent directory")?;
+        sync_directory(path.root, "wallet store parent directory")?;
         Ok(())
     })();
     match result {
         Ok(()) => Ok(()),
-        Err(err) => match fs::remove_file(&tmp) {
-            Ok(()) => Err(err),
-            Err(cleanup_err) if cleanup_err.kind() == std::io::ErrorKind::NotFound => Err(err),
+        Err(err) => match tmp.remove() {
+            Ok(()) | Err(Errno::NOENT) => Err(err),
             Err(cleanup_err) => Err(format!(
                 "failed to save wallet store: {err}; failed to remove staging store: {cleanup_err}"
             )),
@@ -481,85 +510,70 @@ pub(super) fn save_store(path: &Path, store: &WalletStore) -> Result<(), String>
     }
 }
 
-pub(super) fn load_or_create_storage_key(wallet_dir: &Path) -> Result<[u8; 32], String> {
-    ensure_directory(wallet_dir, "wallet storage directory")?;
-    let key_path = wallet_dir.join(WALLET_KEY_FILE);
+pub(super) fn load_or_create_storage_key(root: &WalletStorage) -> Result<[u8; 32], String> {
+    let key_path = root.path.join(WALLET_KEY_FILE);
+    let key_path = root.bind(&key_path, "wallet storage key")?;
     if let Some(key) = read_storage_key_if_present(&key_path)? {
         return Ok(key);
     }
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    let tmp = wallet_dir.join(format!(
+    let tmp_path = root.path.join(format!(
         ".{WALLET_KEY_FILE}.{}.{}.tmp",
         std::process::id(),
         rand::thread_rng().next_u64()
     ));
+    let tmp = root.bind(&tmp_path, "wallet staging key")?;
     let staged = (|| {
-        record_access(&tmp);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&tmp).map_err(|err| err.to_string())?;
-        #[cfg(unix)]
-        {
-            let mut permissions = file
-                .metadata()
-                .map_err(|err| err.to_string())?
-                .permissions();
-            permissions.set_mode(0o600);
-            file.set_permissions(permissions)
-                .map_err(|err| err.to_string())?;
-        }
+        let mut file = tmp
+            .open(OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL)
+            .map_err(|err| err.to_string())?;
+        at::fchmod(&file, Mode::RUSR | Mode::WUSR).map_err(|err| err.to_string())?;
         file.write_all(hex::encode(key).as_bytes())
             .map_err(|err| err.to_string())?;
         file.write_all(b"\n").map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())
     })();
     if let Err(err) = staged {
-        return match fs::remove_file(&tmp) {
-            Ok(()) => Err(err),
-            Err(cleanup_err) if cleanup_err.kind() == std::io::ErrorKind::NotFound => Err(err),
+        return match tmp.remove() {
+            Ok(()) | Err(Errno::NOENT) => Err(err),
             Err(cleanup_err) => Err(format!(
                 "failed to stage wallet storage key: {err}; failed to remove staging key: {cleanup_err}"
             )),
         };
     }
-    record_access(&key_path);
-    match fs::hard_link(&tmp, &key_path) {
+    record_access(key_path.path);
+    match at::linkat(&root.directory, tmp.name, &root.directory, key_path.name, AtFlags::empty()) {
         Ok(()) => {
-            sync_directory(wallet_dir, "wallet storage directory")?;
-            fs::remove_file(&tmp).map_err(|err| err.to_string())?;
-            sync_directory(wallet_dir, "wallet storage directory")?;
+            sync_directory(root, "wallet storage directory")?;
+            tmp.remove().map_err(|err| err.to_string())?;
+            sync_directory(root, "wallet storage directory")?;
             let installed = read_storage_key(&key_path)?;
             if installed != key {
                 return Err("wallet storage key changed during installation".to_string());
             }
             Ok(installed)
         }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            fs::remove_file(&tmp).map_err(|remove_err| remove_err.to_string())?;
-            sync_directory(wallet_dir, "wallet storage directory")?;
+        Err(Errno::EXIST) => {
+            tmp.remove().map_err(|err| err.to_string())?;
+            sync_directory(root, "wallet storage directory")?;
             read_storage_key(&key_path)
         }
-        Err(err) => {
-            let cleanup = fs::remove_file(&tmp);
-            match cleanup {
-                Ok(()) => Err(err.to_string()),
-                Err(cleanup_err) => Err(format!(
-                    "failed to install wallet storage key: {err}; failed to remove staging key: {cleanup_err}"
-                )),
-            }
-        }
+        Err(err) => match tmp.remove() {
+            Ok(()) => Err(err.to_string()),
+            Err(cleanup_err) => Err(format!(
+                "failed to install wallet storage key: {err}; failed to remove staging key: {cleanup_err}"
+            )),
+        },
     }
 }
 
-fn read_storage_key(key_path: &Path) -> Result<[u8; 32], String> {
+fn read_storage_key(key_path: &Leaf<'_>) -> Result<[u8; 32], String> {
     read_storage_key_if_present(key_path)?
         .ok_or_else(|| "wallet storage key does not exist".to_string())
 }
 
-fn read_storage_key_if_present(key_path: &Path) -> Result<Option<[u8; 32]>, String> {
+fn read_storage_key_if_present(key_path: &Leaf<'_>) -> Result<Option<[u8; 32]>, String> {
     let Some(mut file) = open_regular_file_if_present(key_path, "wallet storage key")? else {
         return Ok(None);
     };
@@ -584,10 +598,7 @@ fn read_storage_key_if_present(key_path: &Path) -> Result<Option<[u8; 32]>, Stri
     )?)
     .map_err(|err| format!("wallet storage key must be UTF-8 text: {err}"))?;
     verify_open_file_is_current(key_path, &file, "wallet storage key")?;
-    let wallet_dir = key_path
-        .parent()
-        .ok_or_else(|| "wallet storage key path has no parent directory".to_string())?;
-    sync_directory(wallet_dir, "wallet storage directory")?;
+    sync_directory(key_path.root, "wallet storage directory")?;
     let bytes = hex::decode(value.trim()).map_err(|err| err.to_string())?;
     bytes
         .try_into()
@@ -598,6 +609,13 @@ fn read_storage_key_if_present(key_path: &Path) -> Result<Option<[u8; 32]>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_root(path: &Path) -> WalletStorage {
+        WalletStorage {
+            path: path.to_path_buf(),
+            directory: File::open(path).unwrap(),
+        }
+    }
 
     #[test]
     fn storage_key_bootstrap_is_private_atomic_and_concurrent() {
@@ -610,7 +628,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    load_or_create_storage_key(path.as_ref())
+                    load_or_create_storage_key(&test_root(path.as_ref()))
                 })
             })
             .collect::<Vec<_>>();
@@ -652,8 +670,10 @@ mod tests {
             account_id: "wallet:eip155:20:test".to_string(),
             set_at: 1,
         });
-        save_store(&path, &store).unwrap();
-        assert_eq!(load_store(&path).unwrap().default_accounts.len(), 1);
+        let root = test_root(dir.path());
+        let leaf = root.bind(&path, "wallet store").unwrap();
+        save_store(&leaf, &store).unwrap();
+        assert_eq!(load_store(&leaf).unwrap().default_accounts.len(), 1);
         assert_eq!(
             fs::read_dir(dir.path())
                 .unwrap()
@@ -673,7 +693,7 @@ mod tests {
             .unwrap()
             .set_len(MAX_WALLET_STORE_BYTES as u64 + 1)
             .unwrap();
-        assert!(load_store(&oversized)
+        assert!(load_store(&root.bind(&oversized, "wallet store").unwrap())
             .unwrap_err()
             .contains("67108864-byte size limit"));
     }
@@ -689,10 +709,12 @@ mod tests {
         fs::write(&external_store, &external_bytes).unwrap();
         let store_path = dir.path().join("wallet-state.json");
         symlink(&external_store, &store_path).unwrap();
-        assert!(load_store(&store_path)
+        let root = test_root(dir.path());
+        let leaf = root.bind(&store_path, "wallet store").unwrap();
+        assert!(load_store(&leaf)
             .unwrap_err()
             .contains("regular non-symlink file"));
-        assert!(save_store(&store_path, &WalletStore::default())
+        assert!(save_store(&leaf, &WalletStore::default())
             .unwrap_err()
             .contains("regular non-symlink file"));
         assert_eq!(fs::read(&external_store).unwrap(), external_bytes);
@@ -703,7 +725,7 @@ mod tests {
         let external_key_contents = format!("{}\n", "ab".repeat(32));
         fs::write(&external_key, &external_key_contents).unwrap();
         symlink(&external_key, wallet_dir.join(WALLET_KEY_FILE)).unwrap();
-        assert!(load_or_create_storage_key(&wallet_dir)
+        assert!(load_or_create_storage_key(&test_root(&wallet_dir))
             .unwrap_err()
             .contains("regular non-symlink file"));
         assert_eq!(

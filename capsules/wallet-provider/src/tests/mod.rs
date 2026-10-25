@@ -11,6 +11,8 @@ use std::path::Path;
 mod accounts;
 mod approvals;
 mod browser_signing;
+#[cfg(unix)]
+mod io_observer;
 mod proofs;
 mod storage_boundary;
 mod support;
