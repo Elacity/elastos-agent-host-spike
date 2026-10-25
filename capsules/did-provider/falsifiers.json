@@ -1,5 +1,5 @@
 {
-  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, and DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
+  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, and DID10 the storage-root state grant. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
   "falsifiers": [
     {
       "id": "DID01",
@@ -97,6 +97,80 @@
       ],
       "tests": [
         "verify_did_recovery_under_profile"
+      ]
+    },
+    {
+      "id": "DID07",
+      "title": "the profile drops the process-exec grant, so the provider cannot start",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
+          "new": ";; Removed: shared process-exec grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_did_operations_under_its_root",
+        "outside_read_denied",
+        "outside_write_denied",
+        "verify_did_recovery_under_profile"
+      ]
+    },
+    {
+      "id": "DID08",
+      "title": "the profile drops the root-directory read, so the provider cannot start",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(allow file-read* (literal \"/\"))",
+          "new": ";; Removed: root-directory read grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_did_operations_under_its_root",
+        "outside_read_denied",
+        "outside_write_denied",
+        "verify_did_recovery_under_profile"
+      ]
+    },
+    {
+      "id": "DID09",
+      "title": "the profile drops the kernel-fact read, so the provider cannot start",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(allow sysctl-read)",
+          "new": ";; Removed: sysctl-read grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_did_operations_under_its_root",
+        "outside_read_denied",
+        "outside_write_denied",
+        "verify_did_recovery_under_profile"
+      ]
+    },
+    {
+      "id": "DID10",
+      "title": "the profile drops the storage-root grant, so identity state cannot be written",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": ";; Removed: storage-root state grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_did_operations_under_its_root",
+        "outside_write_denied"
       ]
     }
   ]

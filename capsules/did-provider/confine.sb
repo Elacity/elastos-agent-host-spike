@@ -8,19 +8,11 @@
 
 ;; Startup: execute only the provider binary selected by Runtime.
 (allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
-;; Startup: read that program image.
-(allow file-read* (literal (param "PROVIDER_EXECUTABLE")))
 ;; Startup: resolve the absolute program path through the root directory.
 (allow file-read* (literal "/"))
-;; Startup: dyld reads system libraries and its shared cache.
-(allow file-read* (subpath "/usr/lib") (subpath "/System/Library") (subpath "/Library/Apple"))
 ;; Startup: the loader and allocator read kernel facts.
 (allow sysctl-read)
-;; Startup: the Runtime may bind child streams to the null device.
-(allow file-read* file-write* (literal "/dev/null"))
-;; Identity: the existing encryption code reads entropy.
-(allow file-read* (literal "/dev/urandom"))
-;; Startup: inspect the existing parent while creating the identity directory.
+;; Shared contract: the Runtime bridge binds STORAGE_PARENT for both file profiles.
 (allow file-read* (literal (param "STORAGE_PARENT")))
 ;; Identity: one grant covers encrypted nickname and persona state.
 (allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
