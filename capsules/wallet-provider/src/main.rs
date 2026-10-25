@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod account;
@@ -62,6 +62,15 @@ const MANAGED_EVM_PROOF_TYPE: &str = "managed_evm";
 const MANAGED_BTC_P2WPKH_PROOF_TYPE: &str = "managed_btc_p2wpkh";
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
 const BITCOIN_MAINNET_BIP122: &str = "000000000019d6689c085ae165831e93";
+
+/// Refusal reason when `Init` carries no storage root.
+const STORAGE_PATH_NOT_SET: &str = "wallet-provider: storage path is not set";
+/// Refusal reason when the storage root is empty or blank.
+const STORAGE_PATH_EMPTY: &str = "wallet-provider: storage path is empty";
+/// Refusal reason when the storage root is not absolute.
+const STORAGE_PATH_NOT_ABSOLUTE: &str = "wallet-provider: storage path is not absolute";
+/// Error code for every storage-root refusal.
+const STORAGE_ERROR_CODE: &str = "storage_error";
 const BITCOIN_MAINNET_CHAIN_NAMESPACE: &str = "bip122:000000000019d6689c085ae165831e93";
 const BITCOIN_CHALLENGE_SCHEMA: &str = "elastos.wallet.bitcoin_challenge/v1";
 
@@ -370,20 +379,20 @@ impl WalletProvider {
     }
 
     fn init(&mut self, config: Value) -> Response {
+        // Every Init must name its own root. A confined provider can only write
+        // under that root, so it never guesses one and never inherits an older
+        // one. The reset happens first, so a refused Init leaves no usable root
+        // behind.
         self.store_path = None;
         self.storage_key = None;
         self.store = WalletStore::default();
         self.defer_save = false;
-        let Some(base_path) = config
-            .get("base_path")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Response::error("invalid_config", "wallet-provider requires base_path");
+        let base_path = match storage_root(&config) {
+            Ok(root) => root,
+            Err(reason) => return Response::error(STORAGE_ERROR_CODE, reason),
         };
 
-        let wallet_dir = Path::new(base_path)
+        let wallet_dir = base_path
             .join("ElastOS")
             .join("SystemServices")
             .join("Wallet");
@@ -975,6 +984,26 @@ impl WalletProvider {
         }
         Ok(())
     }
+}
+
+/// Resolve the storage root `Init` was given, or refuse it by name.
+///
+/// This is the single rule for root validity at startup: a missing, empty or
+/// relative root is refused with its own reason. The provider never falls back
+/// to the current directory or a temporary directory.
+fn storage_root(config: &Value) -> Result<PathBuf, String> {
+    let Some(raw) = config.get("base_path").and_then(Value::as_str) else {
+        return Err(STORAGE_PATH_NOT_SET.to_string());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(STORAGE_PATH_EMPTY.to_string());
+    }
+    let root = PathBuf::from(trimmed);
+    if !root.is_absolute() {
+        return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());
+    }
+    Ok(root)
 }
 
 fn response_into_wallet_result(response: Response) -> WalletResultV2 {
