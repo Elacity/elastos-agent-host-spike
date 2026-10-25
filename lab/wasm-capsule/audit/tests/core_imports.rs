@@ -1,5 +1,5 @@
 use std::{fs, path::Path};
-use wasm_capsule_audit::{audit, DeclaredImport, Refusal, AUDIT_API};
+use wasm_capsule_audit::{audit, audit_component, DeclaredImport, Refusal, AUDIT_API};
 
 fn import(module: &str, name: &str) -> DeclaredImport {
     DeclaredImport {
@@ -198,6 +198,11 @@ fn public_api_is_v1() {
         audit_v1(&wat::parse_str("(module)").unwrap(), &[]),
         Ok(vec![])
     );
+    let component_v1: fn(&[u8], &[&str]) -> Result<Vec<String>, Refusal> = audit_component;
+    assert_eq!(
+        component_v1(&wat::parse_str("(component)").unwrap(), &[]),
+        Ok(vec![])
+    );
     let interface = read_source("INTERFACE.md");
     for (refusal, template) in [
         (
@@ -209,6 +214,13 @@ fn public_api_is_v1() {
         ),
         (Refusal::Malformed, "malformed module"),
         (Refusal::CodeInCustomSection, "code in custom section"),
+        (
+            Refusal::UndeclaredInterface {
+                name: "first".into(),
+            },
+            "undeclared interface {name}",
+        ),
+        (Refusal::NotAComponent, "not a component"),
     ] {
         assert!(
             interface.contains(&format!("`{template}`")),
@@ -230,6 +242,7 @@ fn public_api_is_v1() {
         "pub name:",
         "pub enum Refusal",
         "pub fn audit(",
+        "pub fn audit_component(",
     ];
     let public: Vec<_> = source
         .lines()
