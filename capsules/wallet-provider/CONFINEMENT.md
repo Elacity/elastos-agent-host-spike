@@ -98,12 +98,33 @@ when the Runtime side does.
   neither file-content reads nor writes outside the wallet grant.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
-- `both_file_profiles_bind_one_storage_parameter_contract` reads this profile
-  and `../did-provider/confine.sb` and asserts one contract for the Runtime
-  bridge: `(version 1)` first, `(deny default)` second, an explicit
+- `both_file_profiles_bind_one_storage_parameter_contract` lives in
+  `../wallet-provider/tests/confine.rs`. One check function holds the
+  contract: `(version 1)` first, `(deny default)` second, an explicit
   `(deny network*)`, the same `PROVIDER_EXECUTABLE` / `STORAGE_ROOT` /
-  `STORAGE_PARENT` parameter tokens, and no `(allow default)` rule. It runs on
-  every platform because it reads files and starts no process.
+  `STORAGE_PARENT` parameter tokens, no `(allow default)` rule, and the three
+  shared rules verbatim. One list function runs that check over
+  `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
+  and `capsules/model-provider/confine.sb`: the did and wallet profiles are
+  required, and the model profile is checked whenever that file exists and
+  skipped with a printed reason while it is absent. The test runs on every
+  platform because it reads files and starts no process. It does not claim
+  that the model provider meets the contract today.
+- `file_profile_contract_rejects_a_profile_without_deny_network` builds a
+  minimal profile from the contract's own head forms and shared rules inside
+  the test. The check accepts it, then refuses the same profile without
+  `(deny network*)` with a reason that names that rule. The test reads no
+  file.
+- `file_profile_contract_checks_the_model_profile_when_present` runs the same
+  list function over a temporary `capsules/` directory. With no model
+  profile it checks exactly the two required profiles; a model profile
+  without `(deny network*)` fails, naming the model provider and that rule; a
+  passing one is checked; a model profile that is a directory fails as a read
+  error naming its path; and a missing did profile fails, naming did-provider.
+- `file_profile_contract_reports_absent_model` runs the list function in a
+  child harness over a `capsules/` directory without a model profile and
+  requires the printed skip reason to name the model profile and the absent
+  file.
 
 The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent.
 
