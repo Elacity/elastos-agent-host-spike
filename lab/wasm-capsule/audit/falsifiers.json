@@ -71,8 +71,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "                    imports.push(DeclaredImport {",
-          "new": "                    if import.module.starts_with(\"wasi\") { continue; }\n                    imports.push(DeclaredImport {"
+          "old": "                imports.push(DeclaredImport {",
+          "new": "                if import.module.starts_with(\"wasi\") { continue; }\n                imports.push(DeclaredImport {"
         }
       ],
       "tests": [
@@ -104,8 +104,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "return Err(Refusal::Malformed);",
-          "new": "return Ok(imports);"
+          "old": "return Err(invalid);",
+          "new": "return Ok(());"
         }
       ],
       "tests": [
@@ -120,8 +120,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {",
-          "new": "if false && section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+          "old": "if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "if false && content.windows(4).any(|bytes| bytes == b\"\\0asm\") {"
         }
       ],
       "tests": [
@@ -191,6 +191,156 @@
       ],
       "tests": [
         "compact_import_groups_are_listed_and_refused_by_name"
+      ]
+    },
+    {
+      "id": "F-CWA2a",
+      "title": "Ignore Component imports and inspect only embedded core-module imports",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        if let Payload::ComponentImportSection(section) = payload {\n            for import in section {\n                let import = import.map_err(|_| Refusal::NotAComponent)?;\n                interfaces.push(import.name.name.to_owned());\n            }\n        }",
+          "new": "        if let Payload::ImportSection(section) = payload {\n            for import in section.into_imports() {\n                let import = import.map_err(|_| Refusal::NotAComponent)?;\n                interfaces.push(format!(\"{}.{}\", import.module, import.name));\n            }\n        }"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "payload if depth == 1 => read_imports(payload)?,",
+          "new": "payload if depth >= 1 => read_imports(payload)?,"
+        }
+      ],
+      "tests": [
+        "component_importing_wasi_filesystem_is_refused_by_name"
+      ]
+    },
+    {
+      "id": "F-CWA2b",
+      "title": "Match interfaces by package prefix instead of exact name and version",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| name.split('/').next() == declared.split('/').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA2c",
+      "title": "Skip the Component encoding check and accept a core module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Encoding::Component => (Parser::is_component(wasm), Refusal::NotAComponent),",
+          "new": "Encoding::Component => (true, Refusal::NotAComponent),"
+        }
+      ],
+      "tests": [
+        "core_module_bytes_are_not_accepted_as_a_component"
+      ]
+    },
+    {
+      "id": "F-CWA2d",
+      "title": "Check Component custom sections only at the outermost level",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Payload::CustomSection(section) => {",
+          "new": "Payload::CustomSection(section) if encoding == Encoding::Module || depth == 1 => {"
+        }
+      ],
+      "tests": [
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA2e",
+      "title": "Return declared interfaces instead of the names read",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    Ok(interfaces)\n}",
+          "new": "    Ok(declared_interfaces.iter().map(|name| (*name).to_owned()).collect())\n}"
+        }
+      ],
+      "tests": [
+        "component_importing_only_a_declared_interface_passes"
+      ]
+    },
+    {
+      "id": "F-CWA2f",
+      "title": "Skip full validation of Component bytes",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
+          "new": "if !right_encoding || (encoding == Encoding::Module && Validator::new().validate_all(wasm).is_err()) {"
+        }
+      ],
+      "tests": [
+        "invalid_component_bytes_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA2g",
+      "title": "Treat nested Component imports as outside authority",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "payload if depth == 1 => read_imports(payload)?,",
+          "new": "payload if depth >= 1 => read_imports(payload)?,"
+        }
+      ],
+      "tests": [
+        "embedded_imports_are_internal"
+      ]
+    },
+    {
+      "id": "F-CWA3a",
+      "title": "Read only custom-section data and skip the name and its length",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "                if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA3b",
+      "title": "Scan the custom-section name and data separately, skipping runs across fields",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "                if section.name().as_bytes().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                    || section.data().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused"
       ]
     }
   ]

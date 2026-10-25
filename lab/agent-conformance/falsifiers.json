@@ -193,6 +193,22 @@
       "tests": [
         "run_without_operator_is_refused_with_reason"
       ]
+    },
+    {
+      "id": "F-ac1i",
+      "title": "install the provider under a different name while keeping the manifest path",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/mod.rs",
+          "old": "    let installed = home.data().join(\"bin/localhost-provider\");",
+          "new": "    let installed = home.data().join(\"bin/localhost-provider-copy\");"
+        }
+      ],
+      "tests": [
+        "serve_refuses_provider_whose_bytes_differ_from_its_hash"
+      ]
     }
   ]
 }

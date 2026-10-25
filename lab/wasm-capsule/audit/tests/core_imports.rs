@@ -1,5 +1,5 @@
 use std::{fs, path::Path};
-use wasm_capsule_audit::{audit, DeclaredImport, Refusal, AUDIT_API};
+use wasm_capsule_audit::{audit, audit_component, DeclaredImport, Refusal, AUDIT_API};
 
 fn import(module: &str, name: &str) -> DeclaredImport {
     DeclaredImport {
@@ -134,17 +134,18 @@ fn malformed_module_is_refused() {
 
 #[test]
 fn custom_section_carrying_code_is_refused() {
-    fn with_custom(payload: &[u8]) -> Vec<u8> {
+    fn with_custom(name: &[u8], data: &[u8]) -> Vec<u8> {
         let mut wasm = wat::parse_str("(module)").unwrap();
         // These fixtures fit in one-byte unsigned LEB lengths.
-        assert!(payload.len() + 5 < 128);
-        wasm.extend_from_slice(&[0, (payload.len() + 5) as u8, 4]);
-        wasm.extend_from_slice(b"note");
-        wasm.extend_from_slice(payload);
+        let size = 1 + name.len() + data.len();
+        assert!(size < 128);
+        wasm.extend_from_slice(&[0, size as u8, name.len() as u8]);
+        wasm.extend_from_slice(name);
+        wasm.extend_from_slice(data);
         wasm
     }
 
-    assert_eq!(audit(&with_custom(b"plain text"), &[]), Ok(vec![]));
+    assert_eq!(audit(&with_custom(b"note", b"plain text"), &[]), Ok(vec![]));
     for embedded in [
         wat::parse_str("(module)").unwrap(),
         wat::parse_str("(component)").unwrap(),
@@ -154,13 +155,31 @@ fn custom_section_carrying_code_is_refused() {
             let mut payload = vec![b'x'; offset];
             payload.extend_from_slice(&embedded);
             payload.extend_from_slice(b"tail");
-            let refusal = audit(&with_custom(&payload), &[]).unwrap_err();
+            let refusal = audit(&with_custom(b"note", &payload), &[]).unwrap_err();
             assert_eq!(refusal, Refusal::CodeInCustomSection);
             assert_eq!(refusal.to_string(), "code in custom section");
         }
     }
     // A partial magic sequence is plain payload, not an embedded header.
-    assert_eq!(audit(&with_custom(b"\0as"), &[]), Ok(vec![]));
+    assert_eq!(audit(&with_custom(b"note", b"\0as"), &[]), Ok(vec![]));
+
+    for (label, name, data) in [
+        (
+            "module header in the name",
+            b"\0asm\x01\0\0\0".as_slice(),
+            b"plain text".as_slice(),
+        ),
+        ("magic across name and data", b"note\0a", b"sm\x01\0\0\0"),
+        ("magic starts in the name length", b"", b"asm\x01\0\0\0"),
+    ] {
+        let result = audit(&with_custom(name, data), &[]);
+        assert_eq!(result, Err(Refusal::CodeInCustomSection), "{label}");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "code in custom section",
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -198,6 +217,11 @@ fn public_api_is_v1() {
         audit_v1(&wat::parse_str("(module)").unwrap(), &[]),
         Ok(vec![])
     );
+    let component_v1: fn(&[u8], &[&str]) -> Result<Vec<String>, Refusal> = audit_component;
+    assert_eq!(
+        component_v1(&wat::parse_str("(component)").unwrap(), &[]),
+        Ok(vec![])
+    );
     let interface = read_source("INTERFACE.md");
     for (refusal, template) in [
         (
@@ -209,6 +233,13 @@ fn public_api_is_v1() {
         ),
         (Refusal::Malformed, "malformed module"),
         (Refusal::CodeInCustomSection, "code in custom section"),
+        (
+            Refusal::UndeclaredInterface {
+                name: "first".into(),
+            },
+            "undeclared interface {name}",
+        ),
+        (Refusal::NotAComponent, "not a component"),
     ] {
         assert!(
             interface.contains(&format!("`{template}`")),
@@ -230,6 +261,7 @@ fn public_api_is_v1() {
         "pub name:",
         "pub enum Refusal",
         "pub fn audit(",
+        "pub fn audit_component(",
     ];
     let public: Vec<_> = source
         .lines()

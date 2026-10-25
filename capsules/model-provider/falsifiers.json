@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, and PV46 bypasses the refusal of an edit whose file does not exist. Files are relative to examples/agent-host.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -1000,6 +1000,38 @@
       ],
       "tests": [
         "an edit of a missing file is refused"
+      ]
+    },
+    {
+      "id": "PV47",
+      "title": "the model confinement test harness is not a recovery target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/model-provider/confine.sb\",\n    \"capsules/model-provider/tests/confine/main.rs\",",
+          "new": "    \"capsules/model-provider/confine.sb\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV48",
+      "title": "the did confinement test harness is not a recovery target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/did-provider/confine.sb\",\n    \"capsules/did-provider/tests/confine.rs\",",
+          "new": "    \"capsules/did-provider/confine.sb\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
       ]
     }
   ]
