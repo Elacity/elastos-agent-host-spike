@@ -130,6 +130,8 @@ of files later effects could create.
 
 ### Native artifacts and the installed manifest
 
+Task 012 shows the provider fixture and checksum refusal in `serve_refuses_provider_whose_bytes_differ_from_its_hash`; ready-operator proof remains with 013.
+
 Plain `serve` uses `setup_server_infrastructure_impl(true, ...)`
 (`serve_cmd.rs:295`; `server_infra.rs:430-431`). Only `localhost-provider` is
 mandatory. An absent or rejected `did-provider` is skipped
@@ -153,8 +155,11 @@ For each native provider, `components.json` contains `external.<name>` with
 `install_path: "bin/<name>"`, `platforms.<platform>.checksum`, and
 `provider_runtime`. The latter has `role: "provider"`, `substrate: "native"`,
 `runtime_abi: "elastos.provider-stdio/v1"`, `execution: "native-provider"`,
-`provides: "localhost://"` (or `"elastos://did"` for the optional DID provider),
-and `runtime_only: false`. These type/URI checks are in `setup.rs:95-153,198-236`.
+`provides: "localhost://*"` for localhost-provider. The repository's
+`components.json` entry at `external.localhost-provider` is the source for these
+fields; it omits `runtime_only`, whose default is false. The fixture copies that
+entry instead of restating its fields. These type/URI checks are in
+`setup.rs:95-153,198-236`.
 The top-level `profiles` map is required and can be empty; `capsules` defaults
 empty (`setup.rs:34-55`). Optional version, URL, CID and install-strategy fields
 are not required for this already-installed binary check (`setup.rs:95-109,170-189`).
@@ -170,41 +175,21 @@ into `D/bin/` and hashes that copy; a build-directory override alone does not
 satisfy installed verification. It supplies a minimal local manifest, separate
 from signed-release provenance.
 
-Source permits the following offline builds with the committed lockfiles and
-an already-installed toolchain/dependency cache. **Neither build was run**:
-offline cache completeness and successful native compilation remain unmeasured.
-There are no package-local build scripts in these provider folders or their
-local common/guest/identity dependencies. `--locked --offline` refuses missing
-resolution inputs instead of fetching or changing a lockfile. Both output
-directories override the shared root build directory (`.cargo/config.toml:1-10`).
-
-`AC_LANE` denotes the absolute `lab/agent-conformance` directory. A future build
-owner first checks disk space and creates `target/native-tmp` there. These are
-build commands, not authorization to start an operator while the verdict is
-BLOCKED:
+`localhost_provider_under_test()` now builds the required provider through the
+same offline helper and native target as `runtime_under_test()`. LOG records
+the measured build. The helper uses the committed lockfile, cached dependencies,
+`CARGO_PROFILE_DEV_DEBUG=0`, and cleared Rust flags. Its command is:
 
 ```sh
-# Required: elastos/capsules/localhost-provider/ (elastos/Cargo.toml:23).
-(cd elastos && env CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0 RUST_TEST_THREADS=2 \
-  CARGO_TARGET_DIR="$AC_LANE/target/native" \
-  CARGO_BUILD_BUILD_DIR="$AC_LANE/target/native-build" \
-  TMPDIR="$AC_LANE/target/native-tmp" \
-  cargo build --locked --offline --release -p localhost-provider --bin localhost-provider)
-# Optional: capsules/did-provider/ has its own workspace and Cargo.lock.
-env CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0 RUST_TEST_THREADS=2 \
-  CARGO_TARGET_DIR="$AC_LANE/target/native" \
-  CARGO_BUILD_BUILD_DIR="$AC_LANE/target/native-build" \
-  TMPDIR="$AC_LANE/target/native-tmp" \
-  cargo build --locked --offline --release \
-    --manifest-path capsules/did-provider/Cargo.toml --bin did-provider
+cargo build --locked --offline --manifest-path elastos/Cargo.toml \
+  -p localhost-provider --bin localhost-provider
 ```
 
-Outputs would be `target/native/release/localhost-provider` and, if requested,
-`target/native/release/did-provider`. Their manifests name those binary targets
-and local dependencies (`elastos/capsules/localhost-provider/Cargo.toml:1-24`;
-`capsules/did-provider/Cargo.toml:1-37`). Builds use the checkout as input;
-generated artifacts stay in the lane. A native build failure remains a
-prerequisite failure, never evidence about a probe effect.
+The helper keeps the binary at `target/runtime/debug/localhost-provider`,
+intermediates at `target/runtime/build` and scratch files at `target/runtime/tmp`
+inside this lane. Builds use the checkout as input. The optional DID provider
+remains outside this fixture. A native build failure remains a prerequisite
+failure; effect tests need their own behavior evidence.
 
 ### Network decision: AC-010-OFFLINE
 
