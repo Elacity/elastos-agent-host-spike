@@ -1,0 +1,166 @@
+{
+  "about": "Agent conformance falsifiers. Paths are relative to lab/agent-conformance. Replace each old text exactly once; every named test must run and fail, then pass after restoring the original bytes. command: lab is reserved for the provider-owned shared runner; run these by hand until that arm exists. Run F-ac1d with a synthetic parent environment so the planted bug only captures fixture values. F-probe-a through F-probe-f were F-ac2a through F-ac2f in task 002.",
+  "retired": {},
+  "falsifiers": [
+    {
+      "id": "F-ac1c",
+      "title": "take HOME from the parent instead of the fresh root",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/home-source.txt",
+          "old": "throwaway\n",
+          "new": "inherited\n"
+        }
+      ],
+      "tests": [
+        "home_is_throwaway"
+      ]
+    },
+    {
+      "id": "F-ac1d",
+      "title": "pass inherited variables to the child",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            .env_clear()\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "launch_env_is_only_the_throwaway_home"
+      ]
+    },
+    {
+      "id": "F-ac1e",
+      "title": "let a child run past its time bound",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            if started.elapsed() >= bound {",
+          "new": "            if false && started.elapsed() >= bound {"
+        }
+      ],
+      "tests": [
+        "launch_stops_a_child_past_its_bound"
+      ]
+    },
+    {
+      "id": "F-probe-a",
+      "title": "accept activation without a launch argument channel",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "pub fn run_probe() -> Result<(), &'static str> {\n    Err(\"probe launch arguments are unavailable in elastos:bus@v1\")\n}",
+          "new": "pub fn run_probe() -> Result<(), &'static str> {\n    Ok(())\n}"
+        }
+      ],
+      "tests": [
+        "tests::probe_refuses_without_a_launch_argument_channel"
+      ]
+    },
+    {
+      "id": "F-probe-b",
+      "title": "accept imports outside the supported Bus subset",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/artifact.rs",
+          "old": "        _ => Err(\"probe import is outside the supported ElastOS Bus interfaces\"),",
+          "new": "        _ => Ok(()),"
+        }
+      ],
+      "tests": [
+        "foreign_and_wrong_version_imports_are_refused"
+      ]
+    },
+    {
+      "id": "F-probe-c",
+      "title": "remove the component encoding guard",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/artifact.rs",
+          "old": "    if !Parser::is_component(bytes) {\n        return Err(\"probe artifact is not a component\");\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "non_component_and_invalid_component_are_refused"
+      ]
+    },
+    {
+      "id": "F-probe-d",
+      "title": "name a different WIT world in the manifest",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/capsule.json",
+          "old": "\"wit_world_sha256\": \"7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2\"",
+          "new": "\"wit_world_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\""
+        }
+      ],
+      "tests": [
+        "probe_manifest_names_the_current_bus_world"
+      ]
+    },
+    {
+      "id": "F-probe-e",
+      "title": "change only the second independent artifact",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/artifact.rs",
+          "old": "    artifact\n}",
+          "new": "    if round == 2 {\n        let mut changed = artifact;\n        changed.push(0);\n        changed\n    } else {\n        artifact\n    }\n}"
+        }
+      ],
+      "tests": [
+        "probe_hash_is_stable"
+      ]
+    },
+    {
+      "id": "F-probe-f",
+      "title": "accept a structurally invalid component",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/artifact.rs",
+          "old": "    Validator::new()\n        .validate_all(bytes)\n        .map_err(|_| \"probe component is invalid\")?;",
+          "new": "    let _ = Validator::new();"
+        }
+      ],
+      "tests": [
+        "non_component_and_invalid_component_are_refused"
+      ]
+    },
+    {
+      "id": "F-report-a",
+      "title": "grade any result other than ok as PASS",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "    if result == \"ok\" {",
+          "new": "    if result != \"ok\" {"
+        }
+      ],
+      "tests": [
+        "run_table_requires_cargo_results"
+      ]
+    }
+  ]
+}

@@ -35,19 +35,21 @@ can differ across hosts. Publication and admission must bind the complete
 signed bundle through Runtime's content path; an artifact hash alone proves
 neither of those steps.
 
-The regression falsifiers are source mutations, applied one at a time and
-restored after each test. Use the same environment and lease as above:
-
-| ID | Planted change | Required failing test |
-| --- | --- | --- |
-| F-ac2a | In `probe/src/lib.rs`, replace the `run_probe` refusal with `Ok(())`. | `probe_refuses_without_a_launch_argument_channel` |
-| F-ac2b | In `tests/artifact.rs`, replace the `allowed_import` catch-all refusal with `Ok(())`. | `foreign_and_wrong_version_imports_are_refused` |
-| F-ac2c | In `tests/artifact.rs`, remove the `Parser::is_component` guard. | `non_component_and_invalid_component_are_refused` |
-| F-ac2d | In `probe/capsule.json`, replace `wit_world_sha256` with 64 zeroes. | `probe_manifest_names_the_current_bus_world` |
-| F-ac2e | In `build_probe`, append one zero byte to the returned artifact only for round 2. | `probe_hash_is_stable` |
-| F-ac2f | In `imports`, remove the component validator call. | `non_component_and_invalid_component_are_refused` |
+The regression mutations are in the lane's one [falsifier list](falsifiers.json).
+The former F-ac2a through F-ac2f are now F-probe-a through F-probe-f, in the same order.
+Apply one mutation at a time and restore its exact bytes after its named test.
+Use the offline environment and shared build lease above. The provider lane owns
+the shared runner's future `lab` command arm; until then, run these by hand.
+F-ac1d uses a synthetic parent environment, so its deliberate environment leak
+captures fixture values only. [LOG.md](LOG.md) records the commands and results.
 
 Select each named test with `cargo test --locked --manifest-path
 lab/agent-conformance/Cargo.toml TEST_NAME -- --nocapture`. A caught mutation
 requires that named test to run and fail; a build or test-loading error does
 not count. Restore the source bytes before running the normal suite again.
+
+The [runbook](RUNBOOK.md) gives the one-command table: `lab/agent-conformance/run.sh`.
+The `harness` module owns fresh Homes and the one bounded launch primitive.
+Task 008 exercises that primitive with system tools; Runtime launch proof belongs
+to task 009. Passing tests remove their Homes, and failing tests retain their
+roots inside this lane's ignored `target/` and print their paths.
