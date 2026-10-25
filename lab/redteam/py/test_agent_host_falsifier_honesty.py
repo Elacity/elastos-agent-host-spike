@@ -8,9 +8,17 @@ well-formed and anchored:
 
 - falsifiers.json parses, each entry has its fields, and no id repeats;
 - every `caught` entry names at least one test;
-- every named test exists: a #[test] fn for `host`, and for `selftest` a
-  SELF_TEST_CASES key bound to a function falsify.py defines. Any other
-  command has no static lookup here, so it fails closed;
+- every named test exists the way the run looks it up. falsify.py lists a
+  `host` name with --exact, so it needs exactly one test at that full path:
+  a #[test] fn item in code (never text in a comment or a string), in the
+  inline mods of a crate root, not #[ignore], under no cfg but cfg(test). A
+  `selftest` name needs a key of falsify.py's SELF_TEST_CASES, bound to a
+  function defined once, by a plain top-level def before the table. The
+  table is followed only in the one shape whose run-time value is its
+  literal: one top-level dict literal, after it only read. Any other mention
+  of it, a star import, or a builtin that runs code from a string, is
+  refused with its line. Any other command has no static lookup, so it fails
+  closed;
 - every edit's old text is found exactly once, each file's edits applied in
   order, the way falsify.py's Mutation applies them;
 - asks.json has its schema, and every ask a known kind and a resource.
@@ -21,17 +29,20 @@ the same rule to report exactly that defect, so a clean result is not vacuous
 
 Every file is read once into one snapshot, and the pin test binds that
 snapshot to one commit, HEAD resolved once: the bytes read must be the bytes
-committed there. A failure prints that commit, and the sha256 and last change
-of every file read (guard a).
+committed there. After the tests the run prints its record: the problems each
+rule found, HEAD, and for every file read its sha256, its last change and the
+commit that brought that change onto HEAD's first-parent line, whose subject
+names the PR (guard a). A failure prints the same record.
 
 A reproduced defect becomes a finding, lab/redteam/findings/<id>.md, listed in
 KNOWN_FINDINGS with an expected-failure test named test_finding_<id> (guard b).
 A finding hides only the problems it records: any other problem still fails
 the gate. The probe writes no file.
 
-Not checked here: the module path before the last `::` of a host test name,
-and whether each named test really fails under its mutation. Both need cargo,
-so they are the dynamic re-run's job.
+Not checked here: whether each named test really runs and fails under its
+mutation, a name reached only through a computed key (globals()[name],
+globals().update(mapping)), and a macro that writes or rewrites a Rust test.
+Each needs a run, so each is the dynamic re-run's job.
 
 Run: python3 -I -B -m unittest discover -s lab/redteam/py
 (-B keeps __pycache__ out of the lane folder.)
@@ -64,10 +75,53 @@ FIELDS = (("id", str), ("title", str), ("command", str), ("expect", str),
 ASKS_SCHEMA = "elastos.agent-host.asks/v1"
 ASK_KINDS = ("read", "edit", "restore", "run", "child", "init", "hosted", "journal-append")
 
-# `#[test]`, then any other attributes or line comments, then the fn itself.
-TEST_FN = re.compile(r"#\[test\](?:\s*(?:#\[[^\n]*\]|//[^\n]*))*\s*"
-                     r"(?:pub(?:\([^)\n]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
+# Rust, read the way the compiler reads it: comments, strings and character
+# literals are found first, so no text inside them is taken for code. Block
+# comments nest; a raw string ends only at a quote with as many # as it
+# opened with; a ' that does not close a one-character literal is a lifetime.
+RUST_LITERAL = re.compile(r"""
+    (?P<comment>//|/\*)
+  | (?P<raw>\b[bc]?r(?P<hashes>\#*)")
+  | (?P<string>(?:\b[bc])?")
+  | (?P<char>'(?:[^'\\\n]|\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\}|[^\n]))')
+""", re.VERBOSE)
+STRING_REST = re.compile(r'(?:[^"\\]|\\.)*"', re.DOTALL)
+BLOCK_MARK = re.compile(r"/\*|\*/")
+# Then, in the code left: a fn or inline mod item with its outer attributes,
+# a macro call or definition, an inner attribute, and every bracket.
+ATTR_BODY = r"[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*"
+OUTER_ATTR = re.compile(r"\#\s*\[(" + ATTR_BODY + r")\]")
+RUST_TOKEN = re.compile(r"""
+    (?P<attrs>(?:\#\s*\[""" + ATTR_BODY + r"""\]\s*)*)
+    (?: (?:\bpub\b\s*(?:\([^()]*\)\s*)?)?(?:\b(?:async|const|unsafe|extern|default)\s+)*
+        \b(?:fn\s+(?P<fn>\w+)|mod\s+(?P<mod>\w+)\s*(?=\{))
+      | (?P<macro>\bmacro_rules\s*!\s*\w+\s*(?=[(\[{])|\b\w+\s*!\s*(?=[(\[{]))
+      | \#\s*!\s*\[(?P<inner>""" + ATTR_BODY + r""")\]
+      | (?P<open>[(\[{])
+      | (?P<close>[)\]}]) )
+""", re.VERBOSE)
+BRACKETS = {")": "(", "]": "[", "}": "{"}
 ANY_FN = re.compile(r"\bfn\s+(\w+)")
+UNBALANCED = ("the brackets do not balance once comments and strings are blanked, "
+              "so this static lookup cannot place its tests")
+RustFn = collections.namedtuple("RustFn", "leaf path test problem")
+
+# falsify.py's table of self-test cases.
+TABLE = "SELF_TEST_CASES"
+# The reads of the table the lookup follows: none of them can change a dict.
+TABLE_READS = ("items", "keys", "values", "get")
+TABLE_CHANGES = ("clear", "pop", "popitem", "setdefault", "update")
+# Builtins that run code from a string, which a static lookup cannot read:
+# any mention of these, and compile as a bare name (re.compile is not it).
+RUNS_CODE = ("exec", "eval")
+BINDINGS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.alias, ast.Global,
+            ast.Nonlocal, ast.arg, ast.ExceptHandler)
+TABLE_REFUSALS = {
+    "binds": f"binds {TABLE} other than by its one top-level dict literal",
+    "changes": f"changes {TABLE} in place",
+    "uses": f"uses {TABLE} in a way this static lookup does not follow",
+    "string": f"spells {TABLE} as a string",
+}
 
 Problem = collections.namedtuple("Problem", "rule entry file reason")
 
@@ -86,7 +140,9 @@ PROBES = (
     "test_every_edit_old_string_occurs_exactly_once",
     "test_asks_json_conforms_to_schema",
     "test_source_pin_matches_snapshot",
+    "test_clean_report_pins_commit_and_merge",
     "test_probe_refusal_reasons",
+    "test_rust_code_keeps_only_code",
     "test_edit_sequence_matches_runner",
     "test_new_finding_fails_gate",
     "test_discovery_contains_all_probes",
@@ -242,68 +298,303 @@ def lookup_for(command, read, rust_names):
     return "", lambda _name: f"command {command!r} has no static test lookup"
 
 
+def rust_code(text):
+    """text with every comment, string and character literal blanked to
+    spaces, each newline kept, so a scan sees only code, at the same offsets.
+    LookupError(reason) when a comment or a string does not end."""
+    parts, at = [], 0
+    while True:
+        found = RUST_LITERAL.search(text, at)
+        if found is None:
+            return "".join(parts) + text[at:]
+        end = literal_end(text, found)
+        parts += [text[at:found.start()], re.sub(r"[^\n]", " ", text[found.start():end])]
+        at = end
+
+
+def literal_end(text, found):
+    """Where the comment or literal that `found` opens ends."""
+    if found["comment"] == "//":
+        end = text.find("\n", found.end())
+        return len(text) if end < 0 else end
+    if found["comment"]:
+        depth = 1
+        for mark in BLOCK_MARK.finditer(text, found.end()):
+            depth += 1 if mark[0] == "/*" else -1
+            if not depth:
+                return mark.end()
+        raise LookupError("a block comment does not end")
+    if found["raw"]:
+        close = '"' + found["hashes"]
+        end = text.find(close, found.end())
+        if end < 0:
+            raise LookupError("a string does not end")
+        return end + len(close)
+    if found["string"]:
+        rest = STRING_REST.match(text, found.end())
+        if rest is None:
+            raise LookupError("a string does not end")
+        return rest.end()
+    return found.end()  # a character literal is whole in the match
+
+
+def attributes(text):
+    """The outer attributes in text, each without its spaces: `test`,
+    `cfg(test)`, `ignore=` (rust_code has already blanked any string)."""
+    return [re.sub(r"\s+", "", body) for body in OUTER_ATTR.findall(text)]
+
+
+def gated(attrs):
+    """Whether attrs build their item only under some cfg other than
+    cfg(test). cargo test sets test; no other cfg is evaluated here."""
+    return any(attr.startswith("cfg_attr(") or (attr.startswith("cfg(") and attr != "cfg(test)")
+               for attr in attrs)
+
+
+def crate_root(file):
+    """Whether a source file is a crate root, so that its inline mods alone
+    give a test's full path: src/lib.rs, src/main.rs, src/bin/*.rs, tests/*.rs."""
+    return file in ("src/lib.rs", "src/main.rs") or bool(
+        re.fullmatch(r"(?:src/bin|tests)/[^/]+\.rs", file))
+
+
+def rust_fns(code, file):
+    """Every fn item in one file's code, as rust_code leaves it: its leaf, its
+    full path (None when it is no module item of a crate root), whether it
+    is marked #[test], and why cargo would not run it as a test, or None.
+    LookupError(reason) when the brackets do not balance."""
+    regions = [["file", None, False, ""]]  # kind, mod name, gated, bracket
+    opening, fns = None, []
+    for token in RUST_TOKEN.finditer(code):
+        if token["fn"] is not None:
+            fns.append(rust_fn(token["fn"], attributes(token["attrs"]), regions, file))
+        elif token["mod"] is not None:
+            opening = ["mod", token["mod"], gated(attributes(token["attrs"]))]
+        elif token["macro"] is not None:
+            opening = ["macro", None, False]
+        elif token["inner"] is not None:
+            regions[-1][2] = regions[-1][2] or gated([re.sub(r"\s+", "", token["inner"])])
+        elif token["open"] is not None:
+            regions.append((opening or ["block", None, False]) + [token["open"]])
+            opening = None
+        else:
+            if len(regions) == 1 or regions[-1][3] != BRACKETS[token["close"]]:
+                raise LookupError(UNBALANCED)
+            regions.pop()
+    if len(regions) > 1:
+        raise LookupError(UNBALANCED)
+    return fns
+
+
+def rust_fn(leaf, attrs, regions, file):
+    """One fn item, placed by the regions open around it."""
+    test = "test" in attrs
+    kinds = [region[0] for region in regions[1:]]
+    if "macro" in kinds:
+        return RustFn(leaf, None, test, f"#[test] fn {leaf} is only inside a macro, "
+                      "which this static lookup does not expand")
+    if "block" in kinds:
+        return RustFn(leaf, None, test, f"#[test] fn {leaf} is inside a block, not a module "
+                      "item, so the test harness does not collect it")
+    if not crate_root(file):
+        return RustFn(leaf, None, test, f"#[test] fn {leaf} is in {file}, which is not a "
+                      "crate root this static lookup places")
+    path = "::".join([region[1] for region in regions[1:]] + [leaf])
+    if gated(attrs) or any(region[2] for region in regions):
+        return RustFn(leaf, path, test, f"#[test] fn {path} is behind a cfg this static "
+                      "lookup does not evaluate; it reads only cfg(test)")
+    if any(attr == "ignore" or attr.startswith("ignore=") for attr in attrs):
+        return RustFn(leaf, path, test, f"#[test] fn {path} is marked #[ignore], "
+                      "so cargo test does not run it")
+    return RustFn(leaf, path, test, None)
+
+
 def host_lookup(read, rust_names):
-    """A host name is found when a #[test] fn has its leaf, the part after the
-    last ::. A fn of that name without #[test] is not a test."""
-    tests, fns = set(), set()
-    for name in rust_names:
-        text = text_of(read, name)
-        tests.update(TEST_FN.findall(text))
-        fns.update(ANY_FN.findall(text))
+    """A host name is found when exactly one test answers to it, as
+    falsify.py's --exact list requires: a #[test] fn item at that full path
+    that cargo would run (see rust_fn). Otherwise the reason says what stands
+    there instead: a test elsewhere, a fn that is no test, or only text in a
+    comment or a string."""
+    tests, plain, written, broken = [], set(), set(), []
+    for file in rust_names:
+        try:
+            text = text_of(read, file)
+            fns = rust_fns(rust_code(text), file)
+        except LookupError as error:
+            broken.append(f"{file}: {error}")
+            continue
+        tests += [(file, fn) for fn in fns if fn.test]
+        plain.update(fn.leaf for fn in fns if not fn.test)
+        written.update(ANY_FN.findall(text))
 
     def reason(name):
+        if broken:
+            return broken[0]
         leaf = name.rsplit("::", 1)[-1]
-        if leaf in tests:
+        found = [(file, fn) for file, fn in tests if fn.leaf == leaf]
+        live = [file for file, fn in found if fn.path == name and not fn.problem]
+        if len(live) == 1:
             return None
-        if leaf in fns:
+        if live:
+            return (f"{name} is a #[test] fn in {len(live)} files ({', '.join(live)}), "
+                    "but falsify.py's --exact list must find exactly one")
+        stuck = [fn.problem for _file, fn in found if fn.problem and fn.path in (name, None)]
+        if stuck:
+            return stuck[0]
+        elsewhere = [fn.path for _file, fn in found if fn.path]
+        if elsewhere:
+            return f"no #[test] fn at {name}; #[test] fn {leaf} is at {', '.join(elsewhere)}"
+        if leaf in plain:
             return f"fn {leaf} is not marked #[test]"
+        if leaf in written:
+            return f"fn {leaf} is only inside a comment or a string"
         return f"no #[test] fn {leaf}"
     return reason
 
 
 def case_lookup(read):
     """A self-test name is found when it is a key of falsify.py's
-    SELF_TEST_CASES literal bound to a function falsify.py defines."""
+    SELF_TEST_CASES table, bound to a function falsify.py defines once, by a
+    plain top-level def before the table."""
     try:
-        cases, defs = runner_cases(read)
+        cases, binding = runner_cases(read)
     except LookupError as error:
         message = str(error)
         return lambda _name: message
 
     def reason(name):
         if name not in cases:
-            return f"{name!r} is not a SELF_TEST_CASES key"
-        if cases[name] not in defs:
-            return f"{name!r} maps to {cases[name]}, which falsify.py does not define"
-        return None
+            return f"{name!r} is not a {TABLE} key"
+        why = binding(cases[name])
+        return f"{name!r} maps to {cases[name]}, {why}" if why else None
     return reason
 
 
 def runner_cases(read):
-    """({case name: function name}, top-level function names) from falsify.py,
-    read with ast. The last SELF_TEST_CASES assignment wins, as at run time."""
+    """({case name: function name}, function name -> why it is not bound the
+    way the table needs, or None), from falsify.py, read with ast.
+
+    The table is followed only in the one shape whose run-time value is its
+    literal: one top-level SELF_TEST_CASES = {"name": function, ...}, after it
+    only read (iterated, tested with in, indexed, or read through items, keys,
+    values or get). Any other mention of the name is refused with its line,
+    and so are a star import and a builtin that runs code from a string."""
     try:
         tree = ast.parse(text_of(read, "falsify.py"))
     except (SyntaxError, ValueError):
         raise LookupError("falsify.py does not parse") from None
-    defs = {node.name for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    cases = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        else:
-            continue
-        if (any(isinstance(target, ast.Name) and target.id == "SELF_TEST_CASES"
-                for target in targets) and isinstance(node.value, ast.Dict)):
-            cases = {key.value: getattr(value, "id", None)
-                     for key, value in zip(node.value.keys, node.value.values)
-                     if isinstance(key, ast.Constant) and isinstance(key.value, str)}
-    if cases is None:
-        raise LookupError("falsify.py has no SELF_TEST_CASES table")
-    return cases, defs
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    index = name_index(tree, parents)
+    table, refusals = None, []
+    for node in index[TABLE]:
+        use = table_use(node, parents, tree)
+        if use == "literal" and table is None:
+            table = parents[node]
+        elif use != "read":
+            refusals.append((line_of(node, parents),
+                             TABLE_REFUSALS["binds" if use == "literal" else use]))
+    refusals += [(line_of(node, parents), f"names {name}, which runs code this static lookup "
+                  "cannot read") for name in RUNS_CODE + ("compile",) for node in index[name]
+                 if name in RUNS_CODE or isinstance(node, ast.Name)]
+    refusals += [(node.lineno, "imports *, which can bind any name this static lookup follows")
+                 for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                 and any(alias.name == "*" for alias in node.names)]
+    if refusals:
+        line, reason = min(refusals)
+        raise LookupError(f"falsify.py line {line} {reason}")
+    if table is None:
+        raise LookupError(f"falsify.py has no {TABLE} table")
+    cases = {}
+    for key, value in zip(table.value.keys, table.value.values):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                and isinstance(value, ast.Name)):
+            raise LookupError(f"falsify.py line {value.lineno}: a {TABLE} item is not "
+                              "a string key bound to a name")
+        cases[key.value] = value.id
+    return cases, lambda function: case_binding(index[function], parents, tree, table)
+
+
+def name_index(tree, parents):
+    """{name: every node that names it, in source order}. A node names a name
+    through an identifier field (a Name, a def, an import, a keyword argument,
+    an attribute, a global), or as a string constant equal to it."""
+    index = collections.defaultdict(list)
+    for node in ast.walk(tree):
+        values = [node.value] if isinstance(node, ast.Constant) else [
+            item for _field, value in ast.iter_fields(node)
+            for item in (value if isinstance(value, list) else [value])]
+        names = {value.decode("latin-1") if isinstance(value, bytes) else value
+                 for value in values if isinstance(value, (str, bytes))}
+        for name in names:
+            index[name].append(node)
+    for nodes in index.values():
+        nodes.sort(key=lambda node: (line_of(node, parents), getattr(node, "col_offset", 0)))
+    return index
+
+
+def line_of(node, parents):
+    """The line a node is on; an import's alias takes its statement's line."""
+    while not hasattr(node, "lineno"):
+        node = parents[node]
+    return node.lineno
+
+
+def table_use(node, parents, tree):
+    """How one node that names the table uses it: literal, read, binds,
+    changes, string or uses. Only the literal and the reads are followed."""
+    parent = parents.get(node)
+    if isinstance(node, ast.Constant):
+        return "string"
+    if isinstance(node, BINDINGS) or (
+            isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load)):
+        return "binds"
+    if not isinstance(node, ast.Name):
+        return "uses"
+    if isinstance(node.ctx, ast.Store):
+        if isinstance(parent, ast.AugAssign):
+            return "changes"
+        if (isinstance(parent, ast.Assign) and parent.targets == [node]
+                and isinstance(parent.value, ast.Dict) and parent in tree.body):
+            return "literal"
+        return "binds"
+    if isinstance(node.ctx, ast.Del):
+        return "binds"
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return "read" if isinstance(parent.ctx, ast.Load) else "changes"
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        call = parents.get(parent)
+        if parent.attr in TABLE_READS and isinstance(call, ast.Call) and call.func is parent:
+            return "read"
+        return "changes" if parent.attr in TABLE_CHANGES else "uses"
+    if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)) and parent.iter is node:
+        return "read"
+    if isinstance(parent, ast.Compare) and any(
+            comparator is node and isinstance(op, (ast.In, ast.NotIn))
+            for op, comparator in zip(parent.ops, parent.comparators)):
+        return "read"
+    return "uses"
+
+
+def case_binding(named, parents, tree, table):
+    """Why a table function, named by these nodes, is not bound once, by a
+    plain top-level def before the table, or None. A read of the name binds
+    nothing; any other mention does, a string equal to it included."""
+    bound = [node for node in named
+             if not (isinstance(node, (ast.Name, ast.Attribute))
+                     and isinstance(node.ctx, ast.Load))]
+    if not bound:
+        return "which falsify.py does not define"
+    first = bound[0]
+    if len(bound) > 1:
+        verb = "spells as a string" if isinstance(bound[1], ast.Constant) else "binds again"
+        return f"which falsify.py {verb} at line {line_of(bound[1], parents)}"
+    if not (isinstance(first, ast.FunctionDef) and not first.decorator_list
+            and first in tree.body):
+        return (f"which falsify.py line {line_of(first, parents)} binds by something other "
+                "than a plain top-level def")
+    if first.lineno > table.lineno:
+        return f"whose def at line {first.lineno} comes after the table at line {table.lineno}"
+    return None
 
 
 def anchor_problems(entries, read):
@@ -408,6 +699,11 @@ def digest(data):
     return "absent" if data is None else "sha256 " + hashlib.sha256(data).hexdigest()
 
 
+def committed_bytes(commit, paths):
+    """{path: its bytes at commit, or None when the commit has no such file}."""
+    return {path: git("cat-file", "blob", f"{commit}:{path}") for path in paths}
+
+
 def pin_problems(files, commit, committed):
     """Problems binding the bytes read to one commit: every file read must
     hold exactly the bytes the commit has at that path. committed(path) gives
@@ -424,6 +720,53 @@ def pin_problems(files, commit, committed):
     return problems
 
 
+def commit_line(commit):
+    """`hash subject` for one commit, or None."""
+    out = git("log", "-1", "--format=%H %s", commit)
+    return out.decode("utf-8", "replace").strip() if out else None
+
+
+def last_change(path):
+    """`hash subject` of the last commit that changed path at HEAD, or None."""
+    out = git("log", "-1", "--format=%H %s", "HEAD", "--", path)
+    return out.decode("utf-8", "replace").strip() if out else None
+
+
+@functools.lru_cache(maxsize=None)
+def first_parent_line():
+    """HEAD's first-parent line, newest first, or None when git cannot tell."""
+    out = git("rev-list", "--first-parent", "HEAD")
+    return None if out is None else tuple(out.decode("ascii").split())
+
+
+def entry_point(change):
+    """The commit that brought `change` onto HEAD's first-parent line: the
+    merge of its pull request, or `change` itself when it was committed on
+    that line. None when git cannot tell."""
+    line = first_parent_line()
+    after = git("rev-list", "--ancestry-path", f"{change}..HEAD")
+    if line is None or after is None:
+        return None
+    if change in line:
+        return change
+    descendants = set(after.decode("ascii").split())
+    return next((commit for commit in reversed(line) if commit in descendants), None)
+
+
+def pinned(files):
+    """Where the bytes were read (guard a): HEAD, then every file read with its
+    sha256, its last change, and the commit that brought that change onto
+    HEAD's first-parent line; a merge's subject names its PR."""
+    lines = [f"read at HEAD {head_commit() or '(unresolved)'}"]
+    for path, data in sorted(files.items()):
+        change = last_change(path)
+        lines.append(f"  {path} {digest(data)}, last changed in {change or '(unknown)'}")
+        entry = entry_point(change.split()[0]) if change else None
+        if entry:
+            lines.append(f"    first on HEAD's first-parent line in {commit_line(entry)}")
+    return "\n".join(lines)
+
+
 def unexpected(problems, known=None):
     """The problems no recorded finding covers. A finding hides only the
     problems it records, so a second defect beside it still fails the gate."""
@@ -433,15 +776,8 @@ def unexpected(problems, known=None):
 
 
 def described(problems, files):
-    """The problems, as KNOWN_FINDINGS records them, then where they were read
-    (guard a): HEAD, and the sha256 and last change of every file read."""
-    lines = [repr(problem) for problem in problems]
-    lines.append(f"read at HEAD {head_commit() or '(unresolved)'}")
-    for path, data in sorted(files.items()):
-        change = git("log", "-1", "--format=%H %s", "HEAD", "--", path)
-        lines.append(f"  {path} {digest(data)}, last changed in "
-                     f"{change.decode('utf-8', 'replace').strip() if change else '(unknown)'}")
-    return "\n".join(lines)
+    """The problems, as KNOWN_FINDINGS records them, then where they were read."""
+    return "\n".join([repr(problem) for problem in problems] + [pinned(files)])
 
 
 @functools.lru_cache(maxsize=None)
@@ -451,6 +787,24 @@ def merged_base():
     snapshot = Snapshot()
     entries, problems = probe(snapshot.read, snapshot.rust_names())
     return snapshot, entries, problems
+
+
+def report():
+    """The run's record (guard a), printed after the tests: the problems each
+    rule found on the merged base, how many files read differ from HEAD's
+    bytes, and where each was read. unittest's own line below it is the
+    verdict; this record is never one."""
+    snapshot, _entries, problems = merged_base()
+    commit = head_commit()
+    differ = pin_problems(snapshot.files, commit, committed_bytes(commit, snapshot.files).get)
+    counts = ", ".join(f"{rule} {len(found)}" for rule, found in problems.items())
+    return (f"agent-host honesty probe: problems by rule: {counts}; recorded findings: "
+            f"{', '.join(KNOWN_FINDINGS) or 'none'}; files read that differ from HEAD: "
+            f"{len(differ)} of {len(snapshot.files)}\n{pinned(snapshot.files)}")
+
+
+def tearDownModule():
+    print("\n" + report(), file=sys.stderr)
 
 
 def merged_document(name):
@@ -527,6 +881,18 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
                  if entry["expect"] in ("caught", "survives") and entry["tests"]]
         self.assertTrue(named, "no named test to check")
         self.assert_clean("named")
+        # The entries as merged: the first subtest renames a test in its copy.
+        merged = [entry for entry in merged_base()[1]
+                  if entry["expect"] in ("caught", "survives") and entry["tests"]]
+        where = ", ".join(Snapshot.rust_names())
+
+        def every(command, wanted, reason):
+            """The problem reason gives for every merged test of command that wanted accepts."""
+            return [Problem("named", entry["id"], "falsify.py" if command == "selftest" else where,
+                            reason)
+                    for entry in merged for name in entry["tests"]
+                    if entry["command"] == command and wanted(name)]
+
         with self.subTest("a host test renamed away from its fn"):
             host = next((entry for entry in named if entry["command"] == "host"), None)
             if host is None:
@@ -547,6 +913,44 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
                 Problem("named", entry["id"], "falsify.py", reason)
                 for entry in named for name in entry["tests"]
                 if entry["command"] == "selftest" and name == case])
+        lib = text_of(merged_base()[0].read, "src/lib.rs")
+        host = next((entry for entry in merged if entry["command"] == "host"), None)
+        for label, change, reason in (
+                # The reviewer's repro on the merged source: the test is gone
+                # from the code, and its text is left in a block comment.
+                ("a host test left only in a comment",
+                 lambda leaf: lib.replace(f"fn {leaf}(", f"fn {leaf}_renamed_by_redteam(")
+                 + f"\n/*\n#[test]\nfn {leaf}() {{}}\n*/\n",
+                 lambda name, leaf: f"fn {leaf} is only inside a comment or a string"),
+                ("a host test marked #[ignore]",
+                 lambda leaf: lib.replace(f"fn {leaf}(", f"#[ignore]\n    fn {leaf}("),
+                 lambda name, leaf: f"#[test] fn {name} is marked #[ignore], "
+                                    "so cargo test does not run it")):
+            with self.subTest(label):
+                if host is None:
+                    self.skipTest("the merged base has no host entry to plant in")
+                name = host["tests"][0]
+                leaf = name.rsplit("::", 1)[-1]
+                self.assertEqual(lib.count(f"fn {leaf}("), 1, f"fn {leaf} is not defined once")
+                self.assertEqual(
+                    planted({"src/lib.rs": change(leaf).encode()})["named"],
+                    every("host", lambda test: test.rsplit("::", 1)[-1] == leaf,
+                          reason(name, leaf)))
+        runner = text_of(merged_base()[0].read, "falsify.py")
+        selftest = next((entry for entry in merged if entry["command"] == "selftest"), None)
+        for label, statement, reason in (
+                # The reviewer's two repros, each just above the main guard.
+                ("the table rebound with another expression", lambda case: f"{TABLE} = dict()",
+                 "binds SELF_TEST_CASES other than by its one top-level dict literal"),
+                ("a case deleted from the table", lambda case: f"del {TABLE}[{case!r}]",
+                 "changes SELF_TEST_CASES in place")):
+            with self.subTest(label):
+                if selftest is None:
+                    self.skipTest("the merged base has no selftest entry to plant in")
+                text, line = before_main(runner, statement(selftest["tests"][0]))
+                self.assertEqual(planted({"falsify.py": text.encode()})["named"],
+                                 every("selftest", lambda test: True,
+                                       f"falsify.py line {line} {reason}"))
 
     def test_every_edit_old_string_occurs_exactly_once(self):
         entries = copy.deepcopy(merged_base()[1])
@@ -577,7 +981,7 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
             self.assertIsNotNone(snapshot.files.get(f"examples/agent-host/{name}"),
                                  f"{name} was not read")
         commit = head_commit()
-        committed = {path: git("cat-file", "blob", f"{commit}:{path}") for path in snapshot.files}
+        committed = committed_bytes(commit, snapshot.files)
         new = pin_problems(snapshot.files, commit, committed.get)
         if new:
             self.fail("\n" + described(new, snapshot.files))
@@ -594,6 +998,32 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
         self.assertIn(f"read at HEAD {commit}", report)
         self.assertIn(f"{path} {digest(changed[path])}, last changed in ", report)
 
+    def test_clean_report_pins_commit_and_merge(self):
+        """The record printed after the tests names HEAD, and for every file
+        read its sha256, its last change, and the commit that brought that
+        change onto HEAD's first-parent line. git confirms each such commit is
+        on that line and holds the change, and that its first parent does not,
+        so it is the first one that does."""
+        snapshot = merged_base()[0]
+        record = report()
+        commit = head_commit()
+        self.assertIsNotNone(commit, "HEAD cannot be resolved")
+        self.assertIn(f"read at HEAD {commit}", record)
+        self.assertIn("files read that differ from HEAD: 0 of ", record)
+        line = git("rev-list", "--first-parent", "HEAD").decode("ascii").split()
+        for path, data in sorted(snapshot.files.items()):
+            with self.subTest(path):
+                change = last_change(path)
+                self.assertIsNotNone(change, f"{path} has no commit at HEAD")
+                self.assertIn(f"  {path} {digest(data)}, last changed in {change}\n", record + "\n")
+                changed_in = change.split()[0]
+                entry = entry_point(changed_in)
+                self.assertIn(entry, line)
+                self.assertIsNotNone(git("merge-base", "--is-ancestor", changed_in, entry))
+                self.assertIsNone(git("merge-base", "--is-ancestor", changed_in, entry + "^"))
+                self.assertIn(f"    first on HEAD's first-parent line in {commit_line(entry)}",
+                              record)
+
 
 def without_case(runner, case):
     """falsify.py's text without the SELF_TEST_CASES item keyed `case`."""
@@ -608,9 +1038,32 @@ def without_case(runner, case):
     raise LookupError(f"no SELF_TEST_CASES item {case!r}")
 
 
+def before_main(runner, statement):
+    """falsify.py's text with one statement just above its main guard, and the
+    line that statement is on."""
+    at = runner.index('\nif __name__ == "__main__":') + 1
+    return runner[:at] + statement + "\n" + runner[at:], runner[:at].count("\n") + 1
+
+
 # One small tree every rule passes. Each control below breaks one thing in it.
-GOOD_SOURCE = b"fn helper() {}\n\n#[test]\nfn a_test() {}\n"
-GOOD_RUNNER = b'def case():\n    return True\n\n\nSELF_TEST_CASES = {\n    "a case": case,\n}\n'
+GOOD_SOURCE = b"fn helper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn a_test() {}\n}\n"
+RUNNER_CASE = "def a_case():\n    return True\n\n\n"
+RUNNER_TABLE = 'SELF_TEST_CASES = {\n    "a case": a_case,\n}\n\n\n'
+# Every read of the table the lookup follows; none of them can change it.
+RUNNER_READS = '''def run(only):
+    if only not in SELF_TEST_CASES:
+        return False
+    names = [name for name in SELF_TEST_CASES]
+    for name in SELF_TEST_CASES.keys():
+        assert name in SELF_TEST_CASES and name in names
+    for case in SELF_TEST_CASES.values():
+        assert callable(case)
+    for name, case in SELF_TEST_CASES.items():
+        if name == only:
+            return case() and SELF_TEST_CASES.get(name) is SELF_TEST_CASES[name]
+    return False
+'''
+GOOD_RUNNER = (RUNNER_CASE + RUNNER_TABLE + RUNNER_READS).encode()
 GOOD_HOST = {"id": "ST1", "title": "host", "command": "host", "expect": "caught",
              "edits": [{"file": "src/lib.rs", "old": "fn helper() {}",
                         "new": "fn helper() { panic!() }"}],
@@ -635,8 +1088,11 @@ def tree(entries=(GOOD_HOST, GOOD_SELFTEST), **changed):
 
 
 def problems_in(files, rule=None):
-    """The problems every rule finds in a fixture tree, or one rule's."""
-    _entries, found = probe(overlay(nothing, files), ["src/lib.rs"])
+    """The problems every rule finds in a fixture tree, or one rule's. Its
+    Rust files are the .rs files it holds under src/ and tests/."""
+    rust_names = sorted(name for name in files
+                        if name.endswith(".rs") and name.split("/", 1)[0] in SOURCE_DIRS)
+    _entries, found = probe(overlay(nothing, files), rust_names)
     return found[rule] if rule else [problem for problems in found.values() for problem in problems]
 
 
@@ -659,6 +1115,22 @@ class ProbeControls(unittest.TestCase):
         def asks(document):
             return tree(asks=json.dumps(document).encode())
 
+        def rust(lib, extra=()):
+            """The good tree with src/lib.rs replaced, and more Rust files."""
+            files = tree(source=lib.encode())
+            files.update((name, text.encode()) for name, text in extra)
+            return files
+
+        def in_tests(body):
+            """src/lib.rs with body as the inside of its mod tests."""
+            return "fn helper() {}\n\n#[cfg(test)]\nmod tests {\n" + body + "}\n"
+
+        def appended(text):
+            return tree(runner=GOOD_RUNNER + text.encode())
+
+        def assembled(*parts):
+            return tree(runner="".join(parts).encode())
+
         def parse(entry, reason):
             return [Problem("parse", entry, "falsifiers.json", reason)]
 
@@ -671,8 +1143,30 @@ class ProbeControls(unittest.TestCase):
         def ask(entry, reason):
             return [Problem("asks", entry, "asks.json", reason)]
 
+        def runner_refused(line, reason):
+            return named("ST2", "falsify.py", f"falsify.py line {line} {reason}")
+
+        def case_refused(reason):
+            return named("ST2", "falsify.py", f"'a case' maps to a_case, {reason}")
+
         untested = {key: value for key, value in GOOD_HOST.items() if key != "tests"}
         unbound = b'def case():\n    return True\n\nSELF_TEST_CASES = {"a case": gone}\n'
+        hidden = named("ST1", "src/lib.rs", "fn a_test is only inside a comment or a string")
+        behind_cfg = named("ST1", "src/lib.rs", "#[test] fn tests::a_test is behind a cfg this "
+                           "static lookup does not evaluate; it reads only cfg(test)")
+        ignored = named("ST1", "src/lib.rs", "#[test] fn tests::a_test is marked #[ignore], "
+                        "so cargo test does not run it")
+        unbalanced = named("ST1", "src/lib.rs", "src/lib.rs: the brackets do not balance once "
+                           "comments and strings are blanked, so this static lookup cannot place "
+                           "its tests")
+        a_test_mod = "mod tests {\n    #[test]\n    fn a_test() {}\n}\n"
+        end = GOOD_RUNNER.count(b"\n") + 1  # the line of anything appended
+        binds = "binds SELF_TEST_CASES other than by its one top-level dict literal"
+        changes = "changes SELF_TEST_CASES in place"
+        uses = "uses SELF_TEST_CASES in a way this static lookup does not follow"
+        not_plain = "binds by something other than a plain top-level def"
+        bad_item = ("falsify.py line {}: a SELF_TEST_CASES item is not a string key bound to "
+                    "a name").format(RUNNER_CASE.count("\n") + 2)
         cases = (
             ("the good tree", tree(), []),
             ("a compile_error entry may name no test", host(expect="compile_error", tests=[]), []),
@@ -708,6 +1202,71 @@ class ProbeControls(unittest.TestCase):
              named("ST1", "src/lib.rs", "no #[test] fn gone")),
             ("a host test that is a plain fn", host(tests=["tests::helper"]),
              named("ST1", "src/lib.rs", "fn helper is not marked #[test]")),
+            # The reviewer's repro, byte for byte: the test only in a comment.
+            ("a host test only in a block comment",
+             tree(source=b"fn helper() {}\n/*\n#[test]\nfn a_test() {}\n*/\n"), hidden),
+            ("a host test only in line comments",
+             rust(in_tests("    // #[test]\n    // fn a_test() {}\n")), hidden),
+            ("a host test only in a nested block comment",
+             rust(in_tests("    /* outer /* inner */\n    #[test]\n    fn a_test() {}\n    */\n")),
+             hidden),
+            ("a host test only in a string",
+             rust(in_tests('    const S: &str = "#[test] fn a_test() {}";\n')), hidden),
+            ("a host test only in a raw string that holds a quote",
+             rust(in_tests('    const S: &str = r##"say "#[test] fn a_test() {}"##;\n')), hidden),
+            ("a quote or a brace in a char literal is no string or bracket",
+             rust("fn helper() {}\nfn quote<'a>(text: &'a str) -> char {\n"
+                  "    if text.is_empty() { '\"' } else { '{' }\n}\n\n#[cfg(test)]\n" + a_test_mod),
+             []),
+            ("an ignored host test",
+             rust(in_tests("    #[test]\n    #[ignore]\n    fn a_test() {}\n")), ignored),
+            ("an ignored host test with a reason",
+             rust(in_tests('    #[test]\n    #[ignore = "slow"]\n    fn a_test() {}\n')), ignored),
+            ("a host test behind a cfg",
+             rust(in_tests("    #[test]\n    #[cfg(any())]\n    fn a_test() {}\n")), behind_cfg),
+            ("a host test behind a cfg_attr",
+             rust(in_tests("    #[cfg_attr(test, ignore)]\n    #[test]\n    fn a_test() {}\n")),
+             behind_cfg),
+            ("a host test in a mod behind a cfg",
+             rust("fn helper() {}\n\n#[cfg(any())]\n" + a_test_mod), behind_cfg),
+            ("a host test in a file behind an inner cfg",
+             rust("#![cfg(any())]\n" + GOOD_SOURCE.decode()), behind_cfg),
+            ("a host test only inside a macro",
+             rust(in_tests("    macro_rules! make {\n        () => {\n            #[test]\n"
+                           "            fn a_test() {}\n        };\n    }\n")),
+             named("ST1", "src/lib.rs", "#[test] fn a_test is only inside a macro, which this "
+                   "static lookup does not expand")),
+            ("a host test inside a fn body",
+             rust(in_tests("    fn outer() {\n        #[test]\n        fn a_test() {}\n    }\n")),
+             named("ST1", "src/lib.rs", "#[test] fn a_test is inside a block, not a module "
+                   "item, so the test harness does not collect it")),
+            ("a host test at another path",
+             rust("fn helper() {}\n\nmod other {\n    #[test]\n    fn a_test() {}\n}\n"),
+             named("ST1", "src/lib.rs", "no #[test] fn at tests::a_test; #[test] fn a_test is "
+                   "at other::a_test")),
+            ("a host test in a module file",
+             rust("fn helper() {}\nmod extra;\n",
+                  (("src/extra.rs", "#[cfg(test)]\n" + a_test_mod),)),
+             named("ST1", "src/extra.rs, src/lib.rs", "#[test] fn a_test is in src/extra.rs, "
+                   "which is not a crate root this static lookup places")),
+            ("a host test in an integration test crate",
+             rust("fn helper() {}\n", (("tests/it.rs", a_test_mod),)), []),
+            ("a host test in two crate roots",
+             rust(GOOD_SOURCE.decode(), (("tests/it.rs", a_test_mod),)),
+             named("ST1", "src/lib.rs, tests/it.rs", "tests::a_test is a #[test] fn in 2 files "
+                   "(src/lib.rs, tests/it.rs), but falsify.py's --exact list must find "
+                   "exactly one")),
+            ("a bracket left open", rust("fn helper() {}\nmod tests {\n"), unbalanced),
+            ("a bracket closed twice", rust("fn helper() {}\n}\n"), unbalanced),
+            ("a bracket closed by another kind", rust("fn helper() {}\nconst A: [u8; 1] = [0);\n"),
+             unbalanced),
+            ("a block comment that does not end", rust("fn helper() {}\n/* never closed\n"),
+             named("ST1", "src/lib.rs", "src/lib.rs: a block comment does not end")),
+            ("a string that does not end", rust('fn helper() {}\nconst S: &str = "never closed;\n'),
+             named("ST1", "src/lib.rs", "src/lib.rs: a string does not end")),
+            ("a Rust file that is not UTF-8", tree(source=b"fn helper() {}\xff"),
+             named("ST1", "src/lib.rs", "src/lib.rs: the file is not UTF-8")
+             + anchor("ST1", "src/lib.rs", "the file is not UTF-8")),
             ("an e2e test has no static lookup", host(command="e2e"),
              named("ST1", "", "command 'e2e' has no static test lookup")),
             ("a self-test case with no key", tree([GOOD_HOST, dict(GOOD_SELFTEST, tests=["gone"])]),
@@ -721,6 +1280,68 @@ class ProbeControls(unittest.TestCase):
             ("falsify.py is missing", tree(runner=None),
              named("ST2", "falsify.py", "the file does not exist")
              + anchor("ST2", "falsify.py", "the file does not exist")),
+            # The reviewer's two repros: a later binding and a deleted key.
+            ("the table rebound with another expression", appended("SELF_TEST_CASES = dict()\n"),
+             runner_refused(end, binds)),
+            ("a case deleted from the table", appended('del SELF_TEST_CASES["a case"]\n'),
+             runner_refused(end, changes)),
+            ("a case popped from the table", appended('SELF_TEST_CASES.pop("a case")\n'),
+             runner_refused(end, changes)),
+            ("a case replaced in the table", appended('SELF_TEST_CASES["a case"] = run\n'),
+             runner_refused(end, changes)),
+            ("the table merged in place", appended("SELF_TEST_CASES |= {}\n"),
+             runner_refused(end, changes)),
+            ("a second table literal", appended('SELF_TEST_CASES = {"a case": a_case}\n'),
+             runner_refused(end, binds)),
+            ("the table bound inside a block", appended("if True:\n    SELF_TEST_CASES = {}\n"),
+             runner_refused(end + 1, binds)),
+            ("the table deleted", appended("del SELF_TEST_CASES\n"), runner_refused(end, binds)),
+            ("the table declared global", appended("def reset():\n    global SELF_TEST_CASES\n"),
+             runner_refused(end + 1, binds)),
+            ("the table imported", appended("from json import loads as SELF_TEST_CASES\n"),
+             runner_refused(end, binds)),
+            ("the table aliased", appended("cases = SELF_TEST_CASES\n"), runner_refused(end, uses)),
+            ("the table passed on", appended("print(SELF_TEST_CASES)\n"),
+             runner_refused(end, uses)),
+            ("the table patched by keyword", appended("globals().update(SELF_TEST_CASES={})\n"),
+             runner_refused(end, uses)),
+            ("the table named in a string", appended('globals()["SELF_TEST_CASES"] = {}\n'),
+             runner_refused(end, "spells SELF_TEST_CASES as a string")),
+            ("code run from a string", appended('exec("pass")\n'),
+             runner_refused(end, "names exec, which runs code this static lookup cannot read")),
+            ("code run through builtins", appended('import builtins\nbuiltins.eval("1")\n'),
+             runner_refused(end + 1, "names eval, which runs code this static lookup cannot read")),
+            ("code compiled by the builtin", appended('compile("1", "x", "single")\n'),
+             runner_refused(end, "names compile, which runs code this static lookup cannot read")),
+            ("re.compile is not that builtin",
+             appended('import re\nPATTERN = re.compile("x")\n'), []),
+            ("a star import", appended("from os import *\n"),
+             runner_refused(end, "imports *, which can bind any name this static lookup follows")),
+            ("a table item that is not a name",
+             assembled(RUNNER_CASE, 'SELF_TEST_CASES = {\n    "a case": lambda: True,\n}\n',
+                       RUNNER_READS), named("ST2", "falsify.py", bad_item)),
+            ("an unpacked table item",
+             assembled(RUNNER_CASE, 'SELF_TEST_CASES = {\n    **{"a case": a_case},\n}\n',
+                       RUNNER_READS), named("ST2", "falsify.py", bad_item)),
+            ("a case function bound again", appended("a_case = run\n"),
+             case_refused(f"which falsify.py binds again at line {end}")),
+            ("a case function named in a string", appended('globals()["a_case"] = run\n'),
+             case_refused(f"which falsify.py spells as a string at line {end}")),
+            ("a case function defined after the table",
+             assembled(RUNNER_TABLE, RUNNER_CASE, RUNNER_READS),
+             case_refused("whose def at line {} comes after the table at line 1".format(
+                 RUNNER_TABLE.count("\n") + 1))),
+            ("a decorated case function",
+             assembled("@staticmethod\n", RUNNER_CASE, RUNNER_TABLE, RUNNER_READS),
+             case_refused(f"which falsify.py line 2 {not_plain}")),
+            ("an async case function", assembled("async ", RUNNER_CASE, RUNNER_TABLE, RUNNER_READS),
+             case_refused(f"which falsify.py line 1 {not_plain}")),
+            ("a case function inside a block",
+             assembled("if True:\n    def a_case():\n        return True\n\n\n", RUNNER_TABLE,
+                       RUNNER_READS), case_refused(f"which falsify.py line 2 {not_plain}")),
+            ("a case function bound by assignment",
+             assembled("def helper():\n    return True\n\n\na_case = helper\n", RUNNER_TABLE,
+                       RUNNER_READS), case_refused(f"which falsify.py line 5 {not_plain}")),
             ("an old text found nowhere", edit(old="fn gone() {}"),
              anchor("ST1", "src/lib.rs", "edits[0]: old is found 0 times, not once")),
             ("an old text found twice", edit(old="fn "),
@@ -774,6 +1395,41 @@ class ProbeControls(unittest.TestCase):
             self.assertEqual(pin_problems({"a": b"x"}, None, {"a": b"x"}.get), [Problem(
                 "pin", "", "HEAD",
                 "HEAD cannot be resolved, so the bytes read are bound to no commit")])
+
+    def test_rust_code_keeps_only_code(self):
+        """rust_code blanks each comment, string and character literal to
+        spaces and changes nothing else: every offset and newline is kept,
+        and lifetimes, labels and raw identifiers stay code. A comment or a
+        string that does not end is refused with its reason."""
+        for text, code in (
+            ('a // b "c\nd', "a d"),
+            ("a /* b /* c */ d */ e", "a e"),
+            ('a "b \\" // c" d', "a d"),
+            ('a "b\nc" d', "a d"),
+            ('a r##"b "# c"## d', "a d"),
+            ('a b"x" br"y" c"z" cr#"w"# d', "a d"),
+            ("a '\"' b \"c\" d", "a b d"),
+            ("a '{' b '\\'' c '\\\\' d '\\u{7b}' e '\\u{1_F600}' f", "a b c d e f"),
+            ("fn f<'a>(x: &'a str) -> &'a str { x }", "fn f<'a>(x: &'a str) -> &'a str { x }"),
+            ("'outer: loop { break 'outer; }", "'outer: loop { break 'outer; }"),
+            ("let r#type = b'x';", "let r#type = b ;"),
+        ):
+            with self.subTest(text=text):
+                blanked = rust_code(text)
+                self.assertEqual(len(blanked), len(text))
+                self.assertTrue(all(kept == was or (kept == " " and was != "\n")
+                                    for kept, was in zip(blanked, text)), blanked)
+                self.assertEqual(" ".join(blanked.split()), code)
+        for text, reason in (
+            ("a /* b", "a block comment does not end"),
+            ("a /* b /* c */", "a block comment does not end"),
+            ('a "b', "a string does not end"),
+            ('a r#"b"', "a string does not end"),
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(LookupError) as refused:
+                    rust_code(text)
+                self.assertEqual(str(refused.exception), reason)
 
     def test_edit_sequence_matches_runner(self):
         """falsify.py applies one file's edits in order, each to the text the
