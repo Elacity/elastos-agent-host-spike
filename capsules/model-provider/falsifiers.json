@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, and MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses. Files are relative to examples/agent-host.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, and MP02-MP04 break the 60-second idle release behaviour. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -497,8 +497,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))",
-          "new": "    pass  # leave MP01's backup behind"
+          "old": "    for name in PROVIDER_TARGETS:",
+          "new": "    for name in PROVIDER_TARGETS[1:]:"
         }
       ],
       "tests": [
@@ -513,12 +513,28 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))",
-          "new": "    backups.update(provider_target.parent.glob(\"*\" + BACKUP_SUFFIX))"
+          "old": "        backups.update(target.parent.glob(target.name + BACKUP_SUFFIX))",
+          "new": "        backups.update(target.parent.glob(\"*\" + BACKUP_SUFFIX))"
         }
       ],
       "tests": [
         "another lane's backup is not recovered",
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV33",
+      "title": "startup recovery skips the idle engine's exact provider target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    for name in PROVIDER_TARGETS:",
+          "new": "    for name in PROVIDER_TARGETS[:-1]:"
+        }
+      ],
+      "tests": [
         "a killed provider edit is recovered"
       ]
     },
@@ -536,6 +552,54 @@
       ],
       "tests": [
         "local_memory::tests::admission_counts_a_repeated_prefix"
+      ]
+    },
+    {
+      "id": "MP02",
+      "title": "a finished run never arms the idle release",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "impl Drop for LocalRun {\n    fn drop(&mut self) {\n        self.engines.schedule_idle_release();\n    }\n}",
+          "new": "impl Drop for LocalRun {\n    fn drop(&mut self) {\n        // the idle release never fires\n    }\n}"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::idle_engine_is_released_and_next_request_restarts_it"
+      ]
+    },
+    {
+      "id": "MP03",
+      "title": "the idle release ignores an active run and closes its engine",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "            // A run that started meanwhile keeps its engine.\n            let Ok(_permit) = execution.try_acquire() else {\n                return;\n            };",
+          "new": "            // A run that started meanwhile keeps its engine.\n            let _permit = execution.try_acquire();"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::idle_engine_is_released_and_next_request_restarts_it"
+      ]
+    },
+    {
+      "id": "MP04",
+      "title": "the idle release closes the run gate, so the next request cannot start a new engine",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "            let mut engines = engines.lock().await;\n            let ids: Vec<_> = engines.keys().cloned().collect();",
+          "new": "            execution.close();\n            let mut engines = engines.lock().await;\n            let ids: Vec<_> = engines.keys().cloned().collect();"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::idle_engine_is_released_and_next_request_restarts_it"
       ]
     }
   ]

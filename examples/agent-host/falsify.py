@@ -59,7 +59,9 @@ PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
 COMMANDS = ("host", "provider", "e2e", "selftest")
-SELF_TEST_DIR = HERE / ".falsify-selftest"
+# Self-test scratch stays in this lane's report directory, so a run writes
+# only below a path the lane owns.
+SELF_TEST_DIR = HERE / "handoff" / "reports" / ".falsify-selftest"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
 # a test body can print anything, including a fake FAILED line, before it.
@@ -220,13 +222,23 @@ def load(path=DATA):
     return entries
 
 
+# The provider files this runner's falsifiers mutate, relative to REPO. Each
+# exact target is restored on startup; every other provider file stays with
+# its owning runner.
+PROVIDER_TARGETS = (
+    "capsules/model-provider/src/local_memory.rs",
+    "capsules/model-provider/src/local_llama.rs",
+)
+
+
 def recover_backups():
-    """Restore this runner's originals: agent-host files and MP01's exact
-    provider target. Other provider files stay with their owning runners.
+    """Restore this runner's originals: agent-host files and this lane's exact
+    provider targets. Other provider files stay with their owning runners.
     Recovery is independent of the data file selected for the next run."""
     backups = set(HERE.rglob("*" + BACKUP_SUFFIX))
-    provider_target = REPO / "capsules/model-provider/src/local_memory.rs"
-    backups.update(provider_target.parent.glob(provider_target.name + BACKUP_SUFFIX))
+    for name in PROVIDER_TARGETS:
+        target = REPO / name
+        backups.update(target.parent.glob(target.name + BACKUP_SUFFIX))
     for backup in sorted(backups):
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
@@ -916,15 +928,18 @@ def another_lanes_backup_is_not_recovered():
 
 
 def a_killed_provider_edit_is_recovered():
-    """Kill a real MP01 edit in an isolated tree, restart through main(),
-    and repeat the edit. Foreign backups stay with their owners."""
-    mp01 = next(entry for entry in load(REPO / "capsules/model-provider/falsifiers.json")
-                if entry["id"] == "MP01")
+    """Kill real provider edits in an isolated tree, restart through main(),
+    and repeat the edit. This lane's memory and idle-engine targets both come
+    back in either startup mode. Foreign backups stay with their owners."""
+    owned = {entry["id"]: entry
+             for entry in load(REPO / "capsules/model-provider/falsifiers.json")
+             if entry["id"] in ("MP01", "MP02")}
+    entry = {"id": "MP01+MP02",
+             "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
+             + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"}]}
     originals = {edit["file"]: (HERE / edit["file"]).read_bytes()
-                 for edit in mp01["edits"]}
+                 for owned_entry in owned.values() for edit in owned_entry["edits"]}
     originals["owned.txt"] = b"original bytes\n"
-    entry = dict(mp01, edits=mp01["edits"] + [
-        {"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"}])
     child = """import json, os, pathlib, runpy, signal, sys
 runner = runpy.run_path(sys.argv[1])
 runner['Mutation'](json.loads(sys.argv[2]), pathlib.Path(sys.argv[3])).__enter__()
@@ -941,7 +956,8 @@ os.kill(os.getpid(), signal.SIGKILL)
             data.write_text('{"falsifiers": []}', encoding="utf-8")
             provider_data = repo / "capsules/model-provider/falsifiers.json"
             provider_data.parent.mkdir(parents=True)
-            provider_data.write_text(json.dumps({"falsifiers": [mp01]}), encoding="utf-8")
+            provider_data.write_text(json.dumps({"falsifiers": list(owned.values())}),
+                                     encoding="utf-8")
             for name, original in originals.items():
                 target = here / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -961,7 +977,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                 and (here / name).with_name(pathlib.Path(name).name + BACKUP_SUFFIX).read_bytes()
                 == original for name, original in originals.items())
             if killed.returncode != -signal.SIGKILL or not planted:
-                print(f"self-test: MP01 kill: exit={killed.returncode}, planted={planted}")
+                print(f"self-test: provider kill: exit={killed.returncode}, planted={planted}")
                 return False
             argv = ["--from", str(provider_data), "--list"] if mode == "provider" else ["--list"]
             with mock.patch.dict(globals(), HERE=here, REPO=repo, DATA=data):
@@ -975,7 +991,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                 target.read_bytes() == b"foreign mutation\n"
                 and target.with_name(target.name + BACKUP_SUFFIX).read_bytes() == b"foreign original\n"
                 for target in foreign_targets)
-            print(f"self-test: MP01 {mode} restart: exit={code}, restored={restored}, "
+            print(f"self-test: provider {mode} restart: exit={code}, restored={restored}, "
                   f"foreign kept={foreign_kept}")
             if code != 0 or not restored or not foreign_kept:
                 ok = False
@@ -989,7 +1005,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                    for name, original in originals.items()):
                 ok = False
     except Exception as error:
-        print(f"self-test: MP01 restart raised {type(error).__name__}: {error}")
+        print(f"self-test: provider restart raised {type(error).__name__}: {error}")
         return False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
