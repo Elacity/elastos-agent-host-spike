@@ -311,3 +311,68 @@ Principles check (paths below are relative to this lane):
 | 5. Does refusal fail closed with a reason? | Yes. `src/harness.rs:165` returns distinct guard reasons; `tests/harness.rs:7` asserts them, and `tests/harness.rs:128` asserts the timeout reason. |
 | 6. Does capsule logic stay inside and trap down? | Yes. The probe stays unchanged with typed Bus bindings at `probe/src/lib.rs:8` and its internal refusal at `probe/src/lib.rs:14`. |
 | 7. Do new rules have tests and caught falsifiers? | Yes. `tests/harness.rs:7`, `tests/harness.rs:82`, `tests/harness.rs:124` and `tests/report.rs:4` passed, failed under their listed mutations, and passed after restoration; exact results are above. |
+
+## 010 — operator in a throwaway home, source discovery
+
+Runtime owns the fixture operator and its provider processes. Task 003 takes
+its live-or-BLOCKED decision from the single verdict in
+[GAPS.md: Operator in a throwaway home](GAPS.md#operator-in-a-throwaway-home).
+AC-010-OFFLINE stays open: Carrier's loopback bind and environment-only LAN
+discovery control are separate. The lane supplies exactly HOME, TMPDIR and
+PATH (`src/harness.rs:201-207`; `tests/harness.rs:82-105`). The verdict names
+the Home-config change needed for this fixture; live traffic proof is pending.
+
+Plain `serve` requires a verified `bin/localhost-provider` and its
+`components.json` entry. DID and shell are optional on this path; the managed
+Home list is separate (`elastos/crates/elastos-server/src/server_infra.rs:740-806`;
+`serve_cmd.rs:327-366`; `runtime_control.rs:1269-1291` in that server directory).
+GAPS records manifest fields, SHA-256 verification and offline build commands.
+Provider compilation and cache completeness remain unmeasured.
+
+The file table covers the host lock, config, device identity, capability state,
+TLS files, canonical roots, installed binary and coordinates. Keys appear by
+file name and role only. A fresh Home has an empty community bootstrap list
+(`collaboration_startup.rs:78-89,164-180`); passing that list alone proves no dial.
+
+Readiness requires coordinates plus live loopback health before `run` performs
+its own attach checks (`serve_cmd.rs:437-446`; `runtime_control.rs:769-810`).
+SIGTERM reaches the owned process group, with a two-second forced-stop bound
+(`main.rs:1284-1322`). `serve --storage-path` can select an in-root directory;
+AC-006-STORAGE remains attached to `run`'s fixed constructor (`serve_cmd.rs:47`;
+`run_cmd.rs:236`). An unsigned source probe requires Home-local `dev_mode = true`
+and remains subject to grants (`runtime.rs:181-227`).
+
+Checks ran offline with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | Exit 0. |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | Exit 0; 10 passed, 0 failed, 0 ignored. |
+| `git diff --check` | Exit 0. |
+| `node scripts/check-product-data.mjs` and `node --test scripts/check-product-data.test.mjs` | 42 capsules, 2 profiles, 28 method contracts; 99 tests passed. |
+| `(cd elastos && cargo fmt --all -- --check)` and chain-provider formatting | Both exit 0. |
+
+Cargo used `CARGO_NET_OFFLINE=true`; target, intermediate and temporary outputs
+stayed in this lane's `target/`. The required suite built the probe twice.
+Runtime/provider builds, Runtime launches and network calls: zero. New tests
+and falsifiers: zero; this documentation change leaves executable rules intact.
+Existing falsifiers were unchanged and were not rerun.
+
+The worktree began clean; generated check artifacts were removed. GAPS and LOG
+remain for the supervisor's commit, so `git status --short` lists those two
+edits. Cached upstream comparison is 0 ahead / 0 behind
+`spike/spike/agent-host`; remote freshness is unverified. Git state is unchanged.
+
+Principles check (paths without a prefix below are relative to this lane):
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name/URL where a hash belongs? | No. Provider code is identified by its installed byte checksum; `GAPS.md:157-169`. |
+| 2. New ambient or UI authority? | No. The existing launch environment stays fixed; `src/harness.rs:201-207`. |
+| 3. Second operation path or rule copy? | No. This summary links the one operator verdict; `GAPS.md:83-92`. |
+| 4. Does the trusted core grow? | No. The Runtime change is an open blocker, with zero Runtime edits; `GAPS.md:85`. |
+| 5. Clear fail-closed refusal? | Yes. 003 is explicitly BLOCKED pending the Home-config control and traffic proof; `GAPS.md:85`. |
+| 6. Capsule logic stays inside and traps down? | Yes. The typed Bus entry and internal refusal are unchanged; `probe/src/lib.rs:8-25`. |
+| 7. New executable rules have tests and caught falsifiers? | Yes within documentation scope: zero new executable rules. The existing environment test stays intact; `tests/harness.rs:82-105`. This discovery claims no new falsifier result. |
+
+- 010: Extended the single GAPS record and this summary with operator startup files, provider checks/build commands, network controls, readiness/stop/admission evidence and AC-010-OFFLINE; clarified the separate AC-006-STORAGE scope.
