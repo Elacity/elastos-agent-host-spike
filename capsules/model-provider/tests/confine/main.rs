@@ -19,8 +19,8 @@
 
 #![cfg(unix)]
 
-// This target uses only the temporary root helper, the request id helper and
-// the event timeout.
+// This target uses only the temporary root helper, the request id helper, the
+// event timeout, the fake engine writer and the file digest.
 #[allow(dead_code)]
 #[path = "../../src/test_support.rs"]
 mod test_support;
@@ -322,6 +322,50 @@ fn hosted_offer() -> Value {
                 "privacy_policy_ref": "fixture:privacy:confine",
                 "terms_ref": "fixture:terms:confine",
                 "upstream_routing_fallback_assertion": "operator_asserted_disabled"
+            }
+        },
+        "enabled": true
+    })
+}
+
+/// A local llama.cpp text offer for the engine and model at these paths, in
+/// the offer shape `tests/process.rs` sends. Its `init` check resolves
+/// `base_path` and reads both files, outside `STORAGE_ROOT`.
+fn local_offer(engine: &Path, model: &Path) -> Value {
+    json!({
+        "id": "confine-local-text",
+        "title": "Confined Local Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"],
+        "output_modalities": ["text/plain"],
+        "policy": {
+            "concurrency_limit": 1,
+            "input_bytes_limit": 8192,
+            "inline_output_bytes_limit": 8192,
+            "event_bytes_limit": 8192,
+            "runtime_ms_limit": 30000,
+            "retention_secs": 60,
+            "cancel_settlement_timeout_ms": 20
+        },
+        "adapter": {
+            "kind": "local_llama_cpp_text",
+            "engine": {
+                "path": engine,
+                "sha256": test_support::sha256_file(engine)
+            },
+            "model": {
+                "path": model,
+                "sha256": test_support::sha256_file(model)
+            },
+            "settings": {
+                "context_size": 256,
+                "parallel": 1,
+                "threads": 1,
+                "batch_threads": 1,
+                "gpu_layers": 0,
+                "health_timeout_ms": FIXTURE_EVENT_TIMEOUT.as_millis() as u64,
+                "shutdown_timeout_ms": 250,
+                "enable_thinking": false
             }
         },
         "enabled": true
@@ -706,5 +750,113 @@ fn model_outside_read_denied() {
         stored,
         "the record must read back from STORAGE_ROOT"
     );
+    provider.shutdown();
+}
+
+/// The local engine fixture shared by
+/// `model_local_offer_fails_closed_under_profile` and its unconfined control.
+/// The fake engine `base_path/bin/fake-llama-server` and the model
+/// `base_path/models/fake.gguf` lie under `base_path`, outside `STORAGE_ROOT`.
+/// The request is `init_request` with its offers replaced by the one local
+/// offer. Both tests send `init` only, so the engine never starts and its mode
+/// is never read.
+struct LocalEngine {
+    storage: Storage,
+    engine_dir: PathBuf,
+    model_dir: PathBuf,
+    request: Value,
+}
+
+impl LocalEngine {
+    fn prepare(label: &str) -> Self {
+        let storage = Storage::prepare(label);
+        let (engine, model, _) = test_support::write_fake_llama_server(&storage.base, "healthy");
+        let mut request = init_request(&storage, None);
+        request["config"]["extra"]["offers"] = json!([local_offer(&engine, &model)]);
+        Self {
+            engine_dir: engine.parent().expect("engine folder").to_path_buf(),
+            model_dir: model.parent().expect("model folder").to_path_buf(),
+            storage,
+            request,
+        }
+    }
+}
+
+/// Under the profile, an `init` with a local engine offer fails closed. Its
+/// check (`validate_local_artifact` in `src/config.rs`) resolves `base_path`
+/// before it reads the engine or the model, and the profile grants no read of
+/// `base_path` or the directories above it. So `init` answers
+/// `internal_error` within the request timeout, the provider logs
+/// `base_path is unavailable`, nothing is written (`STORAGE_ROOT` is never
+/// created, and the engine and model folders keep their entries and bytes),
+/// and the provider stays in service.
+/// `model_local_offer_accepted_when_unconfined` sends the same `init` without
+/// the profile, and it succeeds.
+///
+/// The provider drops the OS error from that step, so the log carries no
+/// EPERM. The control and the falsifiers show that the sandbox refused:
+/// F-cc7a (`(allow default)`) and F-cc7b (`(deny default)` kept, one
+/// `(allow file-read*)` added) each let the same `init` answer ok, and this
+/// test fails.
+#[test]
+fn model_local_offer_fails_closed_under_profile() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = LocalEngine::prepare("local-offer");
+    let engine_before = tree_snapshot(&fixture.engine_dir);
+    let model_before = tree_snapshot(&fixture.model_dir);
+    let mut provider = Provider::start(Launch::Confined(&fixture.storage));
+
+    let refused = provider.request(&fixture.request);
+    assert_eq!(
+        refused,
+        json!({
+            "status": "error",
+            "code": "internal_error",
+            "message": "model provider failed"
+        }),
+        "the local offer's init must fail closed"
+    );
+    // The refused step: `validate_local_artifact` cannot resolve `base_path`.
+    let logged = provider
+        .logged_fault("internal_error")
+        .expect("the provider must log the internal_error detail");
+    assert!(
+        logged.contains("invalid model provider init config: base_path is unavailable"),
+        "init must stop where it resolves base_path: {logged}"
+    );
+
+    assert!(
+        !fixture.storage.root.exists(),
+        "the refused init must write nothing, not even STORAGE_ROOT"
+    );
+    assert_eq!(
+        tree_snapshot(&fixture.engine_dir),
+        engine_before,
+        "the engine folder must keep its entries and bytes"
+    );
+    assert_eq!(
+        tree_snapshot(&fixture.model_dir),
+        model_before,
+        "the model folder must keep its entries and bytes"
+    );
+
+    assert_serving(&provider.ok(&init_request(&fixture.storage, None)));
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
+}
+
+/// The control for `model_local_offer_fails_closed_under_profile`: the same
+/// fixture and the same `init` without the profile answer ok with the local
+/// offer ready. It sends no `runs_create`, so no engine starts. The profile
+/// is the only difference between the two runs.
+#[test]
+fn model_local_offer_accepted_when_unconfined() {
+    let fixture = LocalEngine::prepare("local-offer-control");
+    let mut provider = Provider::start(Launch::Unconfined);
+
+    assert_serving(&provider.ok(&fixture.request));
+
     provider.shutdown();
 }
