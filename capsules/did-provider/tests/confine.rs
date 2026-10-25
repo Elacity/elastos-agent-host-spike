@@ -13,12 +13,17 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_did-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
+/// The longest the harness waits for a response, a stderr line or a child
+/// exit; a failure stops at a bounded message instead of hanging.
+const DIAGNOSTIC_DEADLINE: Duration = Duration::from_secs(10);
 // Isolated fixture input, unrelated to any installed Home or production key.
 const DEVICE_KEY: [u8; 32] = [0x42; 32];
 
@@ -46,14 +51,23 @@ fn resolved(path: &Path) -> PathBuf {
 struct ConfinedProvider {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    responses: Receiver<Value>,
+    stderr: Receiver<String>,
 }
 
 impl ConfinedProvider {
     fn start(base: &Path) -> Self {
+        Self::start_with_profile(base, Path::new(PROFILE_PATH))
+    }
+
+    /// Starts the provider under `profile` and drains both pipes from spawn.
+    ///
+    /// The provider's only reason for a startup denial is on stderr; a thread
+    /// reads it from the start, so a full pipe cannot block the child's exit.
+    fn start_with_profile(base: &Path, profile: &Path) -> Self {
         let mut child = Command::new(SANDBOX_EXEC)
             .arg("-f")
-            .arg(PROFILE_PATH)
+            .arg(profile)
             .arg("-D")
             .arg(format!("STORAGE_ROOT={}", base.join("did").display()))
             .arg("-D")
@@ -70,24 +84,121 @@ impl ConfinedProvider {
             .spawn()
             .expect("sandbox-exec must start the provider");
         let stdin = child.stdin.take().expect("provider stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
+        let stdout = child.stdout.take().expect("provider stdout");
+        let (response_tx, responses) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let Ok(response) = serde_json::from_str::<Value>(&line) else {
+                    break;
+                };
+                if response_tx.send(response).is_err() {
+                    break;
+                }
+            }
+        });
+        let stderr = child.stderr.take().expect("provider stderr");
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if stderr_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             child,
             stdin,
-            stdout,
+            responses,
+            stderr: stderr_rx,
         }
     }
 
+    /// Sends one request and returns its response.
+    ///
+    /// A request the child cannot take, and a response that never comes, both
+    /// end at `failure`, which names the request, the child's exit status and
+    /// the child's stderr. Normal answers keep their old shape.
+    fn try_send(&mut self, request: Value) -> Result<Value, String> {
+        let line = serde_json::to_string(&request).expect("request must serialize");
+        let write = writeln!(self.stdin, "{line}").and_then(|()| self.stdin.flush());
+        let Ok(response) = self.responses.recv_timeout(DIAGNOSTIC_DEADLINE) else {
+            return Err(self.failure(&line, write.err()));
+        };
+        Ok(response)
+    }
+
     fn send(&mut self, request: Value) -> Value {
-        writeln!(self.stdin, "{request}").expect("provider stdin must accept a request");
-        self.stdin.flush().expect("provider stdin must flush");
-        let mut response = String::new();
-        let read = self
-            .stdout
-            .read_line(&mut response)
-            .expect("provider stdout must answer");
-        assert!(read > 0, "provider exited without a response");
-        serde_json::from_str(&response).expect("provider response must be JSON")
+        self.try_send(request)
+            .unwrap_or_else(|reason| panic!("{reason}"))
+    }
+
+    /// The one message for a request the child did not answer.
+    fn failure(&mut self, request: &str, write: Option<std::io::Error>) -> String {
+        let status = self.await_exit();
+        let stderr = self.drained_stderr();
+        let write = write.map_or_else(String::new, |err| format!("; request write failed: {err}"));
+        format!(
+            "provider did not answer request {request}{write}; child exit status: {status}; child stderr: {stderr}"
+        )
+    }
+
+    /// The child's exit status, or a bounded refusal after the deadline.
+    fn await_exit(&mut self) -> String {
+        let deadline = Instant::now() + DIAGNOSTIC_DEADLINE;
+        loop {
+            match self
+                .child
+                .try_wait()
+                .expect("provider status must be readable")
+            {
+                Some(status) => return describe_status(status),
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                None => {
+                    let _ = self.child.kill();
+                    let status = self.child.wait().expect("killed provider must be reaped");
+                    return format!(
+                        "{} (still running after {DIAGNOSTIC_DEADLINE:?}; killed)",
+                        describe_status(status)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every stderr line the drain thread received. The deadline keeps a
+    /// process that holds the pipe open from hanging the failure report.
+    fn drained_stderr(&mut self) -> String {
+        let mut text = String::new();
+        let deadline = Instant::now() + DIAGNOSTIC_DEADLINE;
+        loop {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                text.push_str(&format!(
+                    "[stderr drain did not finish within {DIAGNOSTIC_DEADLINE:?}]"
+                ));
+                break;
+            };
+            match self.stderr.recv_timeout(left) {
+                Ok(line) => {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+                Err(RecvTimeoutError::Disconnected | RecvTimeoutError::Timeout) => break,
+            }
+        }
+        if text.is_empty() {
+            "(empty)".to_string()
+        } else {
+            text
+        }
+    }
+
+    /// The next drained stderr line, bounded; proves the drain runs before
+    /// any wait for the child.
+    fn next_stderr_line(&mut self) -> String {
+        match self.stderr.recv_timeout(DIAGNOSTIC_DEADLINE) {
+            Ok(line) => line,
+            Err(err) => panic!("provider stderr is not drained before a wait: {err:?}"),
+        }
     }
 
     fn ok(&mut self, request: Value) -> Value {
@@ -111,6 +222,14 @@ impl ConfinedProvider {
         let status = self.child.wait().expect("provider must exit");
         assert!(status.success(), "confined provider exit status: {status}");
     }
+}
+
+/// Names an exit status without repeating the `exit status:` prefix, so the
+/// one failure message reads clearly for an exit code or a signal.
+fn describe_status(status: ExitStatus) -> String {
+    status
+        .code()
+        .map_or_else(|| status.to_string(), |code| format!("exit code {code}"))
 }
 
 impl Drop for ConfinedProvider {
@@ -260,6 +379,110 @@ fn verify_did_recovery_under_profile() {
     // The handled refusal left the provider in service.
     provider.ok(json!({ "op": "get_did" }));
     provider.shutdown();
+}
+
+/// The harness drains stderr from spawn, before it waits for the child.
+///
+/// The startup line reaches the test while the provider still runs, so the
+/// drain cannot depend on a wait and a full stderr pipe cannot block the
+/// child's exit.
+///
+/// Falsifier: replace the stderr drain loop with dropping its pipe and sender
+/// (DID16); no line arrives and this test fails on its bounded deadline.
+#[test]
+fn stderr_is_drained_before_wait() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    let mut provider = ConfinedProvider::start(&root);
+    let line = provider.next_stderr_line();
+    assert!(
+        line.contains("did-provider: starting"),
+        "the first drained line must be the provider's startup log: {line}"
+    );
+    assert!(
+        provider
+            .child
+            .try_wait()
+            .expect("provider status must be readable")
+            .is_none(),
+        "the drained line must arrive while the provider still runs"
+    );
+    provider.init(&root);
+    provider.shutdown();
+}
+
+/// A startup the profile refuses reports the child's own reason.
+///
+/// The fixture profile denies everything, so `sandbox-exec` cannot execute
+/// the provider. The one failure message names the request, the child's exit
+/// status and the child's stderr, whether the request write lands first or
+/// the child has already exited.
+///
+/// Falsifier: drop the child's stderr from `failure` (DID12); this test fails
+/// because `Operation not permitted` is missing. Dropping the request
+/// (DID13), the exit status (DID14) or the shared diagnostic (DID15) fails it
+/// too.
+#[test]
+fn startup_denial_reports_its_reason() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    let profile = fixture.path().join("deny-all.sb");
+    fs::write(&profile, "(version 1)\n(deny default)\n").expect("fixture profile");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+    });
+
+    // The child may exit before or after the write lands; both situations
+    // must end at the one diagnostic that carries the reason.
+    let mut provider = ConfinedProvider::start_with_profile(&root, &profile);
+    let message = provider
+        .try_send(request.clone())
+        .expect_err("a denied startup must not answer");
+    eprintln!("startup denial: {message}");
+    assert!(
+        message.contains("\"op\":\"init\""),
+        "the failure must name the request: {message}"
+    );
+    assert!(
+        message.contains("child exit status:"),
+        "the failure must name the exit status: {message}"
+    );
+    assert!(
+        message.contains("Operation not permitted"),
+        "the failure must carry the child's stderr: {message}"
+    );
+
+    // Once the child has exited, the request cannot be written; the same
+    // diagnostic still names the actual exit status and the child's stderr.
+    let mut exited = ConfinedProvider::start_with_profile(&root, &profile);
+    let status = exited.await_exit();
+    let message = exited
+        .try_send(request)
+        .expect_err("a closed request pipe must fail the same way");
+    eprintln!("closed request pipe: {message}");
+    assert!(
+        message.contains("request write failed:"),
+        "the failure must name the refused write: {message}"
+    );
+    assert!(
+        message.contains(&status),
+        "the failure must name the actual exit status {status}: {message}"
+    );
+    assert!(
+        message.contains("\"op\":\"init\""),
+        "the failure must name the request: {message}"
+    );
+    assert!(
+        message.contains("Operation not permitted"),
+        "the failure must carry the child's stderr: {message}"
+    );
 }
 
 /// A write through a symlink that leaves the storage root is denied, and the
