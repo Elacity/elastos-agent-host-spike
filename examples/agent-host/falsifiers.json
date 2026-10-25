@@ -761,6 +761,166 @@
    "tests": [
     "sparks_http::a_non_http_status_line_is_refused"
    ]
+  },
+  {
+   "id": "FS36",
+   "title": "a connection failure is a silent empty success",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let mut stream =\n            TcpStream::connect(address).map_err(|error| format!(\"connect failed: {error}\"))?;",
+     "new": "        let mut stream = match TcpStream::connect(address) {\n            Ok(stream) => stream,\n            Err(_) => return Ok(String::new()),\n        };"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_short_read_is_an_error_not_an_empty_success"
+   ]
+  },
+  {
+   "id": "FS37",
+   "title": "a read error is ignored instead of returned",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        stream\n            .read_to_end(&mut response)\n            .map_err(|error| format!(\"read failed: {error}\"))?;",
+     "new": "        let _ = stream.read_to_end(&mut response);"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_read_error_is_returned_not_ignored"
+   ]
+  },
+  {
+   "id": "FS38",
+   "title": "a response with no framing is read as an empty body",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let Some(length) = content_lengths.first().copied() else {\n            return Err(\"response has no framing\".to_string());\n        };",
+     "new": "        let length = content_lengths.first().copied().unwrap_or(0);"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_response_with_no_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS39",
+   "title": "a chunk size with a leading plus is parsed instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if size_text.is_empty() || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {\n                return Err(format!(\"invalid chunk size {size_text:?}\"));\n            }",
+     "new": "            // the integer parser checks the size."
+    }
+   ],
+   "tests": [
+    "sparks_http::malformed_numeric_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS40",
+   "title": "a content-length with a leading plus is parsed instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {\n                    return Err(format!(\"invalid content-length {length:?}\"));\n                }",
+     "new": "                // the integer parser checks the length."
+    }
+   ],
+   "tests": [
+    "sparks_http::malformed_numeric_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS41",
+   "title": "a non-UTF-8 chunk size line is lossily decoded instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            let line = String::from_utf8(body[at..line_end].to_vec())\n                .map_err(|_| \"chunk size line is not UTF-8\".to_string())?;",
+     "new": "            let line = String::from_utf8_lossy(&body[at..line_end]).into_owned();"
+    }
+   ],
+   "tests": [
+    "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
+   ]
+  },
+  {
+   "id": "FS42",
+   "title": "a non-UTF-8 content-length body is lossily decoded instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        String::from_utf8(body[..length].to_vec())\n            .map_err(|_| \"response body is not UTF-8\".to_string())",
+     "new": "        Ok(String::from_utf8_lossy(&body[..length]).into_owned())"
+    }
+   ],
+   "tests": [
+    "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
+   ]
+  },
+  {
+   "id": "FS43",
+   "title": "chunk trailers are ignored, so the zero chunk does not need a final CRLF",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if &body[at..at + 2] != b\"\\r\\n\" {\n                    return Err(\"trailers are not accepted\".to_string());\n                }",
+     "new": "                // trailers are ignored."
+    }
+   ],
+   "tests": [
+    "sparks_http::malformed_chunk_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS44",
+   "title": "a chunk that is not ended by CRLF is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if &body[end - 2..end] != b\"\\r\\n\" {\n                return Err(\"chunk is not ended by CRLF\".to_string());\n            }",
+     "new": "            // chunk data is delimited by its size."
+    }
+   ],
+   "tests": [
+    "sparks_http::malformed_chunk_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS45",
+   "title": "a non-UTF-8 chunked body is lossily decoded instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                return String::from_utf8(decoded)\n                    .map_err(|_| \"response body is not UTF-8\".to_string());",
+     "new": "                return Ok(String::from_utf8_lossy(&decoded).into_owned());"
+    }
+   ],
+   "tests": [
+    "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
+   ]
   }
  ]
 }

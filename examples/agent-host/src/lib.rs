@@ -8055,6 +8055,16 @@ mod sparks_http {
 
     impl MockServer {
         pub(crate) fn serve_once(response: &[u8]) -> MockServer {
+            Self::serve_once_with(response, None)
+        }
+
+        /// Serve once, then hold the connection open, so the client's read
+        /// times out instead of reaching EOF.
+        pub(crate) fn serve_once_stalled(response: &[u8], stall: Duration) -> MockServer {
+            Self::serve_once_with(response, Some(stall))
+        }
+
+        fn serve_once_with(response: &[u8], stall: Option<Duration>) -> MockServer {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let response = response.to_vec();
@@ -8066,6 +8076,9 @@ mod sparks_http {
                 let request = read_request(&stream);
                 let mut writer = stream;
                 writer.write_all(&response).unwrap();
+                if let Some(stall) = stall {
+                    std::thread::sleep(stall);
+                }
                 request
             });
             MockServer {
@@ -8081,6 +8094,16 @@ mod sparks_http {
         pub(crate) fn request(mut self) -> Vec<u8> {
             self.handle.take().unwrap().join().unwrap()
         }
+    }
+
+    /// A loopback address the fixture owns and closes before the client
+    /// connects, so a connection failure is proven without touching another
+    /// service.
+    fn closed_loopback_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        url
     }
 
     /// Read one request: headers, then exactly `Content-Length` body bytes.
@@ -8117,15 +8140,27 @@ mod sparks_http {
             .position(|window| window == needle)
     }
 
+    const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// POST a JSON body and return the decoded response body, or a reason.
     pub(crate) fn post_json(base_url: &str, path: &str, body: &str) -> Result<String, String> {
+        post_json_with_timeout(base_url, path, body, READ_TIMEOUT)
+    }
+
+    /// One client path; `read_timeout` only bounds the read.
+    fn post_json_with_timeout(
+        base_url: &str,
+        path: &str,
+        body: &str,
+        read_timeout: Duration,
+    ) -> Result<String, String> {
         let address = base_url
             .strip_prefix("http://")
             .ok_or_else(|| format!("unsupported url {base_url}"))?;
         let mut stream =
             TcpStream::connect(address).map_err(|error| format!("connect failed: {error}"))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(read_timeout))
             .map_err(|error| format!("timeout setup failed: {error}"))?;
         let request = format!(
             "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -8195,11 +8230,14 @@ mod sparks_http {
                     transfer_codings.push(coding.trim().to_string());
                 }
             } else if name.eq_ignore_ascii_case("content-length") {
+                let length = value.trim();
+                if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(format!("invalid content-length {length:?}"));
+                }
                 content_lengths.push(
-                    value
-                        .trim()
+                    length
                         .parse::<usize>()
-                        .map_err(|_| format!("invalid content-length {value:?}"))?,
+                        .map_err(|_| format!("invalid content-length {length:?}"))?,
                 );
             }
         }
@@ -8268,6 +8306,9 @@ mod sparks_http {
             let line = String::from_utf8(body[at..line_end].to_vec())
                 .map_err(|_| "chunk size line is not UTF-8".to_string())?;
             let size_text = line.split(';').next().unwrap_or("").trim();
+            if size_text.is_empty() || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(format!("invalid chunk size {size_text:?}"));
+            }
             let size = usize::from_str_radix(size_text, 16)
                 .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
             at = line_end + 2;
@@ -8396,7 +8437,8 @@ mod sparks_http {
             Err("short read: chunked body is not terminated".to_string())
         );
 
-        assert!(post_json("http://127.0.0.1:1", "/v1/chat", "{}").is_err());
+        let error = post_json(&closed_loopback_url(), "/v1/chat", "{}").unwrap_err();
+        assert!(error.starts_with("connect failed:"), "{error}");
     }
 
     #[test]
@@ -8406,6 +8448,86 @@ mod sparks_http {
         assert_eq!(
             post_json(server.url(), "/v1/chat", "{}"),
             Err("chunk size is too large".to_string())
+        );
+    }
+
+    #[test]
+    fn a_read_error_is_returned_not_ignored() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab";
+        let server = MockServer::serve_once_stalled(response, Duration::from_secs(1));
+        let error =
+            post_json_with_timeout(server.url(), "/v1/chat", "{}", Duration::from_millis(200))
+                .unwrap_err();
+        assert!(error.starts_with("read failed:"), "{error}");
+        assert!(server.request().starts_with(b"POST /v1/chat HTTP/1.1"));
+    }
+
+    #[test]
+    fn a_response_with_no_framing_is_refused() {
+        let response = b"HTTP/1.1 200 OK\r\nX: y\r\n\r\n{}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("response has no framing".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_numeric_framing_is_refused() {
+        let content_length = b"HTTP/1.1 200 OK\r\nContent-Length: +2\r\n\r\n{}";
+        let server = MockServer::serve_once(content_length);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("invalid content-length \"+2\"".to_string())
+        );
+
+        let chunk_size = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+0\r\n\r\n";
+        let server = MockServer::serve_once(chunk_size);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("invalid chunk size \"+0\"".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_chunk_framing_is_refused() {
+        let trailers = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: y\r\n\r\n";
+        let server = MockServer::serve_once(trailers);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("trailers are not accepted".to_string())
+        );
+
+        let bad_crlf = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nabXX0\r\n\r\n";
+        let server = MockServer::serve_once(bad_crlf);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("chunk is not ended by CRLF".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_chunk_or_body_is_refused() {
+        let size_line = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\xff\r\n";
+        let server = MockServer::serve_once(size_line);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("chunk size line is not UTF-8".to_string())
+        );
+
+        let body = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n\xff\xff";
+        let server = MockServer::serve_once(body);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("response body is not UTF-8".to_string())
+        );
+
+        let chunk_body =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\xff\r\n0\r\n\r\n";
+        let server = MockServer::serve_once(chunk_body);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("response body is not UTF-8".to_string())
         );
     }
 
