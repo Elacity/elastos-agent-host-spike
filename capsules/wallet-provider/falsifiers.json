@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. File paths are relative to the repository root. This list records the three storage-root refusals, the two profile mutations above, and the five shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, WP07 stops checking the model profile, WP08 skips the model profile on any read error, WP09 skips a missing required did profile, and WP10 removes the absent-model skip message. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. CONFINEMENT.md also documents a sibling-read allowance, an appended `(allow default)`, and a removed storage-root write rule, which are not registered here yet. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. File paths are relative to the repository root. This list records the three storage-root refusals, the two profile mutations above, and the five shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, WP07 stops checking the model profile, WP08 skips the model profile on any read error, WP09 skips a missing required did profile, and WP10 removes the absent-model skip message. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. CONFINEMENT.md also documents a sibling-read allowance, an appended `(allow default)`, and a removed storage-root write rule, which are not registered here yet. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -79,7 +79,8 @@
         }
       ],
       "tests": [
-        "profile_denies_network"
+        "profile_denies_network",
+        "both_file_profiles_bind_one_storage_parameter_contract"
       ]
     },
     {
@@ -177,6 +178,38 @@
       ],
       "tests": [
         "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP12",
+      "title": "the shared contract check no longer refuses a network allow",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/tests/confine.rs",
+          "old": "        if is_network_allow(form) {\n            return Err(format!(\n                \"{name} must not grant network access; a network allow is refused: {form}\"\n            ));\n        }",
+          "new": "        // falsifier: the check no longer refuses a network allow"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_network_allow"
+      ]
+    },
+    {
+      "id": "WP13",
+      "title": "the shared network-allow predicate accepts only the exact form (allow network*)",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/tests/confine.rs",
+          "old": "fn is_network_allow(form: &str) -> bool {\n    form.starts_with(\"(allow \") && form.contains(\"network\")\n}",
+          "new": "fn is_network_allow(form: &str) -> bool {\n    form == \"(allow network*)\"\n}"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_network_allow"
       ]
     }
   ]
