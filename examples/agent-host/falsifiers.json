@@ -713,6 +713,54 @@
    "tests": [
     "sparks_http::conflicting_framing_is_refused"
    ]
+  },
+  {
+   "id": "FS33",
+   "title": "multiple transfer codings use the first one instead of being refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if transfer_codings.len() != 1 {\n                return Err(format!(\n                    \"conflicting transfer codings: {}\",\n                    transfer_codings.join(\", \")\n                ));\n            }",
+     "new": "            // the first transfer coding is used."
+    }
+   ],
+   "tests": [
+    "sparks_http::conflicting_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS34",
+   "title": "a bare line feed is accepted, so a header folds into an ignored value",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        for (at, byte) in response[..headers_end].iter().enumerate() {\n            match *byte {\n                b'\\r' if response.get(at + 1) != Some(&b'\\n') => {\n                    return Err(\"malformed header line break\".to_string())\n                }\n                b'\\n' if at == 0 || response[at - 1] != b'\\r' => {\n                    return Err(\"malformed header line break\".to_string())\n                }\n                _ => {}\n            }\n        }",
+     "new": "        // line breaks were split by CRLF."
+    }
+   ],
+   "tests": [
+    "sparks_http::malformed_framing_headers_are_refused"
+   ]
+  },
+  {
+   "id": "FS35",
+   "title": "the status line's version token is ignored, so a non-HTTP response succeeds",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let mut parts = status.split_whitespace();\n        let version = parts\n            .next()\n            .ok_or_else(|| \"response status line is missing\".to_string())?;\n        if version != \"HTTP/1.1\" && version != \"HTTP/1.0\" {\n            return Err(format!(\"unsupported http version {version:?}\"));\n        }",
+     "new": "        let mut parts = status.split_whitespace();\n        let _ = parts.next();"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_non_http_status_line_is_refused"
+   ]
   }
  ]
 }

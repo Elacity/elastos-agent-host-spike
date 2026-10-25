@@ -8145,17 +8145,39 @@ mod sparks_http {
     fn decode_response(response: &[u8]) -> Result<String, String> {
         let headers_end = find_subslice(response, b"\r\n\r\n")
             .ok_or_else(|| "response headers are incomplete".to_string())?;
+        for (at, byte) in response[..headers_end].iter().enumerate() {
+            match *byte {
+                b'\r' if response.get(at + 1) != Some(&b'\n') => {
+                    return Err("malformed header line break".to_string())
+                }
+                b'\n' if at == 0 || response[at - 1] != b'\r' => {
+                    return Err("malformed header line break".to_string())
+                }
+                _ => {}
+            }
+        }
         let head = String::from_utf8(response[..headers_end].to_vec())
             .map_err(|_| "response headers are not UTF-8".to_string())?;
         let mut lines = head.split("\r\n");
         let status = lines
             .next()
             .ok_or_else(|| "response status line is missing".to_string())?;
-        let code = status
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse::<u16>().ok())
-            .ok_or_else(|| "response status line is malformed".to_string())?;
+        let mut parts = status.split_whitespace();
+        let version = parts
+            .next()
+            .ok_or_else(|| "response status line is missing".to_string())?;
+        if version != "HTTP/1.1" && version != "HTTP/1.0" {
+            return Err(format!("unsupported http version {version:?}"));
+        }
+        let code_text = parts
+            .next()
+            .ok_or_else(|| "response status code is missing".to_string())?;
+        if code_text.len() != 3 || !code_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("malformed http status code {code_text:?}"));
+        }
+        let code = code_text
+            .parse::<u16>()
+            .map_err(|_| format!("malformed http status code {code_text:?}"))?;
         if !(200..300).contains(&code) {
             return Err(format!("http status {code}"));
         }
@@ -8401,6 +8423,33 @@ mod sparks_http {
         assert_eq!(
             post_json(server.url(), "/v1/chat", "{}"),
             Err("malformed header syntax".to_string())
+        );
+
+        // A bare LF is not a line ending: it must not fold the next header
+        // into an ignored value.
+        let bare_lf =
+            b"HTTP/1.1 200 OK\r\nX: a\nTransfer-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(bare_lf);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed header line break".to_string())
+        );
+    }
+
+    #[test]
+    fn a_non_http_status_line_is_refused() {
+        let wrong_version = b"NOTHTTP 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(wrong_version);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported http version \"NOTHTTP\"".to_string())
+        );
+
+        let bad_code = b"HTTP/1.1 20x OK\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(bad_code);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed http status code \"20x\"".to_string())
         );
     }
 
