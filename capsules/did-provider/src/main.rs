@@ -276,13 +276,21 @@ impl DidProvider {
         }
         let payload_hex =
             elastos_common::chat_protocol::signing_payload_hex(sender_id, ts, content);
-        let payload = match hex::decode(payload_hex) {
+        let payload = match hex::decode(&payload_hex) {
             Ok(payload) => payload,
             Err(e) => {
                 return Response::error("invalid_intent", &format!("Invalid chat payload: {}", e))
             }
         };
-        self.sign_bytes(&payload)
+        // The signature travels with the payload the provider actually signed,
+        // so a caller can verify it without re-rendering the chat payload.
+        match self.sign_bytes(&payload) {
+            Response::Ok { data: Some(signed) } => Response::ok(serde_json::json!({
+                "payload": payload_hex,
+                "signature": signed["signature"],
+            })),
+            refusal => refusal,
+        }
     }
 
     fn verify(&self, did: &str, data_hex: &str, sig_hex: &str) -> Response {
@@ -507,9 +515,11 @@ impl DidProvider {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        if let Ok(Some(nick)) = elastos_identity::load_nickname_with_device_key(&base_dir, &dk) {
-            self.nickname = Some(nick);
-        }
+        // The shared loader is the single nickname decoder. A denied or corrupt
+        // read is a refusal and reaches `Init` as `storage_error`; it is never
+        // reported as "no nickname set".
+        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+            .map_err(|e| format!("did-provider: failed to read nickname: {e}"))?;
         Ok(())
     }
 
@@ -1134,10 +1144,13 @@ mod tests {
 
         let ts = 1_714_000_000;
         let content = "hello world";
-        let data_hex = elastos_common::chat_protocol::signing_payload_hex(&did, ts, content);
-        let sig_hex = match provider.sign_chat_message(&did, ts, content) {
-            Response::Ok { data: Some(d) } => d["signature"].as_str().unwrap().to_string(),
-            _ => panic!("Expected signature"),
+        // The provider returns the payload it signed; the test renders none.
+        let (data_hex, sig_hex) = match provider.sign_chat_message(&did, ts, content) {
+            Response::Ok { data: Some(d) } => (
+                d["payload"].as_str().unwrap().to_string(),
+                d["signature"].as_str().unwrap().to_string(),
+            ),
+            other => panic!("Expected payload and signature, got {:?}", other),
         };
 
         match provider.verify(&did, &data_hex, &sig_hex) {
@@ -1516,6 +1529,37 @@ mod tests {
             did1, did2,
             "changing the device key must change the main DID"
         );
+    }
+
+    /// A nickname read error reaches `Init` as a storage refusal.
+    ///
+    /// Falsifier: restore `if let Ok(Some(nick)) = load_nickname_with_device_key(..)`
+    /// in `try_load_nickname`; the failed read becomes "no nickname" and this
+    /// test fails because `Init` returns ok.
+    #[test]
+    fn init_reports_nickname_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap().to_string();
+        let mut provider = init_provider(Some(&bp));
+        // A directory where the shared loader expects its encrypted nickname
+        // file makes the read fail without a sandbox.
+        std::fs::create_dir_all(dir.path().join("did").join("nickname.enc")).unwrap();
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({
+                "base_path": bp,
+                "encryption_key": hex::encode(make_device_key()),
+            }),
+        });
+        match response {
+            Response::Error { code, message } => {
+                assert_eq!(code, STORAGE_ERROR_CODE);
+                assert!(
+                    message.starts_with("did-provider: failed to read nickname:"),
+                    "unexpected reason: {message}"
+                );
+            }
+            other => panic!("Expected nickname read refusal, got {:?}", other),
+        }
     }
 
     #[test]

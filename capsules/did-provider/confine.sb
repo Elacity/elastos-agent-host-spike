@@ -1,8 +1,10 @@
 ;; Seatbelt profile for did-provider; the signed bundle owns this single source.
 ;; PROVIDER_EXECUTABLE is the canonical binary path.
-;; DID_STORAGE_ROOT is Init.base_path/did; DID_STORAGE_PARENT is Init.base_path.
+;; STORAGE_ROOT is Init.base_path/did; STORAGE_PARENT is Init.base_path.
 (version 1)
 (deny default)
+;; The provider speaks stdin/stdout only; no socket or listener is granted.
+(deny network*)
 
 ;; Startup: execute only the provider binary selected by Runtime.
 (allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
@@ -14,9 +16,11 @@
 (allow file-read* (subpath "/usr/lib") (subpath "/System/Library") (subpath "/Library/Apple"))
 ;; Startup: the loader and allocator read kernel facts.
 (allow sysctl-read)
+;; Startup: the Runtime may bind child streams to the null device.
+(allow file-read* file-write* (literal "/dev/null"))
 ;; Identity: the existing encryption code reads entropy.
 (allow file-read* (literal "/dev/urandom"))
 ;; Startup: inspect the existing parent while creating the identity directory.
-(allow file-read* (literal (param "DID_STORAGE_PARENT")))
+(allow file-read* (literal (param "STORAGE_PARENT")))
 ;; Identity: one grant covers encrypted nickname and persona state.
-(allow file-read* file-write* (subpath (param "DID_STORAGE_ROOT")))
+(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
