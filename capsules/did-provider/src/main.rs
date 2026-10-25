@@ -125,6 +125,9 @@ struct DidProvider {
     signing_key: Option<SigningKey>,
     verifying_key: Option<VerifyingKey>,
     nickname: Option<String>,
+    /// Refusal that stopped the last nickname load; repeated by `get_nickname`
+    /// so a denied lookup never reads as an unset nickname.
+    nickname_load_error: Option<String>,
     storage_path: String,
     /// Device key — used only for encrypting DID key and nickname at rest
     device_key: Option<[u8; 32]>,
@@ -136,6 +139,7 @@ impl DidProvider {
             signing_key: None,
             verifying_key: None,
             nickname: None,
+            nickname_load_error: None,
             storage_path: String::new(),
             device_key: None,
         }
@@ -218,8 +222,10 @@ impl DidProvider {
         }
 
         if let Err(reason) = self.try_load_nickname() {
+            self.nickname_load_error = Some(reason.clone());
             return Response::error(STORAGE_ERROR_CODE, &reason);
         }
+        self.nickname_load_error = None;
 
         Response::ok(serde_json::json!({
             "protocol_version": "1.0",
@@ -276,13 +282,21 @@ impl DidProvider {
         }
         let payload_hex =
             elastos_common::chat_protocol::signing_payload_hex(sender_id, ts, content);
-        let payload = match hex::decode(payload_hex) {
+        let payload = match hex::decode(&payload_hex) {
             Ok(payload) => payload,
             Err(e) => {
                 return Response::error("invalid_intent", &format!("Invalid chat payload: {}", e))
             }
         };
-        self.sign_bytes(&payload)
+        // Return the exact payload that was signed so a caller can forward it
+        // to `verify` unchanged; the provider stays the only place that
+        // builds the chat signing payload.
+        let mut response = self.sign_bytes(&payload);
+        if let Response::Ok { data } = &mut response {
+            data.get_or_insert_with(|| serde_json::json!({}))["payload_hex"] =
+                serde_json::Value::String(payload_hex);
+        }
+        response
     }
 
     fn verify(&self, did: &str, data_hex: &str, sig_hex: &str) -> Response {
@@ -375,6 +389,9 @@ impl DidProvider {
     }
 
     fn get_nickname(&self) -> Response {
+        if let Some(reason) = &self.nickname_load_error {
+            return Response::error(STORAGE_ERROR_CODE, reason);
+        }
         match &self.nickname {
             Some(nick) => Response::ok(serde_json::json!({"nickname": nick})),
             None => Response::error("not_set", "No nickname set"),
@@ -389,6 +406,7 @@ impl DidProvider {
             return Response::error(STORAGE_ERROR_CODE, &reason);
         }
         self.nickname = Some(nickname.to_string());
+        self.nickname_load_error = None;
         Response::ok(serde_json::json!({"nickname": nickname}))
     }
 
@@ -423,27 +441,26 @@ impl DidProvider {
         let key_path = dir.join(format!("{}.enc", normalized));
         let storage_key = derive_storage_key(dk);
 
-        let persona_vk = if key_path.exists() {
+        let encrypted = match read_optional_file(&key_path) {
+            Ok(encrypted) => encrypted,
+            Err(reason) => return Response::error("key_error", &reason.to_string()),
+        };
+        let persona_vk = if let Some(encrypted) = encrypted {
             // Load existing persona key
-            match std::fs::read(&key_path) {
-                Ok(encrypted) => match decrypt_data(&storage_key, &encrypted) {
-                    Ok(mut secret_bytes) => {
-                        if secret_bytes.len() != 32 {
-                            return Response::error("key_error", "Invalid persona key length");
-                        }
-                        let mut key_arr = [0u8; 32];
-                        key_arr.copy_from_slice(&secret_bytes);
-                        let sk = SigningKey::from_bytes(&key_arr);
-                        let vk = sk.verifying_key();
-                        secret_bytes.zeroize();
-                        key_arr.zeroize();
-                        vk
+            match decrypt_data(&storage_key, &encrypted) {
+                Ok(mut secret_bytes) => {
+                    if secret_bytes.len() != 32 {
+                        return Response::error("key_error", "Invalid persona key length");
                     }
-                    Err(e) => {
-                        return Response::error("key_error", &format!("Decrypt failed: {}", e))
-                    }
-                },
-                Err(e) => return Response::error("key_error", &format!("Read failed: {}", e)),
+                    let mut key_arr = [0u8; 32];
+                    key_arr.copy_from_slice(&secret_bytes);
+                    let sk = SigningKey::from_bytes(&key_arr);
+                    let vk = sk.verifying_key();
+                    secret_bytes.zeroize();
+                    key_arr.zeroize();
+                    vk
+                }
+                Err(e) => return Response::error("key_error", &format!("Decrypt failed: {}", e)),
             }
         } else {
             // Generate new persona keypair
@@ -507,9 +524,16 @@ impl DidProvider {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        if let Ok(Some(nick)) = elastos_identity::load_nickname_with_device_key(&base_dir, &dk) {
-            self.nickname = Some(nick);
+        // One decoder: the identity library owns the nickname envelope, the
+        // device-key derivation and the trimming rule.
+        let nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+            .map_err(|error| format!("did-provider: failed to load nickname: {error}"))?;
+        if nickname.is_none() {
+            // A refused lookup must not read as an unset nickname. Confirm the
+            // absence with the one path check, and keep the refusal visible.
+            confirm_nickname_absence(&base_dir)?;
         }
+        self.nickname = nickname;
         Ok(())
     }
 
@@ -520,6 +544,51 @@ impl DidProvider {
         let base_dir = self.base_dir()?;
         elastos_identity::save_nickname_with_device_key(&base_dir, &dk, nickname)
             .map_err(|e| format!("did-provider: failed to save nickname: {e}"))
+    }
+}
+
+// === Storage reads ===
+
+#[derive(Debug)]
+enum OptionalFileError {
+    Metadata(std::io::Error),
+    Read(std::io::Error),
+}
+
+impl std::fmt::Display for OptionalFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Metadata(error) => write!(f, "Metadata lookup failed: {error}"),
+            Self::Read(error) => write!(f, "Read failed: {error}"),
+        }
+    }
+}
+
+/// Only a confirmed missing file permits creation or an unset value. A denied
+/// metadata lookup stays an error instead of reading as absence.
+fn read_optional_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, OptionalFileError> {
+    match path.try_exists() {
+        Ok(false) => Ok(None),
+        Ok(true) => std::fs::read(path)
+            .map(Some)
+            .map_err(OptionalFileError::Read),
+        Err(error) => Err(OptionalFileError::Metadata(error)),
+    }
+}
+
+/// The nickname location the identity library reads and writes.
+fn stored_nickname_path(base_dir: &std::path::Path) -> std::path::PathBuf {
+    base_dir.join("did").join("nickname.enc")
+}
+
+/// Confirm that an unset nickname means a missing or empty file, not a refused
+/// lookup. A denied metadata lookup becomes the storage refusal.
+fn confirm_nickname_absence(base_dir: &std::path::Path) -> Result<(), String> {
+    match stored_nickname_path(base_dir).try_exists() {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!(
+            "did-provider: failed to load nickname: Metadata lookup failed: {error}"
+        )),
     }
 }
 
@@ -1571,6 +1640,137 @@ mod tests {
         match provider.get_nickname() {
             Response::Ok { data: Some(d) } => assert_eq!(d["nickname"], "bob"),
             other => panic!("Expected nickname bob, got {:?}", other),
+        }
+    }
+
+    /// A denied nickname lookup is a storage refusal, not an unset nickname.
+    ///
+    /// Runs this test binary under `confine.sb`. The inner run swaps the stored
+    /// nickname for a symlink outside the root, so the presence check gets
+    /// EPERM. `Init` and `get_nickname` must repeat the exact refusal, the
+    /// outside file must stay unchanged, and a restored file must load again.
+    ///
+    /// Falsifier: collapse the metadata refusal into absence; `Init` succeeds
+    /// and this test fails.
+    #[test]
+    fn nickname_metadata_change_reports_storage_error() {
+        use std::path::PathBuf;
+
+        const FIXTURE_ROOT: &str = "DID_PROVIDER_NICKNAME_RACE_ROOT";
+        const OUTSIDE_FILE: &str = "DID_PROVIDER_NICKNAME_RACE_OUTSIDE";
+
+        if let Some(storage) = std::env::var_os(FIXTURE_ROOT) {
+            let storage = PathBuf::from(storage);
+            let outside = PathBuf::from(std::env::var_os(OUTSIDE_FILE).unwrap());
+            let stored = storage.join("did/nickname.enc");
+            let saved = storage.join("did/saved.enc");
+            std::fs::rename(&stored, &saved).unwrap();
+            std::os::unix::fs::symlink(&outside, &stored).unwrap();
+            assert_eq!(
+                std::fs::metadata(&stored).unwrap_err().raw_os_error(),
+                Some(1),
+                "the nickname lookup must be denied"
+            );
+            let reason = format!(
+                "did-provider: failed to load nickname: Metadata lookup failed: {}",
+                std::io::Error::from_raw_os_error(1)
+            );
+            let mut provider = DidProvider::new();
+            let config = serde_json::json!({
+                "base_path": &storage,
+                "encryption_key": hex::encode(make_device_key()),
+            });
+            assert_storage_error(
+                provider.handle(Request::Init {
+                    config: config.clone(),
+                }),
+                &reason,
+            );
+            assert_storage_error(provider.handle(Request::GetNickname), &reason);
+            assert!(provider.nickname.is_none());
+            assert!(matches!(
+                provider.handle(Request::GetDid),
+                Response::Ok { .. }
+            ));
+
+            std::fs::remove_file(&stored).unwrap();
+            std::fs::rename(&saved, &stored).unwrap();
+            assert!(matches!(
+                provider.handle(Request::Init { config }),
+                Response::Ok { .. }
+            ));
+            match provider.handle(Request::GetNickname) {
+                Response::Ok { data: Some(data) } => assert_eq!(data["nickname"], "alice"),
+                other => panic!("Expected the restored nickname, got {other:?}"),
+            }
+            return;
+        }
+
+        if !std::path::Path::new("/usr/bin/sandbox-exec").is_file() {
+            writeln!(
+                std::io::stderr().lock(),
+                "SKIP nickname_metadata_change_reports_storage_error: /usr/bin/sandbox-exec is unavailable"
+            )
+            .unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let storage = root.path().canonicalize().unwrap();
+        let external = outside.path().canonicalize().unwrap().join("nickname.enc");
+        elastos_identity::save_nickname_with_device_key(&storage, &make_device_key(), "alice")
+            .unwrap();
+        std::fs::copy(storage.join("did/nickname.enc"), &external).unwrap();
+        let before = std::fs::read(&external).unwrap();
+        let binary = std::env::current_exe().unwrap();
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb"))
+            .arg("-D")
+            .arg(format!("STORAGE_ROOT={}", storage.display()))
+            .arg("-D")
+            .arg(format!("PROVIDER_BINARY={}", binary.display()))
+            .arg(&binary)
+            .args([
+                "--exact",
+                "tests::nickname_metadata_change_reports_storage_error",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FIXTURE_ROOT, &storage)
+            .env(OUTSIDE_FILE, &external)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "controlled nickname refusal failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&external).unwrap(), before);
+    }
+
+    #[test]
+    fn nickname_reload_clears_previous_value_when_absent() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(first.path().to_str().unwrap()));
+        assert!(matches!(
+            provider.set_nickname("alice"),
+            Response::Ok { .. }
+        ));
+        assert!(matches!(
+            provider.init(serde_json::json!({
+                "base_path": second.path(), "encryption_key": hex::encode(make_device_key()),
+            })),
+            Response::Ok { .. }
+        ));
+        match provider.get_nickname() {
+            Response::Error { code, message } => {
+                assert_eq!(code, "not_set");
+                assert_eq!(message, "No nickname set");
+            }
+            other => panic!("Expected an absent nickname, got {other:?}"),
         }
     }
 
