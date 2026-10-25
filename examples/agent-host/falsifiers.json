@@ -378,6 +378,22 @@
    ]
   },
   {
+   "id": "FC12",
+   "title": "the summary request drops the shadowed head, so the provider cannot see what it summarises",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    prompt.push_str(\"\\n\\n\");\n    prompt.push_str(&input);",
+     "new": "    prompt.push_str(\"\\n\\n\");\n    let history = input.split_once('\\n').map_or(\"\", |(_head, history)| history);\n    prompt.push_str(history);"
+    }
+   ],
+   "tests": [
+    "tests::a_compaction_summary_request_uses_the_hosted_model_path"
+   ]
+  },
+  {
    "id": "FP01",
    "title": "a snapshot overwrites the last history node, so volatile bytes enter the prefix",
    "command": "host",
