@@ -1,13 +1,9 @@
+use agent_conformance::build::{lane, offline_build};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::sync::OnceLock;
 use wasmparser::{Encoding, Parser, Payload, Validator};
-
-fn lane() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn build_probe(round: usize) -> Vec<u8> {
     let lane = lane();
@@ -18,16 +14,10 @@ fn build_probe(round: usize) -> Vec<u8> {
     if target.exists() {
         fs::remove_dir_all(&target).unwrap();
     }
-    fs::create_dir_all(target.join("tmp")).unwrap();
-    let output = Command::new("bash")
+    let output = offline_build("bash", &target)
+        .expect("prepare the probe build")
         .arg(root.join("scripts/build-component-capsule.sh"))
         .arg(lane.join("probe"))
-        .current_dir(root)
-        .env("CARGO_NET_OFFLINE", "true")
-        .env("CARGO_TARGET_DIR", &target)
-        .env("CARGO_BUILD_BUILD_DIR", target.join("build"))
-        .env("TMPDIR", target.join("tmp"))
-        .env("CARGO_INCREMENTAL", "0")
         .env("RUSTFLAGS", "-Dwarnings")
         .output()
         .expect("start the existing component build script");

@@ -1,4 +1,4 @@
-# Agent conformance probe
+# Agent conformance suite
 
 This workspace builds the lab component through the repository's existing
 `scripts/build-component-capsule.sh`. Runtime owns launch, identity and grants.
@@ -17,10 +17,22 @@ cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -- --nocapt
 ```
 
 Use the repository's shared heavy-build lease for the test command. Reserve
-2 GiB for generated files plus the required 2 GiB of free space. The test needs
+12 GiB for generated files plus the required 2 GiB of free space. The test needs
 the pinned Rust toolchain, its `wasm32-unknown-unknown` target and cached Cargo
-dependencies. Its child builds run offline and treat compiler warnings as
-errors. A missing build tool, target or dependency fails the check.
+dependencies. The shared `build::offline_build` setup keeps Cargo targets,
+intermediates and temporary files under this lane's `target/`. Probe builds
+treat warnings as errors; the Runtime build uses its normal warning policy.
+A missing build tool, target or dependency fails the check with its output.
+
+`runtime::runtime_under_test` builds the checkout's `elastos` binary once per
+test process with `cargo build --locked --offline --manifest-path
+elastos/Cargo.toml -p elastos-server --bin elastos`. It caches a build failure
+as well as a success. The build uses the developer's toolchain environment,
+sets `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`, and clears inherited
+Rust flags. Its one target is `target/runtime`, with intermediates in `build/`
+and temporary files in `tmp/` below that target. It returns the absolute binary
+path and a SHA-256 computed from its bytes by macOS `shasum`. This identifies
+the Runtime tested on this machine; it is separate from capsule bundle identity.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
 imports against the task's three-interface Bus subset. `probe_hash_is_stable` makes two
@@ -50,6 +62,7 @@ not count. Restore the source bytes before running the normal suite again.
 
 The [runbook](RUNBOOK.md) gives the one-command table: `lab/agent-conformance/run.sh`.
 The `harness` module owns fresh Homes and the one bounded launch primitive.
-Task 008 exercises that primitive with system tools; Runtime launch proof belongs
-to task 009. Passing tests remove their Homes, and failing tests retain their
+The Runtime checks launch the probe directory without an operator and require
+the Runtime's own refusal reason. A decoy coordinates file proves which data
+directory the Runtime reads. Passing tests remove their Homes, and failing tests retain their
 roots inside this lane's ignored `target/` and print their paths.
