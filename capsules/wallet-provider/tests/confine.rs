@@ -24,8 +24,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
-/// The did provider's profile, read by the cross-provider contract test.
-const DID_PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../did-provider/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
 const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 
@@ -467,70 +465,293 @@ fn profile_denies_network() {
     }
 }
 
+/// The parameter tokens the Runtime bridge binds for every file-profile
+/// provider. A provider-prefixed token would add a second path for one
+/// operation (P10).
+const CANONICAL_PARAMS: [&str; 3] = ["PROVIDER_EXECUTABLE", "STORAGE_ROOT", "STORAGE_PARENT"];
+const PARAM_PREFIX: &str = "(param \"";
+/// The three rules every file profile binds verbatim.
+const SHARED_RULES: [&str; 3] = [
+    r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#,
+    r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
+    r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
+];
+/// The file profiles the one contract check runs over. Both are required.
+const FILE_PROFILES: [&str; 2] = ["did-provider", "wallet-provider"];
+/// The profile that is checked whenever its file exists.
+const MODEL_PROFILE: &str = "model-provider";
+
+/// The one file-profile contract the Runtime bridge relies on: `(version 1)`
+/// first, `(deny default)` second, an explicit `(deny network*)`, no
+/// `(allow default)`, only the canonical parameter tokens, and the three
+/// shared rules verbatim. Every refusal names the profile and the rule.
+fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
+    let forms = profile_forms(profile);
+    if forms.first().map(String::as_str) != Some("(version 1)") {
+        return Err(format!("{name} must start with (version 1)"));
+    }
+    if forms.get(1).map(String::as_str) != Some("(deny default)") {
+        return Err(format!(
+            "{name} must deny by default immediately after the version"
+        ));
+    }
+    if !forms.iter().any(|form| form == "(deny network*)") {
+        return Err(format!(
+            "{name} must deny the network explicitly with (deny network*)"
+        ));
+    }
+    for form in &forms {
+        if form.starts_with("(allow ")
+            && form.split([' ', '(', ')']).any(|token| token == "default")
+        {
+            return Err(format!("{name} must reject (allow default): {form}"));
+        }
+        let mut rest = form.as_str();
+        while let Some(at) = rest.find(PARAM_PREFIX) {
+            let tail = &rest[at + PARAM_PREFIX.len()..];
+            let Some(end) = tail.find('"') else {
+                return Err(format!("{name} parameter token must close: {form}"));
+            };
+            let token = &tail[..end];
+            if !CANONICAL_PARAMS.contains(&token) {
+                return Err(format!(
+                    "{name} declares the non-canonical parameter token {token}; \
+                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
+                ));
+            }
+            rest = &tail[end..];
+        }
+    }
+    for rule in SHARED_RULES {
+        if !forms.iter().any(|form| form == rule) {
+            return Err(format!("{name} must bind the shared rule {rule}"));
+        }
+    }
+    Ok(())
+}
+
+/// Runs the one contract check over every file profile under `capsules` and
+/// returns the names it checked.
+///
+/// `did-provider` and `wallet-provider` are required; an unreadable one is a
+/// refusal that names its path. `model-provider` is checked whenever
+/// `capsules/model-provider/confine.sb` exists and skipped, with a printed
+/// reason, only while the file is absent.
+fn check_file_profiles(capsules: &Path) -> Result<Vec<&'static str>, String> {
+    let mut checked = Vec::new();
+    for name in FILE_PROFILES {
+        let path = capsules.join(name).join("confine.sb");
+        let profile = match fs::read_to_string(&path) {
+            Ok(profile) => profile,
+            Err(err) => {
+                return Err(format!(
+                    "{name} profile {} must be readable: {err}",
+                    path.display()
+                ))
+            }
+        };
+        check_profile_contract(name, &profile)?;
+        checked.push(name);
+    }
+    let path = capsules.join(MODEL_PROFILE).join("confine.sb");
+    match fs::read_to_string(&path) {
+        Ok(profile) => {
+            check_profile_contract(MODEL_PROFILE, &profile)?;
+            checked.push(MODEL_PROFILE);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => eprintln!(
+            "SKIP model-provider profile {}: the file is absent; the one contract check \
+             runs over it as soon as it exists",
+            path.display()
+        ),
+        Err(err) => {
+            return Err(format!(
+                "model-provider profile {} must be readable: {err}",
+                path.display()
+            ))
+        }
+    }
+    Ok(checked)
+}
+
+/// A minimal profile built from the contract's own pieces: the head forms and
+/// the shared rules. It copies no provider's profile.
+fn contract_fixture_profile(deny_network: bool) -> String {
+    let mut fixture = String::from("(version 1)\n(deny default)\n");
+    if deny_network {
+        fixture.push_str("(deny network*)\n");
+    }
+    for rule in SHARED_RULES {
+        fixture.push_str(rule);
+        fixture.push('\n');
+    }
+    fixture
+}
+
+/// Writes `profile` as `capsules/<provider>/confine.sb` under a temporary
+/// directory.
+fn write_fixture_profile(capsules: &Path, provider: &str, profile: &str) {
+    let dir = capsules.join(provider);
+    fs::create_dir_all(&dir).expect("fixture provider directory");
+    fs::write(dir.join("confine.sb"), profile).expect("fixture profile");
+}
+
+/// A temporary `capsules/` directory holding the passing fixture for the two
+/// required file profiles and no model profile.
+fn contract_fixture_capsules() -> tempfile::TempDir {
+    let capsules = tempfile::tempdir().expect("temporary capsules directory");
+    let fixture = contract_fixture_profile(true);
+    for name in FILE_PROFILES {
+        write_fixture_profile(capsules.path(), name, &fixture);
+    }
+    capsules
+}
+
 /// The did and wallet file profiles present one contract to the Runtime
 /// bridge: the same canonical parameter tokens and the same deny-by-default
 /// head. The bridge binds `STORAGE_ROOT`, `STORAGE_PARENT` and
 /// `PROVIDER_EXECUTABLE` with one parameterized launch, so a provider-prefixed
-/// token would add a second path for one operation (P10).
+/// token would add a second path for one operation (P10). The model profile
+/// joins the same check as soon as its file exists.
 ///
 /// Falsifier: rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in either
 /// `confine.sb`; this test fails on the non-canonical token.
 #[test]
 fn both_file_profiles_bind_one_storage_parameter_contract() {
-    const CANONICAL: [&str; 3] = ["PROVIDER_EXECUTABLE", "STORAGE_ROOT", "STORAGE_PARENT"];
-    const PARAM: &str = "(param \"";
-    const SHARED_RULES: [&str; 3] = [
-        r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#,
-        r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
-        r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
-    ];
-    for (name, path) in [
-        ("did-provider", DID_PROFILE_PATH),
-        ("wallet-provider", PROFILE_PATH),
-    ] {
-        let profile = fs::read_to_string(path)
-            .unwrap_or_else(|err| panic!("{name} profile {path} must be readable: {err}"));
-        let forms = profile_forms(&profile);
-        assert_eq!(
-            forms.first().map(String::as_str),
-            Some("(version 1)"),
-            "{name} must start with its version"
-        );
-        assert_eq!(
-            forms.get(1).map(String::as_str),
-            Some("(deny default)"),
-            "{name} must deny by default immediately after the version"
-        );
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let checked = check_file_profiles(capsules).unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        checked.starts_with(&FILE_PROFILES),
+        "the required file profiles must be checked first: {checked:?}"
+    );
+}
+
+/// The one contract check refuses a profile that omits the explicit network
+/// denial, and names that rule. The fixtures are built in the test; no file
+/// is read.
+///
+/// Falsifier: delete the `(deny network*)` requirement from
+/// `check_profile_contract`; this test fails because the incomplete fixture
+/// passes.
+#[test]
+fn file_profile_contract_rejects_a_profile_without_deny_network() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+    let incomplete = contract_fixture_profile(false);
+    let refusal = check_profile_contract("fixture-provider", &incomplete)
+        .expect_err("a profile without its (deny network*) form must fail");
+    assert!(
+        refusal.contains("(deny network*)"),
+        "the refusal must name the missing rule: {refusal}"
+    );
+}
+
+/// The list function runs the one contract check over the model profile
+/// whenever it exists, skips it only while the file is absent, and refuses a
+/// missing required profile.
+#[test]
+fn file_profile_contract_checks_the_model_profile_when_present() {
+    let capsules = contract_fixture_capsules();
+    let checked =
+        check_file_profiles(capsules.path()).expect("the did and wallet fixtures must pass");
+    assert_eq!(checked, vec!["did-provider", "wallet-provider"]);
+
+    let capsules = contract_fixture_capsules();
+    write_fixture_profile(
+        capsules.path(),
+        MODEL_PROFILE,
+        &contract_fixture_profile(false),
+    );
+    let refusal = check_file_profiles(capsules.path())
+        .expect_err("a model profile without (deny network*) must fail");
+    assert!(
+        refusal.contains("model-provider") && refusal.contains("(deny network*)"),
+        "the refusal must name the model profile and the missing rule: {refusal}"
+    );
+
+    let capsules = contract_fixture_capsules();
+    write_fixture_profile(
+        capsules.path(),
+        MODEL_PROFILE,
+        &contract_fixture_profile(true),
+    );
+    let checked =
+        check_file_profiles(capsules.path()).expect("the passing model fixture must pass");
+    assert!(
+        checked.contains(&MODEL_PROFILE),
+        "the checked names must include the model profile: {checked:?}"
+    );
+
+    let capsules = contract_fixture_capsules();
+    let model_profile = capsules.path().join(MODEL_PROFILE).join("confine.sb");
+    fs::create_dir_all(&model_profile).expect("model profile directory");
+    let refusal = check_file_profiles(capsules.path())
+        .expect_err("a model profile directory is a read error, not an absence");
+    assert!(
+        refusal.contains(&model_profile.display().to_string()),
+        "the refusal must name the model profile path: {refusal}"
+    );
+
+    let capsules = contract_fixture_capsules();
+    fs::remove_file(capsules.path().join("did-provider").join("confine.sb"))
+        .expect("remove the did profile");
+    let refusal = check_file_profiles(capsules.path()).expect_err("the did profile is required");
+    assert!(
+        refusal.contains("did-provider"),
+        "the refusal must name the did profile: {refusal}"
+    );
+}
+
+/// The child that prints the absent-model skip reason reads the temporary
+/// `capsules/` directory named by this variable.
+const ABSENT_MODEL_FIXTURE: &str = "ELASTOS_WALLET_ABSENT_MODEL_FIXTURE";
+
+/// The absent-model skip reason names the model profile and says the file is
+/// absent, so the skip is visible and not silent.
+///
+/// Falsifier: drop the `eprintln!` skip message from `check_file_profiles`;
+/// this test fails because the child prints no reason.
+#[test]
+fn file_profile_contract_reports_absent_model() {
+    let capsules = contract_fixture_capsules();
+    let output = Command::new(std::env::current_exe().expect("the test executable path"))
+        .args([
+            "--exact",
+            "fixture_prints_absent_model_reason",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ABSENT_MODEL_FIXTURE, capsules.path())
+        .output()
+        .expect("the fixture run must complete");
+    assert!(
+        output.status.success(),
+        "the fixture run must pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed = String::from_utf8_lossy(&output.stderr);
+    for expected in ["model-provider", "confine.sb", "absent"] {
         assert!(
-            forms.iter().any(|form| form == "(deny network*)"),
-            "{name} must deny the network explicitly"
+            printed.contains(expected),
+            "the skip reason must name {expected}: {printed}"
         );
-        for form in &forms {
-            assert!(
-                !(form.starts_with("(allow ")
-                    && form.split([' ', '(', ')']).any(|token| token == "default")),
-                "{name} must reject allow default: {form}"
-            );
-            let mut rest = form.as_str();
-            while let Some(at) = rest.find(PARAM) {
-                let tail = &rest[at + PARAM.len()..];
-                let end = tail.find('"').expect("parameter token must close");
-                let token = &tail[..end];
-                assert!(
-                    CANONICAL.contains(&token),
-                    "{name} declares the non-canonical parameter token {token}; \
-                     both file profiles bind STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
-                );
-                rest = &tail[end..];
-            }
-        }
-        for rule in SHARED_RULES {
-            assert!(
-                forms.iter().any(|form| form == rule),
-                "{name} must bind the shared rule {rule}"
-            );
-        }
     }
+}
+
+/// Runs the list function on the fixture directory named by
+/// `ABSENT_MODEL_FIXTURE`; it is meaningful only as a child of
+/// `file_profile_contract_reports_absent_model`.
+#[test]
+fn fixture_prints_absent_model_reason() {
+    let Ok(capsules) = std::env::var(ABSENT_MODEL_FIXTURE) else {
+        return;
+    };
+    check_file_profiles(Path::new(&capsules))
+        .unwrap_or_else(|err| panic!("the fixture profiles must pass: {err}"));
 }
 
 /// Splits the profile into top-level s-expressions with comments removed, so a
