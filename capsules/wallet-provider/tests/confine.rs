@@ -434,6 +434,13 @@ fn plant_storage_key(wallet_dir: &Path) {
     }
 }
 
+/// Whether `form` is a top-level allow rule that grants the network. This is
+/// the one copy of the rule, used both by the provider's own profile test and
+/// by the shared file-profile contract check (P10).
+fn is_network_allow(form: &str) -> bool {
+    form.starts_with("(allow ") && form.contains("network")
+}
+
 /// The profile denies every network operation: it starts from `(deny default)`
 /// and grants no network rule. The provider has no network path of its own,
 /// so this rule is what keeps that true if a later change adds one.
@@ -459,7 +466,7 @@ fn profile_denies_network() {
             "the profile must reject allow default, including after deny default: {form}"
         );
         assert!(
-            !(form.starts_with("(allow ") && form.contains("network")),
+            !is_network_allow(form),
             "the profile must not grant network access: {form}"
         );
     }
@@ -483,8 +490,9 @@ const MODEL_PROFILE: &str = "model-provider";
 
 /// The one file-profile contract the Runtime bridge relies on: `(version 1)`
 /// first, `(deny default)` second, an explicit `(deny network*)`, no
-/// `(allow default)`, only the canonical parameter tokens, and the three
-/// shared rules verbatim. Every refusal names the profile and the rule.
+/// `(allow default)`, no network allow, only the canonical parameter tokens,
+/// and the three shared rules verbatim. Every refusal names the profile and
+/// the rule.
 fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
     let forms = profile_forms(profile);
     if forms.first().map(String::as_str) != Some("(version 1)") {
@@ -505,6 +513,11 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             && form.split([' ', '(', ')']).any(|token| token == "default")
         {
             return Err(format!("{name} must reject (allow default): {form}"));
+        }
+        if is_network_allow(form) {
+            return Err(format!(
+                "{name} must not grant network access; a network allow is refused: {form}"
+            ));
         }
         let mut rest = form.as_str();
         while let Some(at) = rest.find(PARAM_PREFIX) {
@@ -648,6 +661,36 @@ fn file_profile_contract_rejects_a_profile_without_deny_network() {
         refusal.contains("(deny network*)"),
         "the refusal must name the missing rule: {refusal}"
     );
+}
+
+/// The one contract check refuses a profile that grants the network, in any
+/// allow form, and names that rule and the form. The fixtures are built in the
+/// test; no file is read.
+///
+/// Falsifier: remove the network-allow rule from `check_profile_contract`;
+/// this test fails because the granting fixture passes.
+#[test]
+fn file_profile_contract_rejects_a_network_allow() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+    for grant in [
+        "(allow network*)",
+        r#"(allow network-outbound (remote ip "localhost:*"))"#,
+    ] {
+        let profile = format!("{complete}{grant}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a profile with a network allow must fail");
+        assert!(
+            refusal.contains("fixture-provider") && refusal.contains(grant),
+            "the refusal must name the profile and the form: {refusal}"
+        );
+        assert!(
+            refusal.contains("network allow is refused"),
+            "the refusal must say a network allow is refused: {refusal}"
+        );
+    }
 }
 
 /// The list function runs the one contract check over the model profile

@@ -101,9 +101,9 @@ when the Runtime side does.
 - `both_file_profiles_bind_one_storage_parameter_contract` lives in
   `../wallet-provider/tests/confine.rs`. One check function holds the
   contract: `(version 1)` first, `(deny default)` second, an explicit
-  `(deny network*)`, the same `PROVIDER_EXECUTABLE` / `STORAGE_ROOT` /
-  `STORAGE_PARENT` parameter tokens, no `(allow default)` rule, and the three
-  shared rules verbatim. One list function runs that check over
+  `(deny network*)`, no network allow, the same `PROVIDER_EXECUTABLE` /
+  `STORAGE_ROOT` / `STORAGE_PARENT` parameter tokens, no `(allow default)`
+  rule, and the three shared rules verbatim. One list function runs that check over
   `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
   and `capsules/model-provider/confine.sb`: the did and wallet profiles are
   required, and the model profile is checked whenever that file exists and
@@ -115,6 +115,11 @@ when the Runtime side does.
   the test. The check accepts it, then refuses the same profile without
   `(deny network*)` with a reason that names that rule. The test reads no
   file.
+- `file_profile_contract_rejects_a_network_allow` builds the same passing
+  fixture and appends `(allow network*)`, then
+  `(allow network-outbound (remote ip "localhost:*"))`. The check refuses each
+  profile with a reason that names `fixture-provider` and the refused form.
+  The test reads no file.
 - `file_profile_contract_checks_the_model_profile_when_present` runs the same
   list function over a temporary `capsules/` directory. With no model
   profile it checks exactly the two required profiles; a model profile
@@ -138,7 +143,8 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append `(allow file-read* (literal (param "READ_FIXTURE_KEY")))` and run
   `confined_outside_read_is_denied`: reading the planted key makes `Init`
   succeed and the test fail.
-- `(allow network*)` makes `profile_denies_network` fail.
+- `(allow network*)` makes `profile_denies_network` and
+  `both_file_profiles_bind_one_storage_parameter_contract` fail.
 - Appending `(allow default)` also makes `profile_denies_network` fail.
 - Removing the storage-root write rule makes `Init` fail inside the root, so
   the operation test fails.
