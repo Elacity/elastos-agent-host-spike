@@ -35,6 +35,9 @@ command reports a full disk.
 Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
 usage or data error, 3 when it stopped for a full disk.
 """
+from collections import namedtuple
+import contextlib
+import io
 import json
 import inspect
 import os
@@ -50,9 +53,11 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
+# The provider crate is its own workspace with its own lockfile.
+PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
-COMMANDS = ("host", "e2e", "selftest")
+COMMANDS = ("host", "provider", "e2e", "selftest")
 SELF_TEST_DIR = HERE / ".falsify-selftest"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
@@ -94,6 +99,74 @@ CASE_ERROR = 3
 
 def case_marker(name, word):
     return f"self-test case {name!r}: {word}"
+
+
+ParsedArgv = namedtuple(
+    "ParsedArgv", "path mode name filters keep_backups with_repo")
+
+
+def refuse(reason):
+    """Stop before any work: an unsupported option is never a selection."""
+    print(f"usage: {reason}", file=sys.stderr)
+    raise SystemExit(CASE_USAGE)
+
+
+def parse_argv(argv):
+    """The data file and the mode, from the arguments alone.
+
+    This is the front door: it reads no file, runs no test and changes
+    nothing. An option it does not know stops the run here with status 2 and
+    its own reason, so a typo can never select work.
+    """
+    path = DATA
+    filters = []
+    keep_backups = False
+    with_repo = False
+    want_list = False
+    want_cases = False
+    want_self_test = False
+    case_name = None
+    at = 0
+    while at < len(argv):
+        token = argv[at]
+        if token == "--from":
+            if at + 1 >= len(argv) or argv[at + 1].startswith("-"):
+                refuse("--from needs a path, not an option")
+            at += 1
+            path = pathlib.Path(argv[at])
+        elif token.startswith("--from="):
+            refuse("--from=PATH is not supported; use --from PATH")
+        elif token == "--list":
+            want_list = True
+        elif token == "--keep-backups":
+            keep_backups = True
+        elif token == "--with-repo":
+            with_repo = True
+        elif token == "--self-test-cases":
+            want_cases = True
+        elif token == "--self-test":
+            want_self_test = True
+        elif token == "--self-test-case":
+            if at + 1 >= len(argv) or argv[at + 1].startswith("-"):
+                refuse("--self-test-case needs a case name, not an option")
+            at += 1
+            case_name = argv[at]
+        elif token.startswith("-"):
+            refuse(f"unknown option {token}")
+        else:
+            filters.append(token)
+        at += 1
+    if want_list:
+        mode = "list"
+    elif want_cases:
+        mode = "self-test-cases"
+    elif case_name is not None:
+        mode = "self-test-case"
+    elif want_self_test:
+        mode = "self-test"
+    else:
+        mode = "run"
+    return ParsedArgv(path, mode, case_name, filters, keep_backups, with_repo)
 
 
 class DiskFull(Exception):
@@ -224,6 +297,15 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
     """How to build and run one named test, for a command."""
     if command == "host":
         cargo = ["cargo", "test", *cargo_flags, "--manifest-path", str(manifest or HERE / "Cargo.toml")]
+        return {
+            "build": [(cargo + ["--no-run"], REPO)],
+            "one": (cargo + ["--"], REPO, []),
+        }
+    if command == "provider":
+        # The provider workspace pins its own lockfile, so its test command
+        # names --locked and that manifest directly.
+        cargo = ["cargo", "test", "--locked",
+                 "--manifest-path", str(manifest or PROVIDER_MANIFEST)]
         return {
             "build": [(cargo + ["--no-run"], REPO)],
             "one": (cargo + ["--"], REPO, []),
@@ -853,6 +935,156 @@ def a_survivor_is_proved_by_its_named_tests():
     return ok
 
 
+def refusal(argv):
+    """(exit code, reason) from parse_argv, with its message captured."""
+    message = io.StringIO()
+    with contextlib.redirect_stderr(message):
+        try:
+            parse_argv(argv)
+        except SystemExit as stop:
+            return stop.code, message.getvalue()
+    return None, message.getvalue()
+
+
+def from_option_selects_path():
+    """--from names the data file; without it the path is the default."""
+    ok = True
+    default = parse_argv([])
+    print(f"self-test: default path: {default.path}, mode {default.mode}")
+    if default.path != DATA or default.mode != "run":
+        ok = False
+    chosen = pathlib.Path("capsules/model-provider/falsifiers.json")
+    picked = parse_argv(["--from", str(chosen)])
+    print(f"self-test: --from path: {picked.path}")
+    if picked.path != chosen:
+        ok = False
+    return ok
+
+
+def unknown_option_is_refused():
+    """Every unsupported option stops at the front door with status 2 and a
+    reason that names it, even beside --list or after --from PATH."""
+    ok = True
+    for argv, option in (
+        (["--help"], "--help"),
+        (["--typo"], "--typo"),
+        (["--list", "--typo"], "--typo"),
+        (["--from", str(DATA), "--typo"], "--typo"),
+        (["FS01", "--bogus"], "--bogus"),
+    ):
+        code, reason = refusal(argv)
+        print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
+        if code != 2 or option not in reason:
+            ok = False
+    return ok
+
+
+def equals_form_is_refused():
+    """The equals form is refused and names the separated form to use."""
+    ok = True
+    for argv in (["--from=capsules/model-provider/falsifiers.json"], ["--from="]):
+        code, reason = refusal(argv)
+        print(f"self-test: {argv[0]} -> exit {code}: {reason.strip()}")
+        if code != 2 or "use --from PATH" not in reason:
+            ok = False
+    return ok
+
+
+def from_without_a_path_is_refused():
+    """--from needs a path, not a missing value and not another option."""
+    ok = True
+    for argv in (["--from"], ["--from", "--typo"]):
+        code, reason = refusal(argv)
+        print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
+        if code != 2 or "--from needs a path" not in reason:
+            ok = False
+    return ok
+
+
+def argv_refusal_precedes_work():
+    """main() refuses an unsupported option before recovery or loading. Both
+    are stubbed, so this case reads no file and touches no backup."""
+    ok = True
+    touched = []
+    saved = recover_backups, load
+
+    def stub_recover():
+        touched.append("recover_backups")
+
+    def stub_load(*_args, **_kwargs):
+        touched.append("load")
+        return []
+
+    globals()["recover_backups"] = stub_recover
+    globals()["load"] = stub_load
+    code = None
+    message = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(message):
+            try:
+                main(["--typo"])
+            except SystemExit as stop:
+                code = stop.code
+    finally:
+        globals()["recover_backups"], globals()["load"] = saved
+    print(f"self-test: main --typo -> exit {code}, touched={touched}")
+    if code != 2 or touched:
+        ok = False
+    return ok
+
+
+def provider_spec_uses_locked_manifest():
+    """provider is a registered command, and both its build and run argv name
+    --locked and the provider workspace manifest directly."""
+    ok = True
+    manifest = str(REPO / "capsules" / "model-provider" / "Cargo.toml")
+    if "provider" not in COMMANDS:
+        print("self-test: provider is not a registered command")
+        ok = False
+    how = spec("provider")
+    build = how["build"]
+    one, _cwd, _extra = how["one"]
+    print(f"self-test: provider build {[argv for argv, _cwd in build]}")
+    print(f"self-test: provider run {one}")
+    if len(build) != 1:
+        ok = False
+    else:
+        argv = build[0][0]
+        if (argv[:2] != ["cargo", "test"] or "--locked" not in argv
+                or manifest not in argv or "--no-run" not in argv):
+            ok = False
+    if (one[:2] != ["cargo", "test"] or "--locked" not in one
+            or manifest not in one or "--" not in one or "--no-run" in one):
+        ok = False
+    return ok
+
+
+def list_mode_displays():
+    """--list displays the loaded entries. It never selects work, and it may
+    name the file it displays."""
+    ok = True
+    chosen = pathlib.Path("capsules/model-provider/falsifiers.json")
+    for argv, want_path in ((["--list"], DATA), (["--list", "--from", str(chosen)], chosen)):
+        parsed = parse_argv(argv)
+        print(f"self-test: {' '.join(argv)} -> mode {parsed.mode}, path {parsed.path}")
+        if parsed.mode != "list" or parsed.path != want_path:
+            ok = False
+    return ok
+
+
+def prefix_token_still_selects():
+    """A bare token still filters by id prefix, with or without --from."""
+    ok = True
+    chosen = pathlib.Path("capsules/model-provider/falsifiers.json")
+    for argv, want in ((["FS01", "FS03"], ["FS01", "FS03"]),
+                       (["--from", str(chosen), "FS01"], ["FS01"])):
+        parsed = parse_argv(argv)
+        print(f"self-test: {' '.join(argv)} -> mode {parsed.mode}, filters {parsed.filters}")
+        if parsed.mode != "run" or parsed.filters != want:
+            ok = False
+    return ok
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -866,6 +1098,14 @@ SELF_TEST_CASES = {
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
     "a survivor needs its named test to run": a_survivor_needs_its_named_test_to_run,
     "a survivor is proved by its named tests": a_survivor_is_proved_by_its_named_tests,
+    "from option selects path": from_option_selects_path,
+    "unknown option is refused": unknown_option_is_refused,
+    "equals form is refused": equals_form_is_refused,
+    "from without a path is refused": from_without_a_path_is_refused,
+    "argv refusal precedes work": argv_refusal_precedes_work,
+    "provider spec uses locked manifest": provider_spec_uses_locked_manifest,
+    "list mode displays": list_mode_displays,
+    "prefix token still selects": prefix_token_still_selects,
 }
 
 
@@ -906,25 +1146,22 @@ def stop_on_term(*_):
 
 def main(argv):
     signal.signal(signal.SIGTERM, stop_on_term)
+    parsed = parse_argv(argv)
     # --keep-backups is for a self-test that runs on a mutated copy of this
     # file: the backup belongs to the caller's mutation, not to a killed run.
-    if "--keep-backups" not in argv:
+    if not parsed.keep_backups:
         recover_backups()
-    entries = load()
-    if "--list" in argv:
+    entries = load(parsed.path)
+    if parsed.mode == "list":
         for entry in entries:
             print(f"{entry['id']:6} {entry['command']:8} {entry['expect']:13} {entry['title']}")
         return 0
-    if "--self-test-cases" in argv:
+    if parsed.mode == "self-test-cases":
         for name in SELF_TEST_CASES:
             print(name)
         return 0
-    if "--self-test-case" in argv:
-        at = argv.index("--self-test-case")
-        if at + 1 >= len(argv):
-            print("--self-test-case needs a name")
-            return CASE_USAGE
-        name = argv[at + 1]
+    if parsed.mode == "self-test-case":
+        name = parsed.name
         if name not in SELF_TEST_CASES:
             print(f"no self-test case named {name}")
             return CASE_USAGE
@@ -935,12 +1172,12 @@ def main(argv):
             print(f"self-test case {name!r}: ERROR: {type(error).__name__}: {error}")
             return CASE_ERROR
         return CASE_PASSED if ok else CASE_FAILED
-    if "--self-test" in argv:
-        return 0 if self_test(entries, "--with-repo" in argv) else 1
-    chosen = [entry for entry in entries if not argv or any(
-        entry["id"] == arg or entry["id"].startswith(arg) for arg in argv)]
+    if parsed.mode == "self-test":
+        return 0 if self_test(entries, parsed.with_repo) else 1
+    chosen = [entry for entry in entries if not parsed.filters or any(
+        entry["id"] == arg or entry["id"].startswith(arg) for arg in parsed.filters)]
     if not chosen:
-        print("no falsifier matches", " ".join(argv))
+        print("no falsifier matches", " ".join(parsed.filters))
         return 2
     counts = {}
     bad = []
