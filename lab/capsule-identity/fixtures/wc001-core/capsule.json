@@ -1,0 +1,10 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "wc001-core",
+  "version": "0.1.0",
+  "description": "Lab fixture: the wc-001 core Wasm module (not a Component), named by a lab CID for identity tests only",
+  "author": "capsule-identity-lab",
+  "role": "app",
+  "type": "wasm",
+  "entrypoint": "capsule.wasm"
+}
