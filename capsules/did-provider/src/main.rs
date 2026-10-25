@@ -125,6 +125,7 @@ struct DidProvider {
     signing_key: Option<SigningKey>,
     verifying_key: Option<VerifyingKey>,
     nickname: Option<String>,
+    nickname_load_error: Option<String>,
     storage_path: String,
     /// Device key — used only for encrypting DID key and nickname at rest
     device_key: Option<[u8; 32]>,
@@ -136,6 +137,7 @@ impl DidProvider {
             signing_key: None,
             verifying_key: None,
             nickname: None,
+            nickname_load_error: None,
             storage_path: String::new(),
             device_key: None,
         }
@@ -218,8 +220,10 @@ impl DidProvider {
         }
 
         if let Err(reason) = self.try_load_nickname() {
+            self.nickname_load_error = Some(reason.clone());
             return Response::error(STORAGE_ERROR_CODE, &reason);
         }
+        self.nickname_load_error = None;
 
         Response::ok(serde_json::json!({
             "protocol_version": "1.0",
@@ -375,6 +379,9 @@ impl DidProvider {
     }
 
     fn get_nickname(&self) -> Response {
+        if let Some(reason) = &self.nickname_load_error {
+            return Response::error(STORAGE_ERROR_CODE, reason);
+        }
         match &self.nickname {
             Some(nick) => Response::ok(serde_json::json!({"nickname": nick})),
             None => Response::error("not_set", "No nickname set"),
@@ -389,6 +396,7 @@ impl DidProvider {
             return Response::error(STORAGE_ERROR_CODE, &reason);
         }
         self.nickname = Some(nickname.to_string());
+        self.nickname_load_error = None;
         Response::ok(serde_json::json!({"nickname": nickname}))
     }
 
@@ -423,27 +431,26 @@ impl DidProvider {
         let key_path = dir.join(format!("{}.enc", normalized));
         let storage_key = derive_storage_key(dk);
 
-        let persona_vk = if key_path.exists() {
+        let encrypted = match read_optional_file(&key_path) {
+            Ok(encrypted) => encrypted,
+            Err(reason) => return Response::error("key_error", &reason),
+        };
+        let persona_vk = if let Some(encrypted) = encrypted {
             // Load existing persona key
-            match std::fs::read(&key_path) {
-                Ok(encrypted) => match decrypt_data(&storage_key, &encrypted) {
-                    Ok(mut secret_bytes) => {
-                        if secret_bytes.len() != 32 {
-                            return Response::error("key_error", "Invalid persona key length");
-                        }
-                        let mut key_arr = [0u8; 32];
-                        key_arr.copy_from_slice(&secret_bytes);
-                        let sk = SigningKey::from_bytes(&key_arr);
-                        let vk = sk.verifying_key();
-                        secret_bytes.zeroize();
-                        key_arr.zeroize();
-                        vk
+            match decrypt_data(&storage_key, &encrypted) {
+                Ok(mut secret_bytes) => {
+                    if secret_bytes.len() != 32 {
+                        return Response::error("key_error", "Invalid persona key length");
                     }
-                    Err(e) => {
-                        return Response::error("key_error", &format!("Decrypt failed: {}", e))
-                    }
-                },
-                Err(e) => return Response::error("key_error", &format!("Read failed: {}", e)),
+                    let mut key_arr = [0u8; 32];
+                    key_arr.copy_from_slice(&secret_bytes);
+                    let sk = SigningKey::from_bytes(&key_arr);
+                    let vk = sk.verifying_key();
+                    secret_bytes.zeroize();
+                    key_arr.zeroize();
+                    vk
+                }
+                Err(e) => return Response::error("key_error", &format!("Decrypt failed: {}", e)),
             }
         } else {
             // Generate new persona keypair
@@ -507,9 +514,40 @@ impl DidProvider {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        if let Ok(Some(nick)) = elastos_identity::load_nickname_with_device_key(&base_dir, &dk) {
-            self.nickname = Some(nick);
-        }
+        // Read once with explicit metadata and data errors. The identity
+        // library's path-based loader treats denied metadata as absence.
+        let nickname = (|| {
+            let Some(encrypted) = read_optional_file(&base_dir.join("did/nickname.enc"))? else {
+                return Ok(None);
+            };
+            // Preserve the identity library's JSON envelope and key derivation.
+            #[derive(Deserialize)]
+            struct Envelope {
+                #[serde(rename = "version")]
+                _version: u8,
+                nonce: String,
+                ciphertext: String,
+            }
+            let envelope: Envelope = serde_json::from_slice(&encrypted)
+                .map_err(|e| format!("Invalid nickname envelope: {e}"))?;
+            let mut data =
+                hex::decode(envelope.nonce).map_err(|e| format!("Invalid nickname nonce: {e}"))?;
+            if data.len() != NONCE_LEN {
+                return Err(format!("Invalid nickname nonce length: {}", data.len()));
+            }
+            data.extend(
+                hex::decode(envelope.ciphertext)
+                    .map_err(|e| format!("Invalid nickname ciphertext: {e}"))?,
+            );
+            let plaintext = decrypt_data(&derive_storage_key(&dk), &data)
+                .map_err(|e| format!("Nickname decrypt failed: {e}"))?;
+            let nickname =
+                String::from_utf8(plaintext).map_err(|e| format!("Invalid nickname UTF-8: {e}"))?;
+            let nickname = nickname.trim().to_string();
+            Ok((!nickname.is_empty()).then_some(nickname))
+        })()
+        .map_err(|e| format!("did-provider: failed to load nickname: {e}"))?;
+        self.nickname = nickname;
         Ok(())
     }
 
@@ -520,6 +558,17 @@ impl DidProvider {
         let base_dir = self.base_dir()?;
         elastos_identity::save_nickname_with_device_key(&base_dir, &dk, nickname)
             .map_err(|e| format!("did-provider: failed to save nickname: {e}"))
+    }
+}
+
+/// Only a confirmed missing file permits creation or an unset nickname.
+fn read_optional_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    match path.try_exists() {
+        Ok(false) => Ok(None),
+        Ok(true) => std::fs::read(path)
+            .map(Some)
+            .map_err(|e| format!("Read failed: {e}")),
+        Err(e) => Err(format!("Metadata lookup failed: {e}")),
     }
 }
 
@@ -1535,6 +1584,121 @@ mod tests {
         match provider.get_nickname() {
             Response::Ok { data: Some(d) } => assert_eq!(d["nickname"], "alice"),
             other => panic!("Expected nickname alice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nickname_load_refusals_keep_their_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap();
+        let path = dir.path().join("did/nickname.enc");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let encrypted_utf8 =
+            encrypt_data(&derive_storage_key(&make_device_key()), &[0xff]).unwrap();
+        let invalid_utf8 = serde_json::json!({
+            "version": 1,
+            "nonce": hex::encode(&encrypted_utf8[..NONCE_LEN]),
+            "ciphertext": hex::encode(&encrypted_utf8[NONCE_LEN..]),
+        })
+        .to_string();
+        let cases = [
+            ("{".to_string(), "Invalid nickname envelope: EOF while parsing an object at line 1 column 1"),
+            ("{}".to_string(), "Invalid nickname envelope: missing field `version` at line 1 column 2"),
+            (serde_json::json!({"version": 1, "nonce": "zz", "ciphertext": ""}).to_string(),
+                "Invalid nickname nonce: Invalid character 'z' at position 0"),
+            (serde_json::json!({"version": 1, "nonce": "00", "ciphertext": ""}).to_string(),
+                "Invalid nickname nonce length: 1"),
+            (serde_json::json!({"version": 1, "nonce": "00".repeat(NONCE_LEN), "ciphertext": "zz"}).to_string(),
+                "Invalid nickname ciphertext: Invalid character 'z' at position 0"),
+            (serde_json::json!({"version": 1, "nonce": "00".repeat(NONCE_LEN), "ciphertext": ""}).to_string(),
+                "Nickname decrypt failed: Decryption failed: aead::Error"),
+            (invalid_utf8, "Invalid nickname UTF-8: invalid utf-8 sequence of 1 bytes from index 0"),
+        ];
+        for (bytes, reason) in cases {
+            std::fs::write(&path, bytes).unwrap();
+            let mut provider = DidProvider::new();
+            let expected = format!("did-provider: failed to load nickname: {reason}");
+            assert_storage_error(
+                provider.init(serde_json::json!({
+                    "base_path": bp, "encryption_key": hex::encode(make_device_key()),
+                })),
+                &expected,
+            );
+            assert_storage_error(provider.get_nickname(), &expected);
+            assert!(provider.nickname.is_none());
+        }
+    }
+
+    #[test]
+    fn nickname_reload_clears_previous_value_when_absent() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(first.path().to_str().unwrap()));
+        assert!(matches!(
+            provider.set_nickname("alice"),
+            Response::Ok { .. }
+        ));
+        assert!(matches!(
+            provider.init(serde_json::json!({
+                "base_path": second.path(), "encryption_key": hex::encode(make_device_key()),
+            })),
+            Response::Ok { .. }
+        ));
+        match provider.get_nickname() {
+            Response::Error { code, message } => {
+                assert_eq!(code, "not_set");
+                assert_eq!(message, "No nickname set");
+            }
+            other => panic!("Expected an absent nickname, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn persona_refusals_keep_their_reasons() {
+        fn assert_key_error(response: Response, expected_code: &str, expected: &str) {
+            match response {
+                Response::Error { code, message } => {
+                    assert_eq!(code, expected_code);
+                    assert_eq!(message, expected);
+                }
+                other => panic!("Expected refusal {expected:?}, got {other:?}"),
+            }
+        }
+        assert_key_error(
+            DidProvider::new().get_persona_did("bot"),
+            "not_init",
+            "No device key provided",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        for name in ["".to_string(), "x".repeat(65)] {
+            assert_key_error(
+                provider.get_persona_did(&name),
+                "invalid_name",
+                "Persona name must be 1-64 characters",
+            );
+        }
+        assert_key_error(
+            provider.get_persona_did("bad/name"),
+            "invalid_name",
+            "Persona name must be alphanumeric, hyphens, or underscores",
+        );
+        let key_path = dir.path().join("did/personas/bot.enc");
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        let storage_key = derive_storage_key(&make_device_key());
+        for (encrypted, reason) in [
+            (vec![], "Decrypt failed: Data too short"),
+            (
+                vec![0; NONCE_LEN],
+                "Decrypt failed: Decryption failed: aead::Error",
+            ),
+            (
+                encrypt_data(&storage_key, &[0; 31]).unwrap(),
+                "Invalid persona key length",
+            ),
+        ] {
+            std::fs::write(&key_path, encrypted).unwrap();
+            assert_key_error(provider.get_persona_did("bot"), "key_error", reason);
         }
     }
 

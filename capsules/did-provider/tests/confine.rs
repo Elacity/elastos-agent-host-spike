@@ -27,9 +27,10 @@ fn require_sandbox(test: &str) -> bool {
     if Path::new("/usr/bin/sandbox-exec").is_file() {
         true
     } else {
-        eprintln!(
+        // Direct stderr writes bypass libtest's successful-test capture.
+        writeln!(std::io::stderr().lock(),
             "SKIP {test}: /usr/bin/sandbox-exec is unavailable, so did-provider confinement was not exercised"
-        );
+        ).expect("print confinement skip reason");
         false
     }
 }
@@ -44,10 +45,16 @@ struct ConfinedProvider {
 
 impl ConfinedProvider {
     fn spawn(storage_root: &Path) -> Self {
+        Self::spawn_with_profile(storage_root, Path::new(&profile_path()), storage_root)
+    }
+
+    fn spawn_with_profile(storage_root: &Path, profile: &Path, metadata_root: &Path) -> Self {
         let binary = provider_binary();
         let mut child = Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
-            .arg(profile_path())
+            .arg(profile)
+            .arg("-D")
+            .arg(format!("FIXTURE_METADATA_ROOT={}", metadata_root.display()))
             .arg("-D")
             .arg(format!("STORAGE_ROOT={}", storage_root.display()))
             .arg("-D")
@@ -103,6 +110,21 @@ impl ConfinedProvider {
     }
 }
 
+/// Grant only metadata for the outside fixture, so read tests reach the data
+/// read. Keep the profile file alive until the provider has exited.
+fn metadata_profile() -> tempfile::NamedTempFile {
+    let mut profile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        profile,
+        "{}\n; The read fixture permits metadata, while data stays confined.\n\
+        (allow file-read-metadata (subpath (param \"FIXTURE_METADATA_ROOT\")))\n",
+        std::fs::read_to_string(profile_path()).unwrap()
+    )
+    .unwrap();
+    profile.flush().unwrap();
+    profile
+}
+
 impl Drop for ConfinedProvider {
     fn drop(&mut self) {
         if !self.reaped {
@@ -141,6 +163,18 @@ fn assert_permission_denied(message: &str) {
         message.contains("Operation not permitted") || message.contains("Permission denied"),
         "expected a permission-denial reason, got {message:?}"
     );
+}
+
+fn assert_refusal(response: &Value, code: &str, reason: &str) {
+    let (actual_code, message) = error_parts(response);
+    assert_eq!(actual_code, code, "unexpected refusal {response}");
+    assert_eq!(message, reason, "wrong refusal reason: {response}");
+}
+
+fn permission_reason(operation: &str) -> String {
+    // Seatbelt returns EPERM on macOS. Assert the entire reason, including the
+    // operation, so a denied write cannot stand in for a denied read.
+    format!("{operation}: {}", std::io::Error::from_raw_os_error(1))
 }
 
 fn tamper_signature(signature: &str) -> String {
@@ -386,19 +420,24 @@ fn outside_write_denied() {
     let sentinel = b"outside-nickname-sentinel";
     std::fs::write(&outside_nickname, sentinel).unwrap();
 
+    let mut provider = ConfinedProvider::spawn(&storage);
+    assert_ok(&provider.init(&storage));
+
     // `did/nickname.enc` is a symlink into the outside directory: a provider
     // that could write through it would overwrite the sentinel.
     std::fs::create_dir_all(storage.join("did")).unwrap();
     std::os::unix::fs::symlink(&outside_nickname, storage.join("did").join("nickname.enc"))
         .unwrap();
 
-    let mut provider = ConfinedProvider::spawn(&storage);
-    assert_ok(&provider.init(&storage));
-
     let response = provider.request(json!({"op": "set_nickname", "nickname": "alice"}));
     let (code, message) = error_parts(&response);
     assert_eq!(code, "storage_error", "unexpected refusal {response}");
     assert_permission_denied(message);
+    assert_refusal(
+        &response,
+        "storage_error",
+        &permission_reason("did-provider: failed to save nickname"),
+    );
     assert_eq!(
         std::fs::read(&outside_nickname).unwrap(),
         sentinel,
@@ -421,7 +460,8 @@ fn outside_read_denied() {
     let (_root, storage) = canonical_tempdir();
     let (_outside, outside) = canonical_tempdir();
 
-    let mut provider = ConfinedProvider::spawn(&storage);
+    let profile = metadata_profile();
+    let mut provider = ConfinedProvider::spawn_with_profile(&storage, profile.path(), &outside);
     assert_ok(&provider.init(&storage));
 
     let created = provider.request(json!({"op": "get_persona_did", "name": "bot"}));
@@ -438,6 +478,7 @@ fn outside_read_denied() {
     let response = provider.request(json!({"op": "get_persona_did", "name": "bot"}));
     let (_, message) = error_parts(&response);
     assert_permission_denied(message);
+    assert_refusal(&response, "key_error", &permission_reason("Read failed"));
     assert!(
         !response.to_string().contains(&persona_did),
         "the outside persona key must not be readable: {response}"
@@ -452,4 +493,125 @@ fn outside_read_denied() {
     assert_ok(&after);
 
     assert_ok(&provider.shutdown());
+}
+
+#[test]
+fn outside_persona_metadata_denied() {
+    if !require_sandbox("outside_persona_metadata_denied") {
+        return;
+    }
+    let (_root, storage) = canonical_tempdir();
+    let (_outside, outside) = canonical_tempdir();
+    let mut provider = ConfinedProvider::spawn(&storage);
+    assert_ok(&provider.init(&storage));
+    assert_ok(&provider.request(json!({"op": "get_persona_did", "name": "bot"})));
+    let stored = storage.join("did/personas/bot.enc");
+    let external = outside.join("bot.enc");
+    std::fs::rename(&stored, &external).unwrap();
+    std::os::unix::fs::symlink(&external, &stored).unwrap();
+    let before = std::fs::read(&external).unwrap();
+    assert_refusal(
+        &provider.request(json!({"op": "get_persona_did", "name": "bot"})),
+        "key_error",
+        &permission_reason("Metadata lookup failed"),
+    );
+    assert_eq!(std::fs::read(&external).unwrap(), before);
+    assert_ok(&provider.request(json!({"op": "get_did"})));
+    assert_ok(&provider.shutdown());
+}
+
+#[test]
+fn persona_write_refusals_keep_their_reasons() {
+    if !require_sandbox("persona_write_refusals_keep_their_reasons") {
+        return;
+    }
+    for (deny_path, operation) in [
+        ("did/personas", "Failed to create dir"),
+        ("did/personas/bot.enc", "Failed to persist persona key"),
+    ] {
+        let (_root, storage) = canonical_tempdir();
+        std::fs::create_dir_all(storage.join("did")).unwrap();
+        if deny_path.ends_with(".enc") {
+            std::fs::create_dir_all(storage.join("did/personas")).unwrap();
+        }
+        let mut profile = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            profile,
+            "{}\n; Exercise the named persona write refusal.\n\
+            (deny file-write* (subpath (param \"FIXTURE_METADATA_ROOT\")))",
+            std::fs::read_to_string(profile_path()).unwrap()
+        )
+        .unwrap();
+        profile.flush().unwrap();
+        let denied = storage.join(deny_path);
+        let mut provider = ConfinedProvider::spawn_with_profile(&storage, profile.path(), &denied);
+        assert_ok(&provider.init(&storage));
+        assert_refusal(
+            &provider.request(json!({"op": "get_persona_did", "name": "bot"})),
+            "key_error",
+            &permission_reason(operation),
+        );
+        assert!(
+            !denied.exists(),
+            "a refused persona write must leave its target absent"
+        );
+        assert_ok(&provider.request(json!({"op": "get_did"})));
+        assert_ok(&provider.shutdown());
+    }
+}
+
+fn nickname_read_refusal(allow_metadata: bool) {
+    let (_root, storage) = canonical_tempdir();
+    let (_outside, outside) = canonical_tempdir();
+    elastos_identity::save_nickname_with_device_key(&storage, &DEVICE_KEY, "alice").unwrap();
+    let stored = storage.join("did/nickname.enc");
+    let external = outside.join("nickname.enc");
+    std::fs::rename(&stored, &external).unwrap();
+    std::os::unix::fs::symlink(&external, &stored).unwrap();
+    let before = std::fs::read(&external).unwrap();
+    let profile = metadata_profile();
+    let mut provider = if allow_metadata {
+        ConfinedProvider::spawn_with_profile(&storage, profile.path(), &outside)
+    } else {
+        ConfinedProvider::spawn(&storage)
+    };
+    let operation = if allow_metadata {
+        "Read failed"
+    } else {
+        "Metadata lookup failed"
+    };
+    let reason = format!(
+        "did-provider: failed to load nickname: {}",
+        permission_reason(operation)
+    );
+    assert_refusal(&provider.init(&storage), "storage_error", &reason);
+    assert_refusal(
+        &provider.request(json!({"op": "get_nickname"})),
+        "storage_error",
+        &reason,
+    );
+    assert_eq!(std::fs::read(&external).unwrap(), before);
+    assert_ok(&provider.request(json!({"op": "get_did"})));
+    // Restore the permitted file and prove that a later Init clears the refusal.
+    std::fs::remove_file(&stored).unwrap();
+    std::fs::rename(&external, &stored).unwrap();
+    assert_ok(&provider.init(&storage));
+    let nickname = provider.request(json!({"op": "get_nickname"}));
+    assert_ok(&nickname);
+    assert_eq!(nickname["data"]["nickname"], "alice");
+    assert_ok(&provider.shutdown());
+}
+
+#[test]
+fn outside_nickname_metadata_denied() {
+    if require_sandbox("outside_nickname_metadata_denied") {
+        nickname_read_refusal(false);
+    }
+}
+
+#[test]
+fn outside_nickname_read_denied() {
+    if require_sandbox("outside_nickname_read_denied") {
+        nickname_read_refusal(true);
+    }
 }
