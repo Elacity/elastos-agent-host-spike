@@ -396,13 +396,14 @@ impl ProviderFault {
     pub fn journal_access_denied(operation: impl Into<String>) -> Self {
         Self {
             code: "journal_access_denied",
-            message: "model run journal access was denied",
+            message: "model run journal is not writable",
             detail: Some(format!("{} was denied", operation.into())),
         }
     }
 
-    /// One decision for every journal write or create failure: a permission
-    /// error says access was denied, any other IO error stays journal-corrupt.
+    /// One decision for every journal write, create or replace failure: a
+    /// permission error says access is not writable, any other IO error stays
+    /// journal-corrupt.
     pub(crate) fn journal_write_io(operation: &str, err: std::io::Error) -> Self {
         if err.kind() == std::io::ErrorKind::PermissionDenied {
             Self::journal_access_denied(format!("{operation} ({err})"))
@@ -427,6 +428,7 @@ impl ProviderFault {
         self.message
     }
 
+    #[cfg(test)]
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
     }

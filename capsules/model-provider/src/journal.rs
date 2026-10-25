@@ -1171,20 +1171,13 @@ fn atomic_write_with_temp_with_locks(
     )?;
     match expected {
         Some(metadata) => verify_path_snapshot(path, metadata)?,
-        None => match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => {
-                return Err(ProviderFault::corrupt_journal(
-                    "new model run journal target appeared",
-                ))
-            }
-        },
+        None => verify_new_journal_target_absent(path)?,
     }
     rename(&transaction.path, path).map_err(|err| {
-        ProviderFault::corrupt_journal(format!(
-            "failed to replace provider journal {}: {err}",
-            path.display()
-        ))
+        ProviderFault::journal_write_io(
+            &format!("replace provider journal {}", path.display()),
+            err,
+        )
     })?;
     transaction.committed = true;
     sync_parent(
@@ -1246,6 +1239,20 @@ fn same_snapshot(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     #[cfg(not(unix))]
     {
         left.len() == right.len() && left.modified().ok() == right.modified().ok()
+    }
+}
+
+fn verify_new_journal_target_absent(path: &Path) -> Result<(), ProviderFault> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProviderFault::corrupt_journal(format!(
+            "failed to inspect new model run journal target {}: {error}",
+            path.display()
+        ))),
+        Ok(_) => Err(ProviderFault::corrupt_journal(format!(
+            "new model run journal target appeared: {}",
+            path.display()
+        ))),
     }
 }
 
@@ -2986,6 +2993,7 @@ mod tests {
         let metadata = fs::symlink_metadata(&path).unwrap();
         let bytes = encode_bounded(&run, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
 
+        let write_error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let denied = atomic_write_with(
             &path,
             &bytes,
@@ -2997,34 +3005,79 @@ mod tests {
         .unwrap_err();
         assert_eq!(denied.code(), "journal_access_denied");
         assert_ne!(denied.code(), "journal_corrupt");
-        let reason = denied.detail().expect("denied write names its operation");
-        assert!(
-            reason.contains("write or sync temporary journal"),
-            "reason must name the denied operation: {reason}"
+        assert_eq!(denied.message(), "model run journal is not writable");
+        assert_eq!(
+            denied.detail(),
+            Some(format!("write or sync temporary journal ({write_error}) was denied").as_str())
         );
 
         // A directory that denies creating children still reads and traverses.
         let locked = root.join("locked");
         fs::create_dir(&locked).unwrap();
         set_mode(&locked, 0o500);
-        let create_error = open_temp_file_owner_only(&locked.join("journal.tmp")).unwrap_err();
-        assert_eq!(create_error.code(), "journal_access_denied");
-        let reason = create_error
-            .detail()
-            .expect("denied create names its operation");
-        assert!(
-            reason.contains("create temporary journal file"),
-            "reason must name the denied operation: {reason}"
+        let temp_path = locked.join("journal.tmp");
+        let raw = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .unwrap_err();
+        let denied = open_temp_file_owner_only(&temp_path).unwrap_err();
+        assert_eq!(denied.code(), "journal_access_denied");
+        assert_eq!(denied.message(), "model run journal is not writable");
+        assert_eq!(
+            denied.detail(),
+            Some(
+                format!(
+                    "create temporary journal file {} ({raw}) was denied",
+                    temp_path.display()
+                )
+                .as_str()
+            )
         );
-        let directory_error = create_missing_journal_directory(&locked.join("runs")).unwrap_err();
-        assert_eq!(directory_error.code(), "journal_access_denied");
-        let reason = directory_error
-            .detail()
-            .expect("denied directory create names its operation");
-        assert!(
-            reason.contains("create provider journal directory"),
-            "reason must name the denied operation: {reason}"
+        let child = locked.join("runs");
+        let raw = fs::create_dir(&child).unwrap_err();
+        let denied = create_missing_journal_directory(&child).unwrap_err();
+        assert_eq!(denied.code(), "journal_access_denied");
+        assert_eq!(denied.message(), "model run journal is not writable");
+        assert_eq!(
+            denied.detail(),
+            Some(
+                format!(
+                    "create provider journal directory {} ({raw}) was denied",
+                    child.display()
+                )
+                .as_str()
+            )
         );
+
+        // A replacement the sandbox refuses is a write denial, not corruption.
+        for code in [libc::EACCES, libc::EPERM] {
+            let raw = std::io::Error::from_raw_os_error(code);
+            let denied = atomic_write_with(
+                &path,
+                &bytes,
+                Some(&metadata),
+                |file, bytes| {
+                    file.write_all(bytes)?;
+                    file.sync_all()
+                },
+                |_, _| Err(std::io::Error::from_raw_os_error(code)),
+                sync_directory,
+            )
+            .unwrap_err();
+            assert_eq!(denied.code(), "journal_access_denied");
+            assert_eq!(denied.message(), "model run journal is not writable");
+            assert_eq!(
+                denied.detail(),
+                Some(
+                    format!(
+                        "replace provider journal {} ({raw}) was denied",
+                        path.display()
+                    )
+                    .as_str()
+                )
+            );
+        }
         set_mode(&locked, 0o700);
         fs::remove_dir_all(&locked).unwrap();
 
@@ -3032,6 +3085,55 @@ mod tests {
             &run,
             &journal.load_run(&run.run_id).unwrap()
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_only_mode_and_directory_sync_failures_stay_corrupt() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("mode-and-sync-failures");
+        fs::create_dir(&root).unwrap();
+
+        // chmod needs search permission on the parent; without it it is EACCES.
+        let parent = root.join("blocked-parent");
+        let target = parent.join("runs");
+        fs::create_dir_all(&target).unwrap();
+        set_mode(&target, 0o700);
+        set_mode(&parent, 0o400);
+        let raw = fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap_err();
+        let error = set_owner_only_directory_mode(&target).unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        assert_eq!(
+            error.detail(),
+            Some(
+                format!(
+                    "failed to secure provider journal directory {}: {raw}",
+                    target.display()
+                )
+                .as_str()
+            )
+        );
+        set_mode(&parent, 0o700);
+
+        // Opening the directory to sync it needs read permission.
+        let unreadable = root.join("unreadable-directory");
+        fs::create_dir(&unreadable).unwrap();
+        set_mode(&unreadable, 0o300);
+        let raw = fs::File::open(&unreadable).unwrap_err();
+        let error = sync_directory(&unreadable).unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        assert_eq!(
+            error.detail(),
+            Some(
+                format!(
+                    "failed to sync provider journal directory {}: {raw}",
+                    unreadable.display()
+                )
+                .as_str()
+            )
+        );
+        set_mode(&unreadable, 0o700);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -3051,6 +3153,7 @@ mod tests {
         let metadata = fs::symlink_metadata(&path).unwrap();
         let bytes = encode_bounded(&run, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
         for code in [libc::EIO, libc::ENOSPC] {
+            let raw = std::io::Error::from_raw_os_error(code);
             let error = atomic_write_with(
                 &path,
                 &bytes,
@@ -3061,7 +3164,58 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.code(), "journal_corrupt");
+            assert_eq!(
+                error.detail(),
+                Some(format!("write or sync temporary journal: {raw}").as_str())
+            );
         }
+
+        let raw = std::io::Error::from_raw_os_error(libc::EIO);
+        let error = atomic_write_with(
+            &path,
+            &bytes,
+            Some(&metadata),
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EIO)),
+            sync_directory,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        assert_eq!(
+            error.detail(),
+            Some(format!("replace provider journal {}: {raw}", path.display()).as_str())
+        );
+
+        // A new target that appeared, or cannot be inspected, has its own reason.
+        let appeared = verify_new_journal_target_absent(&path).unwrap_err();
+        assert_eq!(appeared.code(), "journal_corrupt");
+        assert_eq!(
+            appeared.detail(),
+            Some(format!("new model run journal target appeared: {}", path.display()).as_str())
+        );
+        let blocked = root.join("blocked-target");
+        fs::create_dir(&blocked).unwrap();
+        set_mode(&blocked, 0o600);
+        let hidden = blocked.join("run.json");
+        let raw = fs::symlink_metadata(&hidden).unwrap_err();
+        let error = verify_new_journal_target_absent(&hidden).unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        assert_eq!(
+            error.detail(),
+            Some(
+                format!(
+                    "failed to inspect new model run journal target {}: {raw}",
+                    hidden.display()
+                )
+                .as_str()
+            )
+        );
+        set_mode(&blocked, 0o700);
+        fs::remove_dir(&blocked).unwrap();
+
         assert_eq!(file_bytes(&path), b"not a journal record");
     }
 
