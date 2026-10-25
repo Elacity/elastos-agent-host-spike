@@ -1,0 +1,3 @@
+# capsule-identity lab: log
+
+- ci-1 (task 005, carrying stopped task 001 from its round 1 `2f5e5c986`): one lab CID over a whole `elastos.capsule/v1` bundle, checked by the Runtime's own `CapsuleManifest`; the walk now lists, opens, checks and reads only through handles (`rustix` 1.1.4 `openat`/`fstat`/`Dir::read_from`, no-follow and non-blocking), so a bundle changed while it is named is refused or named as its checked bytes; pins unchanged (`99cf6c7b…1d51`, `5559e5e3…2066`); 27 tests (round 1's 18 + 9), 32 falsifiers (F-CI1a–u, F-CI5a–k) proved by hand until falsify.py has a `capsule-identity` command; one Mac, these fixtures.
