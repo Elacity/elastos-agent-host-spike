@@ -66,15 +66,25 @@ fn core_module_bytes_are_not_accepted_as_a_component() {
 
 #[test]
 fn component_custom_section_carrying_code_is_refused() {
-    for (payload, expected) in [
-        (r#"\00asm\01\00\00\00"#, Err(Refusal::CodeInCustomSection)),
+    for (name, data, expected) in [
         (
+            "x",
+            r#"\00asm\01\00\00\00"#,
+            Err(Refusal::CodeInCustomSection),
+        ),
+        (
+            "x",
             r#"text\00asm\01\00\00\00tail"#,
             Err(Refusal::CodeInCustomSection),
         ),
-        ("plain text", Ok(vec![])),
+        (
+            r#"\00asm\01\00\00\00"#,
+            "plain text",
+            Err(Refusal::CodeInCustomSection),
+        ),
+        ("x", "plain text", Ok(vec![])),
     ] {
-        let section = format!(r#"(@custom "x" "{payload}")"#);
+        let section = format!(r#"(@custom "{name}" "{data}")"#);
         for source in [
             format!("(component {section})"),
             format!("(component (core module {section}))"),

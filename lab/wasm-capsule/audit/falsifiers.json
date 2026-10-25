@@ -120,8 +120,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {",
-          "new": "if false && section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+          "old": "if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "if false && content.windows(4).any(|bytes| bytes == b\"\\0asm\") {"
         }
       ],
       "tests": [
@@ -308,6 +308,39 @@
       ],
       "tests": [
         "embedded_imports_are_internal"
+      ]
+    },
+    {
+      "id": "F-CWA3a",
+      "title": "Read only custom-section data and skip the name and its length",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "                if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA3b",
+      "title": "Scan the custom-section name and data separately, skipping runs across fields",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "                if section.name().as_bytes().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                    || section.data().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused"
       ]
     }
   ]
