@@ -118,6 +118,96 @@ fn relative_storage_root_is_refused() {
     );
 }
 
+#[test]
+fn leading_whitespace_storage_root_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let before_parent = dir_entries(parent.path());
+    let before_root = dir_entries(&root);
+    let before_cwd = current_dir_entries();
+
+    for prefix in [" ", "\t", "\n", "\u{a0}"] {
+        let mut provider = WalletProvider::new();
+        let base_path = format!("{prefix}{}", root.display());
+        assert_storage_refusal(
+            init_with_config(&mut provider, json!({ "base_path": base_path })),
+            "wallet-provider: storage path is not absolute",
+        );
+        assert!(
+            provider.store_path.is_none() && provider.storage_key.is_none(),
+            "a refused Init must leave no usable root"
+        );
+    }
+
+    assert_eq!(dir_entries(&root), before_root);
+    assert_eq!(dir_entries(parent.path()), before_parent);
+    assert_eq!(current_dir_entries(), before_cwd);
+}
+
+#[test]
+fn trailing_whitespace_storage_root_preserves_supplied_directory() {
+    let parent = tempfile::tempdir().unwrap();
+    let sibling = parent.path().join("root");
+    let root = parent.path().join("root ");
+    fs::create_dir(&sibling).unwrap();
+    fs::create_dir(&root).unwrap();
+    let before_sibling = dir_entries(&sibling);
+    let before_parent = dir_entries(parent.path());
+    let before_cwd = current_dir_entries();
+
+    let mut provider = init_provider(&root);
+    let response = invoke_wallet(
+        &mut provider,
+        PRINCIPAL_ID,
+        "wallet-metamask",
+        link_operation("0xabc"),
+    );
+    assert!(
+        matches!(response, Response::Ok { .. }),
+        "expected wallet write to succeed, got {response:?}"
+    );
+
+    let expected_store = root
+        .join("ElastOS")
+        .join("SystemServices")
+        .join("Wallet")
+        .join("wallet-state.json");
+    assert!(
+        expected_store.is_file(),
+        "wallet state must persist under the supplied root with trailing whitespace"
+    );
+    assert_eq!(
+        provider.store_path.as_deref(),
+        Some(expected_store.as_path())
+    );
+    assert_eq!(
+        dir_entries(&sibling),
+        before_sibling,
+        "the sibling with the trimmed name must stay unchanged"
+    );
+    assert_eq!(dir_entries(parent.path()), before_parent);
+    assert_eq!(current_dir_entries(), before_cwd);
+
+    let mut reloaded = init_provider(&root);
+    match invoke_wallet(
+        &mut reloaded,
+        PRINCIPAL_ID,
+        "wallet",
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    ) {
+        Response::Ok { data: Some(data) } => {
+            let accounts = data["accounts"].as_array().unwrap();
+            assert_eq!(accounts.len(), 1);
+            assert_eq!(accounts[0]["account_id"], "wallet:eip155:20:0xabc");
+        }
+        other => panic!("expected the persisted account from the supplied root, got {other:?}"),
+    }
+    assert_eq!(dir_entries(&sibling), before_sibling);
+}
+
 /// A refused re-init revokes the previous root and keeps its files intact.
 ///
 /// Falsifier: validate the new root before the state reset, so a second Init

@@ -995,11 +995,11 @@ fn storage_root(config: &Value) -> Result<PathBuf, String> {
     let Some(raw) = config.get("base_path").and_then(Value::as_str) else {
         return Err(STORAGE_PATH_NOT_SET.to_string());
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.trim().is_empty() {
         return Err(STORAGE_PATH_EMPTY.to_string());
     }
-    let root = PathBuf::from(trimmed);
+    // Whitespace is part of the supplied path; trim only to detect blank input.
+    let root = PathBuf::from(raw);
     if !root.is_absolute() {
         return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());
     }
