@@ -61,6 +61,7 @@ DATA = HERE / "falsifiers.json"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
 COMMANDS = ("host", "provider", "e2e", "selftest")
+EXPECTATIONS = ("caught", "compile_error", "survives")
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 # A provider edit leaves its backup beside the provider source, so the
 # recovery scan must look there as well as in this folder.
@@ -119,34 +120,65 @@ def refuse(reason):
     raise SystemExit(2)
 
 
+def entry_problem(entry):
+    """Why this list entry cannot be run, or None. One check covers every
+    field a mutation or a named test run reads, so an invalid entry is
+    refused before any file is touched."""
+    if not isinstance(entry, dict):
+        return "an entry must be an object"
+    keys = ("id", "command", "expect", "title", "edits", "tests")
+    if any(key not in entry for key in keys):
+        return "an entry needs id, command, expect, title, edits and tests"
+    if not isinstance(entry["id"], str) or not entry["id"]:
+        return "an entry id must be a non-empty string"
+    if not isinstance(entry["title"], str):
+        return "an entry title must be a string"
+    if entry["command"] not in COMMANDS:
+        return "an unknown command"
+    if entry["expect"] not in EXPECTATIONS:
+        return "an unknown expect"
+    if not isinstance(entry["edits"], list):
+        return "edits must be a list"
+    for edit in entry["edits"]:
+        if not isinstance(edit, dict) or not all(key in edit for key in ("file", "old", "new")):
+            return "an edit needs file, old and new"
+        for key in ("file", "old"):
+            if not isinstance(edit[key], str) or not edit[key]:
+                return f"an edit {key} must be a non-empty string"
+        if not isinstance(edit["new"], str):
+            return "an edit new must be a string"
+    if not isinstance(entry["tests"], list):
+        return "tests must be a list"
+    for name in entry["tests"]:
+        if not isinstance(name, str) or not name:
+            return "a named test must be a non-empty string"
+    return None
+
+
 def load(path=DATA):
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         refuse(f"list file not found: {path}")
-    except OSError as error:
-        refuse(f"list file cannot be read: {path}: {error}")
+    except UnicodeDecodeError:
+        refuse(f"list file is not UTF-8 text: {path}")
+    except OSError:
+        refuse(f"list file cannot be read: {path}")
     try:
         doc = json.loads(text)
-    except json.JSONDecodeError as error:
-        refuse(f"list file is not valid JSON: {path}: {error}")
+    except json.JSONDecodeError:
+        refuse(f"list file is not valid JSON: {path}")
     if not isinstance(doc, dict) or not isinstance(doc.get("falsifiers"), list):
         refuse(f"list file has no falsifiers list: {path}")
     entries = doc["falsifiers"]
     for entry in entries:
-        if not isinstance(entry, dict) or not all(
-                key in entry for key in ("id", "command", "expect", "tests")):
-            refuse(f"list entry refused: {path}: an entry needs id, command, expect and tests")
+        problem = entry_problem(entry)
+        if problem:
+            refuse(f"{path}: {problem}")
     ids = [entry["id"] for entry in entries]
     if len(ids) != len(set(ids)):
         refuse(f"{path}: an id is used twice")
     for entry in entries:
-        if entry["command"] not in COMMANDS or entry["expect"] not in (
-            "caught",
-            "compile_error",
-            "survives",
-        ):
-            refuse(f"{path}: {entry['id']}: unknown command or expect")
         if entry["expect"] in ("caught", "survives") and not entry["tests"]:
             refuse(f"{path}: {entry['id']}: no named tests")
     return entries
@@ -938,9 +970,8 @@ def selected_list_is_executed():
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
 
 
-def refused_with(path, phrase):
-    """True only when load(path) refuses with exit 2 and that reason. Any
-    other exception is a bypassed check, not a refusal."""
+def refused_line(path, line):
+    """True only when load(path) exits 2 and prints exactly `line`."""
     out = io.StringIO()
     code = None
     try:
@@ -951,14 +982,43 @@ def refused_with(path, phrase):
     except Exception as error:
         print(f"self-test: unexpected {type(error).__name__} instead of a refusal: {error}")
         return False
-    return code == 2 and phrase in out.getvalue()
+    printed = out.getvalue().splitlines()
+    if code != 2 or printed != [line]:
+        print(f"self-test: refused exit={code}, lines={printed}, want [{line!r}]")
+        return False
+    return True
+
+
+VALID_ENTRY = {"id": "E01", "title": "a valid entry", "command": "selftest",
+               "expect": "caught", "edits": [], "tests": ["a case"]}
+
+
+def entry_refusals(cases):
+    """Each (title, entries, reason) is refused with exactly
+    `<path>: <reason>`; one entry may stand for its own one-entry list."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "bad-entry.json"
+        for title, entries, reason in cases:
+            if not isinstance(entries, list):
+                entries = [entries]
+            path.write_text(json.dumps({"falsifiers": entries}), encoding="utf-8")
+            got = refused_line(path, f"{path}: {reason}")
+            print(f"self-test: {title}: refused={got}")
+            if not got:
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
 
 
 def a_missing_list_is_refused():
     """A list path that does not exist exits 2 with its own reason."""
     path = SELF_TEST_DIR / "absent.json"
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
-    refused = refused_with(path, "list file not found")
+    refused = refused_line(path, f"list file not found: {path}")
     print(f"self-test: missing list refused: {refused}")
     return refused
 
@@ -971,7 +1031,7 @@ def malformed_list_json_is_refused():
         SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
         path = SELF_TEST_DIR / "malformed.json"
         path.write_text("{ not json", encoding="utf-8")
-        ok = refused_with(path, "list file is not valid JSON")
+        ok = refused_line(path, f"list file is not valid JSON: {path}")
         print(f"self-test: malformed list JSON refused: {ok}")
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -987,7 +1047,7 @@ def a_list_without_the_document_is_refused():
         SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
         path = SELF_TEST_DIR / "wrong-structure.json"
         path.write_text(json.dumps([]), encoding="utf-8")
-        ok = refused_with(path, "list file has no falsifiers list")
+        ok = refused_line(path, f"list file has no falsifiers list: {path}")
         print(f"self-test: list without the document refused: {ok}")
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -995,17 +1055,58 @@ def a_list_without_the_document_is_refused():
 
 
 def an_invalid_list_entry_is_refused():
-    """An entry with an unknown command exits 2 with its own reason."""
+    """Every entry-shape and dispatch refusal exits 2 with its own reason,
+    before any mutation runs."""
+    missing = dict(VALID_ENTRY)
+    del missing["edits"]
+    return entry_refusals((
+        ("the entry is not an object", "not an entry", "an entry must be an object"),
+        ("a required key is missing", missing,
+         "an entry needs id, command, expect, title, edits and tests"),
+        ("the id is not a string", dict(VALID_ENTRY, id=[]),
+         "an entry id must be a non-empty string"),
+        ("the title is not a string", dict(VALID_ENTRY, title=1),
+         "an entry title must be a string"),
+        ("the command is unknown", dict(VALID_ENTRY, command="nope"), "an unknown command"),
+        ("the expect is unknown", dict(VALID_ENTRY, expect="maybe"), "an unknown expect"),
+        ("an id is used twice", [dict(VALID_ENTRY), dict(VALID_ENTRY)], "an id is used twice"),
+    ))
+
+
+def entry_edits_and_tests_are_validated():
+    """Every edit and test field is checked before a mutation runs, and each
+    refusal names its own reason."""
+    return entry_refusals((
+        ("edits is not a list", dict(VALID_ENTRY, edits={}), "edits must be a list"),
+        ("an edit lacks a key", dict(VALID_ENTRY, edits=[{"file": "f.txt", "old": "a"}]),
+         "an edit needs file, old and new"),
+        ("an edit file is not a string",
+         dict(VALID_ENTRY, edits=[{"file": 1, "old": "a", "new": "b"}]),
+         "an edit file must be a non-empty string"),
+        ("an edit old text is empty",
+         dict(VALID_ENTRY, edits=[{"file": "f.txt", "old": "", "new": "b"}]),
+         "an edit old must be a non-empty string"),
+        ("an edit new text is not a string",
+         dict(VALID_ENTRY, edits=[{"file": "f.txt", "old": "a", "new": 1}]),
+         "an edit new must be a string"),
+        ("tests is not a list", dict(VALID_ENTRY, tests=1), "tests must be a list"),
+        ("a named test is not a string", dict(VALID_ENTRY, tests=[1]),
+         "a named test must be a non-empty string"),
+        ("a caught entry has no named test", dict(VALID_ENTRY, tests=[]),
+         "E01: no named tests"),
+    ))
+
+
+def an_undecodable_list_file_is_refused():
+    """A list file with invalid UTF-8 exits 2 with its own reason."""
     ok = False
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
         SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
-        path = SELF_TEST_DIR / "bad-entry.json"
-        path.write_text(json.dumps({"falsifiers": [{
-            "id": "BAD01", "title": "unknown command", "command": "nope",
-            "expect": "caught", "edits": [], "tests": ["anything"]}]}), encoding="utf-8")
-        ok = refused_with(path, "unknown command or expect")
-        print(f"self-test: invalid list entry refused: {ok}")
+        path = SELF_TEST_DIR / "not-text.json"
+        path.write_bytes(b'{"falsifiers": [\xff]}')
+        ok = refused_line(path, f"list file is not UTF-8 text: {path}")
+        print(f"self-test: undecodable list refused: {ok}")
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
@@ -1052,6 +1153,8 @@ SELF_TEST_CASES = {
     "malformed list JSON is refused": malformed_list_json_is_refused,
     "a list without the document is refused": a_list_without_the_document_is_refused,
     "an invalid list entry is refused": an_invalid_list_entry_is_refused,
+    "entry edits and tests are validated": entry_edits_and_tests_are_validated,
+    "an undecodable list file is refused": an_undecodable_list_file_is_refused,
     "provider backup is recovered": provider_backup_is_recovered,
 }
 

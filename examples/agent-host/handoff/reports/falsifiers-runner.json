@@ -58,8 +58,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    except json.JSONDecodeError as error:\n        refuse(f\"list file is not valid JSON: {path}: {error}\")",
-     "new": "    except json.JSONDecodeError as error:\n        raise"
+     "old": "    except json.JSONDecodeError:\n        refuse(f\"list file is not valid JSON: {path}\")",
+     "new": "    except json.JSONDecodeError:\n        raise"
     }
    ],
    "tests": [
@@ -90,8 +90,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if entry[\"command\"] not in COMMANDS or entry[\"expect\"] not in (\n            \"caught\",\n            \"compile_error\",\n            \"survives\",\n        ):",
-     "new": "        if False:"
+     "old": "        problem = entry_problem(entry)\n        if problem:",
+     "new": "        problem = None\n        if problem:"
     }
    ],
    "tests": [
@@ -112,6 +112,54 @@
    ],
    "tests": [
     "provider backup is recovered"
+   ]
+  },
+  {
+   "id": "RL08",
+   "title": "the edits list is not checked before the mutation",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if not isinstance(entry[\"edits\"], list):\n        return \"edits must be a list\"",
+     "new": "    if False:\n        return \"edits must be a list\""
+    }
+   ],
+   "tests": [
+    "entry edits and tests are validated"
+   ]
+  },
+  {
+   "id": "RL09",
+   "title": "invalid UTF-8 is not refused",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    except UnicodeDecodeError:\n        refuse(f\"list file is not UTF-8 text: {path}\")",
+     "new": "    except UnicodeDecodeError:\n        raise"
+    }
+   ],
+   "tests": [
+    "an undecodable list file is refused"
+   ]
+  },
+  {
+   "id": "RL10",
+   "title": "the tests list is not checked before a run",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if not isinstance(entry[\"tests\"], list):\n        return \"tests must be a list\"",
+     "new": "    if False:\n        return \"tests must be a list\""
+    }
+   ],
+   "tests": [
+    "entry edits and tests are validated"
    ]
   }
  ]
