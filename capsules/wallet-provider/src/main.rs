@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod account;
@@ -67,6 +67,7 @@ const BITCOIN_CHALLENGE_SCHEMA: &str = "elastos.wallet.bitcoin_challenge/v1";
 
 struct WalletProvider {
     store_path: Option<PathBuf>,
+    storage_root: Option<PathBuf>,
     storage_key: Option<[u8; 32]>,
     store: WalletStore,
     defer_save: bool,
@@ -76,6 +77,7 @@ impl WalletProvider {
     fn new() -> Self {
         Self {
             store_path: None,
+            storage_root: None,
             storage_key: None,
             store: WalletStore::default(),
             defer_save: false,
@@ -371,23 +373,17 @@ impl WalletProvider {
 
     fn init(&mut self, config: Value) -> Response {
         self.store_path = None;
+        self.storage_root = None;
         self.storage_key = None;
         self.store = WalletStore::default();
         self.defer_save = false;
-        let Some(base_path) = config
-            .get("base_path")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Response::error("invalid_config", "wallet-provider requires base_path");
+        let base_path = match resolve_base_path(config.get("base_path")) {
+            Ok(path) => path,
+            Err(reason) => return Response::error("invalid_config", reason),
         };
 
-        let wallet_dir = Path::new(base_path)
-            .join("ElastOS")
-            .join("SystemServices")
-            .join("Wallet");
-        let store_path = wallet_dir.join("wallet-state.json");
+        let wallet_dir = wallet_dir_for_base(&base_path);
+        let store_path = store_path_for_wallet_dir(&wallet_dir);
         if let Err(err) = create_wallet_dir_durable(&wallet_dir) {
             return Response::error("storage_error", err);
         }
@@ -395,18 +391,19 @@ impl WalletProvider {
             Ok(key) => key,
             Err(err) => return Response::error("storage_error", err),
         };
-        let store = match load_store(&store_path) {
-            Ok(store) => store,
+        let store = match load_store_if_present_under_root(&wallet_dir, &store_path) {
+            Ok(store) => store.unwrap_or_default(),
             Err(err) => return Response::error("storage_error", err),
         };
         let now = now_ts();
         let mut store = prune_store(store, now);
         let pre_v2_approvals_rejected = reject_pre_v2_pending_approvals(&mut store, now);
         if pre_v2_approvals_rejected > 0 {
-            if let Err(err) = save_store(&store_path, &store) {
+            if let Err(err) = save_store_under_root(&wallet_dir, &store_path, &store) {
                 return Response::error("storage_error", err);
             }
         }
+        self.storage_root = Some(wallet_dir);
         self.store_path = Some(store_path);
         self.storage_key = Some(storage_key);
         self.store = store;
@@ -884,14 +881,17 @@ impl WalletProvider {
         let Some(path) = &self.store_path else {
             return Err("wallet-provider is not initialized".to_string());
         };
-        save_store(path, &self.store)
+        let Some(root) = &self.storage_root else {
+            return Err("wallet-provider storage root is not initialized".to_string());
+        };
+        save_store_under_root(root, path, &self.store)
     }
 
     fn recover_store_after_save_failure(&mut self, previous_store: WalletStore) {
-        let persisted_store = self
-            .store_path
-            .as_deref()
-            .and_then(|path| load_store_if_present(path).ok().flatten());
+        let persisted_store = match (&self.storage_root, self.store_path.as_deref()) {
+            (Some(root), Some(path)) => load_store_if_present_under_root(root, path).ok().flatten(),
+            _ => None,
+        };
         self.store = persisted_store.unwrap_or(previous_store);
     }
 

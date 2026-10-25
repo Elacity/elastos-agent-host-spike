@@ -3,10 +3,112 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 const MAX_WALLET_STORE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WALLET_STORAGE_KEY_BYTES: usize = 128;
+pub(super) const BASE_PATH_MISSING_REASON: &str = "wallet-provider requires base_path";
+pub(super) const BASE_PATH_EMPTY_REASON: &str = "wallet-provider base_path must not be empty";
+pub(super) const BASE_PATH_RELATIVE_REASON: &str =
+    "wallet-provider base_path must be an absolute path";
+
+#[cfg(test)]
+thread_local! {
+    static ACCESSED_PATHS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_accessed_paths() {
+    ACCESSED_PATHS.with(|paths| paths.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(super) fn take_accessed_paths() -> Vec<PathBuf> {
+    ACCESSED_PATHS.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
+}
+
+#[cfg(test)]
+fn record_access(path: &Path) {
+    ACCESSED_PATHS.with(|paths| paths.borrow_mut().push(path.to_path_buf()));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn record_access(_path: &Path) {}
+
+/// Validate the Runtime-supplied base directory and return it as a path.
+pub(super) fn resolve_base_path(base_path: Option<&serde_json::Value>) -> Result<PathBuf, String> {
+    let Some(value) = base_path else {
+        return Err(BASE_PATH_MISSING_REASON.to_string());
+    };
+    let Some(value) = value.as_str() else {
+        return Err("wallet-provider base_path must be a string".to_string());
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(BASE_PATH_EMPTY_REASON.to_string());
+    }
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Err(BASE_PATH_RELATIVE_REASON.to_string());
+    }
+    Ok(path.to_path_buf())
+}
+
+/// The wallet directory is the only writable root the provider owns.
+pub(super) fn wallet_dir_for_base(base_path: &Path) -> PathBuf {
+    base_path
+        .join("ElastOS")
+        .join("SystemServices")
+        .join("Wallet")
+}
+
+pub(super) fn store_path_for_wallet_dir(wallet_dir: &Path) -> PathBuf {
+    wallet_dir.join("wallet-state.json")
+}
+
+/// Refuse any path that is not lexically below the configured wallet directory.
+pub(super) fn ensure_path_within_root(root: &Path, path: &Path, label: &str) -> Result<(), String> {
+    if !root.is_absolute() || !path.is_absolute() {
+        return Err(format!(
+            "{label} must be an absolute path inside the configured wallet directory"
+        ));
+    }
+    let relative = path.strip_prefix(root).map_err(|_| {
+        format!(
+            "{label} must stay inside the configured wallet directory: {}",
+            path.display()
+        )
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "{label} must stay inside the configured wallet directory: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn load_store_if_present_under_root(
+    root: &Path,
+    path: &Path,
+) -> Result<Option<WalletStore>, String> {
+    ensure_path_within_root(root, path, "wallet store")?;
+    load_store_if_present(path)
+}
+
+pub(super) fn save_store_under_root(
+    root: &Path,
+    path: &Path,
+    store: &WalletStore,
+) -> Result<(), String> {
+    ensure_path_within_root(root, path, "wallet store")?;
+    save_store(path, store)
+}
 
 pub(super) fn load_store(path: &Path) -> Result<WalletStore, String> {
     Ok(load_store_if_present(path)?.unwrap_or_default())
@@ -37,6 +139,7 @@ fn same_file(_left: &Metadata, _right: &Metadata) -> bool {
 }
 
 fn open_regular_file_if_present(path: &Path, label: &str) -> Result<Option<File>, String> {
+    record_access(path);
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -65,6 +168,7 @@ fn open_regular_file_if_present(path: &Path, label: &str) -> Result<Option<File>
 }
 
 fn verify_open_file_is_current(path: &Path, file: &File, label: &str) -> Result<(), String> {
+    record_access(path);
     let opened = file
         .metadata()
         .map_err(|err| format!("failed to inspect open {label}: {err}"))?;
@@ -119,6 +223,7 @@ fn read_regular_file_if_present(
 }
 
 fn ensure_regular_file_or_absent(path: &Path, label: &str) -> Result<(), String> {
+    record_access(path);
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata_is_regular_leaf(&metadata) => Ok(()),
         Ok(_) => Err(format!("{label} must be a regular non-symlink file")),
@@ -128,6 +233,7 @@ fn ensure_regular_file_or_absent(path: &Path, label: &str) -> Result<(), String>
 }
 
 fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
+    record_access(path);
     let metadata =
         fs::symlink_metadata(path).map_err(|err| format!("failed to inspect {label}: {err}"))?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
@@ -138,6 +244,7 @@ fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
 
 #[cfg(unix)]
 fn sync_directory(path: &Path, label: &str) -> Result<(), String> {
+    record_access(path);
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|err| format!("failed to sync {label}: {err}"))
@@ -149,24 +256,70 @@ fn sync_directory(_path: &Path, _label: &str) -> Result<(), String> {
 }
 
 pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String> {
-    let mut missing = Vec::new();
-    let mut cursor = wallet_dir;
-    loop {
-        match fs::symlink_metadata(cursor) {
+    if !wallet_dir.is_absolute() {
+        return Err("wallet storage directory must be an absolute path".to_string());
+    }
+    // The configured base directory is the bootstrap bound: this function may
+    // inspect or create the base and its descendants, and never opens a
+    // sibling or an ancestor of the base. The wallet directory is always
+    // base_path/ElastOS/SystemServices/Wallet, so the base is three levels up.
+    let base_path = wallet_dir.ancestors().nth(3).ok_or_else(|| {
+        "wallet storage directory must be base_path/ElastOS/SystemServices/Wallet".to_string()
+    })?;
+    match fs::symlink_metadata(base_path) {
+        Ok(metadata) => {
+            record_access(base_path);
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "wallet storage base directory must be a non-symlink directory: {}",
+                    base_path.display()
+                ));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            record_access(base_path);
+            fs::create_dir(base_path).map_err(|err| {
+                format!(
+                    "failed to create wallet storage base directory {}: {err}",
+                    base_path.display()
+                )
+            })?;
+            sync_directory(base_path, "wallet storage base directory")?;
+        }
+        Err(err) => {
+            return Err(format!(
+                "failed to inspect wallet storage base directory {}: {err}",
+                base_path.display()
+            ))
+        }
+    }
+
+    let mut cursor = base_path.to_path_buf();
+    for component in ["ElastOS", "SystemServices", "Wallet"] {
+        cursor = cursor.join(component);
+        record_access(&cursor);
+        match fs::symlink_metadata(&cursor) {
             Ok(metadata) => {
                 if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
                     return Err(format!(
-                        "wallet storage directory component must be a non-symlink directory: {}",
+                        "wallet storage ancestor directory must be a non-symlink directory: {}",
                         cursor.display()
                     ));
                 }
-                break;
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(cursor.to_path_buf());
-                cursor = cursor
-                    .parent()
-                    .ok_or_else(|| "wallet storage directory has no existing parent".to_string())?;
+                fs::create_dir(&cursor).map_err(|err| {
+                    format!(
+                        "failed to create wallet storage directory {}: {err}",
+                        cursor.display()
+                    )
+                })?;
+                sync_directory(&cursor, "wallet storage directory")?;
+                let parent = cursor.parent().ok_or_else(|| {
+                    "wallet storage directory has no parent to synchronize".to_string()
+                })?;
+                ensure_directory(parent, "wallet storage parent directory")?;
+                sync_directory(parent, "wallet storage parent directory")?;
             }
             Err(err) => {
                 return Err(format!(
@@ -176,25 +329,14 @@ pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String>
             }
         }
     }
-
-    fs::create_dir_all(wallet_dir)
-        .map_err(|err| format!("failed to create wallet storage directory: {err}"))?;
-    for directory in missing.iter().rev() {
-        ensure_directory(directory, "wallet storage directory")?;
-        sync_directory(directory, "wallet storage directory")?;
-        let parent = directory
-            .parent()
-            .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
-        ensure_directory(parent, "wallet storage parent directory")?;
-        sync_directory(parent, "wallet storage parent directory")?;
+    if cursor != wallet_dir {
+        return Err(format!(
+            "wallet storage directory must be base_path/ElastOS/SystemServices/Wallet: {}",
+            wallet_dir.display()
+        ));
     }
     ensure_directory(wallet_dir, "wallet storage directory")?;
-    sync_directory(wallet_dir, "wallet storage directory")?;
-    let parent = wallet_dir
-        .parent()
-        .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
-    ensure_directory(parent, "wallet storage parent directory")?;
-    sync_directory(parent, "wallet storage parent directory")
+    sync_directory(wallet_dir, "wallet storage directory")
 }
 
 pub(super) fn prune_store(mut store: WalletStore, now: u64) -> WalletStore {
@@ -302,6 +444,7 @@ pub(super) fn save_store(path: &Path, store: &WalletStore) -> Result<(), String>
         rand::thread_rng().next_u64()
     ));
     let result = (|| {
+        record_access(&tmp);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -320,6 +463,7 @@ pub(super) fn save_store(path: &Path, store: &WalletStore) -> Result<(), String>
         file.write_all(&bytes).map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())?;
         ensure_regular_file_or_absent(path, "wallet store")?;
+        record_access(&tmp);
         fs::rename(&tmp, path).map_err(|err| err.to_string())?;
         verify_open_file_is_current(path, &file, "wallet store")?;
         sync_directory(parent, "wallet store parent directory")?;
@@ -351,6 +495,7 @@ pub(super) fn load_or_create_storage_key(wallet_dir: &Path) -> Result<[u8; 32], 
         rand::thread_rng().next_u64()
     ));
     let staged = (|| {
+        record_access(&tmp);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -380,6 +525,7 @@ pub(super) fn load_or_create_storage_key(wallet_dir: &Path) -> Result<[u8; 32], 
             )),
         };
     }
+    record_access(&key_path);
     match fs::hard_link(&tmp, &key_path) {
         Ok(()) => {
             sync_directory(wallet_dir, "wallet storage directory")?;
