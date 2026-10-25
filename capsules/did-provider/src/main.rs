@@ -740,8 +740,410 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
+
+    /// The committed list records these falsifiers.
+    const EXPECTED_FALSIFIER_IDS: [&str; 6] =
+        ["DID01", "DID02", "DID03", "DID04", "DID05", "DID06"];
+
+    /// The repository root; `falsifiers.json` paths are relative to it.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("did-provider must sit two levels below the repository root")
+            .to_path_buf()
+    }
+
+    /// Whether `source` declares `name` under a `#[test]` attribute.
+    fn declares_test(source: &str, name: &str) -> bool {
+        let declaration = format!("fn {name}(");
+        let mut is_test = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed == "#[test]" {
+                is_test = true;
+            } else if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//") {
+                // Attributes and comments can sit between `#[test]` and the item.
+            } else if is_test && trimmed.starts_with(&declaration) {
+                return true;
+            } else {
+                is_test = false;
+            }
+        }
+        false
+    }
+
+    struct HarnessTests {
+        registered: HashSet<String>,
+        ignored: HashSet<String>,
+    }
+
+    /// The compiled target owns registration and ignore status, including
+    /// attributes applied through `cfg_attr`, for each full selector.
+    fn harness_tests(executable: &Path) -> HarnessTests {
+        let list = |ignored| {
+            let mut command = Command::new(executable);
+            command.args(["--list", "--format", "terse"]);
+            if ignored {
+                command.arg("--ignored");
+            }
+            let output = command.output().unwrap_or_else(|err| {
+                panic!(
+                    "test executable {} must list its tests: {err}",
+                    executable.display()
+                )
+            });
+            assert!(
+                output.status.success(),
+                "test executable {} --list must succeed: {}",
+                executable.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("test executable --list output must be UTF-8")
+                .lines()
+                .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
+                .collect()
+        };
+        HarnessTests {
+            registered: list(false),
+            ignored: list(true),
+        }
+    }
+
+    /// The compiled integration target that matches the current source.
+    ///
+    /// A candidate counts only when it sits in the current test executable's
+    /// deps directory, names this crate's manifest in cargo's dep-info, and is
+    /// no older than `tests/confine.rs`. A stale executable would otherwise
+    /// report tests that the current source disables as active.
+    fn source_bound_target(deps: &Path, manifest: &str, source: &Path) -> Result<PathBuf, String> {
+        let source_modified = fs::metadata(source)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| format!("{} must carry a time: {err}", source.display()))?;
+        let mut candidates: Vec<PathBuf> = fs::read_dir(deps)
+            .map_err(|err| format!("{} must be readable: {err}", deps.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                if !name.starts_with("confine-") || name.contains('.') {
+                    return false;
+                }
+                fs::read_to_string(path.with_extension("d"))
+                    .map(|info| info.contains(&format!("CARGO_MANIFEST_DIR={manifest}")))
+                    .unwrap_or(false)
+            })
+            .collect();
+        candidates.sort_by_key(|path| path.metadata().and_then(|meta| meta.modified()).ok());
+        let newest = candidates.pop().ok_or_else(|| {
+            format!(
+                "the compiled confine integration test target for {manifest} must sit in {}",
+                deps.display()
+            )
+        })?;
+        let target_modified = fs::metadata(&newest)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| format!("{} must carry a time: {err}", newest.display()))?;
+        if target_modified < source_modified {
+            return Err(format!(
+                "{} is older than {}; rebuild the integration test target before this check",
+                newest.display(),
+                source.display()
+            ));
+        }
+        Ok(newest)
+    }
+
+    /// The compiled `tests/confine.rs` target sits beside the unit test target.
+    ///
+    /// The shared build directory also holds other crates' `confine` targets, so
+    /// `source_bound_target` keeps only this crate's current executable.
+    fn integration_harness() -> HarnessTests {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let unit =
+            std::env::current_exe().expect("the unit test executable path must be available");
+        let deps = unit
+            .parent()
+            .expect("the unit test executable sits in the deps directory");
+        let source = Path::new(manifest).join("tests/confine.rs");
+        let target = source_bound_target(deps, manifest, &source)
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        harness_tests(&target)
+    }
+
+    fn read_falsifiers_list() -> serde_json::Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("falsifiers.json");
+        let text = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("falsifier list {} must be readable: {err}", path.display())
+        });
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("falsifier list {} must be JSON: {err}", path.display()))
+    }
+
+    fn assert_falsifiers_list_is_honest(doc: &serde_json::Value) {
+        assert!(
+            doc["about"]
+                .as_str()
+                .is_some_and(|about| !about.trim().is_empty()),
+            "the falsifier list must carry a nonempty about string"
+        );
+        let entries = doc["falsifiers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the falsifier list must carry a falsifiers array"));
+
+        let unit = harness_tests(
+            &std::env::current_exe().expect("the unit test executable path must be available"),
+        );
+        let integration = integration_harness();
+        let root = repo_root();
+        assert!(
+            root.join("capsules/did-provider/src/main.rs").is_file(),
+            "the repository root must own capsules/did-provider"
+        );
+
+        let mut ids: Vec<&str> = Vec::new();
+        for entry in entries {
+            let id = entry["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every falsifier needs an id"));
+            assert!(!id.trim().is_empty(), "every falsifier needs an id");
+            assert!(!ids.contains(&id), "falsifier id {id} is used twice");
+            ids.push(id);
+            for field in ["title", "command"] {
+                let value = entry[field]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: {field} must be a string"));
+                assert!(!value.trim().is_empty(), "{id}: {field} must not be empty");
+            }
+            assert_eq!(
+                entry["command"].as_str(),
+                Some("did"),
+                "{id}: command must be did"
+            );
+            assert_eq!(
+                entry["expect"].as_str(),
+                Some("caught"),
+                "{id}: expect must be caught"
+            );
+
+            let edits = entry["edits"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: edits must be a list"));
+            assert!(!edits.is_empty(), "{id}: edits must not be empty");
+            for edit in edits {
+                let file = edit["file"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
+                let old = edit["old"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs an old snippet"));
+                let new = edit["new"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a new snippet"));
+                assert!(!old.is_empty(), "{id}: old must not be empty");
+                assert!(!new.is_empty(), "{id}: new must not be empty");
+                assert_ne!(old, new, "{id}: new must differ from old");
+                assert!(
+                    !Path::new(file).is_absolute(),
+                    "{id}: {file} must be repository-relative"
+                );
+                let source_path = root.join(file);
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{id}: edit file {} must exist and be readable: {err}",
+                        source_path.display()
+                    )
+                });
+                let occurrences = source.matches(old).count();
+                assert_eq!(
+                    occurrences, 1,
+                    "{id}: old snippet must occur verbatim exactly once in {file}, found {occurrences}"
+                );
+            }
+
+            let tests = entry["tests"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: tests must be a list"));
+            assert!(!tests.is_empty(), "{id}: tests must not be empty");
+            for test in tests {
+                let name = test
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every test name must be a string"));
+                assert!(!name.is_empty(), "{id}: test names must not be empty");
+                let (source_path, registered) = if name.starts_with("tests::") {
+                    (
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+                        &unit,
+                    )
+                } else if name.contains("::") {
+                    panic!("{id}: {name} must be a unit test under tests:: or a bare integration test name");
+                } else {
+                    (
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs"),
+                        &integration,
+                    )
+                };
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{id}: test source {} must be readable: {err}",
+                        source_path.display()
+                    )
+                });
+                let function = name
+                    .rsplit_once("::")
+                    .map_or(name, |(_, function)| function);
+                assert!(
+                    declares_test(&source, function),
+                    "{id}: {name} must be a #[test] function in {}",
+                    source_path.display()
+                );
+                assert!(
+                    registered.registered.contains(name),
+                    "{id}: {name} must be registered in the test executable"
+                );
+                assert!(
+                    !registered.ignored.contains(name),
+                    "{id}: {name} must not be ignored in the test executable"
+                );
+            }
+        }
+
+        for expected in EXPECTED_FALSIFIER_IDS {
+            assert!(ids.contains(&expected), "the list must record {expected}");
+        }
+        let recovery = entries
+            .iter()
+            .find(|entry| entry["id"] == "DID06")
+            .expect("the list must record DID06");
+        assert!(
+            recovery["tests"]
+                .as_array()
+                .expect("DID06 tests must be a list")
+                .iter()
+                .any(|test| test == "verify_did_recovery_under_profile"),
+            "DID06 must name verify_did_recovery_under_profile"
+        );
+    }
+
+    /// The committed falsifier list describes the current source and test harness.
+    ///
+    /// Falsifier: replace one `old` snippet with text that is not in the source,
+    /// delete the DID06 record, empty an `edits`/`tests` array, change a test
+    /// name's prefix, remove its `#[test]`, or mark it ignored; this test fails
+    /// on each.
+    #[test]
+    fn falsifiers_list_is_honest() {
+        assert_falsifiers_list_is_honest(&read_falsifiers_list());
+    }
+
+    #[test]
+    #[cfg_attr(test, ignore = "fixture for the falsifier list's ignored-test check")]
+    fn ignored_falsifier_fixture() {
+        panic!("the ignored fixture must be refused by the falsifier list");
+    }
+
+    #[test]
+    fn falsifiers_list_rejects_ignored_tests() {
+        for (index, selector) in [
+            (0, "tests::ignored_falsifier_fixture"),
+            (3, "ignored_falsifier_fixture"),
+        ] {
+            let mut doc = read_falsifiers_list();
+            let id = doc["falsifiers"][index]["id"].as_str().unwrap().to_owned();
+            doc["falsifiers"][index]["tests"][0] = selector.into();
+            let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+                .expect_err("the falsifier list must refuse an ignored test");
+            let expected = format!("{id}: {selector} must not be ignored in the test executable");
+            assert_eq!(refusal.downcast_ref::<String>(), Some(&expected));
+        }
+    }
+
+    // Keep the test declaration in source while removing it from the harness.
+    #[cfg(any())]
+    #[test]
+    fn excluded_from_harness() {
+        panic!("this fixture must remain excluded from the test harness");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "DID01: tests::excluded_from_harness must be registered in the test executable"
+    )]
+    fn falsifiers_list_rejects_a_test_removed_from_harness() {
+        let mut doc = read_falsifiers_list();
+        doc["falsifiers"][0]["tests"][0] =
+            serde_json::Value::String("tests::excluded_from_harness".into());
+        assert_falsifiers_list_is_honest(&doc);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "DID01: tests::missing::init_requires_storage_without_key must be registered in the test executable"
+    )]
+    fn falsifiers_list_rejects_a_wrong_prefix() {
+        let mut doc = read_falsifiers_list();
+        doc["falsifiers"][0]["tests"][0] =
+            serde_json::Value::String("tests::missing::init_requires_storage_without_key".into());
+        assert_falsifiers_list_is_honest(&doc);
+    }
+
+    /// A stale integration executable must not stand in for the current source.
+    ///
+    /// Regression: `#[ignore]` added to `verify_did_recovery_under_profile` was
+    /// concealed because `--bin did-provider` left the earlier integration
+    /// executable in place and it reported the test as active.
+    #[test]
+    fn falsifiers_list_rejects_stale_integration_evidence() {
+        let dir = tempfile::tempdir().expect("temporary deps directory");
+        let source = dir.path().join("confine.rs");
+        let target = dir.path().join("confine-deadbeef");
+        fs::write(&source, "").expect("source fixture");
+        fs::write(&target, "").expect("target fixture");
+        fs::write(
+            target.with_extension("d"),
+            format!("CARGO_MANIFEST_DIR={}\n", env!("CARGO_MANIFEST_DIR")),
+        )
+        .expect("dep-info fixture");
+
+        let set_modified =
+            |path: &Path, seconds: u64| {
+                fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .expect("fixture must open for its time")
+                    .set_times(fs::FileTimes::new().set_modified(
+                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ))
+                    .expect("fixture time must be set");
+            };
+        set_modified(&source, 2_000_000);
+        set_modified(&target, 1_000_000);
+
+        let stale = source_bound_target(dir.path(), env!("CARGO_MANIFEST_DIR"), &source)
+            .expect_err("a target older than its source must be refused");
+        assert!(
+            stale.contains("is older than"),
+            "the refusal must state the staleness: {stale}"
+        );
+
+        set_modified(&target, 2_000_000);
+        assert_eq!(
+            source_bound_target(dir.path(), env!("CARGO_MANIFEST_DIR"), &source)
+                .expect("a current target must be selected"),
+            target,
+            "the current integration target"
+        );
+    }
 
     fn make_device_key() -> [u8; 32] {
         [42u8; 32]

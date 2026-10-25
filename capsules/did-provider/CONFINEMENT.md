@@ -105,12 +105,17 @@ a probe would test the host network stack while the profile rule is the
 property that must hold.
 
 `both_file_profiles_bind_one_storage_parameter_contract` lives in
-`../wallet-provider/tests/confine.rs`. It reads this profile and the wallet
-profile and asserts the one contract both present to the Runtime bridge:
-`(version 1)` first, `(deny default)` second, an explicit `(deny network*)`,
-the same `PROVIDER_EXECUTABLE` / `STORAGE_ROOT` / `STORAGE_PARENT` parameter
-tokens, and no `(allow default)` rule. It runs on every platform because it
-reads files and starts no process.
+`../wallet-provider/tests/confine.rs`. One check function holds the
+contract: `(version 1)` first, `(deny default)` second, an explicit
+`(deny network*)`, the same `PROVIDER_EXECUTABLE` / `STORAGE_ROOT` /
+`STORAGE_PARENT` parameter tokens, no `(allow default)` rule, and the three
+shared rules verbatim. One list function runs that check over
+`capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
+and `capsules/model-provider/confine.sb`: the did and wallet profiles are
+required, and the model profile is checked whenever that file exists and
+skipped with a printed reason while it is absent. The test runs on every
+platform because it reads files and starts no process. It does not claim
+that the model provider meets the contract today.
 
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
 the repository root. When `/usr/bin/sandbox-exec` is absent the native tests

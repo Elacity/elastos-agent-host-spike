@@ -1,0 +1,103 @@
+{
+  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, and DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
+  "falsifiers": [
+    {
+      "id": "DID01",
+      "title": "a missing or empty storage root falls back to a temp directory instead of refusing",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/src/main.rs",
+          "old": "            return Err(STORAGE_PATH_NOT_SET.to_string());",
+          "new": "            return Ok(std::env::temp_dir());"
+        }
+      ],
+      "tests": [
+        "tests::init_requires_storage_without_key",
+        "tests::empty_storage_path_is_refused"
+      ]
+    },
+    {
+      "id": "DID02",
+      "title": "a relative storage root is accepted instead of refused",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/src/main.rs",
+          "old": "        if !base.is_absolute() {\n            return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n        }",
+          "new": "        if false && !base.is_absolute() {\n            return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n        }"
+        }
+      ],
+      "tests": [
+        "tests::relative_storage_is_refused"
+      ]
+    },
+    {
+      "id": "DID03",
+      "title": "a nickname read error is swallowed back to no nickname",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/src/main.rs",
+          "old": "        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)\n            .map_err(|e| format!(\"did-provider: failed to read nickname: {e}\"))?;",
+          "new": "        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)\n            .ok()\n            .flatten();"
+        }
+      ],
+      "tests": [
+        "tests::init_reports_nickname_read_error"
+      ]
+    },
+    {
+      "id": "DID04",
+      "title": "the profile allows every operation by default",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(deny default)",
+          "new": "(allow default)"
+        }
+      ],
+      "tests": [
+        "outside_write_denied",
+        "outside_read_denied"
+      ]
+    },
+    {
+      "id": "DID05",
+      "title": "the profile grants the network instead of denying it",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(deny network*)",
+          "new": "(allow network*)"
+        }
+      ],
+      "tests": [
+        "profile_denies_network"
+      ]
+    },
+    {
+      "id": "DID06",
+      "title": "verify_did_recovery panics on a bad signature instead of refusing",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/src/main.rs",
+          "old": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(e) => {\n                return Response::error(\"invalid_signature\", &format!(\"Invalid hex sig: {}\", e))\n            }\n        };",
+          "new": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(_) => panic!(\"recovery signature decode failure\"),\n        };"
+        }
+      ],
+      "tests": [
+        "verify_did_recovery_under_profile"
+      ]
+    }
+  ]
+}
