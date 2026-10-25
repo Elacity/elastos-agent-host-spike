@@ -15,11 +15,16 @@ mod lab_name;
 
 use common::build::{lane_dir, sha256_file, Receipt, TempDir};
 use common::json::{self, Value};
-use lab_name::{canonical_closure, lab_name, name_bundle, read_bundle, ClosureFile};
+use lab_name::{
+    canonical_closure, lab_name, name_bundle, no_seam, read_bundle, ClosureFile, Moment,
+};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 /// A lab manifest for the fixture bundle, 175 bytes.
 const FIXTURE_MANIFEST: &str = r#"{
@@ -112,7 +117,7 @@ fn bundle_name_is_the_hash_of_the_canonical_closure() {
         b"12 capsule.wasm 8 ",
         FIXTURE_MODULE,
     ];
-    let files = read_bundle(&bundle).expect("read the fixture bundle");
+    let files = read_bundle(&bundle, &mut no_seam).expect("read the fixture bundle");
     assert_eq!(
         canonical_closure(&files),
         parts.concat(),
@@ -254,7 +259,7 @@ fn file_order_mtime_and_mode_do_not_change_the_name() {
     );
 
     // Nor the order the files arrive in: the rule sorts them by path.
-    let listed = read_bundle(&first).expect("read the first bundle");
+    let listed = read_bundle(&first, &mut no_seam).expect("read the first bundle");
     let reversed: Vec<ClosureFile> = listed.iter().rev().cloned().collect();
     assert_ne!(listed, reversed);
     assert_eq!(
@@ -333,11 +338,209 @@ fn a_symlink_in_the_bundle_is_refused() {
         bundle.join("capsule.wasm"),
         "the refusal must name the link"
     );
-    assert!(
-        refusal.reason.contains("is not a regular file"),
-        "the refusal must say why, got: {}",
-        refusal.reason
+    assert_eq!(
+        refusal.reason, "is a symlink (a symlink is never followed, to read or to write)",
+        "the refusal must say why"
     );
+}
+
+/// Put a symlink to `target` where the file at `path` was.
+#[cfg(unix)]
+fn replace_with_symlink(path: &Path, target: &Path) {
+    fs::remove_file(path).expect("remove the closure file");
+    std::os::unix::fs::symlink(target, path).expect("link the closure file");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_closure_file_replaced_by_a_symlink_before_it_is_opened_is_refused() {
+    let tmp = TempDir::new("bundle-swap-before-open");
+    let bundle = fixture_bundle(tmp.path());
+    let module = bundle.join("capsule.wasm");
+    // The same bytes, outside the bundle, so following the link would give the
+    // same name: the refusal is about the link, not the bytes.
+    let outside = tmp.path().join("outside.wasm");
+    fs::write(&outside, FIXTURE_MODULE).expect("write the outside module");
+
+    // The listing names capsule.wasm as a regular file. Between that
+    // inspection and the open, it becomes a link.
+    let mut swapped = false;
+    let refusal = read_bundle(&bundle, &mut |moment, path| {
+        if moment == Moment::BeforeOpen && path == module {
+            replace_with_symlink(path, &outside);
+            swapped = true;
+        }
+    })
+    .expect_err("a closure file that became a link before it was opened must be refused");
+    assert!(
+        swapped,
+        "the swap must happen before capsule.wasm is opened"
+    );
+    assert_eq!(refusal.path, module, "the refusal must name the link");
+    assert_eq!(
+        refusal.reason, "is a symlink (a symlink is never followed, to read or to write)",
+        "the open itself must refuse the link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_closure_file_replaced_after_it_is_checked_is_read_from_its_handle() {
+    let tmp = TempDir::new("bundle-swap-before-read");
+    let bundle = fixture_bundle(tmp.path());
+    let module = bundle.join("capsule.wasm");
+    // Other bytes, outside the bundle: a reader that went back to the path
+    // after its check would name these.
+    let mut other = FIXTURE_MODULE.to_vec();
+    other[7] ^= 0x01;
+    let outside = tmp.path().join("outside.wasm");
+    fs::write(&outside, &other).expect("write the outside module");
+
+    // capsule.wasm is open and its handle checked; then, before it is read,
+    // the path becomes a link to the other bytes.
+    let mut swapped = false;
+    let files = read_bundle(&bundle, &mut |moment, path| {
+        if moment == Moment::BeforeRead && path == module {
+            replace_with_symlink(path, &outside);
+            swapped = true;
+        }
+    })
+    .unwrap_or_else(|refusal| panic!("the opened, checked file must still be read: {refusal}"));
+    assert!(swapped, "the swap must happen before capsule.wasm is read");
+    assert_eq!(
+        lab_name(&files).expect("name the files"),
+        FIXTURE_NAME,
+        "the name must cover the file that was opened and checked, never what its path points at later"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_in_the_bundle_is_refused_without_blocking() {
+    let tmp = TempDir::new("bundle-fifo");
+    let bundle = fixture_bundle(tmp.path());
+    let module = bundle.join("capsule.wasm");
+    fs::remove_file(&module).expect("remove the module");
+    let made = Command::new("mkfifo")
+        .arg(&module)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(made.success(), "mkfifo must make the FIFO");
+
+    // Nothing ever opens the FIFO's other end, so an open that waits for it
+    // waits forever: the reader runs on its own thread, against a deadline.
+    let (sender, receiver) = mpsc::channel();
+    let dir = bundle.clone();
+    thread::spawn(move || {
+        let _ = sender.send(name_bundle(&dir));
+    });
+    let named = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the reader must refuse a FIFO at once, not wait on it");
+    let refusal = named.expect_err("a FIFO in the bundle must be refused");
+    assert_eq!(refusal.path, module, "the refusal must name the FIFO");
+    assert_eq!(
+        refusal.reason,
+        "is not a regular file (a directory, FIFO or device is never part of the lab closure)",
+        "the refusal must say why"
+    );
+}
+
+/// What a sentinel holds. A sentinel sits outside OUT_DIR, behind a link, and
+/// must still hold exactly this after tools/bundle runs.
+const SENTINEL: &[u8] = b"outside OUT_DIR: tools/bundle must never write here\n";
+
+fn sentinel(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, SENTINEL).expect("write a sentinel");
+    path
+}
+
+/// The run was refused at `path` for `reason`, and printed no name.
+fn assert_refused(output: &Output, path: &Path, reason: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "tools/bundle must refuse, got:\n{stderr}"
+    );
+    assert!(output.stdout.is_empty(), "a refused run must print no name");
+    assert!(
+        stderr.contains(&format!("bundle: refused: {}: {reason}\n", path.display())),
+        "tools/bundle must name {} and the reason, got:\n{stderr}",
+        path.display()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tools_bundle_never_writes_through_a_link() {
+    use std::os::unix::fs::symlink;
+    const BUNDLE_EXISTS: &str =
+        "already exists (tools/bundle writes a new bundle, never into or through what is already there)";
+    let tmp = TempDir::new("bundle-write-links");
+
+    // A linked bundle directory, a symlink at tools/build's module output and a
+    // hard link at its receipt output.
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).expect("create OUT_DIR");
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).expect("create the directory the bundle links to");
+    symlink(&elsewhere, out.join("bundle")).expect("link OUT_DIR/bundle");
+    let module_sentinel = sentinel(tmp.path(), "module-sentinel");
+    let receipt_sentinel = sentinel(tmp.path(), "receipt-sentinel");
+    symlink(&module_sentinel, out.join("capsule.wasm")).expect("link OUT_DIR/capsule.wasm");
+    fs::hard_link(&receipt_sentinel, out.join("receipt.txt"))
+        .expect("hard-link OUT_DIR/receipt.txt");
+
+    let output = tool_build(&out);
+    assert_eq!(
+        fs::read(&module_sentinel).expect("read the module sentinel"),
+        SENTINEL,
+        "tools/build wrote OUT_DIR/capsule.wasm through its symlink"
+    );
+    assert_eq!(
+        fs::read(&receipt_sentinel).expect("read the receipt sentinel"),
+        SENTINEL,
+        "tools/build wrote OUT_DIR/receipt.txt into the file its hard link shares"
+    );
+    assert_eq!(
+        fs::read_dir(&elsewhere)
+            .expect("list the linked directory")
+            .count(),
+        0,
+        "tools/bundle wrote through the linked bundle directory"
+    );
+    // tools/build replaced both of its outputs with new files.
+    assert!(
+        fs::symlink_metadata(out.join("capsule.wasm"))
+            .expect("inspect OUT_DIR/capsule.wasm")
+            .file_type()
+            .is_file(),
+        "tools/build must replace the symlink at OUT_DIR/capsule.wasm with a new file"
+    );
+    assert_eq!(
+        Receipt::read(&out).get("artifact_sha256"),
+        sha256_file(&out.join("capsule.wasm")),
+        "tools/build must write a new receipt for the module it built"
+    );
+    assert_refused(&output, &out.join("bundle"), BUNDLE_EXISTS);
+
+    // A real bundle directory whose capsule.json links to a sentinel: refused
+    // as it stands, and the sentinel is never written.
+    let out = tmp.path().join("out-with-bundle");
+    let bundle = out.join("bundle");
+    fs::create_dir_all(&bundle).expect("create OUT_DIR/bundle");
+    let manifest_sentinel = sentinel(tmp.path(), "manifest-sentinel");
+    symlink(&manifest_sentinel, bundle.join("capsule.json")).expect("link capsule.json");
+
+    let output = tool_build(&out);
+    assert_eq!(
+        fs::read(&manifest_sentinel).expect("read the manifest sentinel"),
+        SENTINEL,
+        "tools/bundle wrote capsule.json through its link"
+    );
+    assert_refused(&output, &bundle, BUNDLE_EXISTS);
 }
 
 /// The member `key` of a manifest object.

@@ -9,14 +9,20 @@
 //! OUT_DIR, outside the closure. stdout carries only the name; a refusal goes to
 //! stderr with its path and reason, and the exit status is 1.
 //!
+//! The build mode writes a new bundle only: anything already at OUT_DIR/bundle,
+//! a link included, is refused before a byte is written, so no write ever goes
+//! through a link. To bundle again into the same OUT_DIR, remove its bundle/.
+//!
 //! This is host-side lab tooling. tools/build compiles only the library, so
 //! none of this is ever compiled into the capsule.
 
 mod lab_name;
 
-use lab_name::{name_bundle, Refusal, MANIFEST_PATH, MODULE_PATH};
-use std::fs;
-use std::io;
+use lab_name::{
+    name_bundle, no_seam, open_regular, read_file, ClosureFile, Refusal, MANIFEST_PATH, MODULE_PATH,
+};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -54,8 +60,8 @@ fn lane_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Build the capsule with tools/build, write the closure into OUT_DIR/bundle/,
-/// and name what is on disk exactly as `--name` would.
+/// Build the capsule with tools/build, write the closure as a new
+/// OUT_DIR/bundle/, and name what is on disk exactly as `--name` would.
 fn build_bundle(out_dir: &Path) -> Result<String, Refusal> {
     // The lane's one reproducible build (wc-001). Its progress line goes to
     // stderr, so stdout carries only the name.
@@ -72,17 +78,50 @@ fn build_bundle(out_dir: &Path) -> Result<String, Refusal> {
         ));
     }
 
+    // The module tools/build wrote, read through the lab's one check.
+    let module = read_file(&out_dir.join(MODULE_PATH), &mut no_seam)?;
     let bundle = out_dir.join("bundle");
-    fs::create_dir_all(&bundle)
-        .map_err(|err| Refusal::new(&bundle, format!("cannot be created ({err})")))?;
-    let module = bundle.join(MODULE_PATH);
-    fs::copy(out_dir.join(MODULE_PATH), &module)
-        .map_err(|err| Refusal::new(&module, format!("cannot be written ({err})")))?;
-    let manifest = bundle.join(MANIFEST_PATH);
-    fs::write(&manifest, capsule_manifest())
-        .map_err(|err| Refusal::new(&manifest, format!("cannot be written ({err})")))?;
+    write_new_bundle(
+        &bundle,
+        &[
+            ClosureFile {
+                path: MANIFEST_PATH.to_string(),
+                bytes: capsule_manifest().into_bytes(),
+            },
+            ClosureFile {
+                path: MODULE_PATH.to_string(),
+                bytes: module,
+            },
+        ],
+    )?;
 
     name_bundle(&bundle)
+}
+
+/// Write `files` as a new bundle directory at `bundle`. The directory is
+/// created new, and `mkdir` never follows a link, so anything already at
+/// `bundle` (a link, a file or a directory) is refused before a byte is
+/// written. Each file is then created new through the lab's one check,
+/// `open_regular`, so nothing is ever written into or through a file that was
+/// there before.
+fn write_new_bundle(bundle: &Path, files: &[ClosureFile]) -> Result<(), Refusal> {
+    fs::create_dir(bundle).map_err(|err| {
+        if err.kind() == io::ErrorKind::AlreadyExists {
+            Refusal::new(
+                bundle,
+                "already exists (tools/bundle writes a new bundle, never into or through what is already there)",
+            )
+        } else {
+            Refusal::new(bundle, format!("cannot be created ({err})"))
+        }
+    })?;
+    for file in files {
+        let path = bundle.join(&file.path);
+        open_regular(&path, OpenOptions::new().write(true).create_new(true))?
+            .write_all(&file.bytes)
+            .map_err(|err| Refusal::new(&path, format!("cannot be written ({err})")))?;
+    }
+    Ok(())
 }
 
 /// The lab manifest of this lane's capsule, in its one byte layout (fixed key

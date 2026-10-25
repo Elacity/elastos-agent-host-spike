@@ -7,6 +7,8 @@
 # OUT_DIR defaults to the lane root. OUT_DIR/bundle/ holds exactly the closure:
 # capsule.json (the lab manifest) and capsule.wasm (the module tools/build
 # made). Anything else in a bundle is refused, with its path and the reason.
+# The build mode writes a new bundle only: anything already at OUT_DIR/bundle,
+# a link included, is refused before a byte is written.
 #
 # The name is a LAB name, `lab-sha256:<hex>`, over the canonical closure (sorted
 # paths, exact bytes, no mtimes or modes). It is not a CID and never a package

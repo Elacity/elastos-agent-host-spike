@@ -50,7 +50,10 @@ the same either way).
 tools/build [OUT_DIR]     # default OUT_DIR is the lane root
 ```
 
-writes `OUT_DIR/capsule.wasm` and `OUT_DIR/receipt.txt`. The build is pinned:
+writes `OUT_DIR/capsule.wasm` and `OUT_DIR/receipt.txt`. Each output replaces
+the entry at its path (`rm -f`, then a noclobber `>` that creates the file new),
+so a symlink or hard link there is replaced, never written through. The build
+is pinned:
 one codegen unit, LTO, a stripped binary and `panic = "abort"` (the release
 profile in `Cargo.toml`), a fixed `SOURCE_DATE_EPOCH`, no incremental cache, a
 fresh isolated target dir, and `--remap-path-prefix` for the source tree,
@@ -103,6 +106,10 @@ from the same file (P10). The build mode reuses `tools/build`: its
 stdout carries only the name. A refusal goes to stderr with the path and the
 reason, and the exit status is 1.
 
+The build mode writes a **new** bundle only. Anything already at
+`OUT_DIR/bundle` (a directory, a file or a link) is refused before a byte is
+written. To bundle again into the same `OUT_DIR`, remove its `bundle/` first.
+
 ### A lab name, not a CID
 
 The name is `lab-sha256:` followed by 64 lowercase hex digits. It is a **lab
@@ -121,8 +128,44 @@ A lab bundle is a directory that holds exactly two regular files:
 | `capsule.wasm` | the core Wasm module `tools/build` made |
 
 Anything else is refused, and the refusal names the path: an extra file (even a
-`.DS_Store`), a missing closure file, a symlink (never followed) or a directory.
-The name is over bytes; it does not check that the manifest is valid.
+`.DS_Store`), a missing closure file, a symlink (never followed), or a
+directory, FIFO or device (refused at once, never waited on). The name is over
+bytes; it does not check that the manifest is valid.
+
+### No link is followed, to read or to write
+
+Every capsule file `tools/bundle` reads or writes goes through one check,
+`open_regular` in `tools/lab_name.rs` (P10). It opens the path with
+`O_NOFOLLOW`, so the open itself refuses a link and no moment passes between a
+check and the open, and with `O_NONBLOCK`, so it never waits on a FIFO or a
+device. Then it checks the handle it opened, never the path again: only a
+regular file is accepted. The caller reads or writes that same handle, so the
+file that was checked is the file that is used. This is the pattern the
+Runtime uses (`elastos/crates/elastos-runtime/src/provider/bridge.rs:118-138`).
+
+- **Reading** (both modes): the listing decides the closure before any file is
+  opened. Each closure file is opened once and read from its handle, so a link
+  put at its path before the open is refused, and one put there after the
+  open is never looked at.
+- **Writing** (build mode): `OUT_DIR/bundle` is created new (`mkdir` never
+  follows a link), and each closure file is created new (`create_new`) through
+  `open_regular`, so nothing is written into or through what was there. The
+  module is read from `tools/build`'s `OUT_DIR/capsule.wasm` through the same
+  check.
+- **`tools/build`** replaces each of its two outputs (see Build), so a symlink
+  or hard link at `OUT_DIR/capsule.wasm` or `OUT_DIR/receipt.txt` is replaced,
+  never written through.
+
+The lane has no dependencies, so no `libc` crate: `tools/lab_name.rs` writes
+out the macOS values of `O_NOFOLLOW`, `O_NONBLOCK` and `ELOOP`, checked against
+the system headers. On any other OS the lab tools do not compile, rather than
+guess a value.
+
+What this does not cover: the directory you name with `--name`, and `OUT_DIR`,
+are used as you give them, so a link in their own path is followed. A swap of
+that directory by another process while the tool runs is not covered either:
+that needs directory-relative opens (`openat`), which stable Rust's std does
+not have, and the lane takes no dependency.
 
 ### The bytes that are hashed
 
@@ -214,12 +257,23 @@ wc-003, in `tests/bundle.rs`:
   command prints no name.
 - `a_missing_closure_file_is_refused`
 - `a_symlink_in_the_bundle_is_refused`
+- `a_closure_file_replaced_by_a_symlink_before_it_is_opened_is_refused` — a
+  test seam swaps the file for a link after the listing; the open refuses it.
+- `a_closure_file_replaced_after_it_is_checked_is_read_from_its_handle` — the
+  seam swaps the path for a link to other bytes after the handle check; the
+  name still covers the bytes that were opened.
+- `a_fifo_in_the_bundle_is_refused_without_blocking` — refused within a
+  deadline, never waited on.
+- `tools_bundle_never_writes_through_a_link` — the real command, with symlinks
+  at `OUT_DIR/bundle`, `OUT_DIR/bundle/capsule.json` and `OUT_DIR/capsule.wasm`
+  and a hard link at `OUT_DIR/receipt.txt`: every sentinel behind them stays
+  unchanged.
 - `bundle_manifest_matches_lab_schema`
 - `bundle_output_uses_the_lab_name_prefix`
 
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001 and twelve wc-003 planted bugs in the
+`falsifiers.json` holds nine wc-001 and seventeen wc-003 planted bugs in the
 provider format (`command: "lab"`). Each requires its named tests to fail. The
 canonical runner `examples/agent-host/falsify.py` has no `lab` command yet (ask
 **R1**), so each is proved by the repo's break → named test fails → revert

@@ -66,7 +66,17 @@ cargo build \
   --release \
   --target wasm32-unknown-unknown
 
-cp "$TARGET_DIR/wasm32-unknown-unknown/release/capsule.wasm" "$OUT_DIR/capsule.wasm"
+# Each output replaces whatever entry is at its path and is never written
+# through it: `rm -f` unlinks a link itself (never what it points at), then
+# noclobber makes `>` create the file new (O_EXCL). So a symlink or a hard link
+# at OUT_DIR/capsule.wasm or OUT_DIR/receipt.txt never redirects a write. A
+# directory there makes `rm` fail, and the build with it.
+write_output() {
+  rm -f -- "$1"
+  (set -o noclobber; cat > "$1")
+}
+
+write_output "$OUT_DIR/capsule.wasm" < "$TARGET_DIR/wasm32-unknown-unknown/release/capsule.wasm"
 
 # The receipt binds this artifact to the exact toolchain and inputs so a
 # rebuild can be checked. Hashes come from the system tool.
@@ -82,7 +92,7 @@ ARTIFACT_SHA="$(sha256 "$OUT_DIR/capsule.wasm")"
 LOCK_SHA="$(sha256 "$LANE_DIR/Cargo.lock")"
 RUSTC_VERSION="$("$RUSTC_BIN" --version)"
 
-cat > "$OUT_DIR/receipt.txt" <<EOF
+write_output "$OUT_DIR/receipt.txt" <<EOF
 schema: wc-001.receipt/v1
 artifact: capsule.wasm
 artifact_sha256: ${ARTIFACT_SHA}

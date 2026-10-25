@@ -1,5 +1,7 @@
 //! The one rule that names a wc-003 lab bundle: which files the closure holds,
-//! the exact bytes that are hashed, and the label on the result.
+//! the exact bytes that are hashed, and the label on the result. It also holds
+//! the one check every capsule file read or write of the `bundle` tool goes
+//! through ([`open_regular`]), so it never reads or writes through a link.
 //!
 //! The `bundle` tool (tools/bundle.rs) and the named tests (tests/bundle.rs)
 //! compile this same file, so naming a bundle has one path (PRINCIPLES P10).
@@ -11,10 +13,29 @@
 //! as a CID, and it is never a package identity (P13): no Runtime admission or
 //! launch path reads it.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+/// The open(2) flags and the errno [`open_regular`] needs, from macOS
+/// <sys/fcntl.h> and <sys/errno.h>. The lane has no dependencies (so no `libc`
+/// crate) and is built and tested on this one Mac, so any other OS is a compile
+/// error, never a guessed value.
+#[cfg(target_os = "macos")]
+mod sys {
+    pub const O_NONBLOCK: i32 = 0x0004;
+    pub const O_NOFOLLOW: i32 = 0x0100;
+    pub const ELOOP: i32 = 62;
+}
+
+#[cfg(not(target_os = "macos"))]
+compile_error!(
+    "the lab's no-follow open knows only the macOS flag values: add this OS's \
+     O_NOFOLLOW, O_NONBLOCK and ELOOP from its headers, then run the symlink and \
+     FIFO tests in tests/bundle.rs"
+);
 
 /// The label on every lab name. It says "lab", never "CID".
 pub const LAB_NAME_PREFIX: &str = "lab-sha256:";
@@ -68,18 +89,35 @@ impl std::fmt::Display for Refusal {
 /// Read and name a bundle directory. Both modes of the `bundle` tool name a
 /// bundle through this one function.
 pub fn name_bundle(dir: &Path) -> Result<String, Refusal> {
-    let files = read_bundle(dir)?;
+    let files = read_bundle(dir, &mut no_seam)?;
     lab_name(&files).map_err(|reason| Refusal::new(dir, reason))
 }
 
+/// A moment in [`read_file`] at which a test may change the bundle, to prove
+/// that the change cannot reach the name. The lab tools pass [`no_seam`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moment {
+    /// The path is known (the listing named it), and it is not opened yet.
+    BeforeOpen,
+    /// The file is open and its handle checked, and it is not read yet.
+    BeforeRead,
+}
+
+/// The seam the lab tools pass: it changes nothing.
+pub fn no_seam(_: Moment, _: &Path) {}
+
 /// Read `dir` as a lab closure and fail closed on anything else: an entry that
-/// is not one of [`CLOSURE_PATHS`], a closure entry that is not a regular file
-/// (a symlink is never followed), and a closure file that is missing. The files
-/// come back in directory listing order; [`canonical_closure`] sorts them.
-pub fn read_bundle(dir: &Path) -> Result<Vec<ClosureFile>, Refusal> {
+/// is not one of [`CLOSURE_PATHS`], a closure file that is missing, and a
+/// closure file [`read_file`] refuses (a symlink, or anything but a regular
+/// file). The listing decides the closure before any file is opened. The files
+/// come back in listing order; [`canonical_closure`] sorts them.
+pub fn read_bundle(
+    dir: &Path,
+    seam: &mut dyn FnMut(Moment, &Path),
+) -> Result<Vec<ClosureFile>, Refusal> {
     let entries = fs::read_dir(dir)
         .map_err(|err| Refusal::new(dir, format!("cannot be read as a bundle ({err})")))?;
-    let mut files = Vec::new();
+    let mut listed = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|err| Refusal::new(dir, format!("cannot be listed ({err})")))?;
         let path = entry.path();
@@ -93,30 +131,69 @@ pub fn read_bundle(dir: &Path) -> Result<Vec<ClosureFile>, Refusal> {
                 "is not part of the lab closure (a lab bundle holds exactly capsule.json and capsule.wasm)",
             ));
         };
-        let meta = fs::symlink_metadata(&path)
-            .map_err(|err| Refusal::new(&path, format!("cannot be inspected ({err})")))?;
-        if !meta.file_type().is_file() {
-            return Err(Refusal::new(
-                &path,
-                "is not a regular file (a symlink, directory or device is never part of the lab closure)",
-            ));
-        }
-        let bytes = fs::read(&path)
-            .map_err(|err| Refusal::new(&path, format!("cannot be read ({err})")))?;
-        files.push(ClosureFile {
-            path: name.to_string(),
-            bytes,
-        });
+        listed.push((name.to_string(), path));
     }
     for required in CLOSURE_PATHS {
-        if !files.iter().any(|file| file.path == required) {
+        if !listed.iter().any(|(name, _)| name == required) {
             return Err(Refusal::new(
                 &dir.join(required),
                 "is missing from the lab closure",
             ));
         }
     }
+    let mut files = Vec::new();
+    for (name, path) in listed {
+        let bytes = read_file(&path, seam)?;
+        files.push(ClosureFile { path: name, bytes });
+    }
     Ok(files)
+}
+
+/// Read one file: open it with [`open_regular`], which checks the handle, and
+/// read that same handle. The path is looked up once, by the open, so a link
+/// put at the path at any moment never brings outside bytes into a name:
+/// before the open, the open refuses it; after it, nothing looks at the path.
+pub fn read_file(path: &Path, seam: &mut dyn FnMut(Moment, &Path)) -> Result<Vec<u8>, Refusal> {
+    seam(Moment::BeforeOpen, path);
+    let mut file = open_regular(path, OpenOptions::new().read(true))?;
+    seam(Moment::BeforeRead, path);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|err| Refusal::new(path, format!("cannot be read ({err})")))?;
+    Ok(bytes)
+}
+
+/// The one check for every capsule file the `bundle` tool reads or writes (and
+/// every closure file the tests read). It opens `path` with `options` plus
+/// O_NOFOLLOW, so the open itself refuses a link and no moment passes between a
+/// check and the open, and O_NONBLOCK, so it never waits on a FIFO or a device.
+/// Then it checks the handle it opened, never the path again: only a regular
+/// file is accepted. The caller reads or writes the returned handle, so the
+/// file that was checked is the file that is used.
+pub fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, Refusal> {
+    let file = options
+        .custom_flags(sys::O_NOFOLLOW | sys::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| {
+            if err.raw_os_error() == Some(sys::ELOOP) {
+                Refusal::new(
+                    path,
+                    "is a symlink (a symlink is never followed, to read or to write)",
+                )
+            } else {
+                Refusal::new(path, format!("cannot be opened ({err})"))
+            }
+        })?;
+    let meta = file
+        .metadata()
+        .map_err(|err| Refusal::new(path, format!("cannot be inspected ({err})")))?;
+    if !meta.file_type().is_file() {
+        return Err(Refusal::new(
+            path,
+            "is not a regular file (a directory, FIFO or device is never part of the lab closure)",
+        ));
+    }
+    Ok(file)
 }
 
 /// The exact bytes a lab name hashes: [`CLOSURE_TAG`], then each file in

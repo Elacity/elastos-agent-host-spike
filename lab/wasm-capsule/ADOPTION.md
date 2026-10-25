@@ -17,10 +17,14 @@ a lab hash of its whole closure; wc-004 and wc-005 build on both.
   It is NOT a validator; wc-002 grows it into the static import audit.
 - `tools/bundle` with its one rule, `tools/lab_name.rs` (wc-003) — a closure
   check that fails closed (exactly `capsule.json` and `capsule.wasm`, regular
-  files only; an extra, missing or symlinked file is refused with its path), a
-  length-framed canonical byte stream over sorted paths and exact bytes, and a
-  pinned test vector. Take the closure check and the refusals; replace the hash
-  with the Runtime's CID rule (see the wc-003 discovery below).
+  files only; an extra, missing or symlinked file, a FIFO or a directory is
+  refused with its path), a length-framed canonical byte stream over sorted
+  paths and exact bytes, and a pinned test vector. Every capsule file read and
+  write of `tools/bundle` goes through one no-follow open that checks, then
+  uses, the same handle (`open_regular`, the Runtime's own pattern in
+  `elastos/crates/elastos-runtime/src/provider/bridge.rs:118-138`), and the
+  build mode writes only a new bundle. Take the closure check and the refusals;
+  replace the hash with the Runtime's CID rule (see the wc-003 discovery below).
 
 ## Requirements (what the claim rests on)
 
@@ -31,6 +35,11 @@ a lab hash of its whole closure; wc-004 and wc-005 build on both.
 - No network: the lane has no external crates, so `cargo build --locked` builds
   from clean caches offline. Keep it that way — a dependency would put the
   lockfile on the network and widen the surface.
+- macOS for the lab tools: with no `libc` crate, `tools/lab_name.rs` writes out
+  the macOS values of `O_NOFOLLOW`, `O_NONBLOCK` and `ELOOP` (checked against
+  the system headers). Any other OS is a compile error until its values are
+  added and the symlink and FIFO tests pass there. In the Runtime, take these
+  from `libc` as the rest of the tree does.
 
 ## Claim scope — do not overstate
 
@@ -44,6 +53,12 @@ a lab hash of its whole closure; wc-004 and wc-005 build on both.
   call it a CID, and never use it as a package identity. wc-004 signs it.
 - `digest` is a placeholder pure function to anchor identity and portability
   work. It is not a product capability.
+- The no-follow open covers each closure file's own path. The bundle directory
+  named with `--name`, and `OUT_DIR`, are used as given (a link in their own
+  path is followed), and a swap of that directory by another process while the
+  tool runs is not covered: that needs directory-relative opens (`openat`),
+  which stable Rust's std lacks. The Runtime would get them from `libc`, as
+  `capsules/ipfs-provider/src/directory_hash.rs` does.
 
 ## wc-003 discovery: how the Runtime names an artifact
 

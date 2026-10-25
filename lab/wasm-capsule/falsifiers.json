@@ -1,5 +1,5 @@
 {
-  "about": "wc-001 and wc-003 lab falsifiers. Each one plants a bug in the capsule source, the build script, the bundle tool or its closure rule (tools/lab_name.rs) and requires every named test to FAIL (error-free). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. wc-003: F-WC3a leaves the manifest out of the closure and F-WC3b hashes the mtime; the rest hash the mode or the arrival order, drop the module bytes or the path framing, bypass the closure rule in the command, label the name CID, skip an extra file, accept a missing or symlinked closure file, or drop a manifest field. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001 and wc-003 lab falsifiers. Each one plants a bug in the capsule source, the build script, the bundle tool or its closure rule (tools/lab_name.rs) and requires every named test to FAIL (error-free). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. wc-003: F-WC3a leaves the manifest out of the closure and F-WC3b hashes the mtime; the rest hash the mode or the arrival order, drop the module bytes or the path framing, bypass the closure rule in the command, label the name CID, skip an extra file, accept a missing closure file, drop a manifest field, let the one open follow a symlink or wait on a FIFO, skip the regular-file check on the opened handle, read the path again after that check, reuse an existing bundle path, or let tools/build write its outputs through a link. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -169,8 +169,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/lab_name.rs",
-          "old": "        let bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n",
-          "new": "        let mut bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n        bytes.extend_from_slice(format!(\"{:?}\", meta.modified().expect(\"an mtime\")).as_bytes());\n"
+          "old": "    file.read_to_end(&mut bytes)\n        .map_err(|err| Refusal::new(path, format!(\"cannot be read ({err})\")))?;\n",
+          "new": "    file.read_to_end(&mut bytes)\n        .map_err(|err| Refusal::new(path, format!(\"cannot be read ({err})\")))?;\n    bytes.extend_from_slice(format!(\"{:?}\", file.metadata().and_then(|meta| meta.modified()).expect(\"an mtime\")).as_bytes());\n"
         }
       ],
       "tests": [
@@ -185,8 +185,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/lab_name.rs",
-          "old": "        let bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n",
-          "new": "        let mut bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n        bytes.extend_from_slice(format!(\"{:o}\", std::os::unix::fs::PermissionsExt::mode(&meta.permissions())).as_bytes());\n"
+          "old": "    file.read_to_end(&mut bytes)\n        .map_err(|err| Refusal::new(path, format!(\"cannot be read ({err})\")))?;\n",
+          "new": "    file.read_to_end(&mut bytes)\n        .map_err(|err| Refusal::new(path, format!(\"cannot be read ({err})\")))?;\n    bytes.extend_from_slice(format!(\"{:o}\", std::os::unix::fs::PermissionsExt::mode(&file.metadata().expect(\"a mode\").permissions())).as_bytes());\n"
         }
       ],
       "tests": [
@@ -250,7 +250,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/bundle.rs",
           "old": "    name_bundle(&bundle)\n",
-          "new": "    let module = fs::read(&module).expect(\"read the bundle's module\");\n    lab_name::lab_name(&[lab_name::ClosureFile {\n        path: MODULE_PATH.to_string(),\n        bytes: module,\n    }])\n    .map_err(|reason| Refusal::new(&bundle, reason))\n"
+          "new": "    lab_name::lab_name(&[ClosureFile {\n        path: MODULE_PATH.to_string(),\n        bytes: read_file(&bundle.join(MODULE_PATH), &mut no_seam)?,\n    }])\n    .map_err(|reason| Refusal::new(&bundle, reason))\n"
         }
       ],
       "tests": [
@@ -297,7 +297,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/lab_name.rs",
-          "old": "    for required in CLOSURE_PATHS {\n        if !files.iter().any(|file| file.path == required) {\n            return Err(Refusal::new(\n                &dir.join(required),\n                \"is missing from the lab closure\",\n            ));\n        }\n    }\n",
+          "old": "    for required in CLOSURE_PATHS {\n        if !listed.iter().any(|(name, _)| name == required) {\n            return Err(Refusal::new(\n                &dir.join(required),\n                \"is missing from the lab closure\",\n            ));\n        }\n    }\n",
           "new": ""
         }
       ],
@@ -307,18 +307,19 @@
     },
     {
       "id": "F-WC3-SYMLINK",
-      "title": "a symlinked closure file is followed",
+      "title": "the one open drops O_NOFOLLOW, so a symlinked closure file is followed",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/lab_name.rs",
-          "old": "        let meta = fs::symlink_metadata(&path)\n",
-          "new": "        let meta = fs::metadata(&path)\n"
+          "old": "        .custom_flags(sys::O_NOFOLLOW | sys::O_NONBLOCK)\n",
+          "new": "        .custom_flags(sys::O_NONBLOCK)\n"
         }
       ],
       "tests": [
-        "a_symlink_in_the_bundle_is_refused"
+        "a_symlink_in_the_bundle_is_refused",
+        "a_closure_file_replaced_by_a_symlink_before_it_is_opened_is_refused"
       ]
     },
     {
@@ -335,6 +336,86 @@
       ],
       "tests": [
         "bundle_manifest_matches_lab_schema"
+      ]
+    },
+    {
+      "id": "F-WC3-FIFO",
+      "title": "the one open drops O_NONBLOCK, so it waits forever on a FIFO in the bundle",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        .custom_flags(sys::O_NOFOLLOW | sys::O_NONBLOCK)\n",
+          "new": "        .custom_flags(sys::O_NOFOLLOW)\n"
+        }
+      ],
+      "tests": [
+        "a_fifo_in_the_bundle_is_refused_without_blocking"
+      ]
+    },
+    {
+      "id": "F-WC3-NOT-REGULAR",
+      "title": "the opened handle is not checked to be a regular file, so a FIFO is read as a closure file",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "    if !meta.file_type().is_file() {\n        return Err(Refusal::new(\n            path,\n            \"is not a regular file (a directory, FIFO or device is never part of the lab closure)\",\n        ));\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a_fifo_in_the_bundle_is_refused_without_blocking"
+      ]
+    },
+    {
+      "id": "F-WC3-REREAD",
+      "title": "after the handle is checked the file is read again by its path, so a symlink swapped in between is followed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "    let mut bytes = Vec::new();\n    file.read_to_end(&mut bytes)\n        .map_err(|err| Refusal::new(path, format!(\"cannot be read ({err})\")))?;\n    Ok(bytes)\n",
+          "new": "    drop(file);\n    fs::read(path).map_err(|err| Refusal::new(path, format!(\"cannot be read ({err})\")))\n"
+        }
+      ],
+      "tests": [
+        "a_closure_file_replaced_after_it_is_checked_is_read_from_its_handle"
+      ]
+    },
+    {
+      "id": "F-WC3-REUSE-BUNDLE",
+      "title": "the build mode reuses an existing bundle path, so a linked bundle directory is written through",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/bundle.rs",
+          "old": "    fs::create_dir(bundle).map_err(|err| {\n",
+          "new": "    fs::create_dir_all(bundle).map_err(|err| {\n"
+        }
+      ],
+      "tests": [
+        "tools_bundle_never_writes_through_a_link"
+      ]
+    },
+    {
+      "id": "F-WC3-BUILD-LINK",
+      "title": "tools/build writes its outputs through whatever is at their paths, so a linked OUT_DIR/capsule.wasm is written through",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/build",
+          "old": "  rm -f -- \"$1\"\n  (set -o noclobber; cat > \"$1\")\n",
+          "new": "  cat > \"$1\"\n"
+        }
+      ],
+      "tests": [
+        "tools_bundle_never_writes_through_a_link"
       ]
     }
   ]
