@@ -104,10 +104,10 @@ pub fn run_build_with_env(lane: &Path, out_dir: &Path, env: &[(&str, &str)]) {
     );
 }
 
-/// The lowercase hex sha256 of a file, from the system tool (the same one the
-/// receipt records with). Independent of any Rust crate, so `capsule` and its
-/// tests stay dependency-free: the lockfile's only registry crates are the
-/// audit's `wasmparser`/`wat` and their dependencies.
+/// The lowercase hex sha256 of a file, from the system tool: the same one
+/// `tools/build` hashes the receipt's files with, so a receipt check compares
+/// like with like. (The lab name uses no system tool: the tools crate hashes it
+/// in-process with `sha2`.)
 pub fn sha256_file(path: &Path) -> String {
     for (bin, args) in [("sha256sum", &[][..]), ("shasum", &["-a", "256"][..])] {
         let Ok(output) = Command::new(bin).args(args).arg(path).output() else {
