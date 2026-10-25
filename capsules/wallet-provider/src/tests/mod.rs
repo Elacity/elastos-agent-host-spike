@@ -12,5 +12,6 @@ mod accounts;
 mod approvals;
 mod browser_signing;
 mod proofs;
+mod storage_root;
 mod support;
 mod v2_contract;
