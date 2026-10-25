@@ -472,6 +472,39 @@
       "tests": [
         "malformed_module_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA5a",
+      "title": "Match interface names and major versions while ignoring minor and patch versions",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('.').next() == name.split('.').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA5b",
+      "title": "Read only the first nonempty top-level Component import section",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        if let Payload::ComponentImportSection(section) = payload {",
+          "new": "        if let Payload::ComponentImportSection(section) = payload {\n            if !interfaces.is_empty() { return Ok(()); }"
+        }
+      ],
+      "tests": [
+        "component_importing_wasi_filesystem_is_refused_by_name",
+        "component_importing_only_a_declared_interface_passes"
+      ]
     }
   ]
 }
