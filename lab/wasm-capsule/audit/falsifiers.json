@@ -1,5 +1,5 @@
 {
-  "about": "cwa-000 skeleton falsifiers. Paths are relative to examples/agent-host/. Each caught entry must build and its named test must run and fail. F-CWA0c must fail to build as a nested workspace; its workspace test also fails when built alone. The canonical falsify.py lab command awaits R1. Before wc-000 adds workspace membership, prove these edits only in the task's scratch workspace.",
+  "about": "Audit crate falsifiers, proved by hand in the lab workspace while canonical runner gap R1 is pending. Paths are relative to examples/agent-host/. Every caught entry must build and all its named tests must run and fail. F-CWA0c expects Cargo to refuse the nested workspace under --locked. Restore each changed file byte-identical before the next entry.",
   "falsifiers": [
     {
       "id": "F-CWA0a",
@@ -13,7 +13,9 @@
           "new": "wasmparser = \"0.258.0\""
         }
       ],
-      "tests": ["manifest_pins_only_wasmparser_and_wat_exactly"]
+      "tests": [
+        "manifest_pins_only_wasmparser_and_wat_exactly"
+      ]
     },
     {
       "id": "F-CWA0b",
@@ -27,7 +29,9 @@
           "new": "\nwat = \"=1.258.0\""
         }
       ],
-      "tests": ["manifest_pins_only_wasmparser_and_wat_exactly"]
+      "tests": [
+        "manifest_pins_only_wasmparser_and_wat_exactly"
+      ]
     },
     {
       "id": "F-CWA0c",
@@ -44,20 +48,6 @@
       "tests": []
     },
     {
-      "id": "F-CWA0d",
-      "title": "the skeleton accepts every module",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "unimplemented!(\"audit implementation lands in cwa-001\")",
-          "new": "Ok(Vec::new())"
-        }
-      ],
-      "tests": ["lib_holds_only_the_v1_signature_with_no_logic"]
-    },
-    {
       "id": "F-CWA0e",
       "title": "a second public audit entry point is added",
       "command": "lab",
@@ -69,7 +59,139 @@
           "new": "pub const AUDIT_API: u32 = 1;\n\npub fn audit_all() {}"
         }
       ],
-      "tests": ["lib_holds_only_the_v1_signature_with_no_logic"]
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA1a",
+      "title": "WASI imports are skipped",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                    imports.push(DeclaredImport {",
+          "new": "                    if import.module.starts_with(\"wasi\") { continue; }\n                    imports.push(DeclaredImport {"
+        }
+      ],
+      "tests": [
+        "undeclared_wasi_import_is_refused_by_name",
+        "clock_random_and_socket_imports_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1b",
+      "title": "Only import counts are compared",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    for import in &imports {\n        if !declared.contains(import) {",
+          "new": "    for import in imports.iter().rev().take(1) {\n        if imports.len() != declared.len() {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA1c",
+      "title": "Invalid bytes return the imports seen so far",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "return Err(Refusal::Malformed);",
+          "new": "return Ok(imports);"
+        }
+      ],
+      "tests": [
+        "malformed_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1d",
+      "title": "Custom-section payloads bypass the code check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "if false && section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1e",
+      "title": "The Malformed Display string drifts from API v1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Self::Malformed => f.write_str(\"malformed module\"),",
+          "new": "Self::Malformed => f.write_str(\"malformed input\"),"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1",
+        "malformed_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1f",
+      "title": "Validation narrows the default features to WASM1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::WASM1)"
+        }
+      ],
+      "tests": [
+        "zero_import_module_passes"
+      ]
+    },
+    {
+      "id": "F-CWA1g",
+      "title": "Only single imports are read; compact groups are skipped",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "section.into_imports()",
+          "new": "section.into_iter().filter_map(|group| match group { Ok(wasmparser::Imports::Single(_, import)) => Some(Ok(import)), Ok(_) => None, Err(error) => Some(Err(error)) })"
+        }
+      ],
+      "tests": [
+        "compact_import_groups_are_listed_and_refused_by_name"
+      ]
+    },
+    {
+      "id": "F-CWA1h",
+      "title": "Success copies declarations instead of imports read",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    Ok(imports)\n}",
+          "new": "    Ok(declared.to_vec())\n}"
+        }
+      ],
+      "tests": [
+        "compact_import_groups_are_listed_and_refused_by_name"
+      ]
     }
   ]
 }

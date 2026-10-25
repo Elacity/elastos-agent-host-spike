@@ -1,0 +1,1 @@
+cwa-001: wrote API v1, implemented validated core-import audit and named refusals, added eight tests and kept two manifest tests; fmt and locked tests passed (10/10); by hand, F-CWA0a/b/e and F-CWA1a–h caught all 13 named test runs, F-CWA0c failed under --locked before tests, and all edited files restored byte-identical; canonical lab runner awaits R1.
