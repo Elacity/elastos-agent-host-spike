@@ -92,15 +92,26 @@ storage root:
   return the exact storage error. Restoring the file and repeating `Init`
   restores normal nickname access.
 
-Nickname presence is confirmed with one metadata check, so a denied lookup is
-not mistaken for absence. Every decode rule then belongs to `elastos_identity`:
-envelope parsing, nonce validation, decryption, UTF-8 conversion, trimming and
-empty-value handling. A metadata denial reports `Metadata lookup failed: ...`;
-a read denial or malformed envelope returns the identity library's exact error
-under `did-provider: failed to load nickname: ...`. The provider unit test
-compares `Init`'s reason with
-`elastos_identity::load_nickname_with_device_key` for seven malformed fixtures,
-so a second interpretation fails the test.
+`read_optional_file` owns presence and read errors for nickname and persona
+files. It checks presence once and reads the file; only confirmed absence
+returns an empty result. The nickname loader decodes those bytes directly.
+The identity library's path loader remains a compatibility reference in tests.
+A metadata denial reports `Metadata lookup failed: ...`; a nickname read
+denial reports the OS reason under `did-provider: failed to load nickname: ...`.
+The byte decoder preserves the identity envelope, encryption, UTF-8 conversion,
+trimming and empty-value rules. Unit tests compare exact errors for seven
+malformed fixtures and values for plain, padded, Unicode and empty nicknames
+against `elastos_identity::load_nickname_with_device_key`.
+
+`nickname_metadata_change_reports_storage_error` runs the unit-test binary
+under the same profile. A test-only callback changes the nickname path to an
+outside symlink immediately after the reader's successful metadata lookup.
+The test confirms that the next metadata lookup returns EPERM, then requires
+both `Init` and `get_nickname` to return the exact `storage_error` from the
+data read. It also checks recovery after the permitted file is restored and
+confirms that the outside file stays unchanged. The callback exists only in
+the test build. `nickname_reload_clears_previous_value_when_absent` requires a
+later `Init` with empty storage to clear the previous nickname.
 
 The tests write skip reasons directly to stderr when `/usr/bin/sandbox-exec`
 is unavailable, so ordinary successful `cargo test` output shows which
@@ -109,7 +120,8 @@ confinement checks were skipped.
 ## Falsifier runs
 
 Executed on 2026-10-25 from this worktree. Each mutation was restored before
-the next run; the final tree passes the full gates.
+the next run. Items 1–5 record the earlier runs; items 6–8 cover the metadata,
+nickname-reset and path-change rules added to this record.
 
 1. Replaced `(deny default)` with `(allow default)`, keeping `(version 1)`
    first. The profile loaded, the provider printed
@@ -132,3 +144,20 @@ the next run; the final tree passes the full gates.
    `left: "did-provider: failed to load nickname: rejected"`,
    `right: "did-provider: failed to load nickname: EOF while parsing an object at line 1 column 1"`,
    proving the provider must return the library's refusal.
+6. Changed the metadata-error branch in `read_optional_file` to `Ok(None)`.
+   `cargo test --manifest-path capsules/did-provider/Cargo.toml --locked --offline --test confine _metadata_denied -- --nocapture`
+   failed both metadata tests. `outside_nickname_metadata_denied` received
+   successful `Init` instead of `storage_error`.
+   `outside_persona_metadata_denied` received `Failed to persist persona key:
+   Operation not permitted (os error 1)` instead of `Metadata lookup failed:
+   Operation not permitted (os error 1)`.
+7. Changed nickname reload to assign state only when the loaded value is
+   `Some`. `cargo test --manifest-path capsules/did-provider/Cargo.toml --locked --offline --bin did-provider tests::nickname_reload_clears_previous_value_when_absent -- --nocapture`
+   failed with `Expected an absent nickname, got Ok` and nickname `alice`.
+   This confirms that successful reload from empty storage clears the old value.
+8. Added `if !path.exists() { return Ok(None); }` after the successful metadata
+   lookup in `read_optional_file`.
+   `cargo test --manifest-path capsules/did-provider/Cargo.toml --locked --offline --bin did-provider tests::nickname_metadata_change_reports_storage_error -- --nocapture`
+   failed after the controlled symlink change: `Init` returned `Ok` instead of
+   `did-provider: failed to load nickname: Operation not permitted (os error 1)`.
+   The profile loaded and the test confirmed EPERM before the response assertion.

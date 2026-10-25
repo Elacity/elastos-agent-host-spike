@@ -581,7 +581,7 @@ fn nickname_read_refusal(allow_metadata: bool) {
         ConfinedProvider::spawn(&storage)
     };
     let reason = if allow_metadata {
-        // The identity library reads the file and returns the OS refusal.
+        // The shared reader returns the OS refusal from the data read.
         format!(
             "did-provider: failed to load nickname: {}",
             permission_error()
