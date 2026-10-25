@@ -1001,6 +1001,89 @@
    "tests": [
     "sparks_http::a_vertical_tab_in_transfer_encoding_is_refused"
    ]
+  },
+  {
+   "id": "FE01",
+   "title": "bind_change selects edits only, so a dispatched restore sends no request",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .filter(|step| is_write(step.kind) && step.effect_id == effect_id)",
+     "new": "        .filter(|step| step.kind == ProposalKind::Edit && step.effect_id == effect_id)"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text"
+   ]
+  },
+  {
+   "id": "FE02",
+   "title": "only an edit is denied when its change fails, so a failed restore stays dispatched",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if is_write(step.kind)\n                && step.effect_id == effect_id\n                && step.state == StepState::Dispatched\n                && !step.has_result",
+     "new": "            if step.kind == ProposalKind::Edit\n                && step.effect_id == effect_id\n                && step.state == StepState::Dispatched\n                && !step.has_result"
+    }
+   ],
+   "tests": [
+    "tests::a_failed_restore_change_denies_its_step",
+    "tests::a_restore_whose_version_moved_is_refused_by_the_write_path"
+   ]
+  },
+  {
+   "id": "FE03",
+   "title": "the single write path records edits only, so a granted restore is not recorded",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !is_write(step.kind)\n        || step.state != StepState::Dispatched",
+     "new": "    if step.kind != ProposalKind::Edit\n        || step.state != StepState::Dispatched"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_restore_is_recorded_by_the_single_write_path"
+   ]
+  },
+  {
+   "id": "FE04",
+   "title": "a restore may be asked without a grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(grant) = step.grant.as_deref() else {\n        return false;\n    };\n    if grant.is_empty() {\n        return false;\n    }",
+     "new": "    if step.kind == ProposalKind::Restore {\n        return current_observation(&journal.events, &step.resource)\n            .is_some_and(|row| row.version == seen_version);\n    }\n    let Some(grant) = step.grant.as_deref() else {\n        return false;\n    };\n    if grant.is_empty() {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_restore_without_a_grant_is_refused_and_records_nothing",
+    "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text"
+   ]
+  },
+  {
+   "id": "FE05",
+   "title": "a restore of an older version is proposed instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if current.version != version {\n        return Err(\"stale\");\n    }",
+     "new": "    if current.version < version {\n        return Err(\"stale\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text",
+    "tests::a_restore_proposes_an_observed_version_and_does_not_apply_it"
+   ]
   }
  ]
 }

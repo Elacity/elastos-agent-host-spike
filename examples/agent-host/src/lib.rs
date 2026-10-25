@@ -33,12 +33,13 @@
 //! A provider write may be asked only with a grant and the current version.
 //! The guest does not apply that write. A run proposal records a project
 //! resource and keeps its arguments as data. A cancelled run does not start.
-//! A restore proposes an observed version and does not apply it. An unknown
-//! version is refused. A version that is no longer current is refused until
-//! that version is read again. A hosted proposal names a model resource and
-//! has no secret field. A missing grant denies it. A child proposal records
-//! a narrower resource and does not inherit the parent grant. A project
-//! proposal stores `localhost://Users/<root>/Projects/<name>` and no host path.
+//! A restore writes an observed version back through the same granted write
+//! path as an edit. An unknown version is refused. A version that is no
+//! longer current is refused until that version is read again. A hosted
+//! proposal names a model resource and has no secret field. A missing grant
+//! denies it. A child proposal records a narrower resource and does not
+//! inherit the parent grant. A project proposal stores
+//! `localhost://Users/<root>/Projects/<name>` and no host path.
 //! A project tree hash changes when a non-entrypoint file changes. A scaffold
 //! write follows the read and version rules and does not apply. A run seat
 //! is `microvm`. A run result is an exit code and a capped log, recorded
@@ -2563,17 +2564,18 @@ struct BoundEdit {
 }
 
 /// Check every file of one change, before anything is sent or recorded.
-/// Each step must be a dispatched edit with a grant and no result; its path
-/// must pass `path_refusal` and name a file no other step of the change
-/// names; no write outside this change may still be open; the file's current
-/// read must be the version the edit was made against, carry a revision, and
-/// still show the old text exactly once. One miss refuses the whole change.
+/// Each step must be a dispatched edit or restore with a grant and no result;
+/// its path must pass `path_refusal` and name a file no other step of the
+/// change names; no write outside this change may still be open; the file's
+/// current read must be the version the step was made against, carry a
+/// revision, and still show the old text exactly once. One miss refuses the
+/// whole change.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn bind_change(journal: &Journal, effect_id: u64) -> Result<Vec<BoundEdit>, Refusal> {
     let steps: Vec<&Step> = journal
         .steps
         .iter()
-        .filter(|step| step.kind == ProposalKind::Edit && step.effect_id == effect_id)
+        .filter(|step| is_write(step.kind) && step.effect_id == effect_id)
         .collect();
     if steps.is_empty() {
         return Err(Refusal::NoChange);
@@ -2639,10 +2641,11 @@ fn events_show_whole(events: &[SurfaceNode], resource: &str, version: u64) -> bo
         .any(|(row, _)| row.version == version && row.window.is_none())
 }
 
-/// The one provider request for a change: every file, each with the Runtime
-/// revision it was read at (`if_revision`), the lines it may touch, and the
-/// text to replace there. The provider applies all files or none. A change
-/// that does not bind sends nothing and writes one refusal record.
+/// The one provider request for a change or a restore: every file, each with
+/// the Runtime revision it was read at (`if_revision`), the lines it may
+/// touch, and the text to replace there. The provider applies all files or
+/// none. A change that does not bind sends nothing and writes one refusal
+/// record.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
     let result = bind_change(journal, effect_id);
@@ -2672,10 +2675,10 @@ fn request_body(bound: &[BoundEdit]) -> Vec<u8> {
         .into_bytes()
 }
 
-/// Record that the provider wrote a whole change. `written` names each file
-/// of the change once, with the revision the provider gave its new text.
-/// Every file is checked first; one miss records nothing for any file and
-/// denies every step of the change. Each file then gets a new read: the
+/// Record that the provider wrote a whole change or restore. `written` names
+/// each file of the change once, with the revision the provider gave its new
+/// text. Every file is checked first; one miss records nothing for any file
+/// and denies every step of the change. Each file then gets a new read: the
 /// whole new text when the old version was read whole, otherwise only the
 /// edited lines. When a file has no version number left, nothing is
 /// recorded and every step is denied. Every refusal writes one refusal
@@ -2701,7 +2704,7 @@ fn note_change_wrote_checked(
 ) -> Result<(), Refusal> {
     let deny = |journal: &mut Journal| {
         for step in journal.steps.iter_mut() {
-            if step.kind == ProposalKind::Edit
+            if is_write(step.kind)
                 && step.effect_id == effect_id
                 && step.state == StepState::Dispatched
                 && !step.has_result
@@ -2810,10 +2813,10 @@ fn provider_write_may_be_asked(journal: &Journal, step_id: u64, seen_version: u6
     row.version == seen_version
 }
 
-/// Record that the provider wrote one granted edit. The new text becomes
-/// the current read. A write that can never apply is denied, so it does not
-/// keep later writes waiting. This does not write a file on the host, and a
-/// grant string in the journal is not a Runtime grant.
+/// Record that the provider wrote one granted edit or restore. The new text
+/// becomes the current read. A write that can never apply is denied, so it
+/// does not keep later writes waiting. This does not write a file on the
+/// host, and a grant string in the journal is not a Runtime grant.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn note_provider_wrote(journal: &mut Journal, step_id: u64) -> bool {
     let Some(index) = journal.steps.iter().position(|step| step.id == step_id) else {
@@ -2828,7 +2831,7 @@ fn note_provider_wrote(journal: &mut Journal, step_id: u64) -> bool {
     {
         return false;
     }
-    if step.kind != ProposalKind::Edit
+    if !is_write(step.kind)
         || step.state != StepState::Dispatched
         || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
         || step.has_result
@@ -3216,7 +3219,10 @@ fn observed_text_at(events: &[SurfaceNode], resource: &str, version: u64) -> Opt
 }
 
 /// Propose restoring an observed version. An unknown version, or a version
-/// that is no longer current, creates no step. This does not apply the text.
+/// that is no longer current, creates no step. The step keeps the observed
+/// text as the text to replace and as the text to write, so a granted
+/// dispatch sends the restore through the same `bind_change` and
+/// `note_change_wrote` path an edit uses. This does not write.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_restore(
     journal: &mut Journal,
@@ -3240,7 +3246,9 @@ fn propose_restore(
         .expect("just pushed");
     step.kind = ProposalKind::Restore;
     step.resource = resource.to_string();
+    step.old = text.clone();
     step.new = text;
+    step.seen_version = Some(version);
     Ok(id)
 }
 
@@ -9649,6 +9657,204 @@ mod tests {
             current_observed_text(&journal.events, resource).as_deref(),
             Some("one")
         );
+    }
+
+    #[test]
+    fn a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "one\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            None,
+            false,
+            "two\n"
+        ));
+        let before = journal.steps.len();
+        assert_eq!(propose_restore(&mut journal, NOTES, 9), Err("unknown"));
+        assert_eq!(propose_restore(&mut journal, NOTES, 1), Err("stale"));
+        assert_eq!(journal.steps.len(), before);
+        let id = propose_restore(&mut journal, NOTES, 2).unwrap();
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.kind, ProposalKind::Restore);
+        assert_eq!(step.old, "two\n");
+        assert_eq!(step.new, "two\n");
+        assert_eq!(step.seen_version, Some(2));
+        assert!(step.grant.is_none());
+        assert_eq!(step.state, StepState::Prepared);
+        assert!(!provider_write_may_be_asked(&journal, id, 2));
+        granted(&mut journal, &[id]);
+        assert!(provider_write_may_be_asked(&journal, id, 2));
+        let request: serde_json::Value =
+            serde_json::from_slice(&edit_request(&mut journal, id).unwrap()).unwrap();
+        assert_eq!(request["op"], "edit");
+        assert_eq!(request["all_or_none"], true);
+        assert_eq!(request["files"][0]["path"], NOTES);
+        assert_eq!(request["files"][0]["if_revision"], "rev-2");
+        assert_eq!(request["files"][0]["old"], "two\n");
+        assert_eq!(request["files"][0]["new"], "two\n");
+        assert_eq!(
+            note_change_wrote(&mut journal, id, &[(NOTES, "rev-3")]),
+            Ok(())
+        );
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert!(step.has_result);
+        assert_eq!(step.state, StepState::Dispatched);
+        assert_eq!(
+            current_observed_text(&journal.events, NOTES).as_deref(),
+            Some("two\n")
+        );
+        let row = current_observation(&journal.events, NOTES).unwrap();
+        assert_eq!(row.version, 3);
+        assert_eq!(row.revision.as_deref(), Some("rev-3"));
+        assert_eq!(
+            observed_text_at(&journal.events, NOTES, 1).as_deref(),
+            Some("one\n")
+        );
+    }
+
+    #[test]
+    fn a_restore_without_a_grant_is_refused_and_records_nothing() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "one\n"
+        ));
+        let id = propose_restore(&mut journal, NOTES, 1).unwrap();
+        assert!(!provider_write_may_be_asked(&journal, id, 1));
+        assert!(!dispatch(&mut journal, id));
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.state, StepState::Denied);
+        assert!(step.grant.is_none());
+        assert!(!step.has_result);
+        let observed = without_refusal_records(&journal.events);
+        let refusals = refusal_records(&journal).len();
+        assert_eq!(edit_request(&mut journal, id), Err("not dispatched"));
+        assert_eq!(
+            note_change_wrote(&mut journal, id, &[(NOTES, "rev-2")]),
+            Err("not dispatched")
+        );
+        assert_eq!(without_refusal_records(&journal.events), observed);
+        assert_eq!(refusal_records(&journal).len(), refusals + 2);
+        assert!(
+            !journal
+                .steps
+                .iter()
+                .find(|step| step.id == id)
+                .unwrap()
+                .has_result
+        );
+    }
+
+    #[test]
+    fn a_granted_restore_is_recorded_by_the_single_write_path() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            1,
+            "rev-1",
+            None,
+            false,
+            "h1{}\n"
+        ));
+        let id = propose_restore(&mut journal, STYLE, 1).unwrap();
+        granted(&mut journal, &[id]);
+        assert!(provider_write_may_be_asked(&journal, id, 1));
+        let before = journal.events.len();
+        assert!(note_provider_wrote(&mut journal, id));
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert!(step.has_result);
+        assert_eq!(step.state, StepState::Dispatched);
+        assert_eq!(journal.events.len(), before + 2);
+        assert!(read_observation(&journal.events[before]).is_some());
+        assert_eq!(journal.events[before].text, "h1{}\n");
+        assert_eq!(journal.events[before + 1].role, Role::ToolResult);
+        assert_eq!(journal.events[before + 1].text, "h1{}\n");
+        assert_eq!(
+            current_observed_text(&journal.events, STYLE).as_deref(),
+            Some("h1{}\n")
+        );
+        assert_eq!(
+            current_observation(&journal.events, STYLE).unwrap().version,
+            2
+        );
+        assert!(!note_provider_wrote(&mut journal, id));
+    }
+
+    #[test]
+    fn a_failed_restore_change_denies_its_step() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "one\n"
+        ));
+        let id = propose_restore(&mut journal, NOTES, 1).unwrap();
+        granted(&mut journal, &[id]);
+        let before = without_refusal_records(&journal.events);
+        assert_eq!(
+            note_change_wrote(&mut journal, id, &[(STYLE, "rev-2")]),
+            Err("written files do not match the change")
+        );
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.state, StepState::Denied);
+        assert!(!step.has_result);
+        assert_eq!(without_refusal_records(&journal.events), before);
+    }
+
+    #[test]
+    fn a_restore_whose_version_moved_is_refused_by_the_write_path() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "one\n"
+        ));
+        let id = propose_restore(&mut journal, NOTES, 1).unwrap();
+        granted(&mut journal, &[id]);
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            None,
+            false,
+            "two\n"
+        ));
+        let before = without_refusal_records(&journal.events);
+        assert_eq!(edit_request(&mut journal, id), Err("stale"));
+        assert_eq!(
+            note_change_wrote(&mut journal, id, &[(NOTES, "rev-3")]),
+            Err("stale")
+        );
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.state, StepState::Denied);
+        assert!(!step.has_result);
+        assert_eq!(without_refusal_records(&journal.events), before);
     }
 
     #[test]

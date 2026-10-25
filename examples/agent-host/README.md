@@ -42,10 +42,11 @@ A provider write may be asked only when the step has a grant and the
 version is still current. The guest does not apply the write. A run
 proposal stores a `localhost://` project and its arguments as data. A host
 path creates no step. Cancel before dispatch does not start a process.
-A restore proposes an observed version and does not apply it. An unknown
-version is refused. A version that is no longer current is refused until
-that version is read again. A hosted proposal names a model resource and
-has no secret field. A missing grant denies it the same way a read is denied.
+A restore writes an observed version back through the same granted write
+path as an edit. An unknown version is refused. A version that is no longer
+current is refused until that version is read again. A hosted proposal
+names a model resource and has no secret field. A missing grant denies it
+the same way a read is denied.
 A child proposal records a resource under the parent's resource. It does
 not receive the parent's grant. `child-grant` is a test token, not a
 Runtime grant. A project proposal stores
