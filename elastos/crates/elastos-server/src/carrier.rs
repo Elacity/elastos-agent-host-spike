@@ -177,7 +177,7 @@ const _: () = assert!(CARRIER_PROVIDER_REPLY_MAX_BYTES >= GOSSIP_PEEK_MAX_BATCH_
 /// base64 stream chunks, plus room for the chunk fields (under 100 bytes per
 /// 64 KiB chunk) and the reply envelope.
 const CARRIER_WHOLE_CONTENT_REPLY_MAX_BYTES: u64 =
-    (crate::content::MAX_WHOLE_CONTENT_BYTES as u64).div_ceil(3) * 4 + 1024 * 1024;
+    (elastos_common::MAX_WHOLE_CONTENT_BYTES as u64).div_ceil(3) * 4 + 1024 * 1024;
 /// How long a peer may take to send one complete request line.
 const CARRIER_PEER_LINE_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 /// How long Runtime waits for an open-ended provider answer. Long model runs

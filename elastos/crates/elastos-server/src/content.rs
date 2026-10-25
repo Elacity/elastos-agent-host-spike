@@ -100,9 +100,6 @@ const OBJECT_MANIFEST_PATH: &str = "_elastos_object.json";
 const SEALED_OBJECT_PATH: &str = "sealed.json";
 
 pub const CONTENT_OBJECT_MANIFEST_PATH: &str = OBJECT_MANIFEST_PATH;
-/// Largest single file Runtime reads whole: one gateway response, one Library
-/// upload, one whole-content answer from a Carrier holder.
-pub(crate) const MAX_WHOLE_CONTENT_BYTES: usize = 100 * 1024 * 1024;
 const MAX_LOCAL_OBJECT_DIRS: usize = 16;
 const MAX_LOCAL_OBJECT_WALK_DEPTH: usize = 8;
 // Bounds the one local object file Runtime reads whole: 4096 manifest entries.

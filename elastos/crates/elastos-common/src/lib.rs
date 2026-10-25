@@ -28,6 +28,10 @@ use sha2::{Digest, Sha256};
 pub use timestamp::{SecureTimestamp, CLOCK_SKEW_TOLERANCE_SECS};
 pub use types::{CapsuleId, CapsuleStatus};
 
+/// Largest single file read whole into memory: one local IPFS read, one gateway
+/// response, one Library upload, one whole-content answer from a Carrier holder.
+pub const MAX_WHOLE_CONTENT_BYTES: usize = 100 * 1024 * 1024;
+
 /// Convert a Runtime principal/profile label into the non-reversible Browser
 /// profile key used for profile-disk names and guest boot args.
 pub fn browser_profile_key_from_value(value: &str) -> Option<String> {
