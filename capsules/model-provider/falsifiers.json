@@ -713,6 +713,87 @@
       "tests": [
         "a killed provider edit is recovered"
       ]
+    },
+    {
+      "id": "PV35",
+      "title": "main runs the default list instead of --from",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    entries = load(parsed.path)\n",
+          "new": "    entries = load(DATA)\n"
+        }
+      ],
+      "tests": [
+        "selected list is executed"
+      ]
+    },
+    {
+      "id": "PV36",
+      "title": "recovery does not skip a live caller's backup",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "                LIVE_BACKUPS.add(backup.resolve())\n",
+          "new": "                pass\n"
+        }
+      ],
+      "tests": [
+        "a nested run leaves the caller's edit active"
+      ]
+    },
+    {
+      "id": "PV37",
+      "title": "a fresh run ignores --keep-backups",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if not parsed.keep_backups:\n        recover_backups()",
+          "new": "    if True:\n        recover_backups()"
+        }
+      ],
+      "tests": [
+        "keep backups keeps the caller's backup"
+      ]
+    },
+    {
+      "id": "PV38",
+      "title": "an existing backup is consumed by error recovery",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "                if backup.exists():\n                    raise SystemExit(f\"{backup}: a backup is already there; stop\")\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a backup collision is not consumed"
+      ]
+    },
+    {
+      "id": "PV39",
+      "title": "a zombie-only group after the guard reap fails closure",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "    errno == Some(libc::ESRCH) || exited_guard_signal_can_settle(true, errno)",
+          "new": "    errno == Some(libc::ESRCH)"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::a_reaped_guard_with_a_zombie_only_group_is_closed",
+        "local_llama::tests::group_absence_accepts_only_gone_or_darwin_zombie_only_groups"
+      ]
     }
   ]
 }

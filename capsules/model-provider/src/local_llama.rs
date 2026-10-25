@@ -919,7 +919,7 @@ async fn finish_guard_shutdown(
     loop {
         if unsafe { libc::kill(-guard_group, 0) } != 0 {
             let errno = std::io::Error::last_os_error().raw_os_error();
-            return if errno == Some(libc::ESRCH) {
+            return if guard_group_is_absent(errno) {
                 Ok(())
             } else {
                 Err(guard_close_failed("guard_absence", errno))
@@ -948,6 +948,15 @@ async fn finish_guard_shutdown(
 #[cfg(unix)]
 fn exited_guard_signal_can_settle(guard_exited: bool, errno: Option<i32>) -> bool {
     cfg!(target_os = "macos") && guard_exited && errno == Some(libc::EPERM)
+}
+
+/// True only when a failed group probe proves no member can still run. ESRCH
+/// means the group is gone. Darwin's killpg excludes zombies and reports EPERM
+/// for a zombie-only group (XNU bsd/kern/kern_sig.c, killpg1); the guard is
+/// already reaped, so a member that could still run would accept the signal.
+#[cfg(unix)]
+fn guard_group_is_absent(errno: Option<i32>) -> bool {
+    errno == Some(libc::ESRCH) || exited_guard_signal_can_settle(true, errno)
 }
 
 fn guard_close_failed(stage: &'static str, errno: Option<i32>) -> LocalLlamaFault {
@@ -1669,6 +1678,62 @@ mod tests {
             "post-reap shutdown signalled the surviving member"
         );
         assert!(!process_exists(member_pid));
+    }
+
+    #[test]
+    fn group_absence_accepts_only_gone_or_darwin_zombie_only_groups() {
+        assert!(guard_group_is_absent(Some(libc::ESRCH)));
+        assert!(!guard_group_is_absent(None));
+        assert!(!guard_group_is_absent(Some(libc::EACCES)));
+        assert_eq!(
+            guard_group_is_absent(Some(libc::EPERM)),
+            cfg!(target_os = "macos"),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reaped_guard_with_a_zombie_only_group_is_closed() {
+        use std::os::unix::process::CommandExt as _;
+
+        // Darwin's killpg excludes zombies and reports EPERM for a zombie-only
+        // group (XNU bsd/kern/kern_sig.c, killpg1). The provider cannot reap
+        // grandchildren, so that state proves closure, not a failed close.
+        let mut guard_command = Command::new("/bin/cat");
+        guard_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        guard_command.as_std_mut().process_group(0);
+        let mut guard = guard_command.spawn().unwrap();
+        let group = guard.id().unwrap() as libc::pid_t;
+        let mut member_command = Command::new("/bin/cat");
+        member_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        member_command.as_std_mut().process_group(group);
+        let mut member = member_command.spawn().unwrap();
+        let member_pid = member.id().unwrap() as libc::pid_t;
+        // Leave both unreaped: the guard is reaped by the shutdown path, and
+        // the member stays this test's zombie for the group probe.
+        assert_eq!(unsafe { libc::kill(member_pid, libc::SIGKILL) }, 0);
+        assert_eq!(unsafe { libc::kill(group, libc::SIGKILL) }, 0);
+        let result = tokio::time::timeout(
+            FIXTURE_EVENT_TIMEOUT,
+            finish_guard_shutdown(&mut guard, group, Duration::from_millis(100)),
+        )
+        .await
+        .unwrap();
+        let member_status = member.wait().await.unwrap();
+        assert!(!member_status.success());
+        assert_eq!(
+            result,
+            Ok(()),
+            "a zombie-only group after the guard reap must count as closed"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

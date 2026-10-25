@@ -60,8 +60,10 @@ BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
 COMMANDS = ("host", "provider", "e2e", "selftest")
 # Self-test scratch stays in this lane's report directory, so a run writes
-# only below a path the lane owns.
+# only below a path the lane owns. A nested self-test child wipes
+# SELF_TEST_DIR, so a caller-owned fixture of a nested run lives beside it.
 SELF_TEST_DIR = HERE / "handoff" / "reports" / ".falsify-selftest"
+CALLER_DIR = HERE / "handoff" / "reports" / ".falsify-caller"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
 # a test body can print anything, including a fake FAILED line, before it.
@@ -231,16 +233,22 @@ PROVIDER_TARGETS = (
     "capsules/model-provider/src/adapters.rs",
 )
 
+# Backups owned by a live Mutation in this process. Startup recovery restores
+# a killed run's leftovers; a nested run must leave a caller's edit alone.
+LIVE_BACKUPS = set()
+
 
 def recover_backups():
     """Restore this runner's originals: agent-host files and this lane's exact
     provider targets. Other provider files stay with their owning runners.
-    Recovery is independent of the data file selected for the next run."""
+    Recovery is independent of the data file selected for the next run, and
+    it never takes a backup a live edit in this process owns."""
     backups = set(HERE.rglob("*" + BACKUP_SUFFIX))
     for name in PROVIDER_TARGETS:
         target = REPO / name
         backups.update(target.parent.glob(target.name + BACKUP_SUFFIX))
-    for backup in sorted(backups):
+    owned = {backup.resolve() for backup in LIVE_BACKUPS}
+    for backup in sorted(b for b in backups if b.resolve() not in owned):
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
         os.utime(target)
@@ -295,10 +303,16 @@ class Mutation:
             for path, text in texts.items():
                 original = path.read_bytes()
                 backup = path.with_name(path.name + BACKUP_SUFFIX)
+                # An existing backup belongs to another run: a caller's live
+                # edit, or a killed run this one must not recover. Refuse
+                # before recording or linking, so error recovery cannot take it.
+                if backup.exists():
+                    raise SystemExit(f"{backup}: a backup is already there; stop")
                 # Record the backup before making it: an interrupt between the
                 # link and the next line leaves the source unchanged, and a
                 # backup that does exist is still restored.
                 self.applied.append((path, backup, original))
+                LIVE_BACKUPS.add(backup.resolve())
                 os.link(path, backup)
                 tmp = path.with_name(path.name + ".falsify-tmp")
                 try:
@@ -323,14 +337,17 @@ class Mutation:
         saved = block_interruptions()
         try:
             for path, backup, original in reversed(self.applied):
-                if not backup.exists():
-                    continue
-                os.replace(backup, path)
-                # The rename brings back the original's old mtime; touch it, so
-                # cargo does not take the mutated build for a fresh one.
-                os.utime(path)
-                if path.read_bytes() != original:
-                    raise SystemExit(f"{path}: restored bytes differ from the saved original; stop")
+                try:
+                    if not backup.exists():
+                        continue
+                    os.replace(backup, path)
+                    # The rename brings back the original's old mtime; touch it, so
+                    # cargo does not take the mutated build for a fresh one.
+                    os.utime(path)
+                    if path.read_bytes() != original:
+                        raise SystemExit(f"{path}: restored bytes differ from the saved original; stop")
+                finally:
+                    LIVE_BACKUPS.discard(backup.resolve())
             self.applied = []
         finally:
             restore_interruptions(saved)
@@ -1014,6 +1031,168 @@ os.kill(os.getpid(), signal.SIGKILL)
     return ok
 
 
+def a_nested_run_leaves_the_callers_edit_active():
+    """The reviewer's order-sensitive repro: an outer survives edit stays
+    active across a nested run. A run that consumed the caller's backup would
+    make the later case fail against clean code: a false catch."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        data = SELF_TEST_DIR / "nested.json"
+        data.write_text('{"falsifiers": []}', encoding="utf-8")
+        not_json = SELF_TEST_DIR / "not-json.json"
+        not_json.write_text("this is not JSON\n", encoding="utf-8")
+        caller = SELF_TEST_DIR / "probe.py"
+        caller.write_text("raise SystemExit(1)\n", encoding="utf-8")
+        backup = caller.with_name(caller.name + BACKUP_SUFFIX)
+        entry = {"id": "ST", "command": "selftest", "expect": "survives",
+                 "edits": [{"file": "probe.py", "old": "SystemExit(1)",
+                            "new": "SystemExit(0)"}],
+                 "tests": ["the caller's edit is still active"]}
+        with Mutation(entry, SELF_TEST_DIR):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["--from", str(data), "--list"])
+            active = caller.read_text() == "raise SystemExit(0)\n" and backup.exists()
+            refused = load_refused(not_json, "the data file is not JSON")
+            still_passes = run(["python3", "-I", str(caller)], SELF_TEST_DIR)[0] == 0
+            got = verdict(entry, False, {"the caller's edit is still active":
+                                         "passed" if still_passes else "failed"})
+            print(f"self-test: nested run: exit={code}, caller edit active={active}, "
+                  f"malformed json refused={refused}, verdict={got[1]}")
+            if code != 0 or not active or not refused:
+                ok = False
+            if got[:2] != (True, "SURVIVED (expected, by design)"):
+                ok = False
+            nested = SELF_TEST_DIR / "nested.txt"
+            nested.write_text("original\n", encoding="utf-8")
+            inner = {"id": "ST", "command": "selftest", "expect": "caught",
+                     "edits": [{"file": "nested.txt", "old": "original",
+                                "new": "mutated"}], "tests": []}
+            with Mutation(inner, SELF_TEST_DIR):
+                pass
+            isolated = (nested.read_text() == "original\n"
+                        and not nested.with_name(nested.name + BACKUP_SUFFIX).exists()
+                        and caller.read_text() == "raise SystemExit(0)\n"
+                        and backup.exists())
+            print(f"self-test: nested edit isolated={isolated}")
+            if not isolated:
+                ok = False
+        restored = (caller.read_text() == "raise SystemExit(1)\n"
+                    and not backup.exists())
+        if not restored:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def keep_backups_keeps_the_callers_backup():
+    """--keep-backups stops a nested run from taking a backup that belongs to
+    the caller's live edit (task 005)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        data = SELF_TEST_DIR / "empty.json"
+        data.write_text('{"falsifiers": []}', encoding="utf-8")
+        caller = SELF_TEST_DIR / "caller.txt"
+        caller.write_text("mutated bytes\n", encoding="utf-8")
+        backup = caller.with_name(caller.name + BACKUP_SUFFIX)
+        backup.write_text("original bytes\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--keep-backups", "--from", str(data), "--list"])
+        kept = (code == 0 and caller.read_text() == "mutated bytes\n"
+                and backup.read_text() == "original bytes\n")
+        print(f"self-test: --keep-backups: exit={code}, caller backup kept={kept}")
+        if not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_backup_collision_is_not_consumed():
+    """A backup that another run owns is refused before it is linked or
+    recorded, so error recovery cannot consume it (task 005)."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        caller = SELF_TEST_DIR / "caller.txt"
+        caller.write_text("mutated bytes\n", encoding="utf-8")
+        backup = caller.with_name(caller.name + BACKUP_SUFFIX)
+        backup.write_text("original bytes\n", encoding="utf-8")
+        entry = {"id": "ST", "command": "selftest", "expect": "caught",
+                 "edits": [{"file": "caller.txt", "old": "mutated bytes",
+                            "new": "edited bytes"}], "tests": []}
+        try:
+            with Mutation(entry, SELF_TEST_DIR):
+                pass
+        except SystemExit:
+            refused = True
+        except BaseException:
+            refused = False
+        else:
+            refused = False
+        kept = (caller.read_text() == "mutated bytes\n"
+                and backup.read_text() == "original bytes\n")
+        print(f"self-test: backup collision: refused={refused}, caller files kept={kept}")
+        return refused and kept
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def selected_list_is_executed():
+    """--from runs exactly the selected list: a crafted entry runs by its own
+    id and the provider list displays its own ids, never the default list.
+    Both nested runs leave the caller's edit active."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    shutil.rmtree(CALLER_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        CALLER_DIR.mkdir(parents=True, exist_ok=True)
+        probe = CALLER_DIR / "probe.txt"
+        probe.write_text("original bytes\n", encoding="utf-8")
+        backup = probe.with_name(probe.name + BACKUP_SUFFIX)
+        data = SELF_TEST_DIR / "chosen.json"
+        data.write_text(json.dumps({"falsifiers": [
+            {"id": "ST01", "title": "the selected list", "command": "selftest",
+             "expect": "survives", "edits": [],
+             "tests": ["from option selects path"]}]}), encoding="utf-8")
+        provider = REPO / "capsules" / "model-provider" / "falsifiers.json"
+        provider_ids = {entry["id"] for entry in load(provider)}
+        default_ids = {entry["id"] for entry in load(DATA)}
+        caller = {"id": "ST", "command": "selftest", "expect": "survives",
+                  "edits": [{"file": "probe.txt", "old": "original bytes",
+                             "new": "mutated bytes"}], "tests": []}
+        with Mutation(caller, CALLER_DIR):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                ran = main(["--from", str(data), "ST01"])
+            ran_chosen = ran == 0 and "ST01" in output.getvalue()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                listed = main(["--from", str(provider), "--list"])
+            shown = {line.split()[0] for line in output.getvalue().splitlines()
+                     if line.strip()}
+            provider_listed = (listed == 0 and shown == provider_ids
+                               and not shown & (default_ids - provider_ids))
+            active = probe.read_text() == "mutated bytes\n" and backup.exists()
+            print(f"self-test: --from run: exit={ran}, chosen ran={ran_chosen}; "
+                  f"provider list: exit={listed}, ids match={provider_listed}; "
+                  f"caller edit active={active}")
+            if not ran_chosen or not provider_listed or not active:
+                ok = False
+        restored = (probe.read_text() == "original bytes\n" and not backup.exists())
+        if not restored:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+        shutil.rmtree(CALLER_DIR, ignore_errors=True)
+    return ok
+
+
 def the_streams_keep_their_own_lines():
     """stdout and stderr are joined at a line boundary, so a marker at the
     start of stderr is still at the start of a line when stdout ends without
@@ -1476,6 +1655,10 @@ SELF_TEST_CASES = {
     "an interrupted edit is restored": interruption_restores,
     "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
     "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
+    "a nested run leaves the caller's edit active": a_nested_run_leaves_the_callers_edit_active,
+    "keep backups keeps the caller's backup": keep_backups_keeps_the_callers_backup,
+    "a backup collision is not consumed": a_backup_collision_is_not_consumed,
+    "selected list is executed": selected_list_is_executed,
     "a missing data file is refused": a_missing_data_file_is_refused,
     "an unreadable data file is refused": an_unreadable_data_file_is_refused,
     "an unreadable data path is refused": an_unreadable_data_path_is_refused,
