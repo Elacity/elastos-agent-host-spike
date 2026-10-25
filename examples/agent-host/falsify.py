@@ -57,6 +57,11 @@ DATA = HERE / "falsifiers.json"
 # The provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 BACKUP_SUFFIX = ".falsify-original"
+# Backups this process holds, and their names in the environment so every
+# nested run inherits the ownership. A caller's live mutation restores its own
+# backup, so a nested run must never put one back.
+OWNED_BACKUPS_ENV = "FALSIFY_OWNED_BACKUPS"
+OWNED_BACKUPS = set()
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
 COMMANDS = ("host", "provider", "e2e", "selftest")
 # Self-test scratch stays in this lane's report directory, so a run writes
@@ -232,15 +237,46 @@ PROVIDER_TARGETS = (
 )
 
 
+def owned_backups():
+    """The backup paths held by this process or handed down by a caller. The
+    environment carries them into nested runs, so each one knows which
+    backups belong to a live mutation instead of a killed run."""
+    inherited = os.environ.get(OWNED_BACKUPS_ENV, "")
+    return OWNED_BACKUPS | {pathlib.Path(name)
+                            for name in inherited.split(os.pathsep) if name}
+
+
+def publish_owned_backups():
+    names = sorted(str(path) for path in owned_backups())
+    if names:
+        os.environ[OWNED_BACKUPS_ENV] = os.pathsep.join(names)
+    else:
+        os.environ.pop(OWNED_BACKUPS_ENV, None)
+
+
+def own_backup(backup):
+    OWNED_BACKUPS.add(backup.resolve())
+    publish_owned_backups()
+
+
+def disown_backup(backup):
+    OWNED_BACKUPS.discard(backup.resolve())
+    publish_owned_backups()
+
+
 def recover_backups():
     """Restore this runner's originals: agent-host files and this lane's exact
     provider targets. Other provider files stay with their owning runners.
-    Recovery is independent of the data file selected for the next run."""
+    Recovery is independent of the data file selected for the next run, and it
+    never touches a backup a caller still owns."""
+    owned = owned_backups()
     backups = set(HERE.rglob("*" + BACKUP_SUFFIX))
     for name in PROVIDER_TARGETS:
         target = REPO / name
         backups.update(target.parent.glob(target.name + BACKUP_SUFFIX))
     for backup in sorted(backups):
+        if backup.resolve() in owned:
+            continue
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
         os.utime(target)
@@ -269,6 +305,11 @@ def restore_interruptions(saved):
         signal.signal(number, handler)
 
 
+class BackupCollision(Exception):
+    """A backup this run did not create is already there. The link decides
+    ownership: this run stops before it touches the caller's bytes."""
+
+
 class Mutation:
     """Apply one falsifier's edits; undo them on exit, whatever happened."""
 
@@ -295,11 +336,23 @@ class Mutation:
             for path, text in texts.items():
                 original = path.read_bytes()
                 backup = path.with_name(path.name + BACKUP_SUFFIX)
-                # Record the backup before making it: an interrupt between the
-                # link and the next line leaves the source unchanged, and a
-                # backup that does exist is still restored.
-                self.applied.append((path, backup, original))
-                os.link(path, backup)
+                # The link decides ownership: a backup that already exists
+                # belongs to another run, and consuming it would put that
+                # run's original back. Signals stay off across the link and
+                # the record, so a kill cannot leave an owned backup
+                # unrecorded.
+                saved = block_interruptions()
+                try:
+                    try:
+                        os.link(path, backup)
+                    except FileExistsError as error:
+                        raise BackupCollision(
+                            f"{backup} is a backup this run did not create; "
+                            "the edit is not applied") from error
+                    self.applied.append((path, backup, original))
+                    own_backup(backup)
+                finally:
+                    restore_interruptions(saved)
                 tmp = path.with_name(path.name + ".falsify-tmp")
                 try:
                     tmp.write_text(text, encoding="utf-8")
@@ -323,14 +376,16 @@ class Mutation:
         saved = block_interruptions()
         try:
             for path, backup, original in reversed(self.applied):
-                if not backup.exists():
-                    continue
-                os.replace(backup, path)
-                # The rename brings back the original's old mtime; touch it, so
-                # cargo does not take the mutated build for a fresh one.
-                os.utime(path)
-                if path.read_bytes() != original:
-                    raise SystemExit(f"{path}: restored bytes differ from the saved original; stop")
+                if backup.exists():
+                    os.replace(backup, path)
+                    # The rename brings back the original's old mtime; touch
+                    # it, so cargo does not take the mutated build for a fresh
+                    # one.
+                    os.utime(path)
+                    if path.read_bytes() != original:
+                        raise SystemExit(
+                            f"{path}: restored bytes differ from the saved original; stop")
+                disown_backup(backup)
             self.applied = []
         finally:
             restore_interruptions(saved)
@@ -490,6 +545,17 @@ def falsify(entry, how=None):
     with Mutation(entry):
         result = evaluate(entry, how or spec(entry["command"]))
     return verdict(entry, *result)
+
+
+def reported(entry):
+    """One falsifier's result. A data mismatch and a backup this run does not
+    own each keep their own word and reason, so neither reads as a catch."""
+    try:
+        return falsify(entry)
+    except LookupError as error:
+        return False, "NO MATCH", str(error)
+    except BackupCollision as error:
+        return False, "BACKUP TAKEN", str(error)
 
 
 REAL_CRATE = {
@@ -1467,6 +1533,159 @@ def prefix_token_still_selects():
     return ok
 
 
+def a_nested_list_is_listed():
+    """A nested main() against a crafted list displays it. This is the first
+    step of the cross-process case below: the nested run must leave a
+    caller's backup alone."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        data = SELF_TEST_DIR / "nested-list.json"
+        data.write_text(json.dumps({"falsifiers": [
+            {"id": "ST", "title": "nested entry", "command": "host",
+             "expect": "caught", "edits": [], "tests": ["tests::x"]}]}),
+            encoding="utf-8")
+        listed = io.StringIO()
+        with contextlib.redirect_stdout(listed):
+            code = main(["--from", str(data), "--list"])
+        text = listed.getvalue()
+        print(f"self-test: nested list -> exit {code}: {text.strip()}")
+        return code == 0 and "nested entry" in text
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def a_nested_run_keeps_the_callers_backup():
+    """Cross-process: an outer `survives` mutation of the non-JSON refusal is
+    active on a copy of this runner. A first case runs a nested main()
+    without --keep-backups, then PV20's case still sees the mutation, so the
+    verdict is NOT A SURVIVOR. The caller's backup keeps the original bytes,
+    and --keep-backups keeps a backup this process does not own."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        runner = SELF_TEST_DIR / "falsify.py"
+        source = (HERE / "falsify.py").read_bytes()
+        runner.write_bytes(source)
+        (SELF_TEST_DIR / "falsifiers.json").write_text(
+            '{"falsifiers": []}', encoding="utf-8")
+        pv20 = next(entry for entry in load(REPO / "capsules/model-provider/falsifiers.json")
+                    if entry["id"] == "PV20")
+        entry = {"id": "ST", "command": "selftest", "expect": "survives",
+                 "tests": ["a nested list is listed",
+                           "a non-json data file is refused"]}
+        how = {"build": [], "one": (["python3", "-I", str(runner), "--keep-backups"],
+                                    HERE, [])}
+        backup = runner.with_name(runner.name + BACKUP_SUFFIX)
+        with Mutation(pv20, SELF_TEST_DIR):
+            got = verdict(entry, *evaluate(entry, how))
+            mutated = str(pv20["edits"][0]["new"]) in runner.read_text(encoding="utf-8")
+            kept = backup.exists() and backup.read_bytes() == source
+            print(f"self-test: nested ownership: {got[1]} ({got[2]}), "
+                  f"mutated={mutated}, caller backup kept={kept}")
+            if got[:2] != (False, "NOT A SURVIVOR"):
+                ok = False
+            if "a non-json data file is refused" not in got[2]:
+                ok = False
+            if not mutated or not kept:
+                ok = False
+        stale = SELF_TEST_DIR / "stale.txt"
+        stale.write_text("mutated bytes\n", encoding="utf-8")
+        stale_backup = stale.with_name(stale.name + BACKUP_SUFFIX)
+        stale_backup.write_text("caller original\n", encoding="utf-8")
+        code, _output = run(["python3", "-I", str(runner), "--keep-backups", "--list"], HERE)
+        stale_kept = (code == 0 and stale.read_text(encoding="utf-8") == "mutated bytes\n"
+                      and stale_backup.read_text(encoding="utf-8") == "caller original\n")
+        print(f"self-test: --keep-backups keeps an unowned backup: exit={code}, "
+              f"kept={stale_kept}")
+        if not stale_kept:
+            ok = False
+        if runner.read_bytes() != source or backup.exists():
+            print("self-test: nested ownership: the caller's copy was not restored")
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_backup_this_run_did_not_make_is_refused():
+    """A competing backup appears inside os.link(). The link decides
+    ownership: the edit stops with its own reason and result, the caller's
+    file and backup keep their bytes, and no backup is recorded for restore.
+    A backup that is already there at the start gets the same refusal."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "planted.txt"
+        original = "original bytes\n"
+        caller_backup = "a caller's backup\n"
+        path.write_text(original, encoding="utf-8")
+        backup = path.with_name(path.name + BACKUP_SUFFIX)
+        entry = {"id": "ST", "command": "selftest", "expect": "caught",
+                 "edits": [{"file": path.name, "old": "original bytes",
+                            "new": "mutated bytes"}],
+                 "tests": ["a nested list is listed"]}
+        reason = f"{backup} is a backup this run did not create; the edit is not applied"
+
+        def bytes_or_none(target):
+            return target.read_bytes() if target.exists() else None
+
+        # A backup the caller made is already there.
+        backup.write_text(caller_backup, encoding="utf-8")
+        real_mutation = Mutation
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: real_mutation(item, SELF_TEST_DIR)):
+            try:
+                got = reported(entry)
+            except BaseException as error:
+                print(f"self-test: reported collision raised {type(error).__name__}: {error}")
+                got = None
+        unchanged = bytes_or_none(path) == original.encode("utf-8")
+        backup_kept = bytes_or_none(backup) == caller_backup.encode("utf-8")
+        print(f"self-test: backup collision: {got}, unchanged={unchanged}, "
+              f"backup kept={backup_kept}")
+        if got != (False, "BACKUP TAKEN", reason):
+            ok = False
+        if not unchanged or not backup_kept:
+            ok = False
+        backup.unlink(missing_ok=True)
+
+        # The same refusal when the competing backup appears inside our link.
+        real_link = os.link
+
+        def competing_link(src, dst, *args, **kwargs):
+            pathlib.Path(dst).write_text(caller_backup, encoding="utf-8")
+            return real_link(src, dst, *args, **kwargs)
+
+        mutation = Mutation(entry, SELF_TEST_DIR)
+        got_class = got_reason = None
+        with mock.patch.object(os, "link", competing_link):
+            try:
+                with mutation:
+                    pass
+            except BackupCollision as error:
+                got_class = type(error).__name__
+                got_reason = str(error)
+            except BaseException as error:
+                print(f"self-test: collision raised {type(error).__name__}: {error}")
+                ok = False
+        unchanged = bytes_or_none(path) == original.encode("utf-8")
+        backup_kept = bytes_or_none(backup) == caller_backup.encode("utf-8")
+        unrecorded = mutation.applied == []
+        print(f"self-test: link collision: class={got_class}, unchanged={unchanged}, "
+              f"backup kept={backup_kept}, unrecorded={unrecorded}")
+        if got_class != "BackupCollision" or got_reason != reason:
+            print(f"self-test: link collision reason: {got_reason!r}")
+            ok = False
+        if not unchanged or not backup_kept or not unrecorded:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -1504,6 +1723,9 @@ SELF_TEST_CASES = {
     "provider spec uses locked manifest": provider_spec_uses_locked_manifest,
     "list mode displays": list_mode_displays,
     "prefix token still selects": prefix_token_still_selects,
+    "a nested list is listed": a_nested_list_is_listed,
+    "a nested run keeps the caller's backup": a_nested_run_keeps_the_callers_backup,
+    "a backup this run did not make is refused": a_backup_this_run_did_not_make_is_refused,
 }
 
 
@@ -1584,10 +1806,7 @@ def main(argv):
     try:
         for entry in chosen:
             start = time.monotonic()
-            try:
-                ok, word, detail = falsify(entry)
-            except LookupError as error:
-                ok, word, detail = False, "NO MATCH", str(error)
+            ok, word, detail = reported(entry)
             ran_e2e |= entry["command"] == "e2e"
             counts[word] = counts.get(word, 0) + 1
             if not ok:

@@ -729,6 +729,70 @@
       "tests": [
         "a killed provider edit is recovered"
       ]
+    },
+    {
+      "id": "PV35",
+      "title": "a nested run restores a backup its caller still owns",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if backup.resolve() in owned:\n            continue",
+          "new": "        if False:\n            continue"
+        }
+      ],
+      "tests": [
+        "a nested run keeps the caller's backup"
+      ]
+    },
+    {
+      "id": "PV36",
+      "title": "a nested run ignores --keep-backups and takes the caller's backup",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if not parsed.keep_backups:\n        recover_backups()",
+          "new": "    if True:\n        recover_backups()"
+        }
+      ],
+      "tests": [
+        "a nested run keeps the caller's backup"
+      ]
+    },
+    {
+      "id": "PV37",
+      "title": "the backup is recorded before the link, so a collision consumes it",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "                saved = block_interruptions()\n                try:\n                    try:\n                        os.link(path, backup)",
+          "new": "                self.applied.append((path, backup, original))\n                saved = block_interruptions()\n                try:\n                    try:\n                        os.link(path, backup)"
+        }
+      ],
+      "tests": [
+        "a backup this run did not make is refused"
+      ]
+    },
+    {
+      "id": "PV38",
+      "title": "the collision refusal is bypassed, so the caller's backup is consumed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "                    except FileExistsError as error:\n                        raise BackupCollision(\n                            f\"{backup} is a backup this run did not create; \"\n                            \"the edit is not applied\") from error",
+          "new": "                    except FileExistsError as error:\n                        pass"
+        }
+      ],
+      "tests": [
+        "a backup this run did not make is refused"
+      ]
     }
   ]
 }
