@@ -127,15 +127,27 @@ the test.
 
 ## Falsifiers
 
-- Replace `(deny default)` with `(allow default)`, keeping `(version 1)` first:
-  both outside cases fail because the symlinked write and read succeed.
-- Remove `(deny network*)`: `profile_denies_network` fails.
-- Restore the `if let Ok(Some(nick))` swallow in `try_load_nickname`:
-  `outside_read_denied` fails because the denied read becomes "no nickname".
+- Restore the temp-directory fallback for a missing or empty storage root
+  (DID01): `tests::init_requires_storage_without_key` and
+  `tests::empty_storage_path_is_refused` fail because a missing or empty root
+  returns a path instead of refusing.
+- Drop the absolute-path check in `base_dir` (DID02):
+  `tests::relative_storage_is_refused` fails because a relative root is
+  accepted.
+- Replace the nickname read error with `.ok().flatten()` in
+  `try_load_nickname` (DID03): `tests::init_reports_nickname_read_error` and
+  `outside_read_denied` fail because a denied or failed read becomes no
+  nickname.
+- Replace `(deny default)` with `(allow default)`, keeping `(version 1)` first
+  (DID04): `outside_write_denied` and `outside_read_denied` fail because the
+  symlinked write and read succeed.
+- Replace `(deny network*)` with `(allow network*)` (DID05):
+  `profile_denies_network` fails on the missing explicit denial.
 - Panic in the `hex::decode(sig_hex)` error branch of `verify_did_recovery` in
-  `src/main.rs`: `verify_did_recovery_under_profile` fails because the confined
-  process dies without a response.
-- Return `parse_error` instead of the signature refusal: the same case fails
+  `src/main.rs` (DID06): `verify_did_recovery_under_profile` fails because the
+  confined process dies without a response.
+- Return `parse_error` instead of the signature refusal in the non-hex branch
+  of `verify_did_recovery` (DID11): `verify_did_recovery_under_profile` fails
   because the response does not name `invalid_signature`.
 - Rename `STORAGE_ROOT` to `DID_STORAGE_ROOT` in either provider's `confine.sb`:
   `both_file_profiles_bind_one_storage_parameter_contract` fails on the
