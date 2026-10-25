@@ -1,0 +1,12 @@
+[package]
+name = "agent-conformance-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "=0.57.1"
