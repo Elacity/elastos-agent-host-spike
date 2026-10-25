@@ -8227,7 +8227,14 @@ mod sparks_http {
             }
             if name.eq_ignore_ascii_case("transfer-encoding") {
                 for coding in value.split(',') {
-                    transfer_codings.push(coding.trim().to_string());
+                    // RFC 9110 5.6.3: only SP/HTAB may frame a field value.
+                    // Any other byte stays and the exact coding comparison
+                    // below refuses it.
+                    transfer_codings.push(
+                        coding
+                            .trim_matches(|byte: char| byte == ' ' || byte == '\t')
+                            .to_string(),
+                    );
                 }
             } else if name.eq_ignore_ascii_case("content-length") {
                 // RFC 9110 5.6.3: a field value has only SP/HTAB around it.
@@ -8531,6 +8538,37 @@ mod sparks_http {
         assert_eq!(
             post_json(server.url(), "/v1/chat", "{}"),
             Err("invalid content-length \"2\\t2\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_vertical_tab_in_transfer_encoding_is_refused() {
+        // Only SP and HTAB may surround a field value (RFC 9110 5.6.3); a
+        // vertical tab there is invalid and trimming it would read `chunked`.
+        let response =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding:\x0bchunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported transfer coding \"\\u{b}chunked\"".to_string())
+        );
+
+        // The permitted framing still works.
+        let framed =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: \tchunked \r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        let server = MockServer::serve_once(framed);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Ok("{}".to_string())
+        );
+
+        // An internal HTAB is not framing and is refused.
+        let internal =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chun\tted\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        let server = MockServer::serve_once(internal);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported transfer coding \"chun\\tted\"".to_string())
         );
     }
 

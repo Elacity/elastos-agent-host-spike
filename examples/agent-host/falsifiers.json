@@ -985,6 +985,22 @@
    "tests": [
     "sparks_http::a_non_http_status_line_is_refused"
    ]
+  },
+  {
+   "id": "FS50",
+   "title": "a transfer coding is trimmed before it is validated, so a vertical tab reads as chunked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    transfer_codings.push(\n                        coding\n                            .trim_matches(|byte: char| byte == ' ' || byte == '\\t')\n                            .to_string(),\n                    );",
+     "new": "                    transfer_codings.push(coding.trim().to_string());"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_vertical_tab_in_transfer_encoding_is_refused"
+   ]
   }
  ]
 }
