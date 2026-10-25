@@ -11966,6 +11966,88 @@ mod tests {
         assert_eq!(journal.epoch, epoch);
     }
 
+    /// The opt-in real-model check on the task-013 client. The local DeepSeek
+    /// writes the summary and the existing `compact_refusal` /
+    /// `record_compact_summary` judge it, with the same prompt and the same
+    /// facts the fake-model tests use. The model's bytes reach the check
+    /// unchanged. The test is ignored by default and also skips cleanly when
+    /// `SPARKS_MODEL_URL` is unset, so the normal gates never call the model.
+    #[test]
+    #[ignore = "opt-in: needs SPARKS_MODEL_URL and the local DeepSeek on the Sparks"]
+    fn a_real_model_compaction_summary_is_judged_by_the_same_check() {
+        let Some(base_url) = sparks_http::sparks_model_url() else {
+            eprintln!("skip: SPARKS_MODEL_URL is unset, so no real model is called");
+            return;
+        };
+        let required: Vec<String> = ["hello", "second turn"]
+            .iter()
+            .map(|fact| (*fact).to_string())
+            .collect();
+        let facts: Vec<&str> = required.iter().map(String::as_str).collect();
+        let mut journal = summary_journal();
+        let head = journal.events[0].clone();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &facts);
+        let prompt = compact_summary_prompt(&journal, id).expect("a summary prompt");
+        let body = serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        .to_string();
+        assert!(body.contains("\"deepseek-v4-flash\""));
+        let reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &body)
+            .unwrap_or_else(|error| panic!("real model request failed: {error}"));
+        eprintln!("real model request ok: {} response bytes", reply.len());
+        let summary = assistant_content(&reply);
+        eprintln!("real model summary: {} bytes", summary.len());
+
+        let expected = compact_refusal(&journal, &summary, &required);
+        let recorded = record_compact_summary(&mut journal, id, Ok(summary.clone()));
+        match expected {
+            None => {
+                assert_eq!(recorded, Ok(()));
+                assert_eq!(journal.events.len(), 2);
+                assert_eq!(journal.events[0], head);
+                assert_eq!(journal.events[1].role, Role::User);
+                assert_eq!(journal.events[1].source, NodeSource::CompactionCheckpoint);
+                assert_eq!(journal.events[1].text, summary);
+                assert_eq!(journal.epoch, epoch + 1);
+                eprintln!("check verdict: recorded");
+            }
+            Some(reason) => {
+                assert_eq!(recorded, Err(reason));
+                assert_eq!(journal.events, before);
+                assert_eq!(journal.epoch, epoch);
+                eprintln!("check verdict: refused: {reason}");
+            }
+        }
+
+        // The same check judges a failing summary: the real summary with its
+        // first required fact changed is refused for the existing reason and
+        // leaves the history unchanged.
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &facts);
+        let without_fact = if summary.contains("hello") {
+            summary.replace("hello", "greeting")
+        } else {
+            format!("{summary} greeting")
+        };
+        assert!(!contains_whole_fact(&without_fact, "hello"));
+        let reason = compact_refusal(&journal, &without_fact, &required)
+            .expect("a summary that changes a required fact is refused");
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(without_fact)),
+            Err(reason)
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+        eprintln!("check verdict: a summary that fails the check is refused: {reason}");
+    }
+
     #[test]
     fn a_crash_before_dispatch_stays_not_started() {
         let mut journal = two_turns();
