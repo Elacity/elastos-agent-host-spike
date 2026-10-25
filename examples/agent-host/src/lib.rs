@@ -9702,7 +9702,7 @@ mod tests {
         assert!(first_body.contains("\"deepseek-v4-flash\""));
         let first_reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &first_body)
             .unwrap_or_else(|error| panic!("the local model refused the first turn: {error}"));
-        let first_text = assistant_content(&first_reply)
+        let first_text = require_completion(&first_reply)
             .unwrap_or_else(|error| panic!("the first turn is not a completion: {error}"));
         eprintln!(
             "real model first turn ok: {} completion bytes",
@@ -9712,7 +9712,7 @@ mod tests {
         assert!(second_body.contains("\"deepseek-v4-flash\""));
         let second_reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &second_body)
             .unwrap_or_else(|error| panic!("the local model refused the second turn: {error}"));
-        let second_text = assistant_content(&second_reply)
+        let second_text = require_completion(&second_reply)
             .unwrap_or_else(|error| panic!("the second turn is not a completion: {error}"));
         eprintln!(
             "real model second turn ok: {} completion bytes",
@@ -12135,10 +12135,10 @@ mod tests {
     }
 
     /// The assistant text of an OpenAI-compatible reply, unchanged, or the
-    /// reason the body is not a completion. An empty body, malformed JSON, a
-    /// body with no assistant content, and empty assistant text are refusals.
-    /// The summary check judges the model's bytes, so nothing trims or
-    /// rewrites them here.
+    /// reason the body carries no assistant text. An empty body, malformed
+    /// JSON, and a body with no assistant content are refusals. Extraction is
+    /// lossless: empty assistant text comes back as `Ok("")`, so the summary
+    /// path lets `compact_refusal` own summary validity.
     fn assistant_content(reply: &str) -> Result<String, String> {
         if reply.trim().is_empty() {
             return Err("reply is empty".to_string());
@@ -12148,10 +12148,18 @@ mod tests {
         let content = reply["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| "reply has no assistant content".to_string())?;
+        Ok(content.to_string())
+    }
+
+    /// A completion for the prefix proof: the reply carries assistant text and
+    /// that text is not empty. The summary path keeps using
+    /// `assistant_content` so `compact_refusal` owns the empty-summary rule.
+    fn require_completion(reply: &str) -> Result<String, String> {
+        let content = assistant_content(reply)?;
         if content.trim().is_empty() {
             return Err("reply has empty assistant content".to_string());
         }
-        Ok(content.to_string())
+        Ok(content)
     }
 
     #[test]
@@ -12165,18 +12173,46 @@ mod tests {
             assistant_content(r#"{"error":{"message":"boom"}}"#),
             Err("reply has no assistant content".to_string())
         );
+        // Extraction is lossless; the summary path judges empty text.
         assert_eq!(
             assistant_content(r#"{"choices":[{"message":{"content":""}}]}"#),
+            Ok(String::new())
+        );
+        assert_eq!(
+            require_completion(r#"{"choices":[{"message":{"content":""}}]}"#),
             Err("reply has empty assistant content".to_string())
         );
         assert_eq!(
-            assistant_content(r#"{"choices":[{"message":{"content":"  "}}]}"#),
+            require_completion(r#"{"choices":[{"message":{"content":"  "}}]}"#),
             Err("reply has empty assistant content".to_string())
         );
         assert_eq!(
-            assistant_content(r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+            require_completion(r#"{"choices":[{"message":{"content":"ok"}}]}"#),
             Ok("ok".to_string())
         );
+    }
+
+    #[test]
+    fn an_empty_model_summary_reaches_the_canonical_refusal() {
+        let reply = r#"{"choices":[{"message":{"content":""}}]}"#;
+        let answer = assistant_content(reply).expect("a valid completion body");
+        assert_eq!(answer, "");
+        let required = ["hello".to_string(), "second turn".to_string()];
+        let facts: Vec<&str> = required.iter().map(String::as_str).collect();
+        let mut journal = summary_journal();
+        let id = dispatched_summary_step(&mut journal, &facts);
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        assert_eq!(
+            compact_refusal(&journal, &answer, &required),
+            Some("summary empty")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(answer)),
+            Err("summary empty")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
     }
 
     #[test]

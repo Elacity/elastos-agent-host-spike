@@ -1157,8 +1157,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                    if sum_labels == count_labels {\n                        pairs.push((*sum, *count));\n                    }",
-     "new": "                    if sum_labels == count_labels || counts.is_empty() {\n                        pairs.push((*sum, 0.0));\n                    }"
+     "old": "                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }",
+     "new": "                [] if sums.len() == 1 => PrefillSeconds::Histogram {\n                    sum: sums[0].1,\n                    count: 0.0,\n                },\n                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }"
     }
    ],
    "tests": [
@@ -1173,8 +1173,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if reply.trim().is_empty() {\n            return Err(\"reply is empty\".to_string());\n        }\n        let reply: serde_json::Value =\n            serde_json::from_str(reply).map_err(|error| format!(\"reply is not JSON: {error}\"))?;\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .ok_or_else(|| \"reply has no assistant content\".to_string())?;\n        if content.trim().is_empty() {\n            return Err(\"reply has empty assistant content\".to_string());\n        }\n        Ok(content.to_string())",
-     "new": "        let reply: serde_json::Value = serde_json::from_str(reply).unwrap_or_default();\n        Ok(reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or(\"\")\n            .to_string())"
+     "old": "        if reply.trim().is_empty() {\n            return Err(\"reply is empty\".to_string());\n        }\n        let reply: serde_json::Value =\n            serde_json::from_str(reply).map_err(|error| format!(\"reply is not JSON: {error}\"))?;\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .ok_or_else(|| \"reply has no assistant content\".to_string())?;\n        Ok(content.to_string())",
+     "new": "        let reply: serde_json::Value = serde_json::from_str(reply).unwrap_or_default();\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or(\"\");\n        Ok(content.to_string())"
     }
    ],
    "tests": [
@@ -1195,6 +1195,22 @@
    ],
    "tests": [
     "sparks_http::a_histogram_pair_requires_matching_labels"
+   ]
+  },
+  {
+   "id": "FS58",
+   "title": "an empty assistant text is accepted as a prefix completion",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let content = assistant_content(reply)?;\n        if content.trim().is_empty() {\n            return Err(\"reply has empty assistant content\".to_string());\n        }\n        Ok(content)",
+     "new": "        let content = assistant_content(reply)?;\n        Ok(content)"
+    }
+   ],
+   "tests": [
+    "tests::a_model_reply_without_assistant_text_is_not_a_completion"
    ]
   }
  ]
