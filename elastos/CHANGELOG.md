@@ -18,8 +18,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Content links (`/s/`, `/ipfs/`, `/content/` and published sites) open only
   what this Home's IPFS store holds or can fetch; it checks every block it
   fetches against the link. Content that only a Carrier peer offers no longer
-  opens from such a link. Pages saved by earlier versions are fetched again,
-  and a single file larger than 100 MiB is refused.
+  opens from such a link. The gateway no longer keeps its own copy of what it
+  serves, so copies saved by earlier versions are not used, and a single file
+  larger than 100 MiB is refused.
 
 ### Fixed
 

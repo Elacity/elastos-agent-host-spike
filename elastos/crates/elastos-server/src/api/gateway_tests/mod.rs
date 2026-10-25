@@ -148,13 +148,97 @@ fn test_state(cache_dir: &std::path::Path) -> GatewayState {
     }
 }
 
-/// Seed the gateway's verified cache with `files` (exact path, bytes) of `cid`.
-fn seed_verified_cache(cache_dir: &std::path::Path, cid: &str, files: &[(&str, &[u8])]) {
-    for (path, bytes) in files {
-        let entry = verified_cache_entry(cache_dir, cid, path);
-        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        std::fs::write(entry, bytes).unwrap();
+/// The local content backend: it answers only the (CID, exact path) pairs it
+/// holds.
+struct LocalStoreFixture {
+    files: HashMap<(String, String), Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for LocalStoreFixture {
+    async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+        Err(ProviderError::Provider("raw requests only".into()))
     }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    fn name(&self) -> &'static str {
+        "local-store-fixture"
+    }
+
+    async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
+        let cid = request.get("cid").and_then(Value::as_str).unwrap_or("");
+        let path = request.get("path").and_then(Value::as_str).unwrap_or("");
+        Ok(match self.files.get(&(cid.to_string(), path.to_string())) {
+            Some(bytes) if request["op"] == "cat" => json!({"status": "ok", "data": {
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }}),
+            _ => json!({"status": "error", "code": "not_found", "message": "not in local store"}),
+        })
+    }
+}
+
+/// An availability holder that answers every read with its own bytes.
+#[derive(Default)]
+struct HolderFixture {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+const HOLDER_BYTES: &[u8] = b"holder bytes";
+
+#[async_trait::async_trait]
+impl Provider for HolderFixture {
+    async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+        Err(ProviderError::Provider("raw requests only".into()))
+    }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        vec!["availability"]
+    }
+
+    fn name(&self) -> &'static str {
+        "holder-fixture"
+    }
+
+    async fn send_raw(&self, _request: &Value) -> Result<Value, ProviderError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(json!({"status": "ok", "data": {
+            "data": base64::engine::general_purpose::STANDARD.encode(HOLDER_BYTES),
+        }}))
+    }
+}
+
+/// Gateway state over the real Content provider, a local store holding
+/// `local_files` (CID, exact path, bytes), and a holder that answers every read.
+async fn verified_store_state(
+    dir: &std::path::Path,
+    local_files: &[(&str, &str, &[u8])],
+) -> (GatewayState, Arc<HolderFixture>) {
+    let registry = Arc::new(ProviderRegistry::new());
+    let files = local_files
+        .iter()
+        .map(|(cid, path, bytes)| ((cid.to_string(), path.to_string()), bytes.to_vec()))
+        .collect();
+    registry
+        .register_sub_provider("ipfs", Arc::new(LocalStoreFixture { files }))
+        .await
+        .unwrap();
+    let holder = Arc::new(HolderFixture::default());
+    registry.register(holder.clone()).await;
+    let content = Arc::new(crate::content::ContentProvider::new(
+        dir.join("content-data"),
+        Arc::downgrade(&registry),
+    ));
+    registry.register(content.clone()).await;
+    registry
+        .register_sub_provider("content", content)
+        .await
+        .unwrap();
+    let mut state = test_state(dir);
+    state.provider_registry = Some(registry);
+    (state, holder)
 }
 
 #[tokio::test]

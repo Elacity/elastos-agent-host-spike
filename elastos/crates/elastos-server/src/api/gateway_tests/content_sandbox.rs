@@ -73,12 +73,21 @@ fn assert_content_policy(response: &Response, path: &str) {
     );
 }
 
+/// Gateway state whose local store holds the fixture bundle as `TEST_CIDV1`
+/// and the download as the single file `TEST_CIDV0`.
+async fn content_fixture_state(dir: &std::path::Path) -> GatewayState {
+    let files: Vec<(&str, &str, &[u8])> = CONTENT_FIXTURE_FILES
+        .iter()
+        .map(|(path, bytes)| (TEST_CIDV1, *path, *bytes))
+        .chain([(TEST_CIDV0, "", DOWNLOAD)])
+        .collect();
+    verified_store_state(dir, &files).await.0
+}
+
 #[tokio::test]
 async fn content_sandbox_cid_aliases_preserve_bytes_and_types() {
     let dir = tempfile::tempdir().unwrap();
-    seed_verified_cache(dir.path(), TEST_CIDV1, &CONTENT_FIXTURE_FILES);
-    seed_verified_cache(dir.path(), TEST_CIDV0, &[("", DOWNLOAD)]);
-    let app = gateway_router(test_state(dir.path()));
+    let app = gateway_router(content_fixture_state(dir.path()).await);
     for prefix in [format!("/s/{TEST_CIDV1}"), format!("/ipfs/{TEST_CIDV1}")] {
         for (suffix, bytes, mime) in [
             ("/", PAGE.as_bytes(), "text/html; charset=utf-8"),
@@ -175,17 +184,12 @@ async fn content_sandbox_cid_aliases_preserve_bytes_and_types() {
         assert_eq!(response.status(), status, "{path}");
         assert_content_policy(&response, &path);
     }
-    for (path, mime, cached_path) in [
+    for (path, mime) in [
         (
             format!("/s/{TEST_CIDV1}/index.html"),
             "text/html; charset=utf-8",
-            "index.html",
         ),
-        (
-            format!("/content/{TEST_CIDV1}"),
-            "application/octet-stream",
-            "",
-        ),
+        (format!("/content/{TEST_CIDV1}"), "application/octet-stream"),
     ] {
         let fetched_dir = tempfile::tempdir().unwrap();
         let fetched = gateway_router(content_test_state(fetched_dir.path()).await)
@@ -199,15 +203,6 @@ async fn content_sandbox_cid_aliases_preserve_bytes_and_types() {
             .await
             .unwrap();
         assert!(!bytes.is_empty());
-        assert_eq!(
-            &bytes[..],
-            std::fs::read(verified_cache_entry(
-                fetched_dir.path(),
-                TEST_CIDV1,
-                cached_path
-            ))
-            .unwrap()
-        );
     }
 }
 
@@ -215,8 +210,7 @@ async fn content_sandbox_cid_aliases_preserve_bytes_and_types() {
 async fn content_sandbox_site_files_and_admitted_bundle_preserve_provenance() {
     let dir = tempfile::tempdir().unwrap();
     write_content_fixture(&my_website_root_path(dir.path()));
-    seed_verified_cache(dir.path(), TEST_CIDV1, &CONTENT_FIXTURE_FILES);
-    let app = gateway_router(test_state(dir.path()));
+    let app = gateway_router(content_fixture_state(dir.path()).await);
     for bundle in [false, true] {
         if bundle {
             let head_path = edge_site_head_path(dir.path(), MY_WEBSITE_URI);
@@ -528,7 +522,6 @@ appProbe.ready = true;
 #[ignore = "requires Playwright and Chromium; CI runs this browser boundary regression"]
 async fn content_sandbox_browser() {
     let dir = tempfile::tempdir().unwrap();
-    seed_verified_cache(dir.path(), TEST_CIDV1, &CONTENT_FIXTURE_FILES);
     let site_root = my_website_root_path(dir.path());
     write_content_fixture(&site_root);
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -536,7 +529,7 @@ async fn content_sandbox_browser() {
     let authority = passkey_authority_with_name(dir.path(), Some("browser-sandbox-fixture"));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = test_state(dir.path());
+    let state = content_fixture_state(dir.path()).await;
     write_frontdoor_browser_fixture(dir.path(), &repo);
     let assistant_token = app_token_for_authority(dir.path(), "assistant", &authority);
     let app = gateway_router_with_api_url(state, format!("http://{addr}"));
