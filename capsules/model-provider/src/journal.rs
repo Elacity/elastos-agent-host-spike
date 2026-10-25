@@ -1159,9 +1159,8 @@ fn atomic_write_with_temp_with_locks(
             ProviderFault::corrupt_journal(format!("failed to inspect temporary journal: {err}"))
         })?,
     )?;
-    write(&mut transaction.file, bytes).map_err(|err| {
-        ProviderFault::corrupt_journal(format!("failed to write or sync temporary journal: {err}"))
-    })?;
+    write(&mut transaction.file, bytes)
+        .map_err(|err| ProviderFault::journal_write_io("write or sync temporary journal", err))?;
     #[cfg(unix)]
     verify_transaction_directories(directories)?;
     verify_path_snapshot(
@@ -2375,10 +2374,10 @@ fn create_missing_journal_directory(path: &Path) -> Result<(), ProviderFault> {
         }
     }
     fs::create_dir(path).map_err(|create_err| {
-        ProviderFault::corrupt_journal(format!(
-            "failed to create provider journal directory {}: {create_err}",
-            path.display()
-        ))
+        ProviderFault::journal_write_io(
+            &format!("create provider journal directory {}", path.display()),
+            create_err,
+        )
     })?;
     set_owner_only_directory_mode(path)
 }
@@ -2393,10 +2392,10 @@ fn open_temp_file_owner_only(path: &Path) -> Result<fs::File, ProviderFault> {
             .mode(0o600)
             .open(path)
             .map_err(|err| {
-                ProviderFault::corrupt_journal(format!(
-                    "failed to create temporary journal file {}: {err}",
-                    path.display()
-                ))
+                ProviderFault::journal_write_io(
+                    &format!("create temporary journal file {}", path.display()),
+                    err,
+                )
             })
     }
     #[cfg(not(unix))]
@@ -2406,10 +2405,10 @@ fn open_temp_file_owner_only(path: &Path) -> Result<fs::File, ProviderFault> {
             .create_new(true)
             .open(path)
             .map_err(|err| {
-                ProviderFault::corrupt_journal(format!(
-                    "failed to create temporary journal file {}: {err}",
-                    path.display()
-                ))
+                ProviderFault::journal_write_io(
+                    &format!("create temporary journal file {}", path.display()),
+                    err,
+                )
             })
     }
 }
@@ -2974,6 +2973,96 @@ mod tests {
         set_mode(&wrong_path, 0o600);
         let error = journal.active_run_count("local-text").unwrap_err();
         assert_eq!(error.code(), "journal_corrupt");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn journal_permission_error_is_access_denied_not_corrupt() {
+        let root = temp_root("permission-denied-journal");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("request:permission-denied");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let bytes = encode_bounded(&run, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
+
+        let denied = atomic_write_with(
+            &path,
+            &bytes,
+            Some(&metadata),
+            |_, _| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |from, to| fs::rename(from, to),
+            sync_directory,
+        )
+        .unwrap_err();
+        assert_eq!(denied.code(), "journal_access_denied");
+        assert_ne!(denied.code(), "journal_corrupt");
+        let reason = denied.detail().expect("denied write names its operation");
+        assert!(
+            reason.contains("write or sync temporary journal"),
+            "reason must name the denied operation: {reason}"
+        );
+
+        // A directory that denies creating children still reads and traverses.
+        let locked = root.join("locked");
+        fs::create_dir(&locked).unwrap();
+        set_mode(&locked, 0o500);
+        let create_error = open_temp_file_owner_only(&locked.join("journal.tmp")).unwrap_err();
+        assert_eq!(create_error.code(), "journal_access_denied");
+        let reason = create_error
+            .detail()
+            .expect("denied create names its operation");
+        assert!(
+            reason.contains("create temporary journal file"),
+            "reason must name the denied operation: {reason}"
+        );
+        let directory_error = create_missing_journal_directory(&locked.join("runs")).unwrap_err();
+        assert_eq!(directory_error.code(), "journal_access_denied");
+        let reason = directory_error
+            .detail()
+            .expect("denied directory create names its operation");
+        assert!(
+            reason.contains("create provider journal directory"),
+            "reason must name the denied operation: {reason}"
+        );
+        set_mode(&locked, 0o700);
+        fs::remove_dir_all(&locked).unwrap();
+
+        assert!(same_execution_identity(
+            &run,
+            &journal.load_run(&run.run_id).unwrap()
+        ));
+    }
+
+    #[test]
+    fn corrupt_journal_is_still_journal_corrupt() {
+        let root = temp_root("corrupt-not-denied");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("request:corrupt-not-denied");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        fs::write(&path, b"not a journal record").unwrap();
+        assert_eq!(
+            journal.load_run(&run.run_id).unwrap_err().code(),
+            "journal_corrupt"
+        );
+
+        // Failures that are not permission denials stay journal-corrupt.
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let bytes = encode_bounded(&run, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
+        for code in [libc::EIO, libc::ENOSPC] {
+            let error = atomic_write_with(
+                &path,
+                &bytes,
+                Some(&metadata),
+                |_, _| Err(std::io::Error::from_raw_os_error(code)),
+                |from, to| fs::rename(from, to),
+                sync_directory,
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "journal_corrupt");
+        }
+        assert_eq!(file_bytes(&path), b"not a journal record");
     }
 
     #[test]
