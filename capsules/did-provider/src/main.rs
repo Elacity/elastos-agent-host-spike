@@ -748,9 +748,9 @@ mod tests {
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
     /// The committed list records these falsifiers.
-    const EXPECTED_FALSIFIER_IDS: [&str; 17] = [
+    const EXPECTED_FALSIFIER_IDS: [&str; 18] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
-        "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17",
+        "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18",
     ];
 
     /// The repository root; `falsifiers.json` paths are relative to it.
@@ -1937,9 +1937,9 @@ mod tests {
 
     /// A nickname read error reaches `Init` as a storage refusal.
     ///
-    /// Falsifier: restore `if let Ok(Some(nick)) = load_nickname_with_device_key(..)`
-    /// in `try_load_nickname`; the failed read becomes "no nickname" and this
-    /// test fails because `Init` returns ok.
+    /// Falsifier: replace the nickname read error with `.ok().flatten()` in
+    /// `try_load_nickname` (DID03); the failed read becomes "no nickname" and
+    /// this test fails because `Init` returns ok.
     #[test]
     fn init_reports_nickname_read_error() {
         let dir = tempfile::tempdir().unwrap();
