@@ -505,6 +505,22 @@
         "component_importing_wasi_filesystem_is_refused_by_name",
         "component_importing_only_a_declared_interface_passes"
       ]
+    },
+    {
+      "id": "F-CWA6a",
+      "title": "Validation enables every feature and accepts Component import name options",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::all())"
+        }
+      ],
+      "tests": [
+        "component_import_names_with_options_are_refused"
+      ]
     }
   ]
 }
