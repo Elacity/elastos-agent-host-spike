@@ -149,12 +149,13 @@ fixture omits their manifest entries, binaries and configs. Missing IPFS only
 leaves content publish/fetch unavailable (`server_infra.rs:1010-1024`). Carrier
 is built into Runtime and is still started (`server_infra.rs:1547-1609`).
 
-For each native provider, `components.json` contains `external.<name>` with
+The repository's `components.json` entry `external.localhost-provider` is the
+fixture's source. For each native provider, `components.json` contains `external.<name>` with
 `install_path: "bin/<name>"`, `platforms.<platform>.checksum`, and
 `provider_runtime`. The latter has `role: "provider"`, `substrate: "native"`,
 `runtime_abi: "elastos.provider-stdio/v1"`, `execution: "native-provider"`,
-`provides: "localhost://"` (or `"elastos://did"` for the optional DID provider),
-and `runtime_only: false`. These type/URI checks are in `setup.rs:95-153,198-236`.
+`provides: "localhost://*"` for this provider. Its entry omits `runtime_only`,
+which defaults to false. These type/URI checks are in `setup.rs:95-153,198-236`.
 The top-level `profiles` map is required and can be empty; `capsules` defaults
 empty (`setup.rs:34-55`). Optional version, URL, CID and install-strategy fields
 are not required for this already-installed binary check (`setup.rs:95-109,170-189`).
@@ -170,9 +171,11 @@ into `D/bin/` and hashes that copy; a build-directory override alone does not
 satisfy installed verification. It supplies a minimal local manifest, separate
 from signed-release provenance.
 
+Task 012's shared provider fixture and checksum refusal are shown by `serve_refuses_provider_whose_bytes_differ_from_its_hash`; ready-operator acceptance remains with 013.
+
 Source permits the following offline builds with the committed lockfiles and
-an already-installed toolchain/dependency cache. **Neither build was run**:
-offline cache completeness and successful native compilation remain unmeasured.
+an already-installed toolchain/dependency cache. **Neither build was run in 010**:
+offline cache completeness and successful native compilation were unmeasured in that task.
 There are no package-local build scripts in these provider folders or their
 local common/guest/identity dependencies. `--locked --offline` refuses missing
 resolution inputs instead of fetching or changing a lockfile. Both output
