@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. File paths are relative to the repository root. This list records the three storage-root refusals, the two profile mutations above, and the five shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, WP07 stops checking the model profile, WP08 skips the model profile on any read error, WP09 skips a missing required did profile, and WP10 removes the absent-model skip message. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. The sibling-read allowance is not registered here yet. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. File paths are relative to the repository root. This list records the three storage-root refusals, the two profile mutations above, and the five shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, WP07 stops checking the model profile, WP08 skips the model profile on any read error, WP09 skips a missing required did profile, and WP10 removes the absent-model skip message. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -336,6 +336,71 @@
         "both_file_profiles_bind_one_storage_parameter_contract",
         "confined_outside_read_is_denied",
         "confined_outside_write_is_denied"
+      ]
+    },
+    {
+      "id": "WP21",
+      "title": "the shared contract check no longer refuses a non-canonical parameter token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/tests/confine.rs",
+          "old": "            if !CANONICAL_PARAMS.contains(&token) {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
+          "new": "            // falsifier: the check no longer refuses a non-canonical parameter token"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_non_canonical_token"
+      ]
+    },
+    {
+      "id": "WP22",
+      "title": "the wallet profile renames the shared STORAGE_ROOT parameter to a wallet-prefixed token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/confine.sb",
+          "old": "(subpath (param \"STORAGE_ROOT\"))",
+          "new": "(subpath (param \"WALLET_STORAGE_ROOT\"))"
+        }
+      ],
+      "tests": [
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP23",
+      "title": "the did profile renames the shared STORAGE_ROOT parameter to a did-prefixed token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/confine.sb",
+          "old": "(subpath (param \"STORAGE_ROOT\"))",
+          "new": "(subpath (param \"DID_STORAGE_ROOT\"))"
+        }
+      ],
+      "tests": [
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP24",
+      "title": "the wallet profile grants a sibling file read through a non-canonical parameter token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal (param \"READ_FIXTURE_KEY\")))"
+        }
+      ],
+      "tests": [
+        "confined_outside_read_is_denied",
+        "both_file_profiles_bind_one_storage_parameter_contract"
       ]
     }
   ]
