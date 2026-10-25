@@ -1,0 +1,75 @@
+{
+  "about": "cwa-000 skeleton falsifiers. Paths are relative to examples/agent-host/. Each caught entry must build and its named test must run and fail. F-CWA0c must fail to build as a nested workspace; its workspace test also fails when built alone. The canonical falsify.py lab command awaits R1. Before wc-000 adds workspace membership, prove these edits only in the task's scratch workspace.",
+  "falsifiers": [
+    {
+      "id": "F-CWA0a",
+      "title": "wasmparser loses its exact version pin",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/Cargo.toml",
+          "old": "wasmparser = \"=0.258.0\"",
+          "new": "wasmparser = \"0.258.0\""
+        }
+      ],
+      "tests": ["manifest_pins_only_wasmparser_and_wat_exactly"]
+    },
+    {
+      "id": "F-CWA0b",
+      "title": "wat becomes a caller dependency",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/Cargo.toml",
+          "old": "\n[dev-dependencies]\nwat = \"=1.258.0\"",
+          "new": "\nwat = \"=1.258.0\""
+        }
+      ],
+      "tests": ["manifest_pins_only_wasmparser_and_wat_exactly"]
+    },
+    {
+      "id": "F-CWA0c",
+      "title": "audit declares a nested workspace",
+      "command": "lab",
+      "expect": "compile_error",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/Cargo.toml",
+          "old": "wat = \"=1.258.0\"",
+          "new": "wat = \"=1.258.0\"\n\n[workspace]"
+        }
+      ],
+      "tests": []
+    },
+    {
+      "id": "F-CWA0d",
+      "title": "the skeleton accepts every module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "unimplemented!(\"audit implementation lands in cwa-001\")",
+          "new": "Ok(Vec::new())"
+        }
+      ],
+      "tests": ["lib_holds_only_the_v1_signature_with_no_logic"]
+    },
+    {
+      "id": "F-CWA0e",
+      "title": "a second public audit entry point is added",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "pub const AUDIT_API: u32 = 1;",
+          "new": "pub const AUDIT_API: u32 = 1;\n\npub fn audit_all() {}"
+        }
+      ],
+      "tests": ["lib_holds_only_the_v1_signature_with_no_logic"]
+    }
+  ]
+}

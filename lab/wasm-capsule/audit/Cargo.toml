@@ -1,0 +1,11 @@
+[package]
+name = "wasm-capsule-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wasmparser = "=0.258.0"
+
+[dev-dependencies]
+wat = "=1.258.0"
