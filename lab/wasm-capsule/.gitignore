@@ -3,3 +3,5 @@
 /target/
 /capsule.wasm
 /receipt.txt
+# tools/bundle's default output (wc-003): rebuilt from source, never committed.
+/bundle/

@@ -55,10 +55,14 @@ SYSROOT="$("$RUSTC_BIN" --print sysroot)"
 us=$'\x1f'
 export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule${us}--remap-path-prefix=${CARGO_HOME_DIR}=/cargo${us}--remap-path-prefix=${SYSROOT}=/rustc"
 
+# --lib: the capsule is the library, so the capsule build compiles only it and
+# not the package's host-side `bundle` tool (wc-003). The capsule's bytes are
+# the same either way.
 cargo build \
   --locked \
   --manifest-path "$LANE_DIR/Cargo.toml" \
   --package capsule \
+  --lib \
   --release \
   --target wasm32-unknown-unknown
 

@@ -1,9 +1,10 @@
-# wasm-capsule lab — wc-001
+# wasm-capsule lab — wc-001, wc-003
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
-byte for byte on this one Mac. Later tasks hash-name it (wc-003), sign that name
-(wc-004) and run it on two engines (wc-005). This is lab tooling Anders may
-adopt; it is not a second Runtime.
+byte for byte on this one Mac (wc-001), put in a bundle that is named by the
+hash of its whole closure (wc-003). Later tasks sign that name (wc-004) and run
+the capsule on two engines (wc-005). This is lab tooling Anders may adopt; it
+is not a second Runtime.
 
 ## What the capsule is
 
@@ -26,8 +27,11 @@ there is one path for the behaviour (P10).
 Cargo.toml            one package `capsule`, its own [workspace] + Cargo.lock
 capsule/src/lib.rs    the guest (no_std on wasm32) + the digest host test
 tools/build           the reproducible build script (bash)
+tools/bundle          the lab bundle command (wc-003); runs the `bundle` binary
+tools/bundle.rs       the `bundle` binary (host-side, never in the capsule)
+tools/lab_name.rs     the one closure rule that names a bundle
 tests/                host-side named tests + the shape reader (never in the capsule)
-  common/             build driver + minimal wasm shape reader
+  common/             build driver, minimal wasm shape reader, strict JSON reader
 falsifiers.json       planted bugs, each caught by a named test (provider format)
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
 ```
@@ -35,7 +39,10 @@ rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
 The lane is a single Cargo package (not a virtual workspace) so the lane gates —
 `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` — act on it without
 `--all`/`--workspace`. It has **no external dependencies**, so `Cargo.lock` holds
-only this package and `cargo build --locked` needs no network.
+only this package and `cargo build --locked` needs no network. The package's
+library is the capsule; its `bundle` binary is the wc-003 tool. `tools/build`
+builds `--lib`, so the capsule build compiles only the capsule (its bytes are
+the same either way).
 
 ## Build
 
@@ -82,6 +89,106 @@ or a dependency). F-WC1 is realised by embedding `env!("CARGO_MANIFEST_DIR")`,
 an absolute path `--remap-path-prefix` does not rewrite, which is why the two
 builds then differ.
 
+## wc-003: the hash-named lab bundle
+
+```bash
+tools/bundle [OUT_DIR]            # build with tools/build, write OUT_DIR/bundle/, print its lab name
+tools/bundle --name BUNDLE_DIR    # print the lab name of an existing bundle
+```
+
+`tools/bundle` runs the lane's `bundle` binary (`tools/bundle.rs`). Both modes
+name a bundle through one rule, `tools/lab_name.rs`, which the tests compile
+from the same file (P10). The build mode reuses `tools/build`: its
+`OUT_DIR/capsule.wasm` and `OUT_DIR/receipt.txt` stay outside the closure.
+stdout carries only the name. A refusal goes to stderr with the path and the
+reason, and the exit status is 1.
+
+### A lab name, not a CID
+
+The name is `lab-sha256:` followed by 64 lowercase hex digits. It is a **lab
+name**. It is **not a CID** and never a package identity: the Runtime names an
+artifact by the CID its IPFS provider gets from Kubo, and this rule does not
+reproduce that (ADOPTION.md has the discovery and the decision). No Runtime
+admission or launch path reads a lab name.
+
+### The closure
+
+A lab bundle is a directory that holds exactly two regular files:
+
+| Path | What it is |
+| --- | --- |
+| `capsule.json` | the lab manifest (below) |
+| `capsule.wasm` | the core Wasm module `tools/build` made |
+
+Anything else is refused, and the refusal names the path: an extra file (even a
+`.DS_Store`), a missing closure file, a symlink (never followed) or a directory.
+The name is over bytes; it does not check that the manifest is valid.
+
+### The bytes that are hashed
+
+```
+"wc-003.lab-closure/v1\n"
+then, for each file in ascending byte order of its path:
+  <path length> SP <path> SP <content length> SP <content>
+```
+
+A length is the byte count in decimal ASCII with no leading zeros, and SP is one
+space (0x20). Every field is length-framed, so two different closures never
+give the same bytes, and the tag keeps a lab name apart from the plain sha256
+of any file. Only paths and exact contents are read: no mtime, mode, owner,
+write or listing order, or directory name. The lab name is `lab-sha256:` and
+the lowercase hex sha256 of these bytes, from the system `sha256sum` or
+`shasum -a 256` (the tools `tools/build` uses; no crate).
+
+Test vector, pinned in `bundle_name_is_the_hash_of_the_canonical_closure`: a
+bundle whose `capsule.wasm` is the 8-byte empty module `00 61 73 6d 01 00 00 00`
+and whose `capsule.json` is the 175-byte `FIXTURE_MANIFEST` in `tests/bundle.rs`
+hashes
+
+```
+wc-003.lab-closure/v1\n12 capsule.json 175 <manifest bytes>12 capsule.wasm 8 <module bytes>
+```
+
+to `lab-sha256:0cb69f7b3bd515d31b4b1ad0c50b56a4036e341b359cd5d09cb2ce9b1f3481e1`.
+That value was computed once outside the lab code, with `printf` and
+`shasum -a 256`, and then pinned.
+
+### Lab manifest (`capsule.json`)
+
+Schema `wc-003.lab-manifest/v1`. A JSON object with exactly these fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema` | string | Always `wc-003.lab-manifest/v1`. It marks a lab manifest, not a Runtime capsule manifest. |
+| `name` | string | A human label, the Cargo package name. Never identity: the bundle's identity is its lab name. |
+| `version` | string | The Cargo package version, `MAJOR.MINOR.PATCH`. |
+| `entrypoint` | string | The closure path of the core Wasm module an engine instantiates: always `capsule.wasm`. A file, not a function, and not a Component. |
+| `imports` | array | The imports the module declares it needs, each `{ "module": "...", "name": "..." }` (the audit API's `DeclaredImport`). This capsule declares `[]`. wc-004 audits the module against it. |
+| `resources` | object | Exactly `max_memory_pages`: the linear-memory ceiling, a whole number of Wasm pages of 65,536 bytes, from 1 to 65,536 (the 4 GiB wasm32 limit). This capsule declares 16 (1 MiB), the initial memory its module declares. Declared only: nothing in wc-003 enforces it. |
+
+`tools/bundle` writes it in one byte layout (this key order, two-space indent,
+LF line ends), so the same capsule always gives the same bytes. Because the
+name hashes exact bytes, any change to the manifest, even whitespace, is a new
+name. This capsule's manifest:
+
+```json
+{
+  "schema": "wc-003.lab-manifest/v1",
+  "name": "capsule",
+  "version": "0.1.0",
+  "entrypoint": "capsule.wasm",
+  "imports": [],
+  "resources": { "max_memory_pages": 16 }
+}
+```
+
+### Reference value
+
+On this Mac on 2026-10-25, `tools/bundle` over the wc-001 capsule (sha256
+`6dd9af1a…` above) printed
+`lab-sha256:11ae0c0cd21c120c216aef1f15ef4178e30371a46e51b26ec95849b43bc8cbcc`.
+It is reproducible on this one Mac only, like the module it covers.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -89,14 +196,31 @@ builds then differ.
 - `digest_returns_the_fixed_value` — the shared impl returns the pinned value.
 - `two_clean_builds_in_different_paths_are_byte_identical` — the foundation claim.
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
+- `the_receipt_names_an_overridden_compiler` — an explicit `RUSTC` reaches the receipt.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
 - plus crafted-byte coverage of the shape reader.
 
+wc-003, in `tests/bundle.rs`:
+
+- `bundle_name_is_the_hash_of_the_canonical_closure` — the documented bytes and
+  the pinned vector, through the rule and the real command; the build mode
+  prints the rule's name of the bundle it wrote, and its module is the artifact
+  `tools/build` receipted.
+- `changing_one_wasm_byte_changes_the_name`
+- `changing_the_manifest_changes_the_name` — only the declared imports change.
+- `file_order_mtime_and_mode_do_not_change_the_name`
+- `an_extra_file_in_the_bundle_is_refused` — names the path and the reason; the
+  command prints no name.
+- `a_missing_closure_file_is_refused`
+- `a_symlink_in_the_bundle_is_refused`
+- `bundle_manifest_matches_lab_schema`
+- `bundle_output_uses_the_lab_name_prefix`
+
 ## Falsifiers
 
-`falsifiers.json` holds seven planted bugs in the provider format
-(`command: "lab"`). Each requires its named test to fail. The canonical runner
-`examples/agent-host/falsify.py` has no `lab` command yet (ask **R1**), so each
-is proved by the repo's break → named test fails → revert method with
-`cargo test` in this workspace until R1 lands.
+`falsifiers.json` holds nine wc-001 and twelve wc-003 planted bugs in the
+provider format (`command: "lab"`). Each requires its named tests to fail. The
+canonical runner `examples/agent-host/falsify.py` has no `lab` command yet (ask
+**R1**), so each is proved by the repo's break → named test fails → revert
+method with `cargo test` in this workspace until R1 lands.

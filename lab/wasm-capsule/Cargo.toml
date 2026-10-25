@@ -1,7 +1,8 @@
 # wc-001 lab capsule. Its own workspace (empty `[workspace]`) and Cargo.lock,
 # kept out of the root ElastOS workspace so the Runtime core never grows for lab
 # tooling. One package: the guest lives in capsule/src, the host-side build and
-# verification tooling lives in tests/ (never compiled into the capsule).
+# verification tooling lives in tests/, and the wc-003 bundle tool is the
+# `bundle` binary in tools/ (none of it is compiled into the capsule).
 #
 # `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
 # act on this single package, so they need no `--all`/`--workspace`.
@@ -17,6 +18,13 @@ path = "capsule/src/lib.rs"
 # `digest_impl`. The capsule has no dependencies: it brings its own logic and a
 # minimal surface (Rong's DigitCapsule; PRINCIPLES P18).
 crate-type = ["cdylib", "rlib"]
+
+# The wc-003 lab bundle tool, run as `tools/bundle`. Host-side only: tools/build
+# builds `--lib`, so the capsule build does not compile this binary, and none of
+# it is in the capsule.
+[[bin]]
+name = "bundle"
+path = "tools/bundle.rs"
 
 # The reproducible-build knobs the capsule is compiled with (Cargo honours
 # `[profile.*]` only in the workspace root): one codegen unit, LTO, a stripped

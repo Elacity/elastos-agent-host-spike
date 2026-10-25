@@ -1,5 +1,5 @@
 {
-  "about": "wc-001 lab falsifiers. Each one plants a bug in the capsule source or the build script and requires its named test to FAIL (error-free). F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001 and wc-003 lab falsifiers. Each one plants a bug in the capsule source, the build script, the bundle tool or its closure rule (tools/lab_name.rs) and requires every named test to FAIL (error-free). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. wc-003: F-WC3a leaves the manifest out of the closure and F-WC3b hashes the mtime; the rest hash the mode or the arrival order, drop the module bytes or the path framing, bypass the closure rule in the command, label the name CID, skip an extra file, accept a missing or symlinked closure file, or drop a manifest field. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -143,6 +143,198 @@
       ],
       "tests": [
         "the_receipt_names_an_overridden_compiler"
+      ]
+    },
+    {
+      "id": "F-WC3a",
+      "title": "the closure leaves the manifest out, so the declared imports can change without a new name",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "    for file in sorted {\n",
+          "new": "    for file in sorted.into_iter().filter(|file| file.path == MODULE_PATH) {\n"
+        }
+      ],
+      "tests": [
+        "changing_the_manifest_changes_the_name"
+      ]
+    },
+    {
+      "id": "F-WC3b",
+      "title": "each file's mtime is hashed into the closure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        let bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n",
+          "new": "        let mut bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n        bytes.extend_from_slice(format!(\"{:?}\", meta.modified().expect(\"an mtime\")).as_bytes());\n"
+        }
+      ],
+      "tests": [
+        "file_order_mtime_and_mode_do_not_change_the_name"
+      ]
+    },
+    {
+      "id": "F-WC3-MODE",
+      "title": "each file's mode is hashed into the closure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        let bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n",
+          "new": "        let mut bytes = fs::read(&path)\n            .map_err(|err| Refusal::new(&path, format!(\"cannot be read ({err})\")))?;\n        bytes.extend_from_slice(format!(\"{:o}\", std::os::unix::fs::PermissionsExt::mode(&meta.permissions())).as_bytes());\n"
+        }
+      ],
+      "tests": [
+        "file_order_mtime_and_mode_do_not_change_the_name"
+      ]
+    },
+    {
+      "id": "F-WC3-ORDER",
+      "title": "files are hashed in the order they arrive, not sorted by path",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "    let mut sorted: Vec<&ClosureFile> = files.iter().collect();\n    sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));\n",
+          "new": "    let sorted: Vec<&ClosureFile> = files.iter().collect();\n"
+        }
+      ],
+      "tests": [
+        "file_order_mtime_and_mode_do_not_change_the_name"
+      ]
+    },
+    {
+      "id": "F-WC3-WASM",
+      "title": "the module's bytes are left out of the closure (its length stays in)",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        closure.extend_from_slice(&file.bytes);\n",
+          "new": "        if file.path != MODULE_PATH {\n            closure.extend_from_slice(&file.bytes);\n        }\n"
+        }
+      ],
+      "tests": [
+        "changing_one_wasm_byte_changes_the_name"
+      ]
+    },
+    {
+      "id": "F-WC3-PATH",
+      "title": "the path framing is left out of the canonical closure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        closure.extend_from_slice(format!(\"{} {} \", file.path.len(), file.path).as_bytes());\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "bundle_name_is_the_hash_of_the_canonical_closure"
+      ]
+    },
+    {
+      "id": "F-WC3-BYPASS",
+      "title": "tools/bundle prints a name over capsule.wasm alone, bypassing the closure rule",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/bundle.rs",
+          "old": "    name_bundle(&bundle)\n",
+          "new": "    let module = fs::read(&module).expect(\"read the bundle's module\");\n    lab_name::lab_name(&[lab_name::ClosureFile {\n        path: MODULE_PATH.to_string(),\n        bytes: module,\n    }])\n    .map_err(|reason| Refusal::new(&bundle, reason))\n"
+        }
+      ],
+      "tests": [
+        "bundle_name_is_the_hash_of_the_canonical_closure"
+      ]
+    },
+    {
+      "id": "F-WC3-CID",
+      "title": "the lab name is labelled CID",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "pub const LAB_NAME_PREFIX: &str = \"lab-sha256:\";",
+          "new": "pub const LAB_NAME_PREFIX: &str = \"CID:\";"
+        }
+      ],
+      "tests": [
+        "bundle_output_uses_the_lab_name_prefix"
+      ]
+    },
+    {
+      "id": "F-WC3-EXTRA",
+      "title": "an extra file in the bundle is silently skipped",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        else {\n            return Err(Refusal::new(\n                &path,\n                \"is not part of the lab closure (a lab bundle holds exactly capsule.json and capsule.wasm)\",\n            ));\n        };\n",
+          "new": "        else {\n            continue;\n        };\n"
+        }
+      ],
+      "tests": [
+        "an_extra_file_in_the_bundle_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC3-MISSING",
+      "title": "a missing closure file is not refused",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "    for required in CLOSURE_PATHS {\n        if !files.iter().any(|file| file.path == required) {\n            return Err(Refusal::new(\n                &dir.join(required),\n                \"is missing from the lab closure\",\n            ));\n        }\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a_missing_closure_file_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC3-SYMLINK",
+      "title": "a symlinked closure file is followed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/lab_name.rs",
+          "old": "        let meta = fs::symlink_metadata(&path)\n",
+          "new": "        let meta = fs::metadata(&path)\n"
+        }
+      ],
+      "tests": [
+        "a_symlink_in_the_bundle_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC3-FIELD",
+      "title": "the written manifest drops its required imports field",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/bundle.rs",
+          "old": "            \"  \\\"imports\\\": [],\\n\",\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "bundle_manifest_matches_lab_schema"
       ]
     }
   ]
