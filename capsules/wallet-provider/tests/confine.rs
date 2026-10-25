@@ -115,14 +115,32 @@ struct ConfinedProvider {
 }
 
 impl ConfinedProvider {
-    fn start(wallet_root: &Path) -> Self {
-        let mut child = Command::new(SANDBOX_EXEC)
+    fn start(base: &Path) -> Self {
+        Self::start_with_profile(base, Path::new(PROFILE_PATH), &[])
+    }
+
+    fn start_with_profile(base: &Path, profile: &Path, parameters: &[(&str, &Path)]) -> Self {
+        let wallet_root = wallet_dir(base);
+        let parent = wallet_root.parent().expect("wallet parent");
+        // Runtime prepares the shared ancestors; the provider creates Wallet.
+        fs::create_dir_all(parent).expect("prepare shared service directories");
+        let mut command = Command::new(SANDBOX_EXEC);
+        command
             .arg("-f")
-            .arg(PROFILE_PATH)
+            .arg(profile)
             .arg("-D")
             .arg(format!("WALLET_STORAGE_ROOT={}", wallet_root.display()))
             .arg("-D")
-            .arg(format!("PROVIDER_EXECUTABLE={PROVIDER_BINARY}"))
+            .arg(format!("WALLET_STORAGE_PARENT={}", parent.display()))
+            .arg("-D")
+            .arg(format!(
+                "PROVIDER_EXECUTABLE={}",
+                resolved(Path::new(PROVIDER_BINARY)).display()
+            ));
+        for (name, path) in parameters {
+            command.arg("-D").arg(format!("{name}={}", path.display()));
+        }
+        let mut child = command
             .arg(PROVIDER_BINARY)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -308,24 +326,39 @@ fn confined_outside_write_is_denied() {
     let root = resolved(root.path());
     let outside = tempfile::tempdir().expect("temporary outside directory");
     let outside = resolved(outside.path());
-    let outside_wallet = wallet_dir(&outside);
     let mut provider = ConfinedProvider::start(&root);
 
     let init = provider.init(&root);
     assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
 
-    let denied = provider.init(&outside);
-    assert_storage_error(&denied);
-    assert!(
-        !outside_wallet.exists(),
-        "a denied write must create nothing outside the wallet root: {}",
-        outside_wallet.display()
-    );
+    // Both an unrelated base and a sibling inside the shared base are outside
+    // the wallet grant. Precreate their parents so denial must reach Wallet.
+    for denied_base in [
+        outside,
+        root.join("sibling"),
+        root.join("ElastOS/SystemServices/Sibling"),
+    ] {
+        let outside_wallet = wallet_dir(&denied_base);
+        fs::create_dir_all(outside_wallet.parent().unwrap()).expect("outside parent fixture");
+        let denied = provider.init(&denied_base);
+        assert_storage_error(&denied);
+        assert!(
+            !outside_wallet.exists(),
+            "a denied write must create nothing outside the wallet root: {}",
+            outside_wallet.display()
+        );
 
-    let status = provider.send(&json!({ "op": "status" }));
+        let status = provider.send(&json!({ "op": "status" }));
+        assert_eq!(
+            status["status"], "ok",
+            "the provider must answer after a denied write instead of exiting: {status}"
+        );
+    }
+
+    let recovered = provider.init(&root);
     assert_eq!(
-        status["status"], "ok",
-        "the provider must answer after a denied write instead of exiting: {status}"
+        recovered["status"], "ok",
+        "the allowed root remains usable: {recovered}"
     );
 
     provider.shutdown();
@@ -343,14 +376,40 @@ fn confined_outside_read_is_denied() {
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
     let root = resolved(root.path());
-    let outside = tempfile::tempdir().expect("temporary outside directory");
-    let outside = resolved(outside.path());
+    let outside = root.join("sibling");
     let outside_wallet = wallet_dir(&outside);
     plant_storage_key(&outside_wallet);
-    let mut provider = ConfinedProvider::start(&root);
+    // Let Init inspect/sync the fixture directories and stat the key and
+    // absent store. Only reading the key's contents remains denied. The
+    // profile under test is still read from the single confine.sb source.
+    let profile = fs::read_to_string(PROFILE_PATH).expect("profile source");
+    let mut read_profile = tempfile::NamedTempFile::new().expect("read fixture profile");
+    write!(read_profile, "{profile}\n\
+        (allow file-read* (literal (param \"READ_FIXTURE_WALLET\")) (literal (param \"READ_FIXTURE_PARENT\")))\n\
+        (allow file-read-metadata (literal (param \"READ_FIXTURE_KEY\")) (literal (param \"READ_FIXTURE_STORE\")))\n")
+        .expect("write read fixture profile");
+    let key_path = outside_wallet.join(WALLET_KEY_FILE);
+    let store_path = outside_wallet.join("wallet-state.json");
+    let mut provider = ConfinedProvider::start_with_profile(
+        &root,
+        read_profile.path(),
+        &[
+            ("READ_FIXTURE_WALLET", &outside_wallet),
+            ("READ_FIXTURE_PARENT", outside_wallet.parent().unwrap()),
+            ("READ_FIXTURE_KEY", &key_path),
+            ("READ_FIXTURE_STORE", &store_path),
+        ],
+    );
 
     let denied = provider.init(&outside);
     assert_storage_error(&denied);
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed to open wallet storage key:"),
+        "the refusal must reach the planted key read: {denied}"
+    );
 
     let status = provider.send(&json!({ "op": "status" }));
     assert_eq!(
@@ -394,6 +453,11 @@ fn profile_denies_network() {
         "the profile must deny by default"
     );
     for form in &forms {
+        assert!(
+            !(form.starts_with("(allow ")
+                && form.split([' ', '(', ')']).any(|token| token == "default")),
+            "the profile must reject allow default, including after deny default: {form}"
+        );
         assert!(
             !(form.starts_with("(allow ") && form.contains("network")),
             "the profile must not grant network access: {form}"

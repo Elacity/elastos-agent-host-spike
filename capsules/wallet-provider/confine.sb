@@ -1,9 +1,10 @@
 ;; Seatbelt profile for wallet-provider.
 ;;
 ;; This file is the single source for the profile. The Runtime loads it from
-;; the signed provider bundle and passes two resolved paths:
+;; the signed provider bundle and passes resolved paths:
 ;;   PROVIDER_EXECUTABLE  - the signed provider binary it starts
-;;   WALLET_STORAGE_ROOT  - the wallet data root it also sends to `Init`
+;;   WALLET_STORAGE_ROOT  - Init.base_path/ElastOS/SystemServices/Wallet
+;;   WALLET_STORAGE_PARENT - the existing parent of WALLET_STORAGE_ROOT
 ;; Everything else is denied, including every network operation.
 (version 1)
 
@@ -32,7 +33,8 @@
 (allow sysctl-read)
 (allow file-read* (literal "/dev/urandom"))
 
-;; Wallet state: the account, key, challenge and approval files live under the
-;; data root the Runtime named, and the provider reads and writes only there.
-(allow file-read* (subpath (param "WALLET_STORAGE_ROOT")))
-(allow file-write* (subpath (param "WALLET_STORAGE_ROOT")))
+;; Startup: inspect and synchronize the existing parent when creating Wallet.
+(allow file-read* (literal (param "WALLET_STORAGE_PARENT")))
+
+;; Wallet state: one grant covers account, key, challenge and approval files.
+(allow file-read* file-write* (subpath (param "WALLET_STORAGE_ROOT")))
