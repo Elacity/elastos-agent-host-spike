@@ -8032,12 +8032,13 @@ export!(AgentHost);
 /// must carry `Content-Length`. `gzip`, `xchunked`, mixed framings and short
 /// reads are refused with their reason, never decoded as a plain body.
 ///
-/// This is task 011's client, carried into this task's base unchanged because
-/// task 011 is not merged yet. No second client and no second skip-guard exist.
+/// This is task 011's client, carried into this branch unchanged with its own
+/// tests because task 011 is not merged into the base. No second client and no
+/// second skip-guard exist.
 #[cfg(test)]
 mod sparks_http {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
     /// The single opt-in decision: no `SPARKS_MODEL_URL` means the model is
@@ -8046,6 +8047,95 @@ mod sparks_http {
         std::env::var("SPARKS_MODEL_URL")
             .ok()
             .filter(|url| !url.is_empty())
+    }
+
+    /// One canned loopback server. It accepts one connection, reads the whole
+    /// request, writes `response`, and closes. `request()` joins it and returns
+    /// the bytes the client sent.
+    pub(crate) struct MockServer {
+        url: String,
+        handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    }
+
+    impl MockServer {
+        pub(crate) fn serve_once(response: &[u8]) -> MockServer {
+            Self::serve_once_with(response, None)
+        }
+
+        /// Serve once, then hold the connection open, so the client's read
+        /// times out instead of reaching EOF.
+        pub(crate) fn serve_once_stalled(response: &[u8], stall: Duration) -> MockServer {
+            Self::serve_once_with(response, Some(stall))
+        }
+
+        fn serve_once_with(response: &[u8], stall: Option<Duration>) -> MockServer {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let response = response.to_vec();
+            let handle = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_request(&stream);
+                let mut writer = stream;
+                writer.write_all(&response).unwrap();
+                if let Some(stall) = stall {
+                    std::thread::sleep(stall);
+                }
+                request
+            });
+            MockServer {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        pub(crate) fn url(&self) -> &str {
+            &self.url
+        }
+
+        pub(crate) fn request(mut self) -> Vec<u8> {
+            self.handle.take().unwrap().join().unwrap()
+        }
+    }
+
+    /// A loopback address the fixture owns and closes before the client
+    /// connects, so a connection failure is proven without touching another
+    /// service.
+    fn closed_loopback_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        url
+    }
+
+    /// Read one request: headers, then exactly `Content-Length` body bytes.
+    fn read_request(mut stream: &TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                return request;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if let Some(headers_end) = find_subslice(&request, b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..headers_end]);
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let body_start = headers_end + 4;
+                if request.len() >= body_start + length {
+                    return request;
+                }
+            }
+        }
     }
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -8249,6 +8339,254 @@ mod sparks_http {
             decoded.extend_from_slice(&body[at..end - 2]);
             at = end;
         }
+    }
+
+    fn chunked(body: &str) -> Vec<u8> {
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len()).as_bytes());
+        response
+    }
+
+    const JSON: &str = r#"{"answer":"ok"}"#;
+
+    #[test]
+    fn a_chunked_body_is_decoded_and_the_coding_name_is_matched_exactly() {
+        let server = MockServer::serve_once(&chunked(JSON));
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Ok(JSON.to_string())
+        );
+        assert!(server.request().starts_with(b"POST /v1/chat HTTP/1.1\r\n"));
+
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: xchunked\r\n\r\n{\"answer\":\"ok\"}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported transfer coding \"xchunked\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_content_length_body_is_decoded() {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{JSON}",
+            JSON.len()
+        );
+        let server = MockServer::serve_once(response.as_bytes());
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Ok(JSON.to_string())
+        );
+        let request = String::from_utf8(server.request()).unwrap();
+        assert!(request.contains(r#"Content-Length: 2"#));
+        assert!(request.ends_with("{}"));
+    }
+
+    #[test]
+    fn an_unsupported_transfer_coding_is_refused_not_read_as_a_plain_body() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n{\"answer\":\"ok\"}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported transfer coding \"gzip\"".to_string())
+        );
+    }
+
+    #[test]
+    fn conflicting_framing_is_refused() {
+        let both =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello";
+        let server = MockServer::serve_once(both);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("conflicting framing: transfer-encoding and content-length".to_string())
+        );
+
+        let two =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n";
+        let server = MockServer::serve_once(two);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("conflicting transfer codings: chunked, gzip".to_string())
+        );
+
+        let lengths = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}";
+        let server = MockServer::serve_once(lengths);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("conflicting content-length values".to_string())
+        );
+    }
+
+    #[test]
+    fn a_short_read_is_an_error_not_an_empty_success() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("short read: 2 of 20 body bytes".to_string())
+        );
+
+        let incomplete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab";
+        let server = MockServer::serve_once(incomplete);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("short read: chunk data is incomplete".to_string())
+        );
+
+        let unterminated = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n";
+        let server = MockServer::serve_once(unterminated);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("short read: chunked body is not terminated".to_string())
+        );
+
+        let error = post_json(&closed_loopback_url(), "/v1/chat", "{}").unwrap_err();
+        assert!(error.starts_with("connect failed:"), "{error}");
+    }
+
+    #[test]
+    fn a_huge_chunk_size_is_an_error_not_an_overflow() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("chunk size is too large".to_string())
+        );
+    }
+
+    #[test]
+    fn a_read_error_is_returned_not_ignored() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab";
+        let server = MockServer::serve_once_stalled(response, Duration::from_secs(1));
+        let error =
+            post_json_with_timeout(server.url(), "/v1/chat", "{}", Duration::from_millis(200))
+                .unwrap_err();
+        assert!(error.starts_with("read failed:"), "{error}");
+        assert!(server.request().starts_with(b"POST /v1/chat HTTP/1.1"));
+    }
+
+    #[test]
+    fn a_response_with_no_framing_is_refused() {
+        let response = b"HTTP/1.1 200 OK\r\nX: y\r\n\r\n{}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("response has no framing".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_numeric_framing_is_refused() {
+        let content_length = b"HTTP/1.1 200 OK\r\nContent-Length: +2\r\n\r\n{}";
+        let server = MockServer::serve_once(content_length);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("invalid content-length \"+2\"".to_string())
+        );
+
+        let chunk_size = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+0\r\n\r\n";
+        let server = MockServer::serve_once(chunk_size);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("invalid chunk size \"+0\"".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_chunk_framing_is_refused() {
+        let trailers = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: y\r\n\r\n";
+        let server = MockServer::serve_once(trailers);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("trailers are not accepted".to_string())
+        );
+
+        let bad_crlf = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nabXX0\r\n\r\n";
+        let server = MockServer::serve_once(bad_crlf);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("chunk is not ended by CRLF".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_chunk_or_body_is_refused() {
+        let size_line = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\xff\r\n";
+        let server = MockServer::serve_once(size_line);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("chunk size line is not UTF-8".to_string())
+        );
+
+        let body = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n\xff\xff";
+        let server = MockServer::serve_once(body);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("response body is not UTF-8".to_string())
+        );
+
+        let chunk_body =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\xff\r\n0\r\n\r\n";
+        let server = MockServer::serve_once(chunk_body);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("response body is not UTF-8".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_framing_headers_are_refused() {
+        let spaced = b"HTTP/1.1 200 OK\r\nTransfer-Encoding : gzip\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(spaced);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed header syntax".to_string())
+        );
+
+        let no_colon = b"HTTP/1.1 200 OK\r\nbogus\r\n\r\n{}";
+        let server = MockServer::serve_once(no_colon);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed header syntax".to_string())
+        );
+
+        // A bare LF is not a line ending: it must not fold the next header
+        // into an ignored value.
+        let bare_lf =
+            b"HTTP/1.1 200 OK\r\nX: a\nTransfer-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(bare_lf);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed header line break".to_string())
+        );
+    }
+
+    #[test]
+    fn a_non_http_status_line_is_refused() {
+        let wrong_version = b"NOTHTTP 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(wrong_version);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported http version \"NOTHTTP\"".to_string())
+        );
+
+        let bad_code = b"HTTP/1.1 20x OK\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(bad_code);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed http status code \"20x\"".to_string())
+        );
+    }
+
+    #[test]
+    fn the_model_url_opt_in_is_one_guard() {
+        std::env::remove_var("SPARKS_MODEL_URL");
+        assert_eq!(sparks_model_url(), None);
+        std::env::set_var("SPARKS_MODEL_URL", "http://127.0.0.1:9");
+        assert_eq!(sparks_model_url(), Some("http://127.0.0.1:9".to_string()));
+        std::env::remove_var("SPARKS_MODEL_URL");
+        assert_eq!(sparks_model_url(), None);
     }
 }
 
@@ -11011,6 +11349,17 @@ mod tests {
         id
     }
 
+    /// The assistant text of an OpenAI-compatible reply, unchanged. The summary
+    /// check judges the model's bytes, so nothing trims or rewrites them here.
+    fn assistant_content(reply: &str) -> String {
+        let reply: serde_json::Value = serde_json::from_str(reply)
+            .unwrap_or_else(|error| panic!("reply is not JSON: {error}"));
+        reply["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_else(|| panic!("reply has no assistant content"))
+            .to_string()
+    }
+
     #[test]
     fn a_compaction_summary_request_uses_the_hosted_model_path() {
         let mut journal = summary_journal();
@@ -11302,13 +11651,7 @@ mod tests {
         let reply = sparks_http::post_json(&base_url, "/v1/chat/completions", &body)
             .unwrap_or_else(|error| panic!("real model request failed: {error}"));
         eprintln!("real model request ok: {} response bytes", reply.len());
-        let reply: serde_json::Value = serde_json::from_str(&reply)
-            .unwrap_or_else(|error| panic!("real model reply is not JSON: {error}"));
-        let summary = reply["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or_else(|| panic!("real model reply has no assistant content"))
-            .trim()
-            .to_string();
+        let summary = assistant_content(&reply);
         eprintln!("real model summary: {} bytes", summary.len());
 
         let expected = compact_refusal(&journal, &summary, &required);
@@ -11354,6 +11697,36 @@ mod tests {
         assert_eq!(journal.events, before);
         assert_eq!(journal.epoch, epoch);
         eprintln!("check verdict: a summary that fails the check is refused: {reason}");
+    }
+
+    /// The real answer is judged unchanged. A padded answer that the shared
+    /// checker refuses as not shrinking stays unshrunk, so the opt-in test
+    /// cannot report a different verdict for the same model bytes.
+    #[test]
+    fn a_padded_model_answer_is_not_trimmed_before_the_check() {
+        let padded = format!("{}hello second turn", " ".repeat(10_000));
+        let reply = serde_json::json!({
+            "choices": [{"message": {"content": padded}}],
+        })
+        .to_string();
+        let answer = assistant_content(&reply);
+        assert_eq!(answer, padded);
+        let required = ["hello".to_string(), "second turn".to_string()];
+        assert_eq!(
+            compact_refusal(&summary_journal(), &answer, &required),
+            Some("summary does not shrink")
+        );
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(answer)),
+            Err("summary does not shrink")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
     }
 
     #[test]
