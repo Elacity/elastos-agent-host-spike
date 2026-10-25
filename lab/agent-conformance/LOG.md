@@ -376,3 +376,265 @@ Principles check (paths without a prefix below are relative to this lane):
 | 7. New executable rules have tests and caught falsifiers? | Yes within documentation scope: zero new executable rules. The existing environment test stays intact; `tests/harness.rs:82-105`. This discovery claims no new falsifier result. |
 
 - 010: Extended the single GAPS record and this summary with operator startup files, provider checks/build commands, network controls, readiness/stop/admission evidence and AC-010-OFFLINE; clarified the separate AC-006-STORAGE scope.
+
+## 009 — Runtime identity and contained no-operator launch
+
+- 009: Added `build::offline_build` and `runtime::runtime_under_test`, reused the shared build setup in `tests/artifact.rs::build_probe`, added two Runtime checks and F-ac1f/F-ac1g, printed the Runtime hash above the existing table, and updated README, RUNBOOK and GAPS.
+
+The Runtime build uses its normal toolchain environment and the exact command
+`cargo build --locked --offline --manifest-path elastos/Cargo.toml -p elastos-server --bin elastos`.
+`OnceLock` caches either its result or its error once per test process. Build
+outputs stay under `target/runtime`, including `build/` and `tmp/`; debug info
+and incremental compilation are disabled. The std-only harness hashes the
+binary with macOS `shasum`; the existing `sha2` test dependency independently
+checks the returned digest. Cargo manifests and lockfiles stay unchanged.
+The binary's path locates it, and its computed SHA-256 identifies the tested
+bytes. This hash is specific to this machine and toolchain, as with 002's probe.
+
+The initial run found an existing warm target. For a real cold measurement,
+under the shared heavy-build lease, the builder checked the previous binary
+with `lsof`, removed only `target/runtime`, and ran:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime -- --show-output
+```
+
+Cold Runtime build plus SHA-256: **138.47 seconds**. The complete two-test
+command took **143.05 seconds**, with 2 passed, 0 failed and 0 ignored.
+`du -sk lab/agent-conformance/target/runtime` reported **2092432 KiB**
+(1.995 GiB), including intermediates. The free-space check allowed
+12 GiB of generated files plus a 2 GiB reserve. The warm target stays for the
+supervisor's gate, then its local inventory entry requires removal.
+
+Every Runtime launch uses `ThrowawayHome::launch`. The relative probe locator
+resolves to this lane's probe from the throwaway Home and keeps private
+checkout paths out of the Runtime transcript. The no-operator test checks the
+nonzero exit and Runtime reason. The data-dir test writes dummy coordinates
+at `home.data()`; Runtime removes them and returns the same reason. Runtime
+rejects the documentation-address URL before PID checks or network calls.
+The operator lookup returns before storage construction. AC-006-STORAGE and
+all other GAPS blockers remain open; this is refusal proof only.
+
+Exact stderr from the restored no-operator check, in lossless Rust string
+escaping (`\u{1b}` is ESC and `\n` is a newline):
+
+```text
+"\u{1b}[2m2026-10-25T15:57:49.974117Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos::run_cmd\u{1b}[0m\u{1b}[2m:\u{1b}[0m Running capsule from: ../../../probe\nError: This command requires a running runtime.\n\n  elastos serve\n\nThen run this command again.\n"
+```
+
+The commands below used the repository's existing `fcntl.flock` heavy-build
+lease and these build settings from the repository root:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-009"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+Each falsifier's single edit came from `falsifiers.json`. The builder asserted
+one exact match, applied `original.replace(old, new, 1)`, ran the named test,
+restored the original bytes in `finally`, then reran the same command.
+Every named test ran and failed on its assertion (exit 101), then passed
+(exit 0). In the captured output below, raw ESC bytes are shown as `\x1b`.
+The shared falsifier runner stays unchanged.
+
+F-ac1g uses the recognized non-component ABI `wasi-preview1`. In this checkout,
+`manifest.rs:738-742` rejects that ABI before the branch cited in the task at
+`run_cmd.rs:52-56`. The observed reason is `Invalid manifest: WASI Preview 1 is
+not a supported product capsule ABI; use elastos.component/v1 or
+elastos.runtime-projection/v1`. The test therefore proves reason matching
+against Runtime's actual refusal. A preliminary misspelling reached enum
+parsing instead; it was corrected and is excluded from the evidence below.
+
+**F-ac1f**
+
+```sh
+cargo test --quiet --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime runtime_data_dir_is_under_throwaway_home -- --exact --nocapture
+```
+
+Planted (exit 101):
+
+```text
+
+running 1 test
+elastos build finished in 0.88s
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+
+thread 'runtime_data_dir_is_under_throwaway_home' (21647373) panicked at tests/runtime.rs:71:5:
+Runtime must remove the decoy from the guarded data directory
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: lab/agent-conformance/target/home-68327-1792943743314015000-0
+runtime_data_dir_is_under_throwaway_home --- FAILED
+
+failures:
+
+failures:
+    runtime_data_dir_is_under_throwaway_home
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.02s
+
+error: test failed, to rerun pass `-p agent-conformance --test runtime`
+```
+
+Restored (exit 0):
+
+```text
+
+running 1 test
+elastos build finished in 0.61s
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.80s
+```
+
+**F-ac1g**
+
+```sh
+cargo test --quiet --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime run_without_operator_is_refused_with_reason -- --exact --nocapture
+```
+
+Planted (exit 101):
+
+```text
+
+running 1 test
+elastos build finished in 0.59s
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+
+thread 'run_without_operator_is_refused_with_reason' (21672888) panicked at tests/runtime.rs:35:5:
+expected operator refusal; stderr:
+\x1b[2m2026-10-25T15:57:43.137657Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos::run_cmd\x1b[0m\x1b[2m:\x1b[0m Running capsule from: ../../../probe
+Error: Invalid manifest: WASI Preview 1 is not a supported product capsule ABI; use elastos.component/v1 or elastos.runtime-projection/v1
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: lab/agent-conformance/target/home-72450-1792943856125151000-0
+run_without_operator_is_refused_with_reason --- FAILED
+
+failures:
+
+failures:
+    run_without_operator_is_refused_with_reason
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 12.32s
+
+error: test failed, to rerun pass `-p agent-conformance --test runtime`
+```
+
+Restored (exit 0):
+
+```text
+
+running 1 test
+elastos build finished in 0.69s
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+Runtime refusal stderr: "\u{1b}[2m2026-10-25T15:57:49.974117Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos::run_cmd\u{1b}[0m\u{1b}[2m:\u{1b}[0m Running capsule from: ../../../probe\nError: This command requires a running runtime.\n\n  elastos serve\n\nThen run this command again.\n"
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.78s
+```
+
+Final lane checks passed with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`:
+
+```sh
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+The full Cargo command took 40.50 seconds; the table command took 34.57 seconds.
+Both completed with 12 passed, 0 failed and 0 ignored. The exact table:
+
+```text
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+test | PASS/FAIL/BLOCKED (id)
+foreign_and_wrong_version_imports_are_refused | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+non_component_and_invalid_component_are_refused | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+```
+
+The basic repository gate also passed: `git diff --check`, the product-data
+check (42 capsules, 2 profiles, 28 method contracts), its 99 tests, Runtime
+workspace formatting and chain-provider formatting. `bash -n` passed for
+`run.sh`. All 12 falsifier IDs are unique and all exact edit anchors match.
+The ten unchanged falsifiers were checked for anchor validity; their mutations
+were outside this task's rerun scope. Their normal tests passed in the suite.
+
+Source SHA-256 values and `git status --porcelain` were unchanged by the full
+runs and falsifier restoration. The builder leaves only lane source edits for
+the supervisor's commit; an empty status follows that commit. Generated files
+are ignored. The restored probe and harness have zero source diff. The two
+intentional failure roots remain for supervisor review, then removal under
+the local lifecycle inventory. Each child was waited for; this task started
+only bounded CLI commands. The cached `spike/spike/agent-host` upstream moved
+during verification; the final branch inventory is 0 ahead / 3 behind it.
+Remote freshness is unverified under the network restriction. Commit, push, PR evidence and independent review belong
+to the supervisor. These exact commands and outputs are ready for its PR.
+
+Principles check (paths are relative to this lane):
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name/URL where a code/content hash belongs? | No. `src/runtime.rs:55-79` computes and returns the built binary's SHA-256; the path only locates those bytes. |
+| 2. New ambient or UI authority? | No. `tests/runtime.rs:23-29` uses the existing guarded launch, whose cleared environment is at `src/harness.rs:204`; the probe receives no grant. |
+| 3. Second operation path or rule copy? | No. `src/build.rs:17` owns the shared offline setup; `tests/artifact.rs:17` reuses it, and `tests/runtime.rs:64` uses the existing data-dir rule. |
+| 4. Does the trusted core grow? | No. The new modules are exported from the lane at `src/lib.rs:3-6`; the Runtime tree has zero source changes. |
+| 5. Does refusal fail closed with a reason? | Yes. `tests/runtime.rs:31-37` requires both the failed exit and Runtime's exact reason fragment; `src/runtime.rs:47-53` preserves Cargo failure output. |
+| 6. Does capsule logic stay inside and trap down? | Yes. The probe remains unchanged with typed Bus bindings at `probe/src/lib.rs:8` and its internal refusal at `probe/src/lib.rs:14`. |
+| 7. Do new rules have tests and caught falsifiers? | Yes. `tests/runtime.rs:43` and `tests/runtime.rs:60` passed, failed under F-ac1g/F-ac1f, then passed after restoration; `falsifiers.json:166` and `falsifiers.json:182` hold the exact edits. |
+
+## 011 — 009 re-landed on the moved base
+
+- 011: Restored the nine reviewed files byte-identical to `0f84602e6`, kept all 010 text in GAPS and LOG, and appended 009's exact LOG section before this record.
+
+The base guard passed before edits. GAPS has +21/-14 against the task base
+and +204/-0 against 009; its 204 added lines exactly match 010's additions.
+LOG keeps the complete task-base prefix and the reviewed 215-line appendix.
+The existing shared heavy-build lease was held for all lane checks. Commands
+ran from the repository root with:
+
+```sh
+export CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-011/tmp"
+```
+
+Each falsifier was applied once from its exact `falsifiers.json` edit after
+checking one matching anchor. Original bytes were restored in `finally`, then
+the same named test ran again. Both commands below ran planted and restored:
+
+| Falsifier and command | Result |
+| --- | --- |
+| F-ac1f: `cargo test --quiet --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime runtime_data_dir_is_under_throwaway_home -- --exact --nocapture` | Planted: exit 101, 1 failed because Runtime left the decoy in the wrong data directory; restored: exit 0, 1 passed. |
+| F-ac1g: `cargo test --quiet --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime run_without_operator_is_refused_with_reason -- --exact --nocapture` | Planted: exit 101, 1 failed because Runtime returned the WASI Preview 1 manifest refusal instead of the operator refusal; restored: exit 0, 1 passed. |
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed.
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -- --show-output`
+passed: 12 passed, 0 failed, 0 ignored, in 45.51 seconds. `lab/agent-conformance/run.sh`
+passed in 44.87 seconds, with the Runtime hash above all 12 PASS rows.
+The warm Runtime build plus SHA-256 took 1.54 seconds. Runtime SHA-256:
+`150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd`.
+
+The basic gate passed: `git diff --check`, `node scripts/check-product-data.mjs`
+(42 capsules, 2 profiles, 28 method contracts), its 99 tests, Runtime workspace
+formatting and chain-provider formatting. `bash -n lab/agent-conformance/run.sh`
+also passed. These checks used the existing tests and falsifiers unchanged.
+
+Source hashes and Git status were identical before and after the runs.
+The supervisor owns staging and committing the 11 source files; three are
+new, so Git's index-based diff omits their working bytes until staging.
+Direct comparisons with `git show 0f84602e6:<path>` prove all nine reviewed
+files match. An empty Git status awaits that supervisor commit. Cached
+upstream divergence is 0 ahead / 0 behind; remote freshness is unverified
+under the network restriction. Ignored build outputs and the two failed-test
+roots have removal conditions in the local lifecycle inventory.

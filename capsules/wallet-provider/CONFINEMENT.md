@@ -117,6 +117,15 @@ when the Runtime side does.
   `(allow network-outbound (remote ip "localhost:*"))`. The check refuses each
   profile with a reason that names `fixture-provider` and the refused form.
   The test reads no file.
+- `file_profile_contract_rejects_an_allow_default` builds the same passing
+  fixture and appends `(allow default)` after the default denial. The check
+  refuses it with a reason that names `fixture-provider` and
+  `must reject (allow default)`. The test reads no file.
+- `file_profile_contract_rejects_a_non_canonical_token` builds the same
+  passing fixture and appends
+  `(allow file-read* (literal (param "READ_FIXTURE_KEY")))`. The check refuses
+  it with a reason that names `fixture-provider` and
+  `non-canonical parameter token READ_FIXTURE_KEY`. The test reads no file.
 - `file_profile_contract_checks_the_model_profile_when_present` runs the same
   list function over a temporary `capsules/` directory. With no model
   profile it checks exactly the two required profiles; a model profile
@@ -132,17 +141,24 @@ The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent.
 
 Falsifier procedure (run against a temporary edit, then restore the profile):
 
-- Rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in this profile:
+- Rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in this profile (WP22):
   `both_file_profiles_bind_one_storage_parameter_contract` fails on the
   non-canonical token.
-- `(allow default)` in place of `(deny default)` makes the outside `Init`
-  succeed, so the outside tests fail.
-- Append `(allow file-read* (literal (param "READ_FIXTURE_KEY")))` and run
-  `confined_outside_read_is_denied`: reading the planted key makes `Init`
-  succeed and the test fail.
-- `(allow network*)` makes `profile_denies_network` and
+- `(allow default)` in place of `(deny default)` (WP04) makes the outside
+  `Init` succeed, so the outside tests fail.
+- Append `(allow file-read* (literal (param "READ_FIXTURE_KEY")))` (WP24):
+  `confined_outside_read_is_denied` fails because reading the planted key
+  lets `Init` succeed, and
+  `both_file_profiles_bind_one_storage_parameter_contract` fails because the
+  token is non-canonical.
+- `(allow network*)` (WP05) makes `profile_denies_network` and
   `both_file_profiles_bind_one_storage_parameter_contract` fail.
-- Appending `(allow default)` also makes `profile_denies_network` fail.
+- Append `(allow default)` after `(deny network*)` (WP20):
+  `profile_denies_network`,
+  `both_file_profiles_bind_one_storage_parameter_contract`,
+  `confined_outside_read_is_denied` and `confined_outside_write_is_denied`
+  fail, because the profile allows every operation and the shared check
+  refuses the rule.
 - Removing the storage-root write rule (WP18) makes `Init` fail inside the
   root, so the operations and outside-write tests fail, and the shared contract
   check fails.
