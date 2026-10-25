@@ -177,21 +177,45 @@ class DiskFull(Exception):
     pass
 
 
+def load_refuse(path, reason):
+    """Stop on a data file that cannot load: status 2 and one clear reason. A
+    refusal never selects work and never counts as zero falsifiers run."""
+    print(f"{path}: {reason}", file=sys.stderr)
+    raise SystemExit(CASE_USAGE)
+
+
 def load(path=DATA):
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    """The entries, or a refusal with status 2 when the data file is missing,
+    is not JSON, or has the wrong document shape."""
+    if not path.is_file():
+        load_refuse(path, "the data file does not exist")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        load_refuse(path, "the data file cannot be read")
+    except UnicodeDecodeError:
+        load_refuse(path, "the data file is not JSON")
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError:
+        load_refuse(path, "the data file is not JSON")
+    if not isinstance(doc, dict):
+        load_refuse(path, "the document is not an object")
+    if "falsifiers" not in doc:
+        load_refuse(path, "the document has no falsifiers list")
     entries = doc["falsifiers"]
+    if not isinstance(entries, list):
+        load_refuse(path, "falsifiers is not a list")
     ids = [entry["id"] for entry in entries]
     if len(ids) != len(set(ids)):
-        sys.exit("falsifiers.json: an id is used twice")
+        load_refuse(path, "an id is used twice")
     for entry in entries:
-        if entry["command"] not in COMMANDS or entry["expect"] not in (
-            "caught",
-            "compile_error",
-            "survives",
-        ):
-            sys.exit(f"falsifiers.json: {entry['id']}: unknown command or expect")
+        if entry["command"] not in COMMANDS:
+            load_refuse(path, f"{entry['id']}: unknown command {entry['command']!r}")
+        if entry["expect"] not in ("caught", "compile_error", "survives"):
+            load_refuse(path, f"{entry['id']}: unknown expect {entry['expect']!r}")
         if entry["expect"] in ("caught", "survives") and not entry["tests"]:
-            sys.exit(f"falsifiers.json: {entry['id']}: no named tests")
+            load_refuse(path, f"{entry['id']}: no named tests")
     return entries
 
 
@@ -883,6 +907,94 @@ def a_self_test_case_counts_only_when_it_ran():
     return ok
 
 
+def load_refused(path, reason):
+    """True only when load(path) stops with status 2 and exactly `reason`.
+    A bypass that lets a read, JSON or shape exception escape fails the case,
+    so that falsifier is caught instead of the case erroring out."""
+    message = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(message):
+            load(path)
+    except SystemExit as stop:
+        code = stop.code
+    except Exception as error:
+        print(f"self-test: load({path}) raised {type(error).__name__}: {error}")
+        return False
+    else:
+        print(f"self-test: load({path}) returned without a refusal")
+        return False
+    print(f"self-test: load({path}) -> exit {code}: {message.getvalue().strip()}")
+    return code == CASE_USAGE and message.getvalue() == f"{path}: {reason}\n"
+
+
+def a_data_file_refusal(name, text, reason):
+    """One crafted data file under the self-test dir: load() stops with status
+    2 and exactly reason. No file is written when text is None."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        path = SELF_TEST_DIR / name
+        if text is not None:
+            SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return load_refused(path, reason)
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def a_missing_data_file_is_refused():
+    """A path with no file is a refusal, not an empty run."""
+    return a_data_file_refusal("missing.json", None, "the data file does not exist")
+
+
+def a_non_json_data_file_is_refused():
+    """Text that is not JSON is a refusal, not an empty run."""
+    return a_data_file_refusal("not-json.json", "this is not JSON\n",
+                               "the data file is not JSON")
+
+
+def a_data_document_must_be_an_object():
+    """A JSON body that is not an object is a refusal with its own reason."""
+    return a_data_file_refusal("root-list.json", json.dumps(["falsifiers"]),
+                               "the document is not an object")
+
+
+def a_data_document_needs_a_falsifiers_list():
+    """An object without a falsifiers key is a refusal with its own reason."""
+    return a_data_file_refusal("no-falsifiers.json", json.dumps({"entries": []}),
+                               "the document has no falsifiers list")
+
+
+def falsifiers_must_be_a_list():
+    """A falsifiers value that is not a list is a refusal with its own reason."""
+    return a_data_file_refusal("falsifiers-object.json",
+                               json.dumps({"falsifiers": {}}),
+                               "falsifiers is not a list")
+
+
+def a_duplicate_id_is_refused():
+    """Two entries with one id are a refusal with status 2."""
+    entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::x"]}
+    return a_data_file_refusal("duplicate.json",
+                               json.dumps({"falsifiers": [entry, dict(entry)]}),
+                               "an id is used twice")
+
+
+def an_unknown_command_is_refused():
+    """A command outside COMMANDS is a refusal with its own reason."""
+    entry = {"id": "ST", "command": "bogus", "expect": "caught", "tests": ["tests::x"]}
+    return a_data_file_refusal("unknown-command.json",
+                               json.dumps({"falsifiers": [entry]}),
+                               "ST: unknown command 'bogus'")
+
+
+def an_unknown_expect_is_refused():
+    """An expect outside the known values is a refusal with its own reason."""
+    entry = {"id": "ST", "command": "host", "expect": "bogus", "tests": ["tests::x"]}
+    return a_data_file_refusal("unknown-expect.json",
+                               json.dumps({"falsifiers": [entry]}),
+                               "ST: unknown expect 'bogus'")
+
+
 def a_survivor_needs_its_named_test_to_run():
     """A survives entry whose named test did not run is NOT RUN, never a
     survivor. load() refuses a survives entry with no named test, the same as
@@ -895,13 +1007,7 @@ def a_survivor_needs_its_named_test_to_run():
         data.write_text(json.dumps({"falsifiers": [
             {"id": "ST", "title": "no test", "command": "host",
              "expect": "survives", "edits": [], "tests": []}]}), encoding="utf-8")
-        refused = False
-        try:
-            load(data)
-        except SystemExit as error:
-            refused = "no named tests" in str(error)
-        print(f"self-test: a survives entry with no named test: refused={refused}")
-        if not refused:
+        if not load_refused(data, "ST: no named tests"):
             ok = False
         entry = {"id": "ST", "command": "host", "expect": "survives",
                  "tests": ["tests::planted_check"]}
@@ -1185,6 +1291,14 @@ SELF_TEST_CASES = {
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
+    "a missing data file is refused": a_missing_data_file_is_refused,
+    "a non-json data file is refused": a_non_json_data_file_is_refused,
+    "a data document must be an object": a_data_document_must_be_an_object,
+    "a data document needs a falsifiers list": a_data_document_needs_a_falsifiers_list,
+    "falsifiers must be a list": falsifiers_must_be_a_list,
+    "a duplicate id is refused": a_duplicate_id_is_refused,
+    "an unknown command is refused": an_unknown_command_is_refused,
+    "an unknown expect is refused": an_unknown_expect_is_refused,
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
     "the streams keep their own lines": the_streams_keep_their_own_lines,
     "a real catch counts": real_catch_counts,
