@@ -649,6 +649,70 @@
    "tests": [
     "sparks_http::the_model_url_opt_in_is_one_guard"
    ]
+  },
+  {
+   "id": "FS29",
+   "title": "a zero-size chunk returns success before the final CRLF, so a truncated body is complete",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if size == 0 {\n                if body.len() < at.saturating_add(2) {\n                    return Err(\"short read: chunked body is not terminated\".to_string());\n                }\n                if &body[at..at + 2] != b\"\\r\\n\" {\n                    return Err(\"trailers are not accepted\".to_string());\n                }\n                return String::from_utf8(decoded)",
+     "new": "            if size == 0 {\n                return String::from_utf8(decoded)"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_short_read_is_an_error_not_an_empty_success"
+   ]
+  },
+  {
+   "id": "FS30",
+   "title": "chunk bounds are unchecked, so a huge chunk size overflows",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            let end = at\n                .checked_add(size)\n                .and_then(|end| end.checked_add(2))\n                .ok_or_else(|| \"chunk size is too large\".to_string())?;",
+     "new": "            let end = at + size + 2;"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_huge_chunk_size_is_an_error_not_an_overflow"
+   ]
+  },
+  {
+   "id": "FS31",
+   "title": "malformed framing headers are ignored, so a spaced transfer-encoding header is not seen",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            let Some((name, value)) = line.split_once(':') else {\n                return Err(\"malformed header syntax\".to_string());\n            };\n            if name.is_empty() || !name.bytes().all(is_header_name_byte) {\n                return Err(\"malformed header syntax\".to_string());\n            }",
+     "new": "            let Some((name, value)) = line.split_once(':') else {\n                continue;\n            };"
+    }
+   ],
+   "tests": [
+    "sparks_http::malformed_framing_headers_are_refused"
+   ]
+  },
+  {
+   "id": "FS32",
+   "title": "duplicate content-length values are accepted, so conflicting lengths are not refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if content_lengths.len() > 1 {\n            return Err(\"conflicting content-length values\".to_string());\n        }",
+     "new": "        // the first content-length wins."
+    }
+   ],
+   "tests": [
+    "sparks_http::conflicting_framing_is_refused"
+   ]
   }
  ]
 }

@@ -8163,8 +8163,11 @@ mod sparks_http {
         let mut content_lengths = Vec::new();
         for line in lines {
             let Some((name, value)) = line.split_once(':') else {
-                continue;
+                return Err("malformed header syntax".to_string());
             };
+            if name.is_empty() || !name.bytes().all(is_header_name_byte) {
+                return Err("malformed header syntax".to_string());
+            }
             if name.eq_ignore_ascii_case("transfer-encoding") {
                 for coding in value.split(',') {
                     transfer_codings.push(coding.trim().to_string());
@@ -8208,6 +8211,28 @@ mod sparks_http {
             .map_err(|_| "response body is not UTF-8".to_string())
     }
 
+    /// RFC 9110 tchar: the only bytes a header field name may carry.
+    fn is_header_name_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    }
+
     /// Decode a chunked body. Every chunk must be complete, with its CRLF.
     fn decode_chunked(body: &[u8]) -> Result<String, String> {
         let mut decoded = Vec::new();
@@ -8225,17 +8250,27 @@ mod sparks_http {
                 .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
             at = line_end + 2;
             if size == 0 {
+                if body.len() < at.saturating_add(2) {
+                    return Err("short read: chunked body is not terminated".to_string());
+                }
+                if &body[at..at + 2] != b"\r\n" {
+                    return Err("trailers are not accepted".to_string());
+                }
                 return String::from_utf8(decoded)
                     .map_err(|_| "response body is not UTF-8".to_string());
             }
-            if body.len() < at + size + 2 {
+            let end = at
+                .checked_add(size)
+                .and_then(|end| end.checked_add(2))
+                .ok_or_else(|| "chunk size is too large".to_string())?;
+            if body.len() < end {
                 return Err("short read: chunk data is incomplete".to_string());
             }
-            if &body[at + size..at + size + 2] != b"\r\n" {
+            if &body[end - 2..end] != b"\r\n" {
                 return Err("chunk is not ended by CRLF".to_string());
             }
-            decoded.extend_from_slice(&body[at..at + size]);
-            at += size + 2;
+            decoded.extend_from_slice(&body[at..end - 2]);
+            at = end;
         }
     }
 
@@ -8307,6 +8342,13 @@ mod sparks_http {
             post_json(server.url(), "/v1/chat", "{}"),
             Err("conflicting transfer codings: chunked, gzip".to_string())
         );
+
+        let lengths = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}";
+        let server = MockServer::serve_once(lengths);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("conflicting content-length values".to_string())
+        );
     }
 
     #[test]
@@ -8325,7 +8367,41 @@ mod sparks_http {
             Err("short read: chunk data is incomplete".to_string())
         );
 
+        let unterminated = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n";
+        let server = MockServer::serve_once(unterminated);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("short read: chunked body is not terminated".to_string())
+        );
+
         assert!(post_json("http://127.0.0.1:1", "/v1/chat", "{}").is_err());
+    }
+
+    #[test]
+    fn a_huge_chunk_size_is_an_error_not_an_overflow() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("chunk size is too large".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_framing_headers_are_refused() {
+        let spaced = b"HTTP/1.1 200 OK\r\nTransfer-Encoding : gzip\r\nContent-Length: 2\r\n\r\n{}";
+        let server = MockServer::serve_once(spaced);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed header syntax".to_string())
+        );
+
+        let no_colon = b"HTTP/1.1 200 OK\r\nbogus\r\n\r\n{}";
+        let server = MockServer::serve_once(no_colon);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("malformed header syntax".to_string())
+        );
     }
 
     #[test]
