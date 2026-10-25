@@ -19166,4 +19166,321 @@ mod tests {
             "record"
         );
     }
+
+    // Task 024: four sessions in one resident guest. A session is one
+    // `Journal` value and nothing else, so four sessions are four independent
+    // journals advanced round by round in this one process. No thread, no
+    // second instance and no module-level state take part.
+
+    /// Sessions in the interleaving test.
+    const SESSION_COUNT: usize = 4;
+    /// Rounds of one session script, run in this order.
+    const SESSION_ROUNDS: usize = 5;
+
+    /// Text only one session writes. Another session's journal can never
+    /// hold it, and the marks are short enough to be whole tokens.
+    fn session_mark(index: usize) -> String {
+        format!("session-mark-{index}-unique")
+    }
+
+    fn session_project(index: usize) -> String {
+        format!("localhost://Users/self/Projects/session-{index}")
+    }
+
+    fn session_model(index: usize) -> String {
+        format!("localhost://Users/self/.AppData/Models/session-{index}.gguf")
+    }
+
+    /// One round of one session's script, on that session's own journal. The
+    /// result says whether the effect the round exists for happened: the head
+    /// and a turn are recorded, a read and a skill are admitted, a granted run
+    /// dispatches and records its result, an `allow-session` answer with a
+    /// Runtime grant id authorizes only its own hosted step, and compaction
+    /// replaces the conversation tail with one summary.
+    fn run_session_round(journal: &mut Journal, index: usize, round: usize) -> bool {
+        let mark = session_mark(index);
+        match round {
+            0 => {
+                admit_system(journal, SYSTEM_HEAD, true);
+                admit_user(
+                    journal,
+                    &format!("{mark} opening message, long enough to compact"),
+                );
+                let turn = open_turn(journal);
+                open_step(journal, turn).is_some() && journal.epoch == 1
+            }
+            1 => {
+                observe(
+                    journal,
+                    &format!("{}/notes.txt", session_project(index)),
+                    1,
+                    &format!("{mark} note text"),
+                ) && admit_skill(journal, &format!("{mark} skill text")).is_ok()
+            }
+            2 => {
+                let argv = [format!("session-{index}-tool")];
+                let Ok(run) = propose_run(journal, &session_project(index), &argv) else {
+                    return false;
+                };
+                authorize(journal, run, Some(&format!("{index}-run-grant")))
+                    && dispatch(journal, run)
+                    && record_tool_result(journal, run, &format!("{mark} tool result ok"))
+            }
+            3 => {
+                let Ok(hosted) = propose_hosted(journal, &session_model(index)) else {
+                    return false;
+                };
+                apply_inbox(
+                    journal,
+                    hosted,
+                    InboxAnswer::AllowSession,
+                    Some(&format!("{index}-hosted-grant")),
+                ) && dispatch(journal, hosted)
+            }
+            4 => compact(journal, &format!("{mark} compacted")),
+            _ => false,
+        }
+    }
+
+    /// What an interleaved run and a solo run must agree on: the model view,
+    /// the cache bytes, and the head of the stored journal.
+    fn session_fingerprint(journal: &Journal) -> (Vec<SurfaceNode>, Vec<u8>, [u8; 32]) {
+        let view = derive(&journal.events);
+        let cache = model_bytes(&journal.events).unwrap();
+        let (_, _, head) = decode_journal(&encode_journal(journal, &[0; 32]).unwrap()).unwrap();
+        (view, cache, head)
+    }
+
+    /// Four sessions advanced round by round in one guest give, each, the
+    /// view and the head its own solo run gives. The same script run twice in
+    /// the same process gives the same four fingerprints, so no value kept
+    /// outside a journal carries one session's work into another's or into a
+    /// later run.
+    #[test]
+    fn four_interleaved_sessions_match_their_solo_runs() {
+        let mut sessions: Vec<Journal> = (0..SESSION_COUNT).map(|_| empty_journal()).collect();
+        let mut interleaved_results = vec![Vec::new(); SESSION_COUNT];
+        for round in 0..SESSION_ROUNDS {
+            for (index, journal) in sessions.iter_mut().enumerate() {
+                interleaved_results[index].push(run_session_round(journal, index, round));
+            }
+        }
+        let interleaved: Vec<(Vec<SurfaceNode>, Vec<u8>, [u8; 32])> =
+            sessions.iter().map(session_fingerprint).collect();
+
+        let mut solo = Vec::new();
+        let mut solo_results = Vec::new();
+        for index in 0..SESSION_COUNT {
+            let mut journal = empty_journal();
+            let mut results = Vec::new();
+            for round in 0..SESSION_ROUNDS {
+                results.push(run_session_round(&mut journal, index, round));
+            }
+            solo.push(session_fingerprint(&journal));
+            solo_results.push(results);
+        }
+
+        for index in 0..SESSION_COUNT {
+            assert_eq!(
+                solo_results[index], interleaved_results[index],
+                "session {index} took another path when interleaved"
+            );
+            assert!(
+                interleaved_results[index].iter().all(|done| *done),
+                "interleaved session {index} did not finish its script"
+            );
+            assert_eq!(
+                interleaved[index], solo[index],
+                "session {index} differs from its solo run"
+            );
+            let mark = session_mark(index);
+            assert!(
+                interleaved[index]
+                    .0
+                    .iter()
+                    .any(|node| node.text.contains(&mark)),
+                "session {index} lost its own text"
+            );
+            for other in 0..SESSION_COUNT {
+                if other == index {
+                    continue;
+                }
+                let other_mark = session_mark(other);
+                assert!(
+                    interleaved[index]
+                        .0
+                        .iter()
+                        .all(|node| !node.text.contains(&other_mark)),
+                    "session {index} shows session {other} text"
+                );
+            }
+        }
+
+        // The four sessions are distinguishable: equal heads would mean a
+        // session's work reached another one.
+        for a in 0..SESSION_COUNT {
+            for b in a + 1..SESSION_COUNT {
+                assert_ne!(interleaved[a].2, interleaved[b].2, "sessions {a} and {b}");
+            }
+        }
+
+        // A second interleaved run in the same process agrees with the first.
+        let mut again: Vec<Journal> = (0..SESSION_COUNT).map(|_| empty_journal()).collect();
+        for round in 0..SESSION_ROUNDS {
+            for (index, journal) in again.iter_mut().enumerate() {
+                assert!(
+                    run_session_round(journal, index, round),
+                    "second run, session {index}, round {round}"
+                );
+            }
+        }
+        let second: Vec<(Vec<SurfaceNode>, Vec<u8>, [u8; 32])> =
+            again.iter().map(session_fingerprint).collect();
+        assert_eq!(second, interleaved, "process-wide state changed a run");
+    }
+
+    /// A grant the first session's step holds runs that step only. The second
+    /// session proposes the same step number for the same resource, holds no
+    /// grant, is denied, and its journal never carries the first session's
+    /// grant string.
+    #[test]
+    fn a_grant_never_crosses_sessions() {
+        let project = "localhost://Users/self/Projects/demo";
+        let argv = [
+            "vm-smoke".to_string(),
+            "tests::project_is_ready".to_string(),
+        ];
+        let mut first = two_turns();
+        let mut second = two_turns();
+        let first_run = propose_run(&mut first, project, &argv).unwrap();
+        let second_run = propose_run(&mut second, project, &argv).unwrap();
+        // An id counts a journal's own steps, so both sessions hold step 1.
+        // A grant found by id alone would reach the other session's step.
+        assert_eq!(first_run, second_run);
+        let second_view = checkpoint(&second).unwrap();
+
+        assert!(authorize(&mut first, first_run, Some("session-a-grant")));
+        assert!(dispatch(&mut first, first_run));
+        assert_eq!(step_state(&first, first_run), Some(StepState::Dispatched));
+
+        assert!(second.steps.iter().all(|step| step.grant.is_none()));
+        assert!(!dispatch(&mut second, second_run));
+        assert_eq!(step_state(&second, second_run), Some(StepState::Denied));
+        assert_eq!(checkpoint(&second).unwrap(), second_view);
+        for journal in [&first, &second] {
+            let bytes = encode_journal(journal, &[0; 32]).unwrap();
+            assert!(!bytes
+                .windows(b"session-a-grant".len())
+                .any(|window| window == b"session-a-grant"));
+        }
+        assert_eq!(
+            first
+                .steps
+                .iter()
+                .find(|step| step.id == first_run)
+                .and_then(|step| step.grant.as_deref()),
+            Some("session-a-grant")
+        );
+    }
+
+    /// A skill admitted in the first session stays in its journal. The second
+    /// session's model view and cache bytes are unchanged, and its own skill
+    /// stays its own.
+    #[test]
+    fn a_skill_never_crosses_sessions() {
+        let first_mark = session_mark(0);
+        let second_mark = session_mark(1);
+        let mut first = two_turns();
+        let mut second = two_turns();
+        let second_view = (derive(&second.events), checkpoint(&second).unwrap());
+
+        assert_eq!(
+            admit_skill(&mut first, &format!("{first_mark} skill text")),
+            Ok(())
+        );
+        assert!(derive(&first.events).iter().any(|node| {
+            node.source == NodeSource::Skill && node.text == format!("{first_mark} skill text")
+        }));
+        assert_eq!(
+            (derive(&second.events), checkpoint(&second).unwrap()),
+            second_view
+        );
+        assert!(second
+            .events
+            .iter()
+            .all(|node| !node.text.contains(&first_mark)));
+
+        assert_eq!(
+            admit_skill(&mut second, &format!("{second_mark} skill text")),
+            Ok(())
+        );
+        assert_eq!(
+            derive(&second.events)
+                .iter()
+                .filter(|node| node.source == NodeSource::Skill)
+                .count(),
+            1
+        );
+        assert!(first
+            .events
+            .iter()
+            .all(|node| !node.text.contains(&second_mark)));
+    }
+
+    /// An `allow-session` answer given to the first session's step authorizes
+    /// that step only. The answer is the first session's log entry, the second
+    /// session's own `allow-session` answer with no grant id mints nothing, and
+    /// its step is still denied.
+    #[test]
+    fn an_inbox_answer_never_crosses_sessions() {
+        let project = "localhost://Users/self/Projects/demo";
+        let argv = [
+            "vm-smoke".to_string(),
+            "tests::project_is_ready".to_string(),
+        ];
+        let mut first = two_turns();
+        let mut second = two_turns();
+        let first_run = propose_run(&mut first, project, &argv).unwrap();
+        let second_run = propose_run(&mut second, project, &argv).unwrap();
+        assert_eq!(first_run, second_run);
+
+        assert!(apply_inbox(
+            &mut first,
+            first_run,
+            InboxAnswer::AllowSession,
+            Some("session-a-grant")
+        ));
+        assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
+        assert!(first
+            .events
+            .iter()
+            .any(|node| matches!(node.source, NodeSource::Inbox(InboxAnswer::AllowSession))));
+        assert!(second
+            .events
+            .iter()
+            .all(|node| !matches!(node.source, NodeSource::Inbox(_))));
+        assert!(!model_bytes(&second.events)
+            .unwrap()
+            .windows(b"inbox: allow-session".len())
+            .any(|window| window == b"inbox: allow-session"));
+
+        assert!(!apply_inbox(
+            &mut second,
+            second_run,
+            InboxAnswer::AllowSession,
+            Some("")
+        ));
+        assert_eq!(step_state(&second, second_run), Some(StepState::Denied));
+        assert!(second.steps.iter().all(|step| step.grant.is_none()));
+        assert!(!dispatch(&mut second, second_run));
+        assert!(second
+            .steps
+            .iter()
+            .all(|step| step.grant.as_deref() != Some("session-a-grant")));
+        assert!(!encode_journal(&second, &[0; 32])
+            .unwrap()
+            .windows(b"session-a-grant".len())
+            .any(|window| window == b"session-a-grant"));
+        assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
+    }
 }

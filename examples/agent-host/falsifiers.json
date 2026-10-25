@@ -1420,6 +1420,54 @@
    "tests": [
     "tests::a_skill_from_an_observed_read_named_by_hash_is_admitted"
    ]
+  },
+  {
+   "id": "F-AH2a",
+   "title": "a turn number comes from a process-wide counter, so an interleaved session numbers its turns from another session's work",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn open_turn(journal: &mut Journal) -> u64 {\n    let id = u64::try_from(journal.turns.len())\n        .unwrap_or(u64::MAX)\n        .saturating_add(1);",
+     "new": "fn open_turn(journal: &mut Journal) -> u64 {\n    static mut NEXT_TURN: u64 = 0;\n    let id = unsafe {\n        NEXT_TURN = NEXT_TURN.saturating_add(1);\n        NEXT_TURN\n    };"
+    }
+   ],
+   "tests": [
+    "tests::four_interleaved_sessions_match_their_solo_runs"
+   ]
+  },
+  {
+   "id": "F-AH2b",
+   "title": "dispatch drops the per-step grant check, so a grant one session's step holds runs the other session's step",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.state != StepState::Prepared || step.grant.is_none() {",
+     "new": "    if step.state != StepState::Prepared {"
+    }
+   ],
+   "tests": [
+    "tests::a_grant_never_crosses_sessions"
+   ]
+  },
+  {
+   "id": "F-AH2c",
+   "title": "an allow-session answer mints its own grant id, so a session answer authorizes without Runtime authority",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        _ => grant.filter(|grant| !grant.is_empty()),",
+     "new": "        _ => grant.filter(|grant| !grant.is_empty()).or(Some(\"allow-session\")),"
+    }
+   ],
+   "tests": [
+    "tests::an_inbox_answer_never_crosses_sessions"
+   ]
   }
  ]
 }
