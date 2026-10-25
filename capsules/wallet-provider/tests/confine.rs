@@ -24,6 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
+/// The did provider's profile, read by the cross-provider contract test.
+const DID_PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../did-provider/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
 const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 
@@ -129,9 +131,9 @@ impl ConfinedProvider {
             .arg("-f")
             .arg(profile)
             .arg("-D")
-            .arg(format!("WALLET_STORAGE_ROOT={}", wallet_root.display()))
+            .arg(format!("STORAGE_ROOT={}", wallet_root.display()))
             .arg("-D")
-            .arg(format!("WALLET_STORAGE_PARENT={}", parent.display()))
+            .arg(format!("STORAGE_PARENT={}", parent.display()))
             .arg("-D")
             .arg(format!(
                 "PROVIDER_EXECUTABLE={}",
@@ -462,6 +464,72 @@ fn profile_denies_network() {
             !(form.starts_with("(allow ") && form.contains("network")),
             "the profile must not grant network access: {form}"
         );
+    }
+}
+
+/// The did and wallet file profiles present one contract to the Runtime
+/// bridge: the same canonical parameter tokens and the same deny-by-default
+/// head. The bridge binds `STORAGE_ROOT`, `STORAGE_PARENT` and
+/// `PROVIDER_EXECUTABLE` with one parameterized launch, so a provider-prefixed
+/// token would add a second path for one operation (P10).
+///
+/// Falsifier: rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in either
+/// `confine.sb`; this test fails on the non-canonical token.
+#[test]
+fn both_file_profiles_bind_one_storage_parameter_contract() {
+    const CANONICAL: [&str; 3] = ["PROVIDER_EXECUTABLE", "STORAGE_ROOT", "STORAGE_PARENT"];
+    const PARAM: &str = "(param \"";
+    const SHARED_RULES: [&str; 3] = [
+        r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#,
+        r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
+        r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
+    ];
+    for (name, path) in [
+        ("did-provider", DID_PROFILE_PATH),
+        ("wallet-provider", PROFILE_PATH),
+    ] {
+        let profile = fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("{name} profile {path} must be readable: {err}"));
+        let forms = profile_forms(&profile);
+        assert_eq!(
+            forms.first().map(String::as_str),
+            Some("(version 1)"),
+            "{name} must start with its version"
+        );
+        assert_eq!(
+            forms.get(1).map(String::as_str),
+            Some("(deny default)"),
+            "{name} must deny by default immediately after the version"
+        );
+        assert!(
+            forms.iter().any(|form| form == "(deny network*)"),
+            "{name} must deny the network explicitly"
+        );
+        for form in &forms {
+            assert!(
+                !(form.starts_with("(allow ")
+                    && form.split([' ', '(', ')']).any(|token| token == "default")),
+                "{name} must reject allow default: {form}"
+            );
+            let mut rest = form.as_str();
+            while let Some(at) = rest.find(PARAM) {
+                let tail = &rest[at + PARAM.len()..];
+                let end = tail.find('"').expect("parameter token must close");
+                let token = &tail[..end];
+                assert!(
+                    CANONICAL.contains(&token),
+                    "{name} declares the non-canonical parameter token {token}; \
+                     both file profiles bind STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
+                );
+                rest = &tail[end..];
+            }
+        }
+        for rule in SHARED_RULES {
+            assert!(
+                forms.iter().any(|form| form == rule),
+                "{name} must bind the shared rule {rule}"
+            );
+        }
     }
 }
 

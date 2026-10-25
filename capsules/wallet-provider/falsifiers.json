@@ -1,0 +1,53 @@
+{
+  "about": "Wallet-provider lane falsifiers for the three storage-root refusals merged by task 010 (PR #62). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named test then fails in each case. The temp fallback keeps the falsifier run out of the tree. File paths are relative to the repository root. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact; did-provider's list follows separately.",
+  "falsifiers": [
+    {
+      "id": "WP01",
+      "title": "a missing storage root falls back to a temp directory instead of refusing",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/src/main.rs",
+          "old": "    let Some(raw) = config.get(\"base_path\").and_then(Value::as_str) else {\n        return Err(STORAGE_PATH_NOT_SET.to_string());\n    };",
+          "new": "    let Some(raw) = config.get(\"base_path\").and_then(Value::as_str) else {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    };"
+        }
+      ],
+      "tests": [
+        "tests::storage_root::missing_storage_root_is_refused"
+      ]
+    },
+    {
+      "id": "WP02",
+      "title": "an empty storage root is accepted instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/src/main.rs",
+          "old": "    if raw.trim().is_empty() {\n        return Err(STORAGE_PATH_EMPTY.to_string());\n    }",
+          "new": "    if raw.trim().is_empty() {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    }"
+        }
+      ],
+      "tests": [
+        "tests::storage_root::empty_storage_root_is_refused"
+      ]
+    },
+    {
+      "id": "WP03",
+      "title": "a relative storage root is accepted instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/src/main.rs",
+          "old": "    if !root.is_absolute() {\n        return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n    }",
+          "new": "    if !root.is_absolute() {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    }"
+        }
+      ],
+      "tests": [
+        "tests::storage_root::relative_storage_root_is_refused"
+      ]
+    }
+  ]
+}
