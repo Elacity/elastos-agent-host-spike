@@ -11,16 +11,21 @@
 
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_did-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 // Isolated fixture input, unrelated to any installed Home or production key.
 const DEVICE_KEY: [u8; 32] = [0x42; 32];
+/// How long a failure path waits for the child to exit before it reports.
+const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
+/// How often the bounded wait checks whether the child has exited.
+const CHILD_EXIT_POLL: Duration = Duration::from_millis(20);
 
 #[test]
 #[ignore = "fixture for the falsifier list's ignored-test check"]
@@ -43,17 +48,85 @@ fn resolved(path: &Path) -> PathBuf {
     fs::canonicalize(path).expect("fixture path must resolve")
 }
 
+/// The child's exit, or the deadline that ended the wait.
+enum ChildExit {
+    Exited(ExitStatus),
+    TimedOut,
+}
+
+impl ChildExit {
+    fn code(&self) -> Option<i32> {
+        match self {
+            Self::Exited(status) => status.code(),
+            Self::TimedOut => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ChildExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exited(status) => write!(f, "{status}"),
+            Self::TimedOut => write!(
+                f,
+                "no exit within {}s, so it was killed",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ),
+        }
+    }
+}
+
+/// One confined provider process, or a fixture child, spoken to over its
+/// standard streams.
+///
+/// `spawn` is the only spawn path. It pipes all three streams and drains
+/// standard error on its own thread from the moment the child starts, so a
+/// child that fills the pipe still reaches its own exit. `unanswered` is the
+/// only failure message.
 struct ConfinedProvider {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr_reader: Option<JoinHandle<String>>,
+    stderr_text: String,
 }
 
 impl ConfinedProvider {
+    /// The one spawn path; `command` already carries its arguments.
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the test child must start");
+        let stdin = child.stdin.take().expect("provider stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
+        let mut stderr_pipe = child.stderr.take().expect("provider stderr");
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        });
+        Self {
+            child,
+            stdin,
+            stdout,
+            stderr_reader: Some(stderr_reader),
+            stderr_text: String::new(),
+        }
+    }
+
     fn start(base: &Path) -> Self {
-        let mut child = Command::new(SANDBOX_EXEC)
+        Self::start_under(Path::new(PROFILE_PATH), base)
+    }
+
+    /// Starts the provider under `profile`, its one profile source.
+    fn start_under(profile: &Path, base: &Path) -> Self {
+        let mut command = Command::new(SANDBOX_EXEC);
+        command
             .arg("-f")
-            .arg(PROFILE_PATH)
+            .arg(profile)
             .arg("-D")
             .arg(format!("STORAGE_ROOT={}", base.join("did").display()))
             .arg("-D")
@@ -63,31 +136,36 @@ impl ConfinedProvider {
                 "PROVIDER_EXECUTABLE={}",
                 resolved(Path::new(PROVIDER_BINARY)).display()
             ))
-            .arg(PROVIDER_BINARY)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("sandbox-exec must start the provider");
-        let stdin = child.stdin.take().expect("provider stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
-        Self {
-            child,
-            stdin,
-            stdout,
-        }
+            .arg(PROVIDER_BINARY);
+        Self::spawn(command)
     }
 
+    /// Sends one request and returns its answer; a failure panics with the one
+    /// message from `unanswered`.
     fn send(&mut self, request: Value) -> Value {
-        writeln!(self.stdin, "{request}").expect("provider stdin must accept a request");
-        self.stdin.flush().expect("provider stdin must flush");
+        self.try_send(&request)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// Sends one request and returns its answer, or the one failure message,
+    /// which names the request, the child's exit status and all the child
+    /// wrote to standard error.
+    fn try_send(&mut self, request: &Value) -> Result<Value, String> {
+        let written = writeln!(self.stdin, "{request}").and_then(|()| self.stdin.flush());
+        if let Err(err) = written {
+            return Err(self.unanswered(request, &format!("writing the request failed: {err}")));
+        }
         let mut response = String::new();
-        let read = self
-            .stdout
-            .read_line(&mut response)
-            .expect("provider stdout must answer");
-        assert!(read > 0, "provider exited without a response");
-        serde_json::from_str(&response).expect("provider response must be JSON")
+        let read = self.stdout.read_line(&mut response);
+        match read {
+            Ok(0) => Err(self.unanswered(request, "the response stream ended")),
+            Ok(_) => serde_json::from_str(&response).map_err(|err| {
+                format!("provider answered request {request} with invalid JSON: {err}: {response}")
+            }),
+            Err(err) => {
+                Err(self.unanswered(request, &format!("reading the response failed: {err}")))
+            }
+        }
     }
 
     fn ok(&mut self, request: Value) -> Value {
@@ -108,8 +186,46 @@ impl ConfinedProvider {
 
     fn shutdown(&mut self) {
         self.ok(json!({ "op": "shutdown" }));
-        let status = self.child.wait().expect("provider must exit");
-        assert!(status.success(), "confined provider exit status: {status}");
+        let exit = self.wait_for_exit();
+        assert!(exit.code() == Some(0), "confined provider {exit}");
+    }
+
+    /// Waits up to `CHILD_EXIT_DEADLINE` for the child to exit.
+    fn wait_for_exit(&mut self) -> ChildExit {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .expect("child status must be readable")
+            {
+                return ChildExit::Exited(status);
+            }
+            if started.elapsed() >= CHILD_EXIT_DEADLINE {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return ChildExit::TimedOut;
+            }
+            std::thread::sleep(CHILD_EXIT_POLL);
+        }
+    }
+
+    /// Every byte the child wrote to standard error, once the drainer reached
+    /// end of file. Call it after the child exits.
+    fn stderr(&mut self) -> &str {
+        if let Some(reader) = self.stderr_reader.take() {
+            self.stderr_text = reader.join().expect("the stderr drainer must not panic");
+        }
+        &self.stderr_text
+    }
+
+    /// The one failure message for a request the provider never answered.
+    fn unanswered(&mut self, request: &Value, cause: &str) -> String {
+        let exit = self.wait_for_exit();
+        let stderr = self.stderr().to_string();
+        format!(
+            "provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}"
+        )
     }
 }
 
@@ -117,6 +233,9 @@ impl Drop for ConfinedProvider {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -384,6 +503,123 @@ fn outside_read_denied() {
     );
     provider.ok(json!({ "op": "get_did" }));
     provider.shutdown();
+}
+
+/// A confined start that fails before it answers shows its reason.
+///
+/// The fixture profile keeps `(version 1)` first and `(deny default)` second,
+/// so `sandbox-exec` cannot exec the provider. The test waits for that child to
+/// exit, sends `init`, and requires the one harness failure to name the
+/// request, the exit status and `sandbox-exec`'s own denial on standard error.
+/// A fixture child that reads one request and exits without answering reaches
+/// the response-stream branch of the same harness with the same three facts.
+///
+/// Falsifier: drop the child's standard error from `unanswered` (DID12); both
+/// failures lose `Operation not permitted` and this test fails.
+#[test]
+fn startup_denial_reports_its_reason() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile = resolved(profile_root.path()).join("deny-all.sb");
+    fs::write(&profile, "(version 1)\n(deny default)\n").expect("fixture profile must be writable");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+    });
+
+    // The denied provider exits before it reads the request, so the harness
+    // cannot write it. It reports the exit status and the sandbox denial.
+    let mut denied = ConfinedProvider::start_under(&profile, &root);
+    let exit = denied.wait_for_exit();
+    assert_ne!(
+        exit.code(),
+        Some(0),
+        "sandbox-exec must not exec the provider: {exit}"
+    );
+    let denial = denied
+        .try_send(&request)
+        .expect_err("a denied provider must not answer");
+    assert!(
+        denial.contains(&request.to_string()),
+        "the failure must name the request: {denial}"
+    );
+    assert!(
+        denial.contains(&exit.to_string()),
+        "the failure must name the exit status: {denial}"
+    );
+    assert!(
+        denial.contains("Operation not permitted"),
+        "the failure must carry sandbox-exec's denial: {denial}"
+    );
+    eprintln!("startup denial failure: {denial}");
+
+    // A child that answers nothing reaches the response-stream branch with the
+    // same three facts.
+    let mut silent = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read request; printf 'fixture: read one request\\n' >&2; exit 3");
+        command
+    });
+    let silence = silent
+        .try_send(&request)
+        .expect_err("a child that exits without answering must fail");
+    let exit = silent.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(3),
+        "the fixture must reach its own exit: {exit}"
+    );
+    assert!(
+        silence.contains(&request.to_string()),
+        "the failure must name the request: {silence}"
+    );
+    assert!(
+        silence.contains(&exit.to_string()),
+        "the failure must name the exit status: {silence}"
+    );
+    assert!(
+        silence.contains("fixture: read one request"),
+        "the failure must carry the child's standard error: {silence}"
+    );
+    eprintln!("response-stream failure: {silence}");
+}
+
+/// The harness drains standard error while the child runs.
+///
+/// The fixture writes 128 KiB, more than the pipe buffer, to standard error and
+/// exits with status 7. The harness must reach that status within its bounded
+/// deadline and collect every byte.
+///
+/// Falsifier: drop the stderr pipe instead of draining it (DID13); the child
+/// dies on a closed pipe, so the status is not 7 and the collected text is
+/// empty, and this test fails.
+#[test]
+fn stderr_is_drained_before_wait() {
+    let mut child = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("dd if=/dev/zero bs=1024 count=128 >&2 2>/dev/null; exit 7");
+        command
+    });
+    let exit = child.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(7),
+        "the child must reach its own exit: {exit}"
+    );
+    let stderr = child.stderr();
+    assert_eq!(stderr.len(), 128 * 1024, "every drained byte must survive");
+    assert!(
+        stderr.as_bytes().iter().all(|byte| *byte == 0),
+        "the drained bytes must be the fixture's zero bytes"
+    );
 }
 
 /// The one profile source denies the network and every default grant.
