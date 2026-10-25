@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers for the three storage-root refusals merged by task 010 (PR #62). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named test then fails in each case. The temp fallback keeps the falsifier run out of the tree. File paths are relative to the repository root. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact; did-provider's list follows separately.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. File paths are relative to the repository root. This list records the three storage-root refusals and the two profile mutations above; CONFINEMENT.md also documents a sibling-read allowance, an appended `(allow default)`, and a removed storage-root write rule, which are not registered here yet. The remaining step is wiring the shared examples/agent-host/falsify.py runner to accept the wallet command and run each named test with --exact.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -47,6 +47,39 @@
       ],
       "tests": [
         "tests::storage_root::relative_storage_root_is_refused"
+      ]
+    },
+    {
+      "id": "WP04",
+      "title": "the profile allows every operation by default",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/confine.sb",
+          "old": "(deny default)",
+          "new": "(allow default)"
+        }
+      ],
+      "tests": [
+        "confined_outside_write_is_denied",
+        "confined_outside_read_is_denied"
+      ]
+    },
+    {
+      "id": "WP05",
+      "title": "the profile adds a network allow beside its explicit network denial",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/wallet-provider/confine.sb",
+          "old": "(deny network*)",
+          "new": "(deny network*)\n(allow network*)"
+        }
+      ],
+      "tests": [
+        "profile_denies_network"
       ]
     }
   ]
