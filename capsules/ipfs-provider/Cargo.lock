@@ -353,10 +353,12 @@ dependencies = [
  "base64",
  "elastos-common",
  "libc",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",
  "ureq",
+ "url",
 ]
 
 [[package]]

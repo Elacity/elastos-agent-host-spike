@@ -578,7 +578,7 @@ impl IpfsProvider {
     }
 
     fn kubo_cat_bytes(&mut self, arg: &str, timeout: Duration) -> Result<Vec<u8>, String> {
-        let url = format!("{}/api/v0/cat?arg={}", self.api_url(), arg);
+        let url = kubo_rpc_url(self.api_port, "cat", &[("arg", arg)]);
         match ureq::post(&url).timeout(timeout).call() {
             Ok(resp) if resp.status() == 200 => {
                 let bytes = read_whole_content(resp.into_reader(), "kubo cat")?;
@@ -596,7 +596,7 @@ impl IpfsProvider {
         dest: &Path,
         timeout: Duration,
     ) -> Result<u64, String> {
-        let url = format!("{}/api/v0/cat?arg={}&offline=true", self.api_url(), arg);
+        let url = kubo_rpc_url(self.api_port, "cat", &[("arg", arg), ("offline", "true")]);
         match ureq::post(&url).timeout(timeout).call() {
             Ok(resp) if resp.status() == 200 => {
                 let written = copy_reader_to_path(resp.into_reader(), dest)?;
@@ -609,7 +609,7 @@ impl IpfsProvider {
     }
 
     fn kubo_prefetch_cid(&mut self, cid: &str) -> Result<(), String> {
-        let url = format!("{}/api/v0/pin/add?arg={}", self.api_url(), cid);
+        let url = kubo_rpc_url(self.api_port, "pin/add", &[("arg", cid)]);
         match ureq::post(&url).timeout(LARGE_HTTP_TIMEOUT).call() {
             Ok(resp) if resp.status() == 200 => {
                 update_coord_last_used(&self.data_dir);
@@ -1073,7 +1073,7 @@ impl IpfsProvider {
         self.gateway_port = gw_port;
 
         // Health poll until ready
-        let health_url = format!("http://127.0.0.1:{}/api/v0/id", api_port);
+        let health_url = kubo_rpc_url(api_port, "id", &[]);
         let start = Instant::now();
         loop {
             if start.elapsed() > KUBO_STARTUP_TIMEOUT {
@@ -1319,20 +1319,23 @@ impl IpfsProvider {
             // of a missing DAG also keeps the HTTP call open with
             // offline=true; a short API timeout fails that miss. A local
             // 64 KiB hit still returns the bounded range after Ready.
-            let mut request = agent
-                .post(&format!("{}/api/v0/cat", self.api_url()))
-                .query("arg", &arg)
-                .query("offline", "true")
-                .query("timeout", BOUNDED_READ_KUBO_TIMEOUT)
+            let (offset_value, length_value) = match &range {
+                Some(range) => (Some(range.start.to_string()), length.to_string()),
+                None => (None, (length + 1).to_string()),
+            };
+            let mut query = vec![
+                ("arg", arg.as_str()),
+                ("offline", "true"),
+                ("timeout", BOUNDED_READ_KUBO_TIMEOUT),
+            ];
+            if let Some(offset_value) = &offset_value {
+                query.push(("offset", offset_value));
+            }
+            query.push(("length", &length_value));
+            let request = agent
+                .post(&kubo_rpc_url(self.api_port, "cat", &query))
                 .set("Accept-Encoding", "identity")
                 .timeout(BOUNDED_READ_TIMEOUT);
-            if let Some(range) = &range {
-                request = request
-                    .query("offset", &range.start.to_string())
-                    .query("length", &length.to_string());
-            } else {
-                request = request.query("length", &(length + 1).to_string());
-            }
             let response = request.call().map_err(|e| e.to_string())?;
             let declared_length = response
                 .header("Content-Length")
@@ -1427,7 +1430,7 @@ impl IpfsProvider {
     fn ls(&mut self, cid: &str) -> Response {
         // Try Kubo first
         if self.ensure_kubo().is_ok() {
-            let url = format!("{}/api/v0/ls?arg={}", self.api_url(), cid);
+            let url = kubo_rpc_url(self.api_port, "ls", &[("arg", cid)]);
             if let Ok(resp) = ureq::post(&url).timeout(HTTP_TIMEOUT).call() {
                 if resp.status() == 200 {
                     if let Ok(body) = resp.into_string() {
@@ -1497,7 +1500,7 @@ impl IpfsProvider {
             let arg = format!("{}/{}", cid, file_path);
 
             let bytes = if self.ensure_kubo().is_ok() {
-                let url = format!("{}/api/v0/cat?arg={}", self.api_url(), arg);
+                let url = kubo_rpc_url(self.api_port, "cat", &[("arg", &arg)]);
                 match ureq::post(&url).timeout(LARGE_HTTP_TIMEOUT).call() {
                     Ok(resp) if resp.status() == 200 => {
                         let mut buf = Vec::new();
@@ -1552,7 +1555,7 @@ impl IpfsProvider {
         if let Err(e) = self.ensure_kubo() {
             return Response::error("kubo_unavailable", &e);
         }
-        let url = format!("{}/api/v0/pin/add?arg={}", self.api_url(), cid);
+        let url = kubo_rpc_url(self.api_port, "pin/add", &[("arg", cid)]);
         match ureq::post(&url).timeout(LARGE_HTTP_TIMEOUT).call() {
             Ok(resp) if resp.status() == 200 => Response::ok_empty(),
             Ok(resp) => Response::error("pin_failed", &format!("HTTP {}", resp.status())),
@@ -1564,7 +1567,7 @@ impl IpfsProvider {
         if let Err(e) = self.ensure_kubo() {
             return Response::error("kubo_unavailable", &e);
         }
-        let url = format!("{}/api/v0/pin/rm?arg={}", self.api_url(), cid);
+        let url = kubo_rpc_url(self.api_port, "pin/rm", &[("arg", cid)]);
         match ureq::post(&url).timeout(HTTP_TIMEOUT).call() {
             Ok(resp) if resp.status() == 200 => Response::ok_empty(),
             Ok(resp) => Response::error("unpin_failed", &format!("HTTP {}", resp.status())),
@@ -1582,7 +1585,7 @@ impl IpfsProvider {
             }));
         }
 
-        let url = format!("{}/api/v0/id", self.api_url());
+        let url = kubo_rpc_url(self.api_port, "id", &[]);
         match ureq::post(&url).timeout(Duration::from_secs(5)).call() {
             Ok(resp) if resp.status() == 200 => Response::ok(serde_json::json!({
                 "healthy": true,
@@ -1639,7 +1642,7 @@ impl IpfsProvider {
         body.extend_from_slice(bytes);
         write!(body, "\r\n--{}--\r\n", boundary).unwrap();
 
-        let url = format!("{}/api/v0/add?pin={}", self.api_url(), pin);
+        let url = kubo_rpc_url(self.api_port, "add", &[("pin", &pin.to_string())]);
 
         let resp = ureq::post(&url)
             .set(
@@ -1685,7 +1688,8 @@ impl IpfsProvider {
         let body = io::Cursor::new(prefix)
             .chain(reader)
             .chain(io::Cursor::new(footer));
-        let resp = ureq::post(&format!("{}/api/v0/add?pin={}", self.api_url(), pin))
+        let url = kubo_rpc_url(self.api_port, "add", &[("pin", &pin.to_string())]);
+        let resp = ureq::post(&url)
             .set(
                 "Content-Type",
                 &format!("multipart/form-data; boundary={}", boundary),
@@ -1773,10 +1777,32 @@ impl IpfsProvider {
     }
 
     fn add_directory_url(&self, pin: bool) -> String {
-        format!(
-            "{}/api/v0/add?wrap-with-directory=true&pin={}&cid-version=1&hash=sha2-256&raw-leaves=true&chunker=size-262144&trickle=false&max-file-links=174&max-directory-links=0&max-hamt-fanout=256&inline=false&inline-limit=32&nocopy=false&fscache=false&preserve-mode=false&preserve-mtime=false&empty-dirs=false&progress=false&fast-provide-root=false&fast-provide-wait=false",
-            self.api_url(),
-            pin
+        let pin = pin.to_string();
+        kubo_rpc_url(
+            self.api_port,
+            "add",
+            &[
+                ("wrap-with-directory", "true"),
+                ("pin", &pin),
+                ("cid-version", "1"),
+                ("hash", "sha2-256"),
+                ("raw-leaves", "true"),
+                ("chunker", "size-262144"),
+                ("trickle", "false"),
+                ("max-file-links", "174"),
+                ("max-directory-links", "0"),
+                ("max-hamt-fanout", "256"),
+                ("inline", "false"),
+                ("inline-limit", "32"),
+                ("nocopy", "false"),
+                ("fscache", "false"),
+                ("preserve-mode", "false"),
+                ("preserve-mtime", "false"),
+                ("empty-dirs", "false"),
+                ("progress", "false"),
+                ("fast-provide-root", "false"),
+                ("fast-provide-wait", "false"),
+            ],
         )
     }
 
@@ -1794,7 +1820,7 @@ impl IpfsProvider {
             ));
         }
 
-        let url = format!("http://127.0.0.1:{}/ipfs/{}", self.gateway_port, arg);
+        let url = local_gateway_url(self.gateway_port, arg);
         match ureq::get(&url).timeout(timeout).call() {
             Ok(resp) if resp.status() == 200 => {
                 read_whole_content(resp.into_reader(), "local Elastos IPFS gateway")
@@ -1819,10 +1845,7 @@ impl IpfsProvider {
             ));
         }
 
-        let url = format!(
-            "http://127.0.0.1:{}/ipfs/{}/_files.json",
-            self.gateway_port, cid
-        );
+        let url = local_gateway_url(self.gateway_port, &format!("{cid}/_files.json"));
         let resp = ureq::get(&url).timeout(HTTP_TIMEOUT).call().map_err(|e| {
             format!(
                 "local Elastos IPFS gateway -> {} for {}/_files.json. No HTTP fallback is allowed.",
@@ -1854,7 +1877,7 @@ impl IpfsProvider {
     fn list_dir_files(&mut self, cid: &str) -> Result<Vec<String>, String> {
         // Try Kubo API first
         if self.ensure_kubo().is_ok() {
-            let url = format!("{}/api/v0/ls?arg={}", self.api_url(), cid);
+            let url = kubo_rpc_url(self.api_port, "ls", &[("arg", cid)]);
             if let Ok(resp) = ureq::post(&url).timeout(HTTP_TIMEOUT).call() {
                 if resp.status() == 200 {
                     if let Ok(body) = resp.into_string() {
@@ -2090,6 +2113,51 @@ fn read_whole_content(reader: impl Read, source: &str) -> Result<Vec<u8>, String
     Ok(bytes)
 }
 
+/// Kubo RPC URL for `command` (for example `pin/add`), each `(name, value)`
+/// appended as one form-encoded query pair, so a CID or path in a value can
+/// never add, end or change another parameter.
+fn kubo_rpc_url(api_port: u16, command: &str, query: &[(&str, &str)]) -> String {
+    let mut url = local_backend_url(api_port);
+    url.path_segments_mut()
+        .expect("http URL has a path")
+        .clear()
+        .extend(["api", "v0"])
+        .extend(command.split('/'));
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
+    url.into()
+}
+
+/// Local Kubo gateway URL for the IPFS path `arg` (`cid` or `cid/path`). Each
+/// segment is percent-encoded on its own, so query, fragment and escape
+/// characters stay part of the file name.
+fn local_gateway_url(gateway_port: u16, arg: &str) -> String {
+    const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    let path: String = std::iter::once("ipfs")
+        .chain(arg.split('/'))
+        .map(|segment| {
+            format!(
+                "/{}",
+                percent_encoding::utf8_percent_encode(segment, SEGMENT)
+            )
+        })
+        .collect();
+    let mut url = local_backend_url(gateway_port);
+    url.set_path(&path);
+    url.into()
+}
+
+fn local_backend_url(port: u16) -> url::Url {
+    let mut url = url::Url::parse("http://127.0.0.1/").expect("static local URL");
+    url.set_port(Some(port)).expect("http URL takes a port");
+    url
+}
+
 // ── Path safety ─────────────────────────────────────────────────────
 
 fn copy_reader_to_path(mut reader: impl Read, dest: &Path) -> Result<u64, String> {
@@ -2321,7 +2389,7 @@ fn collect_ls_files_recursive(
                             if provider.ensure_kubo().is_err() {
                                 continue;
                             }
-                            let url = format!("{}/api/v0/ls?arg={}", provider.api_url(), hash);
+                            let url = kubo_rpc_url(provider.api_port, "ls", &[("arg", hash)]);
                             if let Ok(resp) = ureq::post(&url).timeout(HTTP_TIMEOUT).call() {
                                 if resp.status() == 200 {
                                     if let Ok(body) = resp.into_string() {
@@ -4196,5 +4264,148 @@ mod tests {
             }
             other => panic!("Expected Ok, got {:?}", other),
         }
+    }
+
+    /// A Kubo double that reads requests as Kubo does: RPC query pairs are
+    /// form-decoded and `offset`/`length` are honoured; gateway paths are
+    /// percent-decoded per segment. `files` maps literal `cid/path` to bytes.
+    /// With `rpc_answers` only RPC reads answer, otherwise only gateway reads
+    /// do, so each provider read route is checked on its own.
+    fn literal_path_kubo(
+        files: std::collections::HashMap<String, Vec<u8>>,
+        rpc_answers: bool,
+    ) -> (
+        u16,
+        Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let serving = std::thread::spawn(move || {
+            while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                let mut socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(err) => panic!("fixture accept failed: {err}"),
+                };
+                let headers = read_bounded_fixture_headers(&mut socket);
+                let target = headers.split(' ').nth(1).unwrap_or_default();
+                let url = url::Url::parse(&format!("http://kubo{target}")).unwrap();
+                let body = if url.path() == "/api/v0/cat" && rpc_answers {
+                    let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+                    let value = |name: &str| {
+                        pairs
+                            .iter()
+                            .find(|(key, _)| key == name)
+                            .map(|(_, value)| value.clone())
+                    };
+                    value("arg").and_then(|arg| files.get(&arg)).map(|bytes| {
+                        let offset = value("offset").map_or(0, |v| v.parse().unwrap_or(0));
+                        let length = value("length").map_or(usize::MAX, |v| v.parse().unwrap_or(0));
+                        bytes.iter().skip(offset).take(length).copied().collect()
+                    })
+                } else if let Some(rest) =
+                    url.path().strip_prefix("/ipfs/").filter(|_| !rpc_answers)
+                {
+                    let literal: Vec<String> =
+                        rest.split('/').map(percent_decode_fixture).collect();
+                    files.get(&literal.join("/")).cloned()
+                } else {
+                    None
+                };
+                let reply = match body {
+                    Some(bytes) => {
+                        let mut reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            bytes.len()
+                        )
+                        .into_bytes();
+                        reply.extend_from_slice(&bytes);
+                        reply
+                    }
+                    None => b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                };
+                let _ = socket.write_all(&reply);
+            }
+        });
+        (port, stop, serving)
+    }
+
+    fn percent_decode_fixture(segment: &str) -> String {
+        let bytes = segment.as_bytes();
+        let mut decoded = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let escaped = (bytes[index] == b'%')
+                .then(|| bytes.get(index + 1..index + 3))
+                .flatten()
+                .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+            match escaped {
+                Some(byte) => {
+                    decoded.push(byte);
+                    index += 3;
+                }
+                None => {
+                    decoded.push(bytes[index]);
+                    index += 1;
+                }
+            }
+        }
+        String::from_utf8(decoded).unwrap()
+    }
+
+    #[test]
+    fn literal_file_paths_reach_kubo_unchanged_on_every_read_route() {
+        const CID: &str = "bafyliteralpaths";
+        let paths = elastos_common::test_fixtures::literal_content_paths();
+        let expected = |path: &str| format!("content of {path:?}").into_bytes();
+        let files: std::collections::HashMap<String, Vec<u8>> = paths
+            .iter()
+            .map(|path| (format!("{CID}/{path}"), expected(path)))
+            .collect();
+        let mut failures = Vec::new();
+        for route in ["kubo cat", "kubo cat to path", "local gateway"] {
+            let (port, stop, serving) = literal_path_kubo(files.clone(), route != "local gateway");
+            let root = tempfile::tempdir().unwrap();
+            let root_path = fs::canonicalize(root.path()).unwrap();
+            let mut provider = bounded_cat_fixture_provider(&root_path, port);
+            for (index, path) in paths.iter().enumerate() {
+                let got = if route == "kubo cat to path" {
+                    let dest = root_path.join(format!("out-{index}"));
+                    match provider.cat_to_path(CID, Some(path), dest.to_str().unwrap()) {
+                        Response::Ok { .. } => fs::read(&dest).ok(),
+                        Response::Error { .. } => None,
+                    }
+                } else {
+                    match provider.cat(CID, Some(path)) {
+                        Response::Ok { data: Some(data) } => data["data"]
+                            .as_str()
+                            .and_then(|encoded| BASE64.decode(encoded).ok()),
+                        _ => None,
+                    }
+                };
+                if got.as_deref() != Some(expected(path).as_slice()) {
+                    failures.push(format!(
+                        "{route}: {path:?} -> {:?}",
+                        got.map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    ));
+                }
+            }
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            serving.join().unwrap();
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} literal path reads changed:\n{}",
+            failures.len(),
+            paths.len() * 3,
+            failures.join("\n")
+        );
     }
 }

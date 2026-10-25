@@ -11,6 +11,8 @@ mod manifest;
 #[cfg(unix)]
 pub mod process_lifetime;
 pub mod protected_content;
+#[cfg(feature = "test-fixtures")]
+pub mod test_fixtures;
 pub mod timestamp;
 mod types;
 

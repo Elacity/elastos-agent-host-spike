@@ -484,19 +484,17 @@ fn bounded_response(response: ureq::Response) -> io::Result<Vec<u8>> {
 
 fn profile_request(
     agent: &ureq::Agent,
-    api: &str,
+    api_port: u16,
     operation: &str,
     key: Option<&str>,
     deadline: Instant,
 ) -> io::Result<serde_json::Value> {
-    let mut request = agent
-        .post(&format!("{api}/api/v0/{operation}"))
+    let query: Vec<(&str, &str)> = key.map(|key| ("arg", key)).into_iter().collect();
+    let request = agent
+        .post(&super::kubo_rpc_url(api_port, operation, &query))
         .set("Accept-Encoding", "identity")
         .set("Connection", "close")
         .timeout(remaining(deadline)?);
-    if let Some(key) = key {
-        request = request.query("arg", key);
-    }
     let response = request
         .call()
         .map_err(|_| invalid("directory hash profile request failed"))?;
@@ -523,15 +521,15 @@ fn check_hamt_value(key: &str, value: &serde_json::Value) -> io::Result<()> {
     Ok(())
 }
 
-fn verify_profile(agent: &ureq::Agent, api: &str, deadline: Instant) -> io::Result<()> {
-    if profile_request(agent, api, "version", None, deadline)?["Version"] != "0.40.1" {
+fn verify_profile(agent: &ureq::Agent, api_port: u16, deadline: Instant) -> io::Result<()> {
+    if profile_request(agent, api_port, "version", None, deadline)?["Version"] != "0.40.1" {
         return Err(invalid("unsupported directory hash Kubo version"));
     }
     for key in [
         "Import.UnixFSHAMTDirectorySizeThreshold",
         "Import.UnixFSHAMTDirectorySizeEstimation",
     ] {
-        let response = profile_request(agent, api, "config", Some(key), deadline)?;
+        let response = profile_request(agent, api_port, "config", Some(key), deadline)?;
         if response["Key"] != key {
             return Err(invalid("directory hash config key mismatch"));
         }
@@ -615,7 +613,7 @@ pub(super) fn verify_backend(provider: &super::IpfsProvider) -> io::Result<()> {
         .max_idle_connections(0)
         .build();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let version = profile_request(&agent, &provider.api_url(), "version", None, deadline)?;
+    let version = profile_request(&agent, provider.api_port, "version", None, deadline)?;
     if version["Version"] != "0.40.1" {
         return Err(invalid("unsupported directory hash backend"));
     }
@@ -754,19 +752,19 @@ pub(super) fn check_capacity(
         .max_idle_connections(0)
         .build();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let api = provider.api_url();
-    if profile_request(&agent, &api, "version", None, deadline)?["Version"] != "0.40.1" {
+    let api = provider.api_port;
+    if profile_request(&agent, api, "version", None, deadline)?["Version"] != "0.40.1" {
         return Err(invalid("unsupported capacity backend"));
     }
     validate_capacity_datastore(&profile_request(
         &agent,
-        &api,
+        api,
         "config",
         Some("Datastore.Spec"),
         deadline,
     )?)?;
     // size-only omits RepoPath. A full stat is still bounded by this call's deadline.
-    let stat = profile_request(&agent, &api, "repo/stat", None, deadline)?;
+    let stat = profile_request(&agent, api, "repo/stat", None, deadline)?;
     let repo = stat
         .get("RepoPath")
         .and_then(serde_json::Value::as_str)
@@ -814,10 +812,10 @@ fn hash_directory_with_timeout(
         .try_proxy_from_env(false)
         .max_idle_connections(0)
         .build();
-    let api = provider.api_url();
-    verify_profile(&agent, &api, deadline)?;
-    let mut request = agent
-        .post(&format!("{api}/api/v0/add"))
+    let api = provider.api_port;
+    verify_profile(&agent, api, deadline)?;
+    let request = agent
+        .post(&super::kubo_rpc_url(api, "add", ADD_OPTIONS))
         .set(
             "Content-Type",
             &format!("multipart/form-data; boundary={boundary}"),
@@ -826,9 +824,6 @@ fn hash_directory_with_timeout(
         .set("Accept-Encoding", "identity")
         .set("Connection", "close")
         .timeout(remaining(deadline)?);
-    for (key, value) in ADD_OPTIONS {
-        request = request.query(key, value);
-    }
     // Synchronous send(Read) settles or errors before handles are dropped. This
     // owner starts no background work. Runtime must wait for return before cleanup.
     let response = request
@@ -836,7 +831,7 @@ fn hash_directory_with_timeout(
         .map_err(|_| invalid("directory hash stream failed"))?;
     let root = parse_root(&bounded_response(response)?)?;
     closure.check(descriptor)?;
-    verify_profile(&agent, &api, deadline)?;
+    verify_profile(&agent, api, deadline)?;
     remaining(deadline)?;
     Ok(root)
 }
