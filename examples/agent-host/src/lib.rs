@@ -3445,32 +3445,50 @@ fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
     if pattern.contains("://") {
         return Some("asks url");
     }
+    if pattern.split_once(':').is_some_and(|(scheme, _)| {
+        scheme
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    }) {
+        return Some("asks url scheme");
+    }
     if lower.contains("users/") {
         return Some("asks users path");
     }
-    if pattern.starts_with('/')
-        || pattern.starts_with('~')
-        || pattern.contains('\\')
-        || pattern
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
-    {
-        return Some("asks host path");
+    if pattern.starts_with('/') {
+        return Some("asks absolute host path");
+    }
+    if pattern.starts_with('~') {
+        return Some("asks home host path");
+    }
+    if pattern.contains('\\') {
+        return Some("asks backslash host path");
+    }
+    if pattern.split('/').any(|segment| segment == ".") {
+        return Some("asks current directory");
+    }
+    if pattern.split('/').any(|segment| segment == "..") {
+        return Some("asks parent directory");
     }
     if secret_shaped(&lower) {
         return Some("asks secret");
     }
-    if pattern.matches(PRINCIPAL_MARKER).count() > 1
-        || (pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER))
-    {
-        return Some("asks marker");
+    if pattern.matches(PRINCIPAL_MARKER).count() > 1 {
+        return Some("asks repeated marker");
     }
-    let well_placed = match pattern.strip_prefix(PRINCIPAL_MARKER) {
-        Some(tail) => tail.is_empty() || tail.starts_with('/'),
-        None => pattern.ends_with('/'),
-    };
-    if !well_placed {
-        return Some("asks pattern");
+    if pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER) {
+        return Some("asks misplaced marker");
+    }
+    match pattern.strip_prefix(PRINCIPAL_MARKER) {
+        Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {
+            return Some("asks marker tail");
+        }
+        None if !pattern.ends_with('/') => return Some("asks literal directory"),
+        _ => {}
     }
     None
 }
@@ -3489,13 +3507,13 @@ fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
     if document.keys().any(|key| key != "schema" && key != "asks") {
         return Err("asks unknown field");
     }
-    if document.get("schema").and_then(serde_json::Value::as_str) != Some(ASKS_SCHEMA) {
-        return Err("asks schema");
+    let schema = document.get("schema").ok_or("asks schema missing")?;
+    let schema = schema.as_str().ok_or("asks schema type")?;
+    if schema != ASKS_SCHEMA {
+        return Err("asks schema unsupported");
     }
-    let entries = document
-        .get("asks")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("asks list")?;
+    let entries = document.get("asks").ok_or("asks list missing")?;
+    let entries = entries.as_array().ok_or("asks list type")?;
     if entries.is_empty() {
         return Err("asks empty");
     }
@@ -3505,17 +3523,16 @@ fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
         if entry.keys().any(|key| key != "kind" && key != "resource") {
             return Err("asks entry field");
         }
-        let kind = entry
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .and_then(proposal_kind)
-            .ok_or("asks kind")?;
-        let pattern = entry
-            .get("resource")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("asks resource")?;
+        let kind = entry.get("kind").ok_or("asks kind missing")?;
+        let kind = kind.as_str().ok_or("asks kind type")?;
+        if kind == "unspecified" {
+            return Err("asks kind unspecified");
+        }
+        let kind = proposal_kind(kind).ok_or("asks kind unknown")?;
+        let pattern = entry.get("resource").ok_or("asks resource missing")?;
+        let pattern = pattern.as_str().ok_or("asks resource type")?;
         if pattern.is_empty() {
-            return Err("asks resource");
+            return Err("asks resource empty");
         }
         if pattern.chars().any(char::is_whitespace) {
             return Err("asks whitespace");
@@ -3532,15 +3549,22 @@ fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
 }
 
 /// The declaration, parsed once from the compiled-in file. Immutable after
-/// that parse, so it holds no per-session state; a malformed declaration
-/// declares no ask (fail closed, P11).
+/// that parse, so it holds no per-session state. Keep a malformed declaration's
+/// reason so every reader fails with that reason (fail closed, P11).
 #[cfg(test)]
-static DECLARED_ASKS: std::sync::LazyLock<Vec<Ask>> =
-    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON).unwrap_or_default());
+static DECLARED_ASKS: std::sync::LazyLock<Result<Vec<Ask>, &'static str>> =
+    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON));
+
+#[cfg(test)]
+fn require_parsed_asks<'a>(parsed: &'a Result<Vec<Ask>, &'static str>) -> &'a [Ask] {
+    parsed
+        .as_deref()
+        .unwrap_or_else(|reason| panic!("{reason}"))
+}
 
 #[cfg(test)]
 fn declared_asks() -> &'static [Ask] {
-    &DECLARED_ASKS
+    require_parsed_asks(&DECLARED_ASKS)
 }
 
 /// A declared pattern is a resource path after `localhost://`. A literal
@@ -19894,8 +19918,36 @@ mod tests {
                 "asks url",
             ),
             (
+                asks_document(r#"{"kind":"read","resource":"file:/tmp/"}"#),
+                "asks url scheme",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"data:text/plain,x/"}"#),
+                "asks url scheme",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Git+SSH.v1-local:repo/"}"#),
+                "asks url scheme",
+            ),
+            (
                 asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
-                "asks host path",
+                "asks absolute host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"~/tmp/"}"#),
+                "asks home host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"tmp\\projects/"}"#),
+                "asks backslash host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/./"}"#),
+                "asks current directory",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/../"}"#),
+                "asks parent directory",
             ),
             (
                 asks_document(r#"{"kind":"read","resource":"Users/self/"}"#),
@@ -19920,12 +19972,20 @@ mod tests {
             ("1".to_string(), "asks root"),
             (
                 r#"{"schema":"elastos.agent-host.asks/v1"}"#.to_string(),
-                "asks list",
+                "asks list missing",
+            ),
+            (
+                r#"{"asks":[{"kind":"read","resource":"<principal>/"}]}"#.to_string(),
+                "asks schema missing",
+            ),
+            (
+                r#"{"schema":1,"asks":[{"kind":"read","resource":"<principal>/"}]}"#.to_string(),
+                "asks schema type",
             ),
             (
                 r#"{"schema":"wrong","asks":[{"kind":"read","resource":"<principal>/"}]}"#
                     .to_string(),
-                "asks schema",
+                "asks schema unsupported",
             ),
             (
                 format!(
@@ -19935,7 +19995,7 @@ mod tests {
             ),
             (
                 format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":{{}}}}"#),
-                "asks list",
+                "asks list type",
             ),
             (asks_document(""), "asks empty"),
             (asks_document("1"), "asks entry"),
@@ -19943,19 +20003,30 @@ mod tests {
                 asks_document(r#"{"kind":"read","resource":"<principal>/","extra":1}"#),
                 "asks entry field",
             ),
-            (asks_document(r#"{"resource":"<principal>/"}"#), "asks kind"),
+            (
+                asks_document(r#"{"resource":"<principal>/"}"#),
+                "asks kind missing",
+            ),
+            (
+                asks_document(r#"{"kind":1,"resource":"<principal>/"}"#),
+                "asks kind type",
+            ),
             (
                 asks_document(r#"{"kind":"unknown","resource":"<principal>/"}"#),
-                "asks kind",
+                "asks kind unknown",
             ),
             (
                 asks_document(r#"{"kind":"unspecified","resource":"<principal>/"}"#),
-                "asks kind",
+                "asks kind unspecified",
             ),
-            (asks_document(r#"{"kind":"read"}"#), "asks resource"),
+            (asks_document(r#"{"kind":"read"}"#), "asks resource missing"),
+            (
+                asks_document(r#"{"kind":"read","resource":1}"#),
+                "asks resource type",
+            ),
             (
                 asks_document(r#"{"kind":"read","resource":""}"#),
-                "asks resource",
+                "asks resource empty",
             ),
             (
                 asks_document(r#"{"kind":"read","resource":"Models /"}"#),
@@ -19966,8 +20037,36 @@ mod tests {
                 "asks url",
             ),
             (
+                asks_document(r#"{"kind":"read","resource":"file:/tmp/"}"#),
+                "asks url scheme",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"data:text/plain,x/"}"#),
+                "asks url scheme",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Git+SSH.v1-local:repo/"}"#),
+                "asks url scheme",
+            ),
+            (
                 asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
-                "asks host path",
+                "asks absolute host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"~/tmp/"}"#),
+                "asks home host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"tmp\\projects/"}"#),
+                "asks backslash host path",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/./"}"#),
+                "asks current directory",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"Models/../"}"#),
+                "asks parent directory",
             ),
             (
                 asks_document(r#"{"kind":"read","resource":"Users/self/"}"#),
@@ -19978,12 +20077,20 @@ mod tests {
                 "asks secret",
             ),
             (
+                asks_document(r#"{"kind":"read","resource":"<principal>/<principal>/"}"#),
+                "asks repeated marker",
+            ),
+            (
+                asks_document(r#"{"kind":"read","resource":"<principal>Models/"}"#),
+                "asks marker tail",
+            ),
+            (
                 asks_document(r#"{"kind":"read","resource":"Models/<principal>/"}"#),
-                "asks marker",
+                "asks misplaced marker",
             ),
             (
                 asks_document(r#"{"kind":"read","resource":"Models"}"#),
-                "asks pattern",
+                "asks literal directory",
             ),
             (
                 format!(
@@ -20005,6 +20112,27 @@ mod tests {
             ),
         ] {
             assert_eq!(parse_asks(&text), Err(reason), "{text}");
+        }
+    }
+
+    #[test]
+    fn malformed_compiled_declaration_keeps_its_parser_reason() {
+        let declaration = std::sync::LazyLock::new(|| {
+            parse_asks(include_str!("../tests/fixtures/asks-unspecified.json"))
+        });
+        // Every access retains the parser reason, including after a failed
+        // reader. An empty list would let reverse coverage pass vacuously.
+        for _ in 0..2 {
+            let failure = std::panic::catch_unwind(|| require_parsed_asks(&declaration))
+                .expect_err("a malformed compiled declaration must fail its reader");
+            assert_eq!(
+                failure.downcast_ref::<String>().map(String::as_str),
+                Some("asks kind unspecified")
+            );
+            assert_eq!(
+                std::sync::LazyLock::force(&declaration),
+                &Err("asks kind unspecified")
+            );
         }
     }
 
@@ -20030,7 +20158,7 @@ mod tests {
             parse_asks(&asks_document(
                 r#"{"kind":"unspecified","resource":"<principal>/"}"#
             )),
-            Err("asks kind"),
+            Err("asks kind unspecified"),
             "the placeholder is not an ask"
         );
         for ask in declared_asks() {

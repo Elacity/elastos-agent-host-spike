@@ -1,1906 +1,2196 @@
 {
- "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest), e2e (run-e2e.sh: the guest in a test Runtime), or selftest (this runner's own named self-test case, for a change to falsify.py).",
- "retired": {},
- "falsifiers": [
-  {
-   "id": "FS01",
-   "title": "the skill budget guard is gone, so an over-budget skill is appended",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
+  "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest), e2e (run-e2e.sh: the guest in a test Runtime), or selftest (this runner's own named self-test case, for a change to falsify.py).",
+  "retired": {},
+  "falsifiers": [
     {
-     "file": "src/lib.rs",
-     "old": "    if text.len() > SKILL_BUDGET {\n        return Err(\"over budget\");\n    }",
-     "new": "    if text.len() > SKILL_BUDGET && false {\n        return Err(\"over budget\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::an_over_budget_skill_leaves_the_journal_unchanged"
-   ]
-  },
-  {
-   "id": "FS02",
-   "title": "a skill may carry a host path",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if host_path(text) {\n        return Err(\"host path\");\n    }",
-     "new": "    if host_path(text) && false {\n        return Err(\"host path\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::an_over_budget_skill_leaves_the_journal_unchanged"
-   ]
-  },
-  {
-   "id": "FS03",
-   "title": "an empty skill is appended",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if text.is_empty() {\n        return Err(\"empty\");\n    }\n    if text.len() > SKILL_BUDGET {",
-     "new": "    if text.is_empty() && false {\n        return Err(\"empty\");\n    }\n    if text.len() > SKILL_BUDGET {"
-    }
-   ],
-   "tests": [
-    "tests::an_over_budget_skill_leaves_the_journal_unchanged"
-   ]
-  },
-  {
-   "id": "FS04",
-   "title": "a harness error that exits non-zero is counted as a failed test",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"not run\"",
-     "new": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"failed\""
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS05",
-   "title": "a name no test answers to is counted as a failed test",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "        if [line for line in listed.splitlines() if line == f\"{name}: test\"] != [f\"{name}: test\"]:\n            outcomes[name] = \"not run\"\n            continue",
-     "new": "        if [line for line in listed.splitlines() if line == f\"{name}: test\"] != [f\"{name}: test\"]:\n            outcomes[name] = \"failed\"\n            continue"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS06",
-   "title": "an interrupted edit is not put back before the error propagates",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "        except BaseException as error:\n            # Python does not call __exit__ when __enter__ raises, and a\n            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every\n            # original back before the interruption goes on.\n            self.restore()\n            if isinstance(error, OSError) and \"No space\" in str(error):",
-     "new": "        except BaseException as error:\n            if isinstance(error, OSError) and \"No space\" in str(error):"
-    }
-   ],
-   "tests": [
-    "an interrupted edit is restored"
-   ]
-  },
-  {
-   "id": "FS07",
-   "title": "a test that exits zero without running is counted as a pass",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "        if code == 0:\n            ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))\n            outcomes[name] = \"passed\" if ran else \"not run\"",
-     "new": "        if code == 0:\n            outcomes[name] = \"passed\""
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS08",
-   "title": "the return sits outside the restoration try, so an interrupt after the edit leaks",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "            return self\n        except BaseException as error:",
-     "new": "            pass\n        except BaseException as error:"
+      "id": "FS01",
+      "title": "the skill budget guard is gone, so an over-budget skill is appended",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if text.len() > SKILL_BUDGET {\n        return Err(\"over budget\");\n    }",
+          "new": "    if text.len() > SKILL_BUDGET && false {\n        return Err(\"over budget\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::an_over_budget_skill_leaves_the_journal_unchanged"
+      ]
     },
     {
-     "file": "falsify.py",
-     "old": "                raise DiskFull(str(error)) from error\n            raise\n\n    def restore(self):",
-     "new": "                raise DiskFull(str(error)) from error\n            raise\n        return self\n\n    def restore(self):"
-    }
-   ],
-   "tests": [
-    "an interrupt at the end of the edit is restored"
-   ]
-  },
-  {
-   "id": "FS09",
-   "title": "a self-test non-zero exit is a failure without proof that the case ran",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "            code, output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
-     "new": "            code, _output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
-    }
-   ],
-   "tests": [
-    "a self-test case counts only when it ran"
-   ]
-  },
-  {
-   "id": "FS10",
-   "title": "a survives entry is a survivor from the suite alone, with no named-test proof",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    missing = [name for name in entry[\"tests\"] if outcomes.get(name, \"not run\") == \"not run\"]",
-     "new": "    if expect == \"survives\":\n        return True, \"SURVIVED (expected, by design)\", \"\"\n    missing = [name for name in entry[\"tests\"] if outcomes.get(name, \"not run\") == \"not run\"]"
-    }
-   ],
-   "tests": [
-    "a survivor needs its named test to run"
-   ]
-  },
-  {
-   "id": "FS11",
-   "title": "a survives entry skips the named tests the caught path proves",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    argv, cwd, extra = how[\"one\"]\n    outcomes = {}",
-     "new": "    if entry[\"expect\"] == \"survives\":\n        return False, {}\n    argv, cwd, extra = how[\"one\"]\n    outcomes = {}"
-    }
-   ],
-   "tests": [
-    "a survivor is proved by its named tests"
-   ]
-  },
-  {
-   "id": "FS12",
-   "title": "a survives entry may name no test",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "        if entry[\"expect\"] in (\"caught\", \"survives\") and not entry[\"tests\"]:",
-     "new": "        if entry[\"expect\"] == \"caught\" and not entry[\"tests\"]:"
-    }
-   ],
-   "tests": [
-    "a survivor needs its named test to run"
-   ]
-  },
-  {
-   "id": "FC01",
-   "title": "the shrink rule is gone: a long summary replaces the tail",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if visible_bytes(&replacement_head) >= visible_bytes(&kept) {\n        return None;\n    }",
-     "new": "    if false {\n        return None;\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_model_summary_that_does_not_shrink_is_refused",
-    "tests::compaction_refuses_a_summary_that_does_not_shrink"
-   ]
-  },
-  {
-   "id": "FC02",
-   "title": "a required fact may be dropped",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if !required\n        .iter()\n        .all(|fact| contains_whole_fact(summary, fact.as_str()))\n    {\n        return Some(\"summary drops a required fact\");\n    }",
-     "new": "    if false {\n        return Some(\"summary drops a required fact\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_model_summary_that_drops_a_required_fact_is_refused"
-   ]
-  },
-  {
-   "id": "FC03",
-   "title": "a summary may repeat the system head (node 0)",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if summary.contains(&head.text) {\n        return Some(\"summary touches node 0\");\n    }",
-     "new": "    if false {\n        return Some(\"summary touches node 0\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_model_summary_that_touches_node_zero_is_refused"
-   ]
-  },
-  {
-   "id": "FC04",
-   "title": "a model failure is recorded as a summary",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        Err(reason) => Err(reason),",
-     "new": "        Err(_) => Ok(()),"
-    }
-   ],
-   "tests": [
-    "tests::a_model_failure_leaves_the_history_unchanged"
-   ]
-  },
-  {
-   "id": "FC05",
-   "title": "a summary is recorded from a step that was never dispatched",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if step.kind != ProposalKind::Hosted || step.state != StepState::Dispatched {\n        return Err(\"summary step not dispatched\");\n    }",
-     "new": "    if step.kind != ProposalKind::Hosted {\n        return Err(\"summary step not dispatched\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_summary_from_a_step_that_was_not_dispatched_is_refused"
-   ]
-  },
-  {
-   "id": "FC06",
-   "title": "a settled summary step accepts another answer",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if step.has_result {\n        return Err(\"summary step settled\");\n    }",
-     "new": "    if false {\n        return Err(\"summary step settled\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_settled_summary_step_does_not_accept_another_answer"
-   ]
-  },
-  {
-   "id": "FC07",
-   "title": "a delayed answer erases history the request never saw",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if hex_digest(&sha256(prompt.as_bytes())) != request_digest {\n        return Err(\"summary is stale\");\n    }",
-     "new": "    if false {\n        return Err(\"summary is stale\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_summary_answer_after_new_history_is_stale"
-   ]
-  },
-  {
-   "id": "FC08",
-   "title": "compaction replaces node 0 instead of keeping the head",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    let replacement_head = [\n        head.clone(),\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];",
-     "new": "    let replacement_head = [\n        SurfaceNode {\n            role: Role::User,\n            text: String::new(),\n            source: NodeSource::Message,\n        },\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];"
-    }
-   ],
-   "tests": [
-    "tests::compaction_keeps_node_zero_and_starts_a_new_series",
-    "tests::a_model_written_compaction_summary_is_recorded"
-   ]
-  },
-  {
-   "id": "FC09",
-   "title": "a model failure writes history instead of leaving it unchanged",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        Err(reason) => Err(reason),",
-     "new": "        Err(_) => {\n            journal.events.push(SurfaceNode {\n                role: Role::User,\n                text: \"model failed\".to_string(),\n                source: NodeSource::CompactionCheckpoint,\n            });\n            Ok(())\n        }"
-    }
-   ],
-   "tests": [
-    "tests::a_model_failure_leaves_the_history_unchanged"
-   ]
-  },
-  {
-   "id": "FC10",
-   "title": "a required fact may be a part of another token",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if ch.is_alphanumeric()\n        || unicode_normalization::char::is_combining_mark(ch)\n        || matches!(ch, '_' | '-' | '=')\n    {\n        return true;\n    }",
-     "new": "    if false {\n        return true;\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_model_summary_that_changes_a_required_fact_is_refused"
-   ]
-  },
-  {
-   "id": "FC11",
-   "title": "a combining mark ends a token, so a changed word still matches",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if ch.is_alphanumeric()\n        || unicode_normalization::char::is_combining_mark(ch)\n        || matches!(ch, '_' | '-' | '=')\n    {",
-     "new": "    if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '=') {"
-    }
-   ],
-   "tests": [
-    "tests::a_model_summary_that_changes_a_required_fact_with_a_combining_mark_is_refused"
-   ]
-  },
-  {
-   "id": "FC12",
-   "title": "the summary request drops the shadowed head, so the provider cannot see what it summarises",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    prompt.push_str(\"\\n\\n\");\n    prompt.push_str(&input);",
-     "new": "    prompt.push_str(\"\\n\\n\");\n    let history = input.split_once('\\n').map_or(\"\", |(_head, history)| history);\n    prompt.push_str(history);"
-    }
-   ],
-   "tests": [
-    "tests::a_compaction_summary_request_uses_the_hosted_model_path"
-   ]
-  },
-  {
-   "id": "FP01",
-   "title": "a snapshot overwrites the last history node, so volatile bytes enter the prefix",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        journal.events.push(SurfaceNode {\n            role: Role::User,\n            text: text.to_string(),\n            source: NodeSource::Snapshot,\n        });",
-     "new": "        if let Some(last) = journal.events.last_mut() {\n            last.text = text.to_string();\n        }"
-    }
-   ],
-   "tests": [
-    "tests::the_prompt_prefix_is_byte_identical_across_two_turns",
-    "tests::changing_a_prefix_node_changes_the_prefix_bytes"
-   ]
-  },
-  {
-   "id": "FS13",
-   "title": "a harness error is ignored, so a fake summary counts as a catch",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    return failed and not returned and harness_is_error_free(output)",
-     "new": "    return failed and not returned"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS14",
-   "title": "a harness error is found at column zero only",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
-     "new": "HARNESS_ERROR = re.compile(\n    r\"^(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS15",
-   "title": "only a bare dyld marker counts as a loader error",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "LOADER_ERROR = re.compile(\n    r\"dyld(?:\\[[^\\]]*\\])?: |error while loading shared libraries|Library not loaded:\")",
-     "new": "LOADER_ERROR = re.compile(\n    r\"dyld: \")"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS16",
-   "title": "the streams are joined without a line boundary",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
-     "new": "    output = ANSI.sub(\"\", done.stdout + done.stderr)"
-    }
-   ],
-   "tests": [
-    "the streams keep their own lines"
-   ]
-  },
-  {
-   "id": "FS17",
-   "title": "a harness error after a prefix is not a marker",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
-     "new": "HARNESS_ERROR = re.compile(\n    r\"^[ \\t]*(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS18",
-   "title": "terminal formatting is not stripped, so a colored marker is missed",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
-     "new": "    output = done.stdout + \"\\n\" + done.stderr"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS19",
-   "title": "the whole cargo footer line is exempt, so a later error on it is missed",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
-     "new": "    dropped = [line for line in output.splitlines()\n               if not line.strip().startswith(\"error: test failed, to rerun pass\")]\n    return not HARNESS_ERROR.search(\"\\n\".join(dropped))"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS20",
-   "title": "line separators are dropped, so an error split after its colon is missed",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
-     "new": "    return not [line for line in TEST_FAILED.sub(\"\", output).splitlines()\n                if HARNESS_ERROR.search(line)]"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS21",
-   "title": "a cargo launch failure is not recognized, so a fake summary counts as a catch",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
-     "new": "CARGO_FAILURE = re.compile(\n    r\"process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS22",
-   "title": "an abnormal test-process exit is not recognized, so a fake summary counts as a catch",
-   "command": "selftest",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "falsify.py",
-     "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
-     "new": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\")"
-    }
-   ],
-   "tests": [
-    "a named test that does not run is not a catch"
-   ]
-  },
-  {
-   "id": "FS23",
-   "title": "the chunked coding name is substring-matched, so xchunked is treated as chunked",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if !coding.eq_ignore_ascii_case(\"chunked\") {",
-     "new": "            if !coding.contains(\"chunked\") {"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_chunked_body_is_decoded_and_the_coding_name_is_matched_exactly"
-   ]
-  },
-  {
-   "id": "FS24",
-   "title": "a content-length body reads one byte too many, so a complete response is a short read",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let Some(length) = content_lengths.first().copied() else {",
-     "new": "        let Some(length) = content_lengths.first().map(|length| length + 1) else {"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_content_length_body_is_decoded"
-   ]
-  },
-  {
-   "id": "FS25",
-   "title": "an unsupported transfer coding falls through to the plain body",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if !coding.eq_ignore_ascii_case(\"chunked\") {\n                return Err(format!(\"unsupported transfer coding {coding:?}\"));\n            }\n            return decode_chunked(body);",
-     "new": "            let _ = coding;\n            return Ok(String::from_utf8_lossy(body).into_owned());"
-    }
-   ],
-   "tests": [
-    "sparks_http::an_unsupported_transfer_coding_is_refused_not_read_as_a_plain_body"
-   ]
-  },
-  {
-   "id": "FS26",
-   "title": "transfer-encoding and content-length together are accepted, so the framing is ambiguous",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if !transfer_codings.is_empty() && !content_lengths.is_empty() {\n            return Err(\"conflicting framing: transfer-encoding and content-length\".to_string());\n        }",
-     "new": "        // transfer-encoding takes precedence over content-length."
-    }
-   ],
-   "tests": [
-    "sparks_http::conflicting_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS27",
-   "title": "a short read returns an empty success instead of an error",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if body.len() < length {\n            return Err(format!(\"short read: {} of {length} body bytes\", body.len()));\n        }",
-     "new": "        if body.len() < length {\n            return Ok(String::new());\n        }"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_short_read_is_an_error_not_an_empty_success"
-   ]
-  },
-  {
-   "id": "FS28",
-   "title": "the skip-guard ignores SPARKS_MODEL_URL, so the opt-in decision is lost",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        std::env::var(\"SPARKS_MODEL_URL\")\n            .ok()\n            .filter(|url| !url.is_empty())",
-     "new": "        let _ = std::env::var(\"SPARKS_MODEL_URL\");\n        None"
-    }
-   ],
-   "tests": [
-    "sparks_http::the_model_url_opt_in_is_one_guard"
-   ]
-  },
-  {
-   "id": "FS29",
-   "title": "a zero-size chunk returns success before the final CRLF, so a truncated body is complete",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if size == 0 {\n                if body.len() < at.saturating_add(2) {\n                    return Err(\"short read: chunked body is not terminated\".to_string());\n                }\n                if &body[at..at + 2] != b\"\\r\\n\" {\n                    return Err(\"trailers are not accepted\".to_string());\n                }\n                return String::from_utf8(decoded)",
-     "new": "            if size == 0 {\n                return String::from_utf8(decoded)"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_short_read_is_an_error_not_an_empty_success"
-   ]
-  },
-  {
-   "id": "FS30",
-   "title": "chunk bounds are unchecked, so a huge chunk size overflows",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            let end = at\n                .checked_add(size)\n                .and_then(|end| end.checked_add(2))\n                .ok_or_else(|| \"chunk size is too large\".to_string())?;",
-     "new": "            let end = at + size + 2;"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_huge_chunk_size_is_an_error_not_an_overflow"
-   ]
-  },
-  {
-   "id": "FS31",
-   "title": "malformed framing headers are ignored, so a spaced transfer-encoding header is not seen",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            let Some((name, value)) = line.split_once(':') else {\n                return Err(\"malformed header syntax\".to_string());\n            };\n            if name.is_empty() || !name.bytes().all(is_header_name_byte) {\n                return Err(\"malformed header syntax\".to_string());\n            }",
-     "new": "            let Some((name, value)) = line.split_once(':') else {\n                continue;\n            };"
-    }
-   ],
-   "tests": [
-    "sparks_http::malformed_framing_headers_are_refused"
-   ]
-  },
-  {
-   "id": "FS32",
-   "title": "duplicate content-length values are accepted, so conflicting lengths are not refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if content_lengths.len() > 1 {\n            return Err(\"conflicting content-length values\".to_string());\n        }",
-     "new": "        // the first content-length wins."
-    }
-   ],
-   "tests": [
-    "sparks_http::conflicting_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS33",
-   "title": "multiple transfer codings use the first one instead of being refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if transfer_codings.len() != 1 {\n                return Err(format!(\n                    \"conflicting transfer codings: {}\",\n                    transfer_codings.join(\", \")\n                ));\n            }",
-     "new": "            // the first transfer coding is used."
-    }
-   ],
-   "tests": [
-    "sparks_http::conflicting_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS34",
-   "title": "a bare line feed is accepted, so a header folds into an ignored value",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        for (at, byte) in response[..headers_end].iter().enumerate() {\n            match *byte {\n                b'\\r' if response.get(at + 1) != Some(&b'\\n') => {\n                    return Err(\"malformed header line break\".to_string())\n                }\n                b'\\n' if at == 0 || response[at - 1] != b'\\r' => {\n                    return Err(\"malformed header line break\".to_string())\n                }\n                _ => {}\n            }\n        }",
-     "new": "        // line breaks were split by CRLF."
-    }
-   ],
-   "tests": [
-    "sparks_http::malformed_framing_headers_are_refused"
-   ]
-  },
-  {
-   "id": "FS35",
-   "title": "the status line's version token is ignored, so a non-HTTP response succeeds",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let mut parts = status.split_whitespace();\n        let version = parts\n            .next()\n            .ok_or_else(|| \"response status line is missing\".to_string())?;\n        if version != \"HTTP/1.1\" && version != \"HTTP/1.0\" {\n            return Err(format!(\"unsupported http version {version:?}\"));\n        }",
-     "new": "        let mut parts = status.split_whitespace();\n        let _ = parts.next();"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_non_http_status_line_is_refused"
-   ]
-  },
-  {
-   "id": "FS36",
-   "title": "a connection failure is a silent empty success",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let mut stream =\n            TcpStream::connect(address).map_err(|error| format!(\"connect failed: {error}\"))?;",
-     "new": "        let mut stream = match TcpStream::connect(address) {\n            Ok(stream) => stream,\n            Err(_) => return Ok(String::new()),\n        };"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_short_read_is_an_error_not_an_empty_success"
-   ]
-  },
-  {
-   "id": "FS37",
-   "title": "a read error is ignored instead of returned",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        stream\n            .read_to_end(&mut response)\n            .map_err(|error| format!(\"read failed: {error}\"))?;",
-     "new": "        let _ = stream.read_to_end(&mut response);"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_read_error_is_returned_not_ignored"
-   ]
-  },
-  {
-   "id": "FS38",
-   "title": "a response with no framing is read as an empty body",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let Some(length) = content_lengths.first().copied() else {\n            return Err(\"response has no framing\".to_string());\n        };",
-     "new": "        let length = content_lengths.first().copied().unwrap_or(0);"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_response_with_no_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS39",
-   "title": "a chunk size with a leading plus is parsed instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if size_text.is_empty() || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {\n                return Err(format!(\"invalid chunk size {size_text:?}\"));\n            }",
-     "new": "            // the integer parser checks the size."
-    }
-   ],
-   "tests": [
-    "sparks_http::malformed_numeric_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS40",
-   "title": "a content-length with a leading plus is parsed instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {\n                    return Err(format!(\"invalid content-length {length:?}\"));\n                }",
-     "new": "                // the integer parser checks the length."
-    }
-   ],
-   "tests": [
-    "sparks_http::malformed_numeric_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS41",
-   "title": "a non-UTF-8 chunk size line is lossily decoded instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            let line = String::from_utf8(body[at..line_end].to_vec())\n                .map_err(|_| \"chunk size line is not UTF-8\".to_string())?;",
-     "new": "            let line = String::from_utf8_lossy(&body[at..line_end]).into_owned();"
-    }
-   ],
-   "tests": [
-    "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
-   ]
-  },
-  {
-   "id": "FS42",
-   "title": "a non-UTF-8 content-length body is lossily decoded instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        String::from_utf8(body[..length].to_vec())\n            .map_err(|_| \"response body is not UTF-8\".to_string())",
-     "new": "        Ok(String::from_utf8_lossy(&body[..length]).into_owned())"
-    }
-   ],
-   "tests": [
-    "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
-   ]
-  },
-  {
-   "id": "FS43",
-   "title": "chunk trailers are ignored, so the zero chunk does not need a final CRLF",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                if &body[at..at + 2] != b\"\\r\\n\" {\n                    return Err(\"trailers are not accepted\".to_string());\n                }",
-     "new": "                // trailers are ignored."
-    }
-   ],
-   "tests": [
-    "sparks_http::malformed_chunk_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS44",
-   "title": "a chunk that is not ended by CRLF is accepted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if &body[end - 2..end] != b\"\\r\\n\" {\n                return Err(\"chunk is not ended by CRLF\".to_string());\n            }",
-     "new": "            // chunk data is delimited by its size."
-    }
-   ],
-   "tests": [
-    "sparks_http::malformed_chunk_framing_is_refused"
-   ]
-  },
-  {
-   "id": "FS45",
-   "title": "a non-UTF-8 chunked body is lossily decoded instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                return String::from_utf8(decoded)\n                    .map_err(|_| \"response body is not UTF-8\".to_string());",
-     "new": "                return Ok(String::from_utf8_lossy(&decoded).into_owned());"
-    }
-   ],
-   "tests": [
-    "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
-   ]
-  },
-  {
-   "id": "FS46",
-   "title": "the model answer is trimmed before the summary check, so padded bytes get a different verdict",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        Ok(content.to_string())",
-     "new": "        Ok(content.trim().to_string())"
-    }
-   ],
-   "tests": [
-    "tests::a_padded_model_answer_is_not_trimmed_before_the_check"
-   ]
-  },
-  {
-   "id": "FS47",
-   "title": "a chunk size is trimmed before it is validated, so a bare LF reads as hexadecimal digits",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            let size_text = line.split(';').next().unwrap_or(\"\");",
-     "new": "            let size_text = line.split(';').next().unwrap_or(\"\").trim();"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_bare_lf_in_a_chunk_size_is_refused"
-   ]
-  },
-  {
-   "id": "FS48",
-   "title": "a content-length is trimmed before it is validated, so a vertical tab reads as a digit",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                let length = value.trim_matches(|byte: char| byte == ' ' || byte == '\\t');",
-     "new": "                let length = value.trim();"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_vertical_tab_in_content_length_is_refused"
-   ]
-  },
-  {
-   "id": "FS49",
-   "title": "the three-digit status guard is gone, so 0200 is read as status 200",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if code_text.len() != 3 || !code_text.bytes().all(|byte| byte.is_ascii_digit()) {",
-     "new": "        if !code_text.bytes().all(|byte| byte.is_ascii_digit()) {"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_non_http_status_line_is_refused"
-   ]
-  },
-  {
-   "id": "FS50",
-   "title": "a transfer coding is trimmed before it is validated, so a vertical tab reads as chunked",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                    transfer_codings.push(\n                        coding\n                            .trim_matches(|byte: char| byte == ' ' || byte == '\\t')\n                            .to_string(),\n                    );",
-     "new": "                    transfer_codings.push(coding.trim().to_string());"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_vertical_tab_in_transfer_encoding_is_refused"
-   ]
-  },
-  {
-   "id": "FE01",
-   "title": "bind_change selects edits only, so a dispatched restore sends no request",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        .filter(|step| is_write(step.kind) && step.effect_id == effect_id)",
-     "new": "        .filter(|step| step.kind == ProposalKind::Edit && step.effect_id == effect_id)"
-    }
-   ],
-   "tests": [
-    "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text"
-   ]
-  },
-  {
-   "id": "FE02",
-   "title": "only an edit is denied when its change fails, so a failed restore stays dispatched",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if is_write(step.kind)\n                && step.effect_id == effect_id\n                && step.state == StepState::Dispatched\n                && !step.has_result",
-     "new": "            if step.kind == ProposalKind::Edit\n                && step.effect_id == effect_id\n                && step.state == StepState::Dispatched\n                && !step.has_result"
-    }
-   ],
-   "tests": [
-    "tests::a_failed_restore_change_denies_its_step",
-    "tests::a_restore_whose_version_moved_is_refused_by_the_write_path"
-   ]
-  },
-  {
-   "id": "FE03",
-   "title": "the single-write recorder also takes a restore, so a refused request becomes a recorded result",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if step.kind != ProposalKind::Edit\n        || step.state != StepState::Dispatched",
-     "new": "    if !is_write(step.kind)\n        || step.state != StepState::Dispatched"
-    }
-   ],
-   "tests": [
-    "tests::a_restore_is_not_recorded_by_the_single_write_path"
-   ]
-  },
-  {
-   "id": "FE04",
-   "title": "a restore may be asked without a grant",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    let Some(grant) = step.grant.as_deref() else {\n        return false;\n    };\n    if grant.is_empty() {\n        return false;\n    }",
-     "new": "    if step.kind == ProposalKind::Restore {\n        return current_observation(&journal.events, &step.resource)\n            .is_some_and(|row| row.version == seen_version);\n    }\n    let Some(grant) = step.grant.as_deref() else {\n        return false;\n    };\n    if grant.is_empty() {\n        return false;\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_restore_without_a_grant_is_refused_and_records_nothing",
-    "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text"
-   ]
-  },
-  {
-   "id": "FE05",
-   "title": "a restore of an older version is proposed instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if current.version != version {\n        return Err(\"stale\");\n    }",
-     "new": "    if current.version < version {\n        return Err(\"stale\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text",
-    "tests::a_restore_proposes_an_observed_version_and_does_not_apply_it"
-   ]
-  },
-  {
-   "id": "FS51",
-   "title": "a metric sample with no value is read as zero, so a missing counter passes",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                let value = rest\n                    .split_whitespace()\n                    .next()?\n                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())?;",
-     "new": "                let value = rest\n                    .split_whitespace()\n                    .next()\n                    .and_then(|value| value.parse::<f64>().ok())\n                    .unwrap_or(0.0);"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_metric_sample_without_a_numeric_value_is_not_a_counter"
-   ]
-  },
-  {
-   "id": "FS52",
-   "title": "the sample name is prefix-matched, so an unrelated suffix is read as the counter",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                if sample_name != name {",
-     "new": "                if !sample_name.starts_with(name) {"
-    }
-   ],
-   "tests": [
-    "sparks_http::an_unrelated_metric_suffix_is_not_the_named_counter"
-   ]
-  },
-  {
-   "id": "FS53",
-   "title": "the value is read before the label block, so a number inside a label becomes the counter",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        match line.split_once('{') {\n            Some((head, after)) => {\n                let end = label_block_end(after)?;\n                Some((head, &line[head.len()..=head.len() + end], &after[end..]))\n            }\n            None => {",
-     "new": "        match line.split_once('{') {\n            Some((head, after)) => {\n                let (_, rest) = after.split_once(char::is_whitespace).unwrap_or((after, \"\"));\n                Some((head, \"\", rest))\n            }\n            None => {"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_number_inside_a_label_is_not_the_sample_value"
-   ]
-  },
-  {
-   "id": "FS54",
-   "title": "a non-finite value is accepted as a counter",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())",
-     "new": "                    .parse::<f64>()\n                    .ok()"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_non_finite_metric_value_is_not_a_counter"
-   ]
-  },
-  {
-   "id": "FS55",
-   "title": "the histogram accepts a sum without its count",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }",
-     "new": "                [] if sums.len() == 1 => PrefillSeconds::Histogram {\n                    sum: sums[0].1,\n                    count: 0.0,\n                },\n                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }"
-    }
-   ],
-   "tests": [
-    "sparks_http::the_prefill_histogram_requires_both_sum_and_count"
-   ]
-  },
-  {
-   "id": "FS56",
-   "title": "a model reply without assistant text is accepted as a completion",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if reply.trim().is_empty() {\n            return Err(\"reply is empty\".to_string());\n        }\n        let reply: serde_json::Value =\n            serde_json::from_str(reply).map_err(|error| format!(\"reply is not JSON: {error}\"))?;\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .ok_or_else(|| \"reply has no assistant content\".to_string())?;\n        Ok(content.to_string())",
-     "new": "        let reply: serde_json::Value = serde_json::from_str(reply).unwrap_or_default();\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or(\"\");\n        Ok(content.to_string())"
-    }
-   ],
-   "tests": [
-    "tests::a_model_reply_without_assistant_text_is_not_a_completion"
-   ]
-  },
-  {
-   "id": "FS57",
-   "title": "histogram values are paired without their labels, so different series make one pair",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                    if sum_labels == count_labels {",
-     "new": "                    if true {"
-    }
-   ],
-   "tests": [
-    "sparks_http::a_histogram_pair_requires_matching_labels"
-   ]
-  },
-  {
-   "id": "FS58",
-   "title": "an empty assistant text is accepted as a prefix completion",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let content = assistant_content(reply)?;\n        if content.trim().is_empty() {\n            return Err(\"reply has empty assistant content\".to_string());\n        }\n        Ok(content)",
-     "new": "        let content = assistant_content(reply)?;\n        Ok(content)"
-    }
-   ],
-   "tests": [
-    "tests::a_model_reply_without_assistant_text_is_not_a_completion"
-   ]
-  },
-  {
-   "id": "FS59",
-   "title": "the stated skill CID is not compared, so content with another hash is admitted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if hex_digest(&sha256(text.as_bytes())) != cid {\n        return Err(\"wrong cid\");\n    }",
-     "new": "    if cid.is_empty() {\n        return Err(\"wrong cid\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::a_skill_cid_that_does_not_match_the_observed_text_is_refused"
-   ]
-  },
-  {
-   "id": "FS60",
-   "title": "a missing observation falls back to the last journal line, so unobserved content is admitted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    let Some(text) = current_observation(&journal.events, resource)\n        .filter(|row| row.version == version)\n        .and_then(|_| current_observed_text(&journal.events, resource))\n    else {\n        return Err(match current_observation(&journal.events, resource) {\n            None => \"not observed\",\n            Some(row) if row.version != version => \"stale\",\n            Some(_) => \"not whole\",\n        });\n    };",
-     "new": "    let text = current_observed_text(&journal.events, resource)\n        .or_else(|| journal.events.last().map(|node| node.text.clone()))\n        .unwrap_or_default();"
-    }
-   ],
-   "tests": [
-    "tests::a_skill_from_unobserved_content_is_refused"
-   ]
-  },
-  {
-   "id": "FS61",
-   "title": "the skill is appended directly, so the budget and host-path rules are bypassed",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    admit_skill(journal, &text)",
-     "new": "    if text.is_empty() {\n        return Err(\"empty\");\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text,\n        source: NodeSource::Skill,\n    });\n    Ok(())"
-    }
-   ],
-   "tests": [
-    "tests::an_over_budget_or_host_path_skill_from_a_read_is_still_refused"
-   ]
-  },
-  {
-   "id": "FS62",
-   "title": "the requested version is ignored, so a skill is admitted from another version's read",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        .filter(|row| row.version == version)",
-     "new": "        .filter(|_row| true)"
-    }
-   ],
-   "tests": [
-    "tests::a_skill_from_unobserved_content_is_refused"
-   ]
-  },
-  {
-   "id": "FS63",
-   "title": "a windowed read supplies the whole text, so a partial read is admitted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        .and_then(|_| current_observed_text(&journal.events, resource))",
-     "new": "        .and_then(|_| journal.events.last().map(|node| node.text.clone()))"
-    }
-   ],
-   "tests": [
-    "tests::a_skill_from_unobserved_content_is_refused"
-   ]
-  },
-  {
-   "id": "FS64",
-   "title": "the scaffold does not keep the observed version, so the write path calls it stale",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    step.old = observed;\n    step.new = text.to_string();\n    step.seen_version = Some(row.version);",
-     "new": "    step.old = observed;\n    step.new = text.to_string();"
-    }
-   ],
-   "tests": [
-    "tests::a_granted_scaffold_applies_through_the_write_path"
-   ]
-  },
-  {
-   "id": "FS65",
-   "title": "the edit request sends the replaced text, so the scaffold text is never written",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "                \"new\": edit.new,",
-     "new": "                \"new\": edit.old,"
-    }
-   ],
-   "tests": [
-    "tests::a_granted_scaffold_applies_through_the_write_path"
-   ]
-  },
-  {
-   "id": "FS66",
-   "title": "a quoted project digest passes without being compared with the observed tree",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    quoted == hex_digest(&digest)",
-     "new": "    quoted == quoted"
-    }
-   ],
-   "tests": [
-    "tests::a_scaffolded_project_opens_again_with_the_same_tree_digest"
-   ]
-  },
-  {
-   "id": "FS67",
-   "title": "the shared write path drops the grant check, so a stored scaffold writes without a grant",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if step.state != StepState::Dispatched\n            || step.grant.as_deref().is_none_or(str::is_empty)\n            || step.has_result",
-     "new": "        if step.state != StepState::Dispatched\n            || step.has_result"
-    }
-   ],
-   "tests": [
-    "tests::a_scaffold_without_a_grant_is_refused_and_records_nothing"
-   ]
-  },
-  {
-   "id": "FS68",
-   "title": "an empty old text binds a file that shows text, so a scaffold overwrites it",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            if observed_text_at(&journal.events, &step.resource, row.version).as_deref() != Some(\"\")\n                || !events_show_whole(&journal.events, &step.resource, row.version)\n            {\n                return Err(Refusal::Empty);\n            }",
-     "new": "            if observed_text_at(&journal.events, &step.resource, row.version).is_none() {\n                return Err(Refusal::Empty);\n            }"
-    }
-   ],
-   "tests": [
-    "tests::an_empty_old_binds_only_the_first_write_of_an_empty_file"
-   ]
-  },
-  {
-   "id": "FS69",
-   "title": "the first write of an empty file is recorded as a window, so the project does not open whole",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "            (1, String::new(), true)",
-     "new": "            (1, String::new(), false)"
-    }
-   ],
-   "tests": [
-    "tests::a_granted_scaffold_applies_through_the_write_path"
-   ]
-  },
-  {
-   "id": "FS70",
-   "title": "an admitted skill is recorded as a snapshot, so the positive admission effect is lost",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Skill,\n    });",
-     "new": "    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Snapshot,\n    });"
-    }
-   ],
-   "tests": [
-    "tests::a_skill_from_an_observed_read_named_by_hash_is_admitted"
-   ]
-  },
-  {
-   "id": "F-AH2a",
-   "title": "a turn number comes from a process-wide counter, so an interleaved session numbers its turns from another session's work",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "fn open_turn(journal: &mut Journal) -> u64 {\n    let id = u64::try_from(journal.turns.len())\n        .unwrap_or(u64::MAX)\n        .saturating_add(1);",
-     "new": "fn open_turn(journal: &mut Journal) -> u64 {\n    static mut NEXT_TURN: u64 = 0;\n    let id = unsafe {\n        NEXT_TURN = NEXT_TURN.saturating_add(1);\n        NEXT_TURN\n    };"
-    }
-   ],
-   "tests": [
-    "tests::four_interleaved_sessions_match_their_solo_runs"
-   ]
-  },
-  {
-   "id": "F-AH2b",
-   "title": "dispatch drops the per-step grant check, so a grant one session's step holds runs the other session's step",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if step.state != StepState::Prepared || step.grant.is_none() {",
-     "new": "    if step.state != StepState::Prepared {"
-    }
-   ],
-   "tests": [
-    "tests::a_grant_never_crosses_sessions"
-   ]
-  },
-  {
-   "id": "F-AH2c",
-   "title": "an allow-session answer mints its own grant id, so a session answer authorizes without Runtime authority",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        _ => grant.filter(|grant| !grant.is_empty()),",
-     "new": "        _ => grant.filter(|grant| !grant.is_empty()).or(Some(\"allow-session\")),"
-    }
-   ],
-   "tests": [
-    "tests::an_inbox_answer_never_crosses_sessions"
-   ]
-  },
-  {
-   "id": "F-AH3a",
-   "title": "a hosted proposal records a model resource the declaration does not cover",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    step.kind = ProposalKind::Hosted;\n    step.resource = resource.to_string();",
-     "new": "    step.kind = ProposalKind::Hosted;\n    step.resource = \"localhost://Other/hosted\".to_string();"
-    }
-   ],
-   "tests": [
-    "tests::every_resource_the_guest_proposes_is_declared"
-   ]
-  },
-  {
-   "id": "F-AH3c",
-   "title": "a declared ask is deleted, so a proposable resource is no longer covered",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
-     "new": ""
-    }
-   ],
-   "tests": [
-    "tests::every_proposal_kind_has_a_declared_ask",
-    "tests::every_resource_the_guest_proposes_is_declared"
-   ]
-  },
-  {
-   "id": "F-AH3d",
-   "title": "a declared ask has no observed resource, so the declaration is wider than the guest",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
-    }
-   ],
-   "tests": [
-    "tests::every_declared_ask_is_observed"
-   ]
-  },
-  {
-   "id": "F-AH3e",
-   "title": "the placeholder kind is declared as an ask",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-     "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
-    }
-   ],
-   "tests": [
-    "tests::every_proposal_kind_has_a_declared_ask"
-   ]
-  },
-  {
-   "id": "F-AH3v01",
-   "title": "a declared ask carries a URL",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
-    }
-   ],
-   "tests": [
-    "tests::asks_declare_no_urls_secrets_or_users_paths"
-   ]
-  },
-  {
-   "id": "F-AH3v02",
-   "title": "a declared ask carries a secret-shaped value",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
-    }
-   ],
-   "tests": [
-    "tests::asks_declare_no_urls_secrets_or_users_paths"
-   ]
-  },
-  {
-   "id": "F-AH3v03",
-   "title": "a declared ask carries a routed Users/ path",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-     "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
-    }
-   ],
-   "tests": [
-    "tests::asks_declare_no_urls_secrets_or_users_paths"
-   ]
-  },
-  {
-   "id": "F-AH3v04",
-   "title": "a declared ask carries a host path",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
-     "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
-    }
-   ],
-   "tests": [
-    "tests::asks_declare_no_urls_secrets_or_users_paths"
-   ]
-  },
-  {
-   "id": "F-AH3v05",
-   "title": "a repeated resource field hides a URL, so the discarded value is never checked",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
-    }
-   ],
-   "tests": [
-    "tests::asks_declare_no_urls_secrets_or_users_paths"
-   ]
-  },
-  {
-   "id": "F-AH3p01",
-   "title": "a declaration that is not JSON is read as an empty document",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| \"asks json\")?;",
-     "new": "    let document: serde_json::Value = serde_json::from_str(text).unwrap_or_default();"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p02",
-   "title": "a repeated key is collapsed, so the discarded value is never checked",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if repeated_object_key(text).is_some() {\n        return Err(\"asks duplicate field\");\n    }",
-     "new": "    if false {\n        return Err(\"asks duplicate field\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p03",
-   "title": "a document that is not an object is read as an empty declaration",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    let document = document.as_object().ok_or(\"asks root\")?;",
-     "new": "    let Some(document) = document.as_object() else {\n        return Ok(Vec::new());\n    };"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p04",
-   "title": "an unknown top-level field is accepted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if document.keys().any(|key| key != \"schema\" && key != \"asks\") {\n        return Err(\"asks unknown field\");\n    }",
-     "new": "    if false {\n        return Err(\"asks unknown field\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p05",
-   "title": "the schema is not checked, so any declaration parses",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if document.get(\"schema\").and_then(serde_json::Value::as_str) != Some(ASKS_SCHEMA) {\n        return Err(\"asks schema\");\n    }",
-     "new": "    if false {\n        return Err(\"asks schema\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p06",
-   "title": "a missing or non-list asks is read as an empty list",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    let entries = document\n        .get(\"asks\")\n        .and_then(serde_json::Value::as_array)\n        .ok_or(\"asks list\")?;",
-     "new": "    let empty = Vec::new();\n    let entries = document\n        .get(\"asks\")\n        .and_then(serde_json::Value::as_array)\n        .unwrap_or(&empty);"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p07",
-   "title": "an empty declaration is accepted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if entries.is_empty() {\n        return Err(\"asks empty\");\n    }",
-     "new": "    if false {\n        return Err(\"asks empty\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p08",
-   "title": "an entry that is not an object is skipped instead of refused",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let entry = entry.as_object().ok_or(\"asks entry\")?;",
-     "new": "        let Some(entry) = entry.as_object() else {\n            continue;\n        };"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p09",
-   "title": "an unknown per-entry field is accepted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if entry.keys().any(|key| key != \"kind\" && key != \"resource\") {\n            return Err(\"asks entry field\");\n        }",
-     "new": "        if false {\n            return Err(\"asks entry field\");\n        }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p10",
-   "title": "a missing or unknown kind is read as a read ask",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let kind = entry\n            .get(\"kind\")\n            .and_then(serde_json::Value::as_str)\n            .and_then(proposal_kind)\n            .ok_or(\"asks kind\")?;",
-     "new": "        let kind = entry\n            .get(\"kind\")\n            .and_then(serde_json::Value::as_str)\n            .and_then(proposal_kind)\n            .unwrap_or(ProposalKind::Read);"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p11",
-   "title": "a missing resource is read as the shared model namespace",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        let pattern = entry\n            .get(\"resource\")\n            .and_then(serde_json::Value::as_str)\n            .ok_or(\"asks resource\")?;",
-     "new": "        let pattern = entry\n            .get(\"resource\")\n            .and_then(serde_json::Value::as_str)\n            .unwrap_or(\"Models/\");"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p12",
-   "title": "a resource with whitespace is accepted",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        if pattern.chars().any(char::is_whitespace) {\n            return Err(\"asks whitespace\");\n        }",
-     "new": "        if false {\n            return Err(\"asks whitespace\");\n        }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p13",
-   "title": "a declared ask may carry a URL",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if pattern.contains(\"://\") {\n        return Some(\"asks url\");\n    }",
-     "new": "    if false {\n        return Some(\"asks url\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p14",
-   "title": "a declared ask may carry a host path",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if pattern.starts_with('/')\n        || pattern.starts_with('~')\n        || pattern.contains('\\\\')\n        || pattern\n            .split('/')\n            .any(|segment| segment == \".\" || segment == \"..\")\n    {\n        return Some(\"asks host path\");\n    }",
-     "new": "    if false {\n        return Some(\"asks host path\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p15",
-   "title": "a declared ask may route a Users/ path",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if lower.contains(\"users/\") {\n        return Some(\"asks users path\");\n    }",
-     "new": "    if false {\n        return Some(\"asks users path\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p16",
-   "title": "a declared ask may carry a secret-shaped value",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if secret_shaped(&lower) {\n        return Some(\"asks secret\");\n    }",
-     "new": "    if false {\n        return Some(\"asks secret\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p17",
-   "title": "the principal marker may sit anywhere in a pattern",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if pattern.matches(PRINCIPAL_MARKER).count() > 1\n        || (pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER))\n    {\n        return Some(\"asks marker\");\n    }",
-     "new": "    if false {\n        return Some(\"asks marker\");\n    }"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  },
-  {
-   "id": "F-AH3p18",
-   "title": "a literal pattern need not end at a directory boundary",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "        Some(tail) => tail.is_empty() || tail.starts_with('/'),\n        None => pattern.ends_with('/'),",
-     "new": "        Some(tail) => tail.is_empty() || tail.starts_with('/'),\n        None => true,"
-    }
-   ],
-   "tests": [
-    "tests::asks_parser_refuses_each_shape_with_its_reason"
-   ]
-  }
- ]
+      "id": "FS02",
+      "title": "a skill may carry a host path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if host_path(text) {\n        return Err(\"host path\");\n    }",
+          "new": "    if host_path(text) && false {\n        return Err(\"host path\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::an_over_budget_skill_leaves_the_journal_unchanged"
+      ]
+    },
+    {
+      "id": "FS03",
+      "title": "an empty skill is appended",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if text.is_empty() {\n        return Err(\"empty\");\n    }\n    if text.len() > SKILL_BUDGET {",
+          "new": "    if text.is_empty() && false {\n        return Err(\"empty\");\n    }\n    if text.len() > SKILL_BUDGET {"
+        }
+      ],
+      "tests": [
+        "tests::an_over_budget_skill_leaves_the_journal_unchanged"
+      ]
+    },
+    {
+      "id": "FS04",
+      "title": "a harness error that exits non-zero is counted as a failed test",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"not run\"",
+          "new": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"failed\""
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS05",
+      "title": "a name no test answers to is counted as a failed test",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if [line for line in listed.splitlines() if line == f\"{name}: test\"] != [f\"{name}: test\"]:\n            outcomes[name] = \"not run\"\n            continue",
+          "new": "        if [line for line in listed.splitlines() if line == f\"{name}: test\"] != [f\"{name}: test\"]:\n            outcomes[name] = \"failed\"\n            continue"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS06",
+      "title": "an interrupted edit is not put back before the error propagates",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        except BaseException as error:\n            # Python does not call __exit__ when __enter__ raises, and a\n            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every\n            # original back before the interruption goes on.\n            self.restore()\n            if isinstance(error, OSError) and \"No space\" in str(error):",
+          "new": "        except BaseException as error:\n            if isinstance(error, OSError) and \"No space\" in str(error):"
+        }
+      ],
+      "tests": [
+        "an interrupted edit is restored"
+      ]
+    },
+    {
+      "id": "FS07",
+      "title": "a test that exits zero without running is counted as a pass",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if code == 0:\n            ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))\n            outcomes[name] = \"passed\" if ran else \"not run\"",
+          "new": "        if code == 0:\n            outcomes[name] = \"passed\""
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS08",
+      "title": "the return sits outside the restoration try, so an interrupt after the edit leaks",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "            return self\n        except BaseException as error:",
+          "new": "            pass\n        except BaseException as error:"
+        },
+        {
+          "file": "falsify.py",
+          "old": "                raise DiskFull(str(error)) from error\n            raise\n\n    def restore(self):",
+          "new": "                raise DiskFull(str(error)) from error\n            raise\n        return self\n\n    def restore(self):"
+        }
+      ],
+      "tests": [
+        "an interrupt at the end of the edit is restored"
+      ]
+    },
+    {
+      "id": "FS09",
+      "title": "a self-test non-zero exit is a failure without proof that the case ran",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "            code, output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
+          "new": "            code, _output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
+        }
+      ],
+      "tests": [
+        "a self-test case counts only when it ran"
+      ]
+    },
+    {
+      "id": "FS10",
+      "title": "a survives entry is a survivor from the suite alone, with no named-test proof",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    missing = [name for name in entry[\"tests\"] if outcomes.get(name, \"not run\") == \"not run\"]",
+          "new": "    if expect == \"survives\":\n        return True, \"SURVIVED (expected, by design)\", \"\"\n    missing = [name for name in entry[\"tests\"] if outcomes.get(name, \"not run\") == \"not run\"]"
+        }
+      ],
+      "tests": [
+        "a survivor needs its named test to run"
+      ]
+    },
+    {
+      "id": "FS11",
+      "title": "a survives entry skips the named tests the caught path proves",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    argv, cwd, extra = how[\"one\"]\n    outcomes = {}",
+          "new": "    if entry[\"expect\"] == \"survives\":\n        return False, {}\n    argv, cwd, extra = how[\"one\"]\n    outcomes = {}"
+        }
+      ],
+      "tests": [
+        "a survivor is proved by its named tests"
+      ]
+    },
+    {
+      "id": "FS12",
+      "title": "a survives entry may name no test",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if entry[\"expect\"] in (\"caught\", \"survives\") and not entry[\"tests\"]:",
+          "new": "        if entry[\"expect\"] == \"caught\" and not entry[\"tests\"]:"
+        }
+      ],
+      "tests": [
+        "a survivor needs its named test to run"
+      ]
+    },
+    {
+      "id": "FC01",
+      "title": "the shrink rule is gone: a long summary replaces the tail",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if visible_bytes(&replacement_head) >= visible_bytes(&kept) {\n        return None;\n    }",
+          "new": "    if false {\n        return None;\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_model_summary_that_does_not_shrink_is_refused",
+        "tests::compaction_refuses_a_summary_that_does_not_shrink"
+      ]
+    },
+    {
+      "id": "FC02",
+      "title": "a required fact may be dropped",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if !required\n        .iter()\n        .all(|fact| contains_whole_fact(summary, fact.as_str()))\n    {\n        return Some(\"summary drops a required fact\");\n    }",
+          "new": "    if false {\n        return Some(\"summary drops a required fact\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_model_summary_that_drops_a_required_fact_is_refused"
+      ]
+    },
+    {
+      "id": "FC03",
+      "title": "a summary may repeat the system head (node 0)",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if summary.contains(&head.text) {\n        return Some(\"summary touches node 0\");\n    }",
+          "new": "    if false {\n        return Some(\"summary touches node 0\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_model_summary_that_touches_node_zero_is_refused"
+      ]
+    },
+    {
+      "id": "FC04",
+      "title": "a model failure is recorded as a summary",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        Err(reason) => Err(reason),",
+          "new": "        Err(_) => Ok(()),"
+        }
+      ],
+      "tests": [
+        "tests::a_model_failure_leaves_the_history_unchanged"
+      ]
+    },
+    {
+      "id": "FC05",
+      "title": "a summary is recorded from a step that was never dispatched",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if step.kind != ProposalKind::Hosted || step.state != StepState::Dispatched {\n        return Err(\"summary step not dispatched\");\n    }",
+          "new": "    if step.kind != ProposalKind::Hosted {\n        return Err(\"summary step not dispatched\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_summary_from_a_step_that_was_not_dispatched_is_refused"
+      ]
+    },
+    {
+      "id": "FC06",
+      "title": "a settled summary step accepts another answer",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if step.has_result {\n        return Err(\"summary step settled\");\n    }",
+          "new": "    if false {\n        return Err(\"summary step settled\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_settled_summary_step_does_not_accept_another_answer"
+      ]
+    },
+    {
+      "id": "FC07",
+      "title": "a delayed answer erases history the request never saw",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if hex_digest(&sha256(prompt.as_bytes())) != request_digest {\n        return Err(\"summary is stale\");\n    }",
+          "new": "    if false {\n        return Err(\"summary is stale\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_summary_answer_after_new_history_is_stale"
+      ]
+    },
+    {
+      "id": "FC08",
+      "title": "compaction replaces node 0 instead of keeping the head",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let replacement_head = [\n        head.clone(),\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];",
+          "new": "    let replacement_head = [\n        SurfaceNode {\n            role: Role::User,\n            text: String::new(),\n            source: NodeSource::Message,\n        },\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];"
+        }
+      ],
+      "tests": [
+        "tests::compaction_keeps_node_zero_and_starts_a_new_series",
+        "tests::a_model_written_compaction_summary_is_recorded"
+      ]
+    },
+    {
+      "id": "FC09",
+      "title": "a model failure writes history instead of leaving it unchanged",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        Err(reason) => Err(reason),",
+          "new": "        Err(_) => {\n            journal.events.push(SurfaceNode {\n                role: Role::User,\n                text: \"model failed\".to_string(),\n                source: NodeSource::CompactionCheckpoint,\n            });\n            Ok(())\n        }"
+        }
+      ],
+      "tests": [
+        "tests::a_model_failure_leaves_the_history_unchanged"
+      ]
+    },
+    {
+      "id": "FC10",
+      "title": "a required fact may be a part of another token",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if ch.is_alphanumeric()\n        || unicode_normalization::char::is_combining_mark(ch)\n        || matches!(ch, '_' | '-' | '=')\n    {\n        return true;\n    }",
+          "new": "    if false {\n        return true;\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_model_summary_that_changes_a_required_fact_is_refused"
+      ]
+    },
+    {
+      "id": "FC11",
+      "title": "a combining mark ends a token, so a changed word still matches",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if ch.is_alphanumeric()\n        || unicode_normalization::char::is_combining_mark(ch)\n        || matches!(ch, '_' | '-' | '=')\n    {",
+          "new": "    if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '=') {"
+        }
+      ],
+      "tests": [
+        "tests::a_model_summary_that_changes_a_required_fact_with_a_combining_mark_is_refused"
+      ]
+    },
+    {
+      "id": "FC12",
+      "title": "the summary request drops the shadowed head, so the provider cannot see what it summarises",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    prompt.push_str(\"\\n\\n\");\n    prompt.push_str(&input);",
+          "new": "    prompt.push_str(\"\\n\\n\");\n    let history = input.split_once('\\n').map_or(\"\", |(_head, history)| history);\n    prompt.push_str(history);"
+        }
+      ],
+      "tests": [
+        "tests::a_compaction_summary_request_uses_the_hosted_model_path"
+      ]
+    },
+    {
+      "id": "FP01",
+      "title": "a snapshot overwrites the last history node, so volatile bytes enter the prefix",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        journal.events.push(SurfaceNode {\n            role: Role::User,\n            text: text.to_string(),\n            source: NodeSource::Snapshot,\n        });",
+          "new": "        if let Some(last) = journal.events.last_mut() {\n            last.text = text.to_string();\n        }"
+        }
+      ],
+      "tests": [
+        "tests::the_prompt_prefix_is_byte_identical_across_two_turns",
+        "tests::changing_a_prefix_node_changes_the_prefix_bytes"
+      ]
+    },
+    {
+      "id": "FS13",
+      "title": "a harness error is ignored, so a fake summary counts as a catch",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    return failed and not returned and harness_is_error_free(output)",
+          "new": "    return failed and not returned"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS14",
+      "title": "a harness error is found at column zero only",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
+          "new": "HARNESS_ERROR = re.compile(\n    r\"^(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS15",
+      "title": "only a bare dyld marker counts as a loader error",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "LOADER_ERROR = re.compile(\n    r\"dyld(?:\\[[^\\]]*\\])?: |error while loading shared libraries|Library not loaded:\")",
+          "new": "LOADER_ERROR = re.compile(\n    r\"dyld: \")"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS16",
+      "title": "the streams are joined without a line boundary",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
+          "new": "    output = ANSI.sub(\"\", done.stdout + done.stderr)"
+        }
+      ],
+      "tests": [
+        "the streams keep their own lines"
+      ]
+    },
+    {
+      "id": "FS17",
+      "title": "a harness error after a prefix is not a marker",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
+          "new": "HARNESS_ERROR = re.compile(\n    r\"^[ \\t]*(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS18",
+      "title": "terminal formatting is not stripped, so a colored marker is missed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
+          "new": "    output = done.stdout + \"\\n\" + done.stderr"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS19",
+      "title": "the whole cargo footer line is exempt, so a later error on it is missed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
+          "new": "    dropped = [line for line in output.splitlines()\n               if not line.strip().startswith(\"error: test failed, to rerun pass\")]\n    return not HARNESS_ERROR.search(\"\\n\".join(dropped))"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS20",
+      "title": "line separators are dropped, so an error split after its colon is missed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
+          "new": "    return not [line for line in TEST_FAILED.sub(\"\", output).splitlines()\n                if HARNESS_ERROR.search(line)]"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS21",
+      "title": "a cargo launch failure is not recognized, so a fake summary counts as a catch",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
+          "new": "CARGO_FAILURE = re.compile(\n    r\"process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS22",
+      "title": "an abnormal test-process exit is not recognized, so a fake summary counts as a catch",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
+          "new": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\")"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "FS23",
+      "title": "the chunked coding name is substring-matched, so xchunked is treated as chunked",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if !coding.eq_ignore_ascii_case(\"chunked\") {",
+          "new": "            if !coding.contains(\"chunked\") {"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_chunked_body_is_decoded_and_the_coding_name_is_matched_exactly"
+      ]
+    },
+    {
+      "id": "FS24",
+      "title": "a content-length body reads one byte too many, so a complete response is a short read",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let Some(length) = content_lengths.first().copied() else {",
+          "new": "        let Some(length) = content_lengths.first().map(|length| length + 1) else {"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_content_length_body_is_decoded"
+      ]
+    },
+    {
+      "id": "FS25",
+      "title": "an unsupported transfer coding falls through to the plain body",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if !coding.eq_ignore_ascii_case(\"chunked\") {\n                return Err(format!(\"unsupported transfer coding {coding:?}\"));\n            }\n            return decode_chunked(body);",
+          "new": "            let _ = coding;\n            return Ok(String::from_utf8_lossy(body).into_owned());"
+        }
+      ],
+      "tests": [
+        "sparks_http::an_unsupported_transfer_coding_is_refused_not_read_as_a_plain_body"
+      ]
+    },
+    {
+      "id": "FS26",
+      "title": "transfer-encoding and content-length together are accepted, so the framing is ambiguous",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if !transfer_codings.is_empty() && !content_lengths.is_empty() {\n            return Err(\"conflicting framing: transfer-encoding and content-length\".to_string());\n        }",
+          "new": "        // transfer-encoding takes precedence over content-length."
+        }
+      ],
+      "tests": [
+        "sparks_http::conflicting_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS27",
+      "title": "a short read returns an empty success instead of an error",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if body.len() < length {\n            return Err(format!(\"short read: {} of {length} body bytes\", body.len()));\n        }",
+          "new": "        if body.len() < length {\n            return Ok(String::new());\n        }"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_short_read_is_an_error_not_an_empty_success"
+      ]
+    },
+    {
+      "id": "FS28",
+      "title": "the skip-guard ignores SPARKS_MODEL_URL, so the opt-in decision is lost",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        std::env::var(\"SPARKS_MODEL_URL\")\n            .ok()\n            .filter(|url| !url.is_empty())",
+          "new": "        let _ = std::env::var(\"SPARKS_MODEL_URL\");\n        None"
+        }
+      ],
+      "tests": [
+        "sparks_http::the_model_url_opt_in_is_one_guard"
+      ]
+    },
+    {
+      "id": "FS29",
+      "title": "a zero-size chunk returns success before the final CRLF, so a truncated body is complete",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if size == 0 {\n                if body.len() < at.saturating_add(2) {\n                    return Err(\"short read: chunked body is not terminated\".to_string());\n                }\n                if &body[at..at + 2] != b\"\\r\\n\" {\n                    return Err(\"trailers are not accepted\".to_string());\n                }\n                return String::from_utf8(decoded)",
+          "new": "            if size == 0 {\n                return String::from_utf8(decoded)"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_short_read_is_an_error_not_an_empty_success"
+      ]
+    },
+    {
+      "id": "FS30",
+      "title": "chunk bounds are unchecked, so a huge chunk size overflows",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            let end = at\n                .checked_add(size)\n                .and_then(|end| end.checked_add(2))\n                .ok_or_else(|| \"chunk size is too large\".to_string())?;",
+          "new": "            let end = at + size + 2;"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_huge_chunk_size_is_an_error_not_an_overflow"
+      ]
+    },
+    {
+      "id": "FS31",
+      "title": "malformed framing headers are ignored, so a spaced transfer-encoding header is not seen",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            let Some((name, value)) = line.split_once(':') else {\n                return Err(\"malformed header syntax\".to_string());\n            };\n            if name.is_empty() || !name.bytes().all(is_header_name_byte) {\n                return Err(\"malformed header syntax\".to_string());\n            }",
+          "new": "            let Some((name, value)) = line.split_once(':') else {\n                continue;\n            };"
+        }
+      ],
+      "tests": [
+        "sparks_http::malformed_framing_headers_are_refused"
+      ]
+    },
+    {
+      "id": "FS32",
+      "title": "duplicate content-length values are accepted, so conflicting lengths are not refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if content_lengths.len() > 1 {\n            return Err(\"conflicting content-length values\".to_string());\n        }",
+          "new": "        // the first content-length wins."
+        }
+      ],
+      "tests": [
+        "sparks_http::conflicting_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS33",
+      "title": "multiple transfer codings use the first one instead of being refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if transfer_codings.len() != 1 {\n                return Err(format!(\n                    \"conflicting transfer codings: {}\",\n                    transfer_codings.join(\", \")\n                ));\n            }",
+          "new": "            // the first transfer coding is used."
+        }
+      ],
+      "tests": [
+        "sparks_http::conflicting_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS34",
+      "title": "a bare line feed is accepted, so a header folds into an ignored value",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        for (at, byte) in response[..headers_end].iter().enumerate() {\n            match *byte {\n                b'\\r' if response.get(at + 1) != Some(&b'\\n') => {\n                    return Err(\"malformed header line break\".to_string())\n                }\n                b'\\n' if at == 0 || response[at - 1] != b'\\r' => {\n                    return Err(\"malformed header line break\".to_string())\n                }\n                _ => {}\n            }\n        }",
+          "new": "        // line breaks were split by CRLF."
+        }
+      ],
+      "tests": [
+        "sparks_http::malformed_framing_headers_are_refused"
+      ]
+    },
+    {
+      "id": "FS35",
+      "title": "the status line's version token is ignored, so a non-HTTP response succeeds",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let mut parts = status.split_whitespace();\n        let version = parts\n            .next()\n            .ok_or_else(|| \"response status line is missing\".to_string())?;\n        if version != \"HTTP/1.1\" && version != \"HTTP/1.0\" {\n            return Err(format!(\"unsupported http version {version:?}\"));\n        }",
+          "new": "        let mut parts = status.split_whitespace();\n        let _ = parts.next();"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_non_http_status_line_is_refused"
+      ]
+    },
+    {
+      "id": "FS36",
+      "title": "a connection failure is a silent empty success",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let mut stream =\n            TcpStream::connect(address).map_err(|error| format!(\"connect failed: {error}\"))?;",
+          "new": "        let mut stream = match TcpStream::connect(address) {\n            Ok(stream) => stream,\n            Err(_) => return Ok(String::new()),\n        };"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_short_read_is_an_error_not_an_empty_success"
+      ]
+    },
+    {
+      "id": "FS37",
+      "title": "a read error is ignored instead of returned",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        stream\n            .read_to_end(&mut response)\n            .map_err(|error| format!(\"read failed: {error}\"))?;",
+          "new": "        let _ = stream.read_to_end(&mut response);"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_read_error_is_returned_not_ignored"
+      ]
+    },
+    {
+      "id": "FS38",
+      "title": "a response with no framing is read as an empty body",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let Some(length) = content_lengths.first().copied() else {\n            return Err(\"response has no framing\".to_string());\n        };",
+          "new": "        let length = content_lengths.first().copied().unwrap_or(0);"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_response_with_no_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS39",
+      "title": "a chunk size with a leading plus is parsed instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if size_text.is_empty() || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {\n                return Err(format!(\"invalid chunk size {size_text:?}\"));\n            }",
+          "new": "            // the integer parser checks the size."
+        }
+      ],
+      "tests": [
+        "sparks_http::malformed_numeric_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS40",
+      "title": "a content-length with a leading plus is parsed instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {\n                    return Err(format!(\"invalid content-length {length:?}\"));\n                }",
+          "new": "                // the integer parser checks the length."
+        }
+      ],
+      "tests": [
+        "sparks_http::malformed_numeric_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS41",
+      "title": "a non-UTF-8 chunk size line is lossily decoded instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            let line = String::from_utf8(body[at..line_end].to_vec())\n                .map_err(|_| \"chunk size line is not UTF-8\".to_string())?;",
+          "new": "            let line = String::from_utf8_lossy(&body[at..line_end]).into_owned();"
+        }
+      ],
+      "tests": [
+        "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
+      ]
+    },
+    {
+      "id": "FS42",
+      "title": "a non-UTF-8 content-length body is lossily decoded instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        String::from_utf8(body[..length].to_vec())\n            .map_err(|_| \"response body is not UTF-8\".to_string())",
+          "new": "        Ok(String::from_utf8_lossy(&body[..length]).into_owned())"
+        }
+      ],
+      "tests": [
+        "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
+      ]
+    },
+    {
+      "id": "FS43",
+      "title": "chunk trailers are ignored, so the zero chunk does not need a final CRLF",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                if &body[at..at + 2] != b\"\\r\\n\" {\n                    return Err(\"trailers are not accepted\".to_string());\n                }",
+          "new": "                // trailers are ignored."
+        }
+      ],
+      "tests": [
+        "sparks_http::malformed_chunk_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS44",
+      "title": "a chunk that is not ended by CRLF is accepted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if &body[end - 2..end] != b\"\\r\\n\" {\n                return Err(\"chunk is not ended by CRLF\".to_string());\n            }",
+          "new": "            // chunk data is delimited by its size."
+        }
+      ],
+      "tests": [
+        "sparks_http::malformed_chunk_framing_is_refused"
+      ]
+    },
+    {
+      "id": "FS45",
+      "title": "a non-UTF-8 chunked body is lossily decoded instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                return String::from_utf8(decoded)\n                    .map_err(|_| \"response body is not UTF-8\".to_string());",
+          "new": "                return Ok(String::from_utf8_lossy(&decoded).into_owned());"
+        }
+      ],
+      "tests": [
+        "sparks_http::invalid_utf8_in_a_chunk_or_body_is_refused"
+      ]
+    },
+    {
+      "id": "FS46",
+      "title": "the model answer is trimmed before the summary check, so padded bytes get a different verdict",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        Ok(content.to_string())",
+          "new": "        Ok(content.trim().to_string())"
+        }
+      ],
+      "tests": [
+        "tests::a_padded_model_answer_is_not_trimmed_before_the_check"
+      ]
+    },
+    {
+      "id": "FS47",
+      "title": "a chunk size is trimmed before it is validated, so a bare LF reads as hexadecimal digits",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            let size_text = line.split(';').next().unwrap_or(\"\");",
+          "new": "            let size_text = line.split(';').next().unwrap_or(\"\").trim();"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_bare_lf_in_a_chunk_size_is_refused"
+      ]
+    },
+    {
+      "id": "FS48",
+      "title": "a content-length is trimmed before it is validated, so a vertical tab reads as a digit",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                let length = value.trim_matches(|byte: char| byte == ' ' || byte == '\\t');",
+          "new": "                let length = value.trim();"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_vertical_tab_in_content_length_is_refused"
+      ]
+    },
+    {
+      "id": "FS49",
+      "title": "the three-digit status guard is gone, so 0200 is read as status 200",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if code_text.len() != 3 || !code_text.bytes().all(|byte| byte.is_ascii_digit()) {",
+          "new": "        if !code_text.bytes().all(|byte| byte.is_ascii_digit()) {"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_non_http_status_line_is_refused"
+      ]
+    },
+    {
+      "id": "FS50",
+      "title": "a transfer coding is trimmed before it is validated, so a vertical tab reads as chunked",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                    transfer_codings.push(\n                        coding\n                            .trim_matches(|byte: char| byte == ' ' || byte == '\\t')\n                            .to_string(),\n                    );",
+          "new": "                    transfer_codings.push(coding.trim().to_string());"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_vertical_tab_in_transfer_encoding_is_refused"
+      ]
+    },
+    {
+      "id": "FE01",
+      "title": "bind_change selects edits only, so a dispatched restore sends no request",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        .filter(|step| is_write(step.kind) && step.effect_id == effect_id)",
+          "new": "        .filter(|step| step.kind == ProposalKind::Edit && step.effect_id == effect_id)"
+        }
+      ],
+      "tests": [
+        "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text"
+      ]
+    },
+    {
+      "id": "FE02",
+      "title": "only an edit is denied when its change fails, so a failed restore stays dispatched",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if is_write(step.kind)\n                && step.effect_id == effect_id\n                && step.state == StepState::Dispatched\n                && !step.has_result",
+          "new": "            if step.kind == ProposalKind::Edit\n                && step.effect_id == effect_id\n                && step.state == StepState::Dispatched\n                && !step.has_result"
+        }
+      ],
+      "tests": [
+        "tests::a_failed_restore_change_denies_its_step",
+        "tests::a_restore_whose_version_moved_is_refused_by_the_write_path"
+      ]
+    },
+    {
+      "id": "FE03",
+      "title": "the single-write recorder also takes a restore, so a refused request becomes a recorded result",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if step.kind != ProposalKind::Edit\n        || step.state != StepState::Dispatched",
+          "new": "    if !is_write(step.kind)\n        || step.state != StepState::Dispatched"
+        }
+      ],
+      "tests": [
+        "tests::a_restore_is_not_recorded_by_the_single_write_path"
+      ]
+    },
+    {
+      "id": "FE04",
+      "title": "a restore may be asked without a grant",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let Some(grant) = step.grant.as_deref() else {\n        return false;\n    };\n    if grant.is_empty() {\n        return false;\n    }",
+          "new": "    if step.kind == ProposalKind::Restore {\n        return current_observation(&journal.events, &step.resource)\n            .is_some_and(|row| row.version == seen_version);\n    }\n    let Some(grant) = step.grant.as_deref() else {\n        return false;\n    };\n    if grant.is_empty() {\n        return false;\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_restore_without_a_grant_is_refused_and_records_nothing",
+        "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text"
+      ]
+    },
+    {
+      "id": "FE05",
+      "title": "a restore of an older version is proposed instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if current.version != version {\n        return Err(\"stale\");\n    }",
+          "new": "    if current.version < version {\n        return Err(\"stale\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_granted_restore_uses_the_write_path_and_records_the_checkpoint_text",
+        "tests::a_restore_proposes_an_observed_version_and_does_not_apply_it"
+      ]
+    },
+    {
+      "id": "FS51",
+      "title": "a metric sample with no value is read as zero, so a missing counter passes",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                let value = rest\n                    .split_whitespace()\n                    .next()?\n                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())?;",
+          "new": "                let value = rest\n                    .split_whitespace()\n                    .next()\n                    .and_then(|value| value.parse::<f64>().ok())\n                    .unwrap_or(0.0);"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_metric_sample_without_a_numeric_value_is_not_a_counter"
+      ]
+    },
+    {
+      "id": "FS52",
+      "title": "the sample name is prefix-matched, so an unrelated suffix is read as the counter",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                if sample_name != name {",
+          "new": "                if !sample_name.starts_with(name) {"
+        }
+      ],
+      "tests": [
+        "sparks_http::an_unrelated_metric_suffix_is_not_the_named_counter"
+      ]
+    },
+    {
+      "id": "FS53",
+      "title": "the value is read before the label block, so a number inside a label becomes the counter",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        match line.split_once('{') {\n            Some((head, after)) => {\n                let end = label_block_end(after)?;\n                Some((head, &line[head.len()..=head.len() + end], &after[end..]))\n            }\n            None => {",
+          "new": "        match line.split_once('{') {\n            Some((head, after)) => {\n                let (_, rest) = after.split_once(char::is_whitespace).unwrap_or((after, \"\"));\n                Some((head, \"\", rest))\n            }\n            None => {"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_number_inside_a_label_is_not_the_sample_value"
+      ]
+    },
+    {
+      "id": "FS54",
+      "title": "a non-finite value is accepted as a counter",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                    .parse::<f64>()\n                    .ok()\n                    .filter(|value| value.is_finite())",
+          "new": "                    .parse::<f64>()\n                    .ok()"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_non_finite_metric_value_is_not_a_counter"
+      ]
+    },
+    {
+      "id": "FS55",
+      "title": "the histogram accepts a sum without its count",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }",
+          "new": "                [] if sums.len() == 1 => PrefillSeconds::Histogram {\n                    sum: sums[0].1,\n                    count: 0.0,\n                },\n                [] => {\n                    return Err(\n                        \"tensorfold:request_prefill_seconds has no matching _sum and _count series\"\n                            .to_string(),\n                    )\n                }"
+        }
+      ],
+      "tests": [
+        "sparks_http::the_prefill_histogram_requires_both_sum_and_count"
+      ]
+    },
+    {
+      "id": "FS56",
+      "title": "a model reply without assistant text is accepted as a completion",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if reply.trim().is_empty() {\n            return Err(\"reply is empty\".to_string());\n        }\n        let reply: serde_json::Value =\n            serde_json::from_str(reply).map_err(|error| format!(\"reply is not JSON: {error}\"))?;\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .ok_or_else(|| \"reply has no assistant content\".to_string())?;\n        Ok(content.to_string())",
+          "new": "        let reply: serde_json::Value = serde_json::from_str(reply).unwrap_or_default();\n        let content = reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or(\"\");\n        Ok(content.to_string())"
+        }
+      ],
+      "tests": [
+        "tests::a_model_reply_without_assistant_text_is_not_a_completion"
+      ]
+    },
+    {
+      "id": "FS57",
+      "title": "histogram values are paired without their labels, so different series make one pair",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                    if sum_labels == count_labels {",
+          "new": "                    if true {"
+        }
+      ],
+      "tests": [
+        "sparks_http::a_histogram_pair_requires_matching_labels"
+      ]
+    },
+    {
+      "id": "FS58",
+      "title": "an empty assistant text is accepted as a prefix completion",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let content = assistant_content(reply)?;\n        if content.trim().is_empty() {\n            return Err(\"reply has empty assistant content\".to_string());\n        }\n        Ok(content)",
+          "new": "        let content = assistant_content(reply)?;\n        Ok(content)"
+        }
+      ],
+      "tests": [
+        "tests::a_model_reply_without_assistant_text_is_not_a_completion"
+      ]
+    },
+    {
+      "id": "FS59",
+      "title": "the stated skill CID is not compared, so content with another hash is admitted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if hex_digest(&sha256(text.as_bytes())) != cid {\n        return Err(\"wrong cid\");\n    }",
+          "new": "    if cid.is_empty() {\n        return Err(\"wrong cid\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::a_skill_cid_that_does_not_match_the_observed_text_is_refused"
+      ]
+    },
+    {
+      "id": "FS60",
+      "title": "a missing observation falls back to the last journal line, so unobserved content is admitted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let Some(text) = current_observation(&journal.events, resource)\n        .filter(|row| row.version == version)\n        .and_then(|_| current_observed_text(&journal.events, resource))\n    else {\n        return Err(match current_observation(&journal.events, resource) {\n            None => \"not observed\",\n            Some(row) if row.version != version => \"stale\",\n            Some(_) => \"not whole\",\n        });\n    };",
+          "new": "    let text = current_observed_text(&journal.events, resource)\n        .or_else(|| journal.events.last().map(|node| node.text.clone()))\n        .unwrap_or_default();"
+        }
+      ],
+      "tests": [
+        "tests::a_skill_from_unobserved_content_is_refused"
+      ]
+    },
+    {
+      "id": "FS61",
+      "title": "the skill is appended directly, so the budget and host-path rules are bypassed",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    admit_skill(journal, &text)",
+          "new": "    if text.is_empty() {\n        return Err(\"empty\");\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text,\n        source: NodeSource::Skill,\n    });\n    Ok(())"
+        }
+      ],
+      "tests": [
+        "tests::an_over_budget_or_host_path_skill_from_a_read_is_still_refused"
+      ]
+    },
+    {
+      "id": "FS62",
+      "title": "the requested version is ignored, so a skill is admitted from another version's read",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        .filter(|row| row.version == version)",
+          "new": "        .filter(|_row| true)"
+        }
+      ],
+      "tests": [
+        "tests::a_skill_from_unobserved_content_is_refused"
+      ]
+    },
+    {
+      "id": "FS63",
+      "title": "a windowed read supplies the whole text, so a partial read is admitted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        .and_then(|_| current_observed_text(&journal.events, resource))",
+          "new": "        .and_then(|_| journal.events.last().map(|node| node.text.clone()))"
+        }
+      ],
+      "tests": [
+        "tests::a_skill_from_unobserved_content_is_refused"
+      ]
+    },
+    {
+      "id": "FS64",
+      "title": "the scaffold does not keep the observed version, so the write path calls it stale",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    step.old = observed;\n    step.new = text.to_string();\n    step.seen_version = Some(row.version);",
+          "new": "    step.old = observed;\n    step.new = text.to_string();"
+        }
+      ],
+      "tests": [
+        "tests::a_granted_scaffold_applies_through_the_write_path"
+      ]
+    },
+    {
+      "id": "FS65",
+      "title": "the edit request sends the replaced text, so the scaffold text is never written",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "                \"new\": edit.new,",
+          "new": "                \"new\": edit.old,"
+        }
+      ],
+      "tests": [
+        "tests::a_granted_scaffold_applies_through_the_write_path"
+      ]
+    },
+    {
+      "id": "FS66",
+      "title": "a quoted project digest passes without being compared with the observed tree",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    quoted == hex_digest(&digest)",
+          "new": "    quoted == quoted"
+        }
+      ],
+      "tests": [
+        "tests::a_scaffolded_project_opens_again_with_the_same_tree_digest"
+      ]
+    },
+    {
+      "id": "FS67",
+      "title": "the shared write path drops the grant check, so a stored scaffold writes without a grant",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if step.state != StepState::Dispatched\n            || step.grant.as_deref().is_none_or(str::is_empty)\n            || step.has_result",
+          "new": "        if step.state != StepState::Dispatched\n            || step.has_result"
+        }
+      ],
+      "tests": [
+        "tests::a_scaffold_without_a_grant_is_refused_and_records_nothing"
+      ]
+    },
+    {
+      "id": "FS68",
+      "title": "an empty old text binds a file that shows text, so a scaffold overwrites it",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            if observed_text_at(&journal.events, &step.resource, row.version).as_deref() != Some(\"\")\n                || !events_show_whole(&journal.events, &step.resource, row.version)\n            {\n                return Err(Refusal::Empty);\n            }",
+          "new": "            if observed_text_at(&journal.events, &step.resource, row.version).is_none() {\n                return Err(Refusal::Empty);\n            }"
+        }
+      ],
+      "tests": [
+        "tests::an_empty_old_binds_only_the_first_write_of_an_empty_file"
+      ]
+    },
+    {
+      "id": "FS69",
+      "title": "the first write of an empty file is recorded as a window, so the project does not open whole",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            (1, String::new(), true)",
+          "new": "            (1, String::new(), false)"
+        }
+      ],
+      "tests": [
+        "tests::a_granted_scaffold_applies_through_the_write_path"
+      ]
+    },
+    {
+      "id": "FS70",
+      "title": "an admitted skill is recorded as a snapshot, so the positive admission effect is lost",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Skill,\n    });",
+          "new": "    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Snapshot,\n    });"
+        }
+      ],
+      "tests": [
+        "tests::a_skill_from_an_observed_read_named_by_hash_is_admitted"
+      ]
+    },
+    {
+      "id": "F-AH2a",
+      "title": "a turn number comes from a process-wide counter, so an interleaved session numbers its turns from another session's work",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "fn open_turn(journal: &mut Journal) -> u64 {\n    let id = u64::try_from(journal.turns.len())\n        .unwrap_or(u64::MAX)\n        .saturating_add(1);",
+          "new": "fn open_turn(journal: &mut Journal) -> u64 {\n    static mut NEXT_TURN: u64 = 0;\n    let id = unsafe {\n        NEXT_TURN = NEXT_TURN.saturating_add(1);\n        NEXT_TURN\n    };"
+        }
+      ],
+      "tests": [
+        "tests::four_interleaved_sessions_match_their_solo_runs"
+      ]
+    },
+    {
+      "id": "F-AH2b",
+      "title": "dispatch drops the per-step grant check, so a grant one session's step holds runs the other session's step",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if step.state != StepState::Prepared || step.grant.is_none() {",
+          "new": "    if step.state != StepState::Prepared {"
+        }
+      ],
+      "tests": [
+        "tests::a_grant_never_crosses_sessions"
+      ]
+    },
+    {
+      "id": "F-AH2c",
+      "title": "an allow-session answer mints its own grant id, so a session answer authorizes without Runtime authority",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        _ => grant.filter(|grant| !grant.is_empty()),",
+          "new": "        _ => grant.filter(|grant| !grant.is_empty()).or(Some(\"allow-session\")),"
+        }
+      ],
+      "tests": [
+        "tests::an_inbox_answer_never_crosses_sessions"
+      ]
+    },
+    {
+      "id": "F-AH3a",
+      "title": "a hosted proposal records a model resource the declaration does not cover",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    step.kind = ProposalKind::Hosted;\n    step.resource = resource.to_string();",
+          "new": "    step.kind = ProposalKind::Hosted;\n    step.resource = \"localhost://Other/hosted\".to_string();"
+        }
+      ],
+      "tests": [
+        "tests::every_resource_the_guest_proposes_is_declared"
+      ]
+    },
+    {
+      "id": "F-AH3c",
+      "title": "a declared ask is deleted, so a proposable resource is no longer covered",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "tests::every_proposal_kind_has_a_declared_ask",
+        "tests::every_resource_the_guest_proposes_is_declared"
+      ]
+    },
+    {
+      "id": "F-AH3d",
+      "title": "a declared ask has no observed resource, so the declaration is wider than the guest",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+          "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
+        }
+      ],
+      "tests": [
+        "tests::every_declared_ask_is_observed"
+      ]
+    },
+    {
+      "id": "F-AH3e",
+      "title": "the placeholder kind is declared as an ask",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
+          "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
+        }
+      ],
+      "tests": [
+        "tests::every_proposal_kind_has_a_declared_ask",
+        "tests::every_resource_the_guest_proposes_is_declared",
+        "tests::every_declared_ask_is_observed"
+      ]
+    },
+    {
+      "id": "F-AH3v01",
+      "title": "a declared ask carries a URL",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+          "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    },
+    {
+      "id": "F-AH3v02",
+      "title": "a declared ask carries a secret-shaped value",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+          "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    },
+    {
+      "id": "F-AH3v03",
+      "title": "a declared ask carries a routed Users/ path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
+          "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    },
+    {
+      "id": "F-AH3v04",
+      "title": "a declared ask carries a host path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
+          "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    },
+    {
+      "id": "F-AH3v05",
+      "title": "a repeated resource field hides a URL, so the discarded value is never checked",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+          "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    },
+    {
+      "id": "F-AH3p01",
+      "title": "a declaration that is not JSON is read as an empty document",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| \"asks json\")?;",
+          "new": "    let document: serde_json::Value = serde_json::from_str(text).unwrap_or_default();"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p02",
+      "title": "a repeated key is collapsed, so the discarded value is never checked",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if repeated_object_key(text).is_some() {\n        return Err(\"asks duplicate field\");\n    }",
+          "new": "    if false {\n        return Err(\"asks duplicate field\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p03",
+      "title": "a document that is not an object is read as an empty declaration",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let document = document.as_object().ok_or(\"asks root\")?;",
+          "new": "    let Some(document) = document.as_object() else {\n        return Ok(Vec::new());\n    };"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p04",
+      "title": "an unknown top-level field is accepted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if document.keys().any(|key| key != \"schema\" && key != \"asks\") {\n        return Err(\"asks unknown field\");\n    }",
+          "new": "    if false {\n        return Err(\"asks unknown field\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p05",
+      "title": "an unsupported schema is accepted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if schema != ASKS_SCHEMA {\n        return Err(\"asks schema unsupported\");\n    }",
+          "new": "    if false {\n        return Err(\"asks schema unsupported\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p06",
+      "title": "a missing asks field loses its reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let entries = document.get(\"asks\").ok_or(\"asks list missing\")?;",
+          "new": "    let entries = document.get(\"asks\").unwrap_or(&serde_json::Value::Null);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p07",
+      "title": "an empty declaration is accepted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if entries.is_empty() {\n        return Err(\"asks empty\");\n    }",
+          "new": "    if false {\n        return Err(\"asks empty\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p08",
+      "title": "an entry that is not an object is skipped instead of refused",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let entry = entry.as_object().ok_or(\"asks entry\")?;",
+          "new": "        let Some(entry) = entry.as_object() else {\n            continue;\n        };"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p09",
+      "title": "an unknown per-entry field is accepted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if entry.keys().any(|key| key != \"kind\" && key != \"resource\") {\n            return Err(\"asks entry field\");\n        }",
+          "new": "        if false {\n            return Err(\"asks entry field\");\n        }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p10",
+      "title": "an unknown kind is read as a read ask",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let kind = proposal_kind(kind).ok_or(\"asks kind unknown\")?;",
+          "new": "        let kind = proposal_kind(kind).unwrap_or(ProposalKind::Read);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p11",
+      "title": "a missing resource loses its reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let pattern = entry.get(\"resource\").ok_or(\"asks resource missing\")?;",
+          "new": "        let pattern = entry.get(\"resource\").unwrap_or(&serde_json::Value::Null);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p12",
+      "title": "a resource with whitespace is accepted",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if pattern.chars().any(char::is_whitespace) {\n            return Err(\"asks whitespace\");\n        }",
+          "new": "        if false {\n            return Err(\"asks whitespace\");\n        }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p13",
+      "title": "a declared ask may carry a URL",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.contains(\"://\") {\n        return Some(\"asks url\");\n    }",
+          "new": "    if false {\n        return Some(\"asks url\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p14",
+      "title": "a declared ask may carry an absolute host path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.starts_with('/') {\n        return Some(\"asks absolute host path\");\n    }",
+          "new": "    if false {\n        return Some(\"asks absolute host path\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p15",
+      "title": "a declared ask may route a Users/ path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if lower.contains(\"users/\") {\n        return Some(\"asks users path\");\n    }",
+          "new": "    if false {\n        return Some(\"asks users path\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p16",
+      "title": "a declared ask may carry a secret-shaped value",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if secret_shaped(&lower) {\n        return Some(\"asks secret\");\n    }",
+          "new": "    if false {\n        return Some(\"asks secret\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p17",
+      "title": "the principal marker may sit anywhere in a pattern",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER) {\n        return Some(\"asks misplaced marker\");\n    }",
+          "new": "    if false {\n        return Some(\"asks misplaced marker\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p18",
+      "title": "a literal pattern need not end at a directory boundary",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        None if !pattern.ends_with('/') => return Some(\"asks literal directory\"),",
+          "new": "        None if false => return Some(\"asks literal directory\"),"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p19",
+      "title": "a missing schema loses its reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let schema = document.get(\"schema\").ok_or(\"asks schema missing\")?;",
+          "new": "    let schema = document.get(\"schema\").unwrap_or(&serde_json::Value::Null);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p20",
+      "title": "a non-string schema is read as the supported schema",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let schema = schema.as_str().ok_or(\"asks schema type\")?;",
+          "new": "    let schema = schema.as_str().unwrap_or(ASKS_SCHEMA);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p21",
+      "title": "a non-array asks field is read as an empty list",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let entries = entries.as_array().ok_or(\"asks list type\")?;",
+          "new": "    let empty = Vec::new();\n    let entries = entries.as_array().unwrap_or(&empty);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p22",
+      "title": "a missing kind loses its reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let kind = entry.get(\"kind\").ok_or(\"asks kind missing\")?;",
+          "new": "        let kind = entry.get(\"kind\").unwrap_or(&serde_json::Value::Null);"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p23",
+      "title": "a non-string kind is read as a read ask",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let kind = kind.as_str().ok_or(\"asks kind type\")?;",
+          "new": "        let kind = kind.as_str().unwrap_or(\"read\");"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p24",
+      "title": "the unspecified placeholder loses its own refusal reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if kind == \"unspecified\" {\n            return Err(\"asks kind unspecified\");\n        }",
+          "new": "        if false {\n            return Err(\"asks kind unspecified\");\n        }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p25",
+      "title": "a non-string resource is read as the shared model namespace",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        let pattern = pattern.as_str().ok_or(\"asks resource type\")?;",
+          "new": "        let pattern = pattern.as_str().unwrap_or(\"Models/\");"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p26",
+      "title": "an empty resource loses its own refusal reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if pattern.is_empty() {\n            return Err(\"asks resource empty\");\n        }",
+          "new": "        if false {\n            return Err(\"asks resource empty\");\n        }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p27",
+      "title": "a declared ask may carry a home-relative host path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.starts_with('~') {\n        return Some(\"asks home host path\");\n    }",
+          "new": "    if false {\n        return Some(\"asks home host path\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p28",
+      "title": "a declared ask may carry a backslash host path",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.contains('\\\\') {\n        return Some(\"asks backslash host path\");\n    }",
+          "new": "    if false {\n        return Some(\"asks backslash host path\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p29",
+      "title": "a declared ask may contain a current-directory segment",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.split('/').any(|segment| segment == \".\") {\n        return Some(\"asks current directory\");\n    }",
+          "new": "    if false {\n        return Some(\"asks current directory\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p30",
+      "title": "a declared ask may contain a parent-directory segment",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.split('/').any(|segment| segment == \"..\") {\n        return Some(\"asks parent directory\");\n    }",
+          "new": "    if false {\n        return Some(\"asks parent directory\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p31",
+      "title": "a declared ask may repeat its principal marker",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.matches(PRINCIPAL_MARKER).count() > 1 {\n        return Some(\"asks repeated marker\");\n    }",
+          "new": "    if false {\n        return Some(\"asks repeated marker\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p32",
+      "title": "a principal marker may have an invalid tail",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {\n            return Some(\"asks marker tail\");\n        }",
+          "new": "        Some(_) if false => {\n            return Some(\"asks marker tail\");\n        }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p33",
+      "title": "a declared ask may carry a URL scheme without an authority",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if pattern.split_once(':').is_some_and(|(scheme, _)| {\n        scheme\n            .as_bytes()\n            .first()\n            .is_some_and(u8::is_ascii_alphabetic)\n            && scheme\n                .bytes()\n                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))\n    }) {\n        return Some(\"asks url scheme\");\n    }",
+          "new": "    if false {\n        return Some(\"asks url scheme\");\n    }"
+        }
+      ],
+      "tests": [
+        "tests::asks_parser_refuses_each_shape_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-AH3p34",
+      "title": "a failed declaration reader receives an empty list instead of its parser reason",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    parsed\n        .as_deref()\n        .unwrap_or_else(|reason| panic!(\"{reason}\"))",
+          "new": "    parsed.as_deref().unwrap_or_default()"
+        }
+      ],
+      "tests": [
+        "tests::malformed_compiled_declaration_keeps_its_parser_reason"
+      ]
+    },
+    {
+      "id": "F-AH3v06",
+      "title": "a declared ask carries the URL file:/tmp/",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+          "new": "    {\"kind\": \"hosted\", \"resource\": \"file:/tmp/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    },
+    {
+      "id": "F-AH3v07",
+      "title": "a declared ask carries the URL data:text/plain,x/",
+      "command": "host",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "asks.json",
+          "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+          "new": "    {\"kind\": \"hosted\", \"resource\": \"data:text/plain,x/\"},"
+        }
+      ],
+      "tests": [
+        "tests::asks_declare_no_urls_secrets_or_users_paths"
+      ]
+    }
+  ]
 }
