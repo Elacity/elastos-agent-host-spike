@@ -47,20 +47,23 @@ when the Runtime side does.
 
 ## What the profile allows
 
-- Exec and read the program selected through `PROVIDER_EXECUTABLE`; the
-  Runtime chooses the binary and the provider starts from it.
-- Read `/` to resolve the absolute program path.
-- Read `/usr/lib`, `/System/Library` and `/Library/Apple`; dyld loads system
-  libraries and the shared cache from there.
-- Read kernel facts through `sysctl-read`; the loader and allocator request
-  them at startup.
-- Read and write `/dev/null`; the Runtime may bind child streams to the null
-  device.
-- Read `/dev/urandom`; the encryption code takes its nonce entropy there.
-- Read `STORAGE_PARENT`; the provider inspects the existing parent while it
-  creates the identity directory.
-- Read and write under `STORAGE_ROOT`; one grant covers encrypted nickname and
-  persona state.
+- `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the
+  binary the Runtime named.
+- `(allow file-read* (literal "/"))`: resolve the absolute program path through
+  the root directory.
+- `(allow sysctl-read)`: the loader and the allocator read kernel facts at
+  startup.
+- `(allow file-read* (literal (param "STORAGE_PARENT")))`: bind the one shared
+  file-profile contract. No did confinement test needs this grant; the profile
+  keeps it because the wallet profile and the Runtime bridge bind the same
+  parameter (P10).
+- `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`: one grant
+  covers encrypted nickname and persona state.
+
+`process-exec`, the `STORAGE_PARENT` read and the `STORAGE_ROOT` grant are the
+three shared contract rules pinned verbatim by
+`both_file_profiles_bind_one_storage_parameter_contract`; the `STORAGE_PARENT`
+read is the one of them that did-provider keeps only for that contract.
 
 Every other file read, file write, process and network operation falls to
 `(deny default)`.
@@ -137,6 +140,39 @@ the test.
 - Rename `STORAGE_ROOT` to `DID_STORAGE_ROOT` in either provider's `confine.sb`:
   `both_file_profiles_bind_one_storage_parameter_contract` fails on the
   non-canonical token.
+- Remove `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` (DID07):
+  `confined_provider_serves_did_operations_under_its_root`,
+  `outside_read_denied`, `outside_write_denied` and
+  `verify_did_recovery_under_profile` fail because the provider cannot start.
+- Remove `(allow file-read* (literal "/"))` (DID08): the same four cases fail.
+- Remove `(allow sysctl-read)` (DID09): the same four cases fail.
+- Remove the `STORAGE_ROOT` grant (DID10):
+  `confined_provider_serves_did_operations_under_its_root` and
+  `outside_write_denied` fail because the identity write is denied.
+- Remove `(allow file-read* (literal (param "STORAGE_PARENT")))`: WP11 in
+  `../wallet-provider/falsifiers.json` records it, and
+  `both_file_profiles_bind_one_storage_parameter_contract` fails. No did
+  confinement test fails, so did keeps this grant only for the one contract.
+
+Task 015 removed these allow forms because no named confinement test needed
+them on macOS 26.5.2 arm64:
+
+- `(allow file-read* (literal (param "PROVIDER_EXECUTABLE")))` removed: no
+  confinement test needed it on macOS 26.5.2 arm64.
+- `(allow file-read* (subpath "/usr/lib"))` removed: no confinement test needed
+  it on macOS 26.5.2 arm64.
+- `(allow file-read* (subpath "/System/Library"))` removed: no confinement test
+  needed it on macOS 26.5.2 arm64.
+- `(allow file-read* (subpath "/Library/Apple"))` removed: no confinement test
+  needed it on macOS 26.5.2 arm64.
+- `(allow file-read* file-write* (literal "/dev/null"))` removed: no
+  confinement test needed it on macOS 26.5.2 arm64.
+- `(allow file-read* (literal "/dev/urandom"))` removed: no confinement test
+  needed it on macOS 26.5.2 arm64.
+
+A host that needs one of the removed grants receives a sandbox denial for the
+affected access, so that operation fails closed with a reason. The grant comes
+back only together with a named test that needs it.
 
 The wallet provider keeps its own profile and tests in `../wallet-provider/`.
 Both providers present the same file-based contract to the Runtime bridge:
