@@ -748,8 +748,9 @@ mod tests {
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
     /// The committed list records these falsifiers.
-    const EXPECTED_FALSIFIER_IDS: [&str; 6] =
-        ["DID01", "DID02", "DID03", "DID04", "DID05", "DID06"];
+    const EXPECTED_FALSIFIER_IDS: [&str; 10] = [
+        "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
+    ];
 
     /// The repository root; `falsifiers.json` paths are relative to it.
     fn repo_root() -> PathBuf {
