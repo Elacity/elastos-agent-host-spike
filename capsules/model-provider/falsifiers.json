@@ -1,0 +1,292 @@
+{
+  "falsifiers": [
+    {
+      "id": "PV01",
+      "title": "--from is accepted but the default path is kept",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "            at += 1\n            path = pathlib.Path(argv[at])",
+          "new": "            at += 1\n            path = DATA"
+        }
+      ],
+      "tests": [
+        "from option selects path"
+      ]
+    },
+    {
+      "id": "PV02",
+      "title": "an unknown option is selected instead of refused",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token.startswith(\"-\"):\n            refuse(f\"unknown option {token}\")",
+          "new": "        elif token.startswith(\"-\"):\n            filters.append(token)"
+        }
+      ],
+      "tests": [
+        "unknown option is refused"
+      ]
+    },
+    {
+      "id": "PV03",
+      "title": "the equals form is accepted instead of refused",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token.startswith(\"--from=\"):\n            refuse(\"--from=PATH is not supported; use --from PATH\")",
+          "new": "        elif token.startswith(\"--from=\"):\n            path = pathlib.Path(token.split(\"=\", 1)[1])"
+        }
+      ],
+      "tests": [
+        "equals form is refused"
+      ]
+    },
+    {
+      "id": "PV04",
+      "title": "--from takes the next option for its path",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "            if at + 1 >= len(argv) or argv[at + 1].startswith(\"-\"):\n                refuse(\"--from needs a path, not an option\")",
+          "new": "            if at + 1 >= len(argv):\n                refuse(\"--from needs a path, not an option\")"
+        }
+      ],
+      "tests": [
+        "from without a path is refused"
+      ]
+    },
+    {
+      "id": "PV05",
+      "title": "a refusal keeps its reason but exits 1 instead of 2",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    print(f\"usage: {reason}\", file=sys.stderr)\n    raise SystemExit(CASE_USAGE)",
+          "new": "    print(f\"usage: {reason}\", file=sys.stderr)\n    raise SystemExit(1)"
+        }
+      ],
+      "tests": [
+        "unknown option is refused"
+      ]
+    },
+    {
+      "id": "PV06",
+      "title": "the arguments are parsed after recovery and loading",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    parsed = parse_argv(argv)\n    # --keep-backups is for a self-test that runs on a mutated copy of this\n    # file: the backup belongs to the caller's mutation, not to a killed run.\n    if not parsed.keep_backups:\n        recover_backups()\n    entries = load(parsed.path)",
+          "new": "    entries = load(DATA)\n    parsed = parse_argv(argv)\n    # --keep-backups is for a self-test that runs on a mutated copy of this\n    # file: the backup belongs to the caller's mutation, not to a killed run.\n    if not parsed.keep_backups:\n        recover_backups()"
+        }
+      ],
+      "tests": [
+        "argv refusal precedes work"
+      ]
+    },
+    {
+      "id": "PV07",
+      "title": "--list selects work instead of displaying the entries",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if want_list:\n        mode = \"list\"",
+          "new": "    if want_list:\n        mode = \"run\""
+        }
+      ],
+      "tests": [
+        "list mode displays"
+      ]
+    },
+    {
+      "id": "PV08",
+      "title": "a bare id prefix is dropped instead of selecting",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        else:\n            filters.append(token)",
+          "new": "        else:\n            pass"
+        }
+      ],
+      "tests": [
+        "prefix token still selects"
+      ]
+    },
+    {
+      "id": "PV09",
+      "title": "provider is not a registered command",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "COMMANDS = (\"host\", \"provider\", \"e2e\", \"selftest\")",
+          "new": "COMMANDS = (\"host\", \"e2e\", \"selftest\")"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV10",
+      "title": "the provider spec names the agent-host manifest",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "PROVIDER_MANIFEST = REPO / \"capsules\" / \"model-provider\" / \"Cargo.toml\"",
+          "new": "PROVIDER_MANIFEST = HERE / \"Cargo.toml\""
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV11",
+      "title": "the provider test command drops --locked",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_MANIFEST)]",
+          "new": "        cargo = [\"cargo\", \"test\",\n                 \"--manifest-path\", str(manifest or PROVIDER_MANIFEST)]"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV12",
+      "title": "modifier-only arguments select every falsifier",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if mode == \"run\" and not filters and not from_selected and (keep_backups or with_repo):\n        refuse(\"--keep-backups and --with-repo need a mode, --from PATH, or an id prefix\")",
+          "new": "    if False:\n        refuse(\"--keep-backups and --with-repo need a mode, --from PATH, or an id prefix\")"
+        }
+      ],
+      "tests": [
+        "modifier only invocation is refused"
+      ]
+    },
+    {
+      "id": "PV13",
+      "title": "--list stops validation of the remaining arguments",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token == \"--list\":\n            want_list = True",
+          "new": "        elif token == \"--list\":\n            want_list = True\n            break"
+        }
+      ],
+      "tests": [
+        "unknown option is refused"
+      ]
+    },
+    {
+      "id": "PV14",
+      "title": "the provider test command drops only --manifest-path",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_MANIFEST)]",
+          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or PROVIDER_MANIFEST)]"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV15",
+      "title": "--self-test-case accepts a missing name",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv) or argv[at + 1].startswith(\"-\"):",
+          "new": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv):\n                case_name = \"\"\n                break\n            if argv[at + 1].startswith(\"-\"):"
+        }
+      ],
+      "tests": [
+        "self-test case without a name is refused"
+      ]
+    },
+    {
+      "id": "PV16",
+      "title": "--self-test-case takes the next option for its name",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv) or argv[at + 1].startswith(\"-\"):",
+          "new": "        elif token == \"--self-test-case\":\n            if at + 1 >= len(argv):"
+        }
+      ],
+      "tests": [
+        "self-test case without a name is refused"
+      ]
+    },
+    {
+      "id": "PV17",
+      "title": "the provider manifest precedes its flag instead of following it",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_MANIFEST)]",
+          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or PROVIDER_MANIFEST), \"--manifest-path\"]"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV18",
+      "title": "--from with the default path loses its explicit selection",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "            from_selected = True",
+          "new": "            from_selected = path != DATA"
+        }
+      ],
+      "tests": [
+        "modifiers preserve explicit selection"
+      ]
+    }
+  ]
+}
