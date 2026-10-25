@@ -1,7 +1,8 @@
 //! The one rule that names a wc-003 lab bundle: which files the closure holds,
 //! the exact bytes that are hashed, and the label on the result. It also holds
-//! the one check every closure file is opened through ([`open_regular`]), so a
-//! name never covers bytes reached through a link.
+//! the one read-only check every closure file is opened through
+//! ([`open_regular`]), so a name never covers bytes reached through a link, and
+//! naming never writes, truncates or creates a file.
 //!
 //! [`name_bundle`] is the one naming entry point. The named tests
 //! (tests/lab_name.rs in the lab root) call this same module, so naming a
@@ -17,7 +18,7 @@
 //! launch path reads it.
 
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -146,7 +147,7 @@ fn unlistable(dir: &Path, err: io::Error) -> Refusal {
 /// looks at the path.
 pub fn read_file(path: &Path, seam: &mut dyn FnMut(Moment, &Path)) -> Result<Vec<u8>, Refusal> {
     seam(Moment::BeforeOpen, path);
-    let file = open_regular(path, OpenOptions::new().read(true))?;
+    let file = open_regular(path)?;
     seam(Moment::BeforeRead, path);
     read_handle(path, &file)
 }
@@ -162,17 +163,19 @@ pub fn read_handle(path: &Path, mut file: &File) -> Result<Vec<u8>, Refusal> {
     Ok(bytes)
 }
 
-/// The one check every closure file is opened through. It opens `path` with
-/// `options` plus `O_NOFOLLOW`, so the open itself refuses a link and no
-/// moment passes between a check and the open, and `O_NONBLOCK`, so it never
-/// waits on a FIFO or a device. Both flags come from `libc`, as in the
-/// Runtime's own no-follow open
-/// (`elastos/crates/elastos-runtime/src/provider/bridge.rs:118-124`). Then it
-/// checks the handle it opened, never the path again: only a regular file is
-/// accepted. The caller reads the returned handle, so the file that was
-/// checked is the file that is used.
-pub fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, Refusal> {
-    let file = options
+/// The one check every closure file is opened through. It builds its own
+/// options and opens `path` for reading only, so no caller can make it write,
+/// truncate or create a file. It adds `O_NOFOLLOW`, so the open itself refuses
+/// a link and no moment passes between a check and the open, and `O_NONBLOCK`,
+/// so it never waits on a FIFO or a device. Both flags come from `libc`, as in
+/// the Runtime's own no-follow open
+/// (`elastos/crates/elastos-runtime/src/provider/bridge.rs:118-124`). Then
+/// [`check_regular`] checks the handle it opened, never the path again: only a
+/// regular file is accepted. The caller reads the returned handle, so the file
+/// that was checked is the file that is used.
+pub fn open_regular(path: &Path) -> Result<File, Refusal> {
+    let file = OpenOptions::new()
+        .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(|err| {
@@ -182,16 +185,27 @@ pub fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, Refu
                 Refusal::new(path, format!("cannot be opened ({err})"))
             }
         })?;
-    let meta = file
-        .metadata()
-        .map_err(|err| Refusal::new(path, format!("cannot be inspected ({err})")))?;
+    check_regular(path, file.metadata())?;
+    Ok(file)
+}
+
+/// Accept the handle [`open_regular`] opened for `path` only if `inspected`,
+/// that handle's own inspection, says it is a regular file. An inspection that
+/// failed is refused with the path and the cause the OS gave. It is apart from
+/// [`open_regular`] only so a test can hand it an inspection that failed: the
+/// inspection of an open handle cannot be made to fail on demand. Give it only
+/// the inspection of an opened handle: a check of a path, then an open of that
+/// path, is the race [`open_regular`] closes.
+pub fn check_regular(path: &Path, inspected: io::Result<Metadata>) -> Result<(), Refusal> {
+    let meta =
+        inspected.map_err(|err| Refusal::new(path, format!("cannot be inspected ({err})")))?;
     if !meta.file_type().is_file() {
         return Err(Refusal::new(
             path,
             "is not a regular file (a directory, FIFO or device is never part of the lab closure)",
         ));
     }
-    Ok(file)
+    Ok(())
 }
 
 /// The exact bytes a lab name hashes: [`CLOSURE_TAG`], then each file in

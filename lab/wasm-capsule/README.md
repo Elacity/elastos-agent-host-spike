@@ -137,17 +137,18 @@ A lab bundle is a directory that holds exactly two regular files:
 Anything else is refused, and each refusal names the path and gives its own
 reason: an extra entry (even a `.DS_Store`), a missing closure file, a symlink
 (never followed), a directory, FIFO or device (refused at once, never waited
-on), a directory that cannot be listed, and a file that cannot be opened or
-read. The last two carry the cause the OS gave. The name covers the manifest's
-exact bytes; it does not check that the manifest is valid (its schema is a
-later task).
+on), a directory that cannot be listed, and a file that cannot be opened,
+inspected or read. The last two carry the cause the OS gave. The name covers
+the manifest's exact bytes; it does not check that the manifest is valid (its
+schema is a later task).
 
-Each closure file is opened once, by `open_regular`, with
-`O_NOFOLLOW | O_NONBLOCK` from `libc`: the open itself refuses a link, so no
-moment passes between a check and the open, and it never waits on a FIFO or a
-device. Then it checks the handle it opened, never the path again: only a
-regular file is accepted, and the bytes are read from that same handle. This is
-the Runtime's own pattern
+Each closure file is opened once, by `open_regular`, for reading only, with
+`O_NOFOLLOW | O_NONBLOCK` from `libc`. It builds its own options and takes none
+from its caller, so it never writes, truncates or creates a file. The open
+itself refuses a link, so no moment passes between a check and the open, and it
+never waits on a FIFO or a device. Then it checks the handle it opened, never
+the path again: only a regular file is accepted, and the bytes are read from
+that same handle. This is the Runtime's own pattern
 (`elastos/crates/elastos-runtime/src/provider/bridge.rs:118-124`). The listing
 decides the closure before any file is opened, so a link put at a closure path
 before the open is refused, and one put there after the open is never looked
@@ -233,16 +234,20 @@ wc-003a, in `tests/lab_name.rs` (through `wasm_capsule_tools::lab_name`):
 - `directory_in_bundle_is_refused`
 - `device_is_refused` — `/dev/null` through the one open (only root can make a
   device node).
+- `the_one_open_never_writes_truncates_or_creates_a_file` — the bytes stay as
+  they were, its handle refuses a write, and a missing path is not created.
 - `unlistable_bundle_reports_path_and_cause` — a missing directory, and a file
   where the directory should be.
 - `open_failure_reports_path_and_cause` — the seam removes a listed file before
   its open.
+- `inspection_failure_reports_path_and_cause` — `check_regular` is handed a
+  real failed inspection (an open handle's cannot be made to fail on demand).
 - `read_failure_reports_path_and_cause` — a write-only handle, whose read fails.
 - `lab_name_carries_the_lab_prefix_never_cid`
 
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001 and twenty wc-003a planted bugs in the
+`falsifiers.json` holds nine wc-001 and twenty-four wc-003a planted bugs in the
 provider format (`command: "lab"`). Each requires all its named tests to fail at
 an assertion. The canonical runner
 `examples/agent-host/falsify.py` has no `lab` command yet (ask **R1**), so each

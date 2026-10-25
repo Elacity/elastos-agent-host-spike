@@ -26,15 +26,17 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   lab bundle, through one entry point, `name_bundle(dir)`. It has a closure
   check that fails closed: exactly `capsule.json` and `capsule.wasm`, regular
   files only, and an extra or missing entry, a symlink, a FIFO, directory or
-  device, a directory that cannot be listed and a file that cannot be opened or
-  read are each refused with the path and their own reason. Each file gets one
-  no-follow open that checks, then reads, the same handle (`open_regular`, with
-  `O_NOFOLLOW | O_NONBLOCK` from `libc`, the Runtime's own pattern in
-  `elastos/crates/elastos-runtime/src/provider/bridge.rs:118-124`). Then a
-  length-framed canonical byte stream over sorted paths and exact bytes, an
-  in-process `sha2` hash, and a pinned test vector. Take the closure check and
-  the refusals; replace the hash with the Runtime's CID rule (see the wc-003
-  discovery below).
+  device, a directory that cannot be listed and a file that cannot be opened,
+  inspected or read are each refused with the path and their own reason. Each
+  file gets one read-only, no-follow open that checks, then reads, the same
+  handle (`open_regular`, with `O_NOFOLLOW | O_NONBLOCK` from `libc`, the
+  Runtime's own pattern in
+  `elastos/crates/elastos-runtime/src/provider/bridge.rs:118-124`). That open
+  builds its own options, so no caller can make it write, truncate or create a
+  file. Then a length-framed canonical byte stream over sorted paths and exact
+  bytes, an in-process `sha2` hash, and a pinned test vector. Take the closure
+  check and the refusals; replace the hash with the Runtime's CID rule (see the
+  wc-003 discovery below).
 
 ## Requirements (what the claim rests on)
 

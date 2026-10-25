@@ -1,5 +1,5 @@
 {
-  "about": "wc-001 and wc-003a lab falsifiers. Each one plants a bug in the capsule source, the build script or the lab-name rule (tools/src/lab_name.rs) and requires every one of its named tests to FAIL at an assertion (a build error or no matching test does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. wc-003a: F-WC3a leaves the manifest out of the closure and F-WC3b hashes the mtime; the rest hash the mode or the arrival order, drop the module bytes, the path framing, the content length or the tag, write the digest in uppercase, label the name CID, let name_bundle name the module alone, skip an extra file, accept a missing closure file, let the one open follow a symlink or wait on a FIFO, skip the regular-file check on the opened handle, read the path again after that check, or drop the OS's cause from a listing, open or read refusal. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001 and wc-003a lab falsifiers. Each one plants a bug in the capsule source, the build script or the lab-name rule (tools/src/lab_name.rs) and requires every one of its named tests to FAIL at an assertion (a build error or no matching test does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. wc-003a: F-WC3a leaves the manifest out of the closure and F-WC3b hashes the mtime; the rest hash the mode or the arrival order, drop the module bytes, the path framing, the content length or the tag, write the digest in uppercase, label the name CID, let name_bundle name the module alone, skip an extra file, accept a missing closure file, let the one open follow a symlink or wait on a FIFO, skip the regular-file check on the opened handle, read the path again after that check, let the one open write, truncate or create a file, or drop the OS's cause from a listing, open, inspection or read refusal. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -426,6 +426,56 @@
       ]
     },
     {
+      "id": "F-WC3-WRITABLE",
+      "title": "the one open also asks for write access, so its handle can change a closure file",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/lab_name.rs",
+          "old": "    let file = OpenOptions::new()\n        .read(true)\n",
+          "new": "    let file = OpenOptions::new()\n        .read(true)\n        .write(true)\n"
+        }
+      ],
+      "tests": [
+        "the_one_open_never_writes_truncates_or_creates_a_file"
+      ]
+    },
+    {
+      "id": "F-WC3-TRUNCATE",
+      "title": "the one open truncates the file it opens, as caller-chosen write and truncate options did",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/lab_name.rs",
+          "old": "    let file = OpenOptions::new()\n        .read(true)\n",
+          "new": "    let file = OpenOptions::new()\n        .read(true)\n        .write(true)\n        .truncate(true)\n"
+        }
+      ],
+      "tests": [
+        "the_one_open_never_writes_truncates_or_creates_a_file",
+        "bundle_name_is_the_hash_of_the_canonical_closure"
+      ]
+    },
+    {
+      "id": "F-WC3-CREATE",
+      "title": "the one open creates a closure file that does not exist (O_CREAT, with the handle still read-only)",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/lab_name.rs",
+          "old": "        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)\n",
+          "new": "        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CREAT)\n"
+        }
+      ],
+      "tests": [
+        "the_one_open_never_writes_truncates_or_creates_a_file",
+        "open_failure_reports_path_and_cause"
+      ]
+    },
+    {
       "id": "F-WC3-UNLISTABLE-CAUSE",
       "title": "a bundle directory that cannot be listed is refused without the OS's cause",
       "command": "lab",
@@ -455,6 +505,22 @@
       ],
       "tests": [
         "open_failure_reports_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-INSPECT-CAUSE",
+      "title": "a closure file whose opened handle cannot be inspected is refused without the OS's cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/lab_name.rs",
+          "old": "        inspected.map_err(|err| Refusal::new(path, format!(\"cannot be inspected ({err})\")))?;\n",
+          "new": "        inspected.map_err(|_| Refusal::new(path, \"cannot be inspected\"))?;\n"
+        }
+      ],
+      "tests": [
+        "inspection_failure_reports_path_and_cause"
       ]
     },
     {

@@ -21,8 +21,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use wasm_capsule_tools::lab_name::{
-    canonical_closure, lab_name, name_bundle, no_seam, open_regular, read_bundle, read_handle,
-    ClosureFile, Moment,
+    canonical_closure, check_regular, lab_name, name_bundle, no_seam, open_regular, read_bundle,
+    read_handle, ClosureFile, Moment,
 };
 
 /// A lab manifest for the fixture bundle, 175 bytes.
@@ -416,12 +416,64 @@ fn device_is_refused() {
             .is_char_device(),
         "/dev/null must be a character device"
     );
-    let refusal = open_regular(device, fs::OpenOptions::new().read(true))
-        .expect_err("a device must be refused");
+    let refusal = open_regular(device).expect_err("a device must be refused");
     assert_eq!(refusal.path, device, "the refusal must name the device");
     assert_eq!(
         refusal.reason, NOT_REGULAR_REASON,
         "the refusal must say why"
+    );
+}
+
+/// The one open builds its own read-only options, so no caller can make it
+/// write, truncate or create a file. Each step catches one way it could: an
+/// open that truncates, a handle that can write, and an open that creates.
+#[test]
+fn the_one_open_never_writes_truncates_or_creates_a_file() {
+    use std::io::{ErrorKind, Write};
+
+    let tmp = TempDir::new("open-read-only");
+    let bundle = fixture_bundle(tmp.path());
+    let module = bundle.join("capsule.wasm");
+
+    // Opening leaves the bytes as they were.
+    drop(open_regular(&module).expect("open capsule.wasm"));
+    assert_eq!(
+        fs::read(&module).expect("read capsule.wasm back"),
+        FIXTURE_MODULE,
+        "the one open must never truncate a file"
+    );
+
+    // Its handle refuses a write, with the cause the OS gives for any handle
+    // opened for reading only.
+    let cause = fs::File::open(&module)
+        .expect("open capsule.wasm for reading")
+        .write(b"planted")
+        .expect_err("a handle opened for reading must refuse a write");
+    let refused = open_regular(&module)
+        .expect("open capsule.wasm")
+        .write(b"planted")
+        .expect_err("the one open's handle must refuse a write");
+    assert_eq!(
+        refused.raw_os_error(),
+        cause.raw_os_error(),
+        "the one open's handle must be open for reading only"
+    );
+
+    // A path that does not exist stays that way: the open is refused with the
+    // OS's cause, and it creates nothing.
+    let missing = bundle.join("no-such-file");
+    let cause = fs::File::open(&missing).expect_err("the open must fail");
+    let opened = open_regular(&missing);
+    assert!(
+        matches!(fs::symlink_metadata(&missing), Err(err) if err.kind() == ErrorKind::NotFound),
+        "the one open must never create a file"
+    );
+    let refusal = opened.expect_err("a path that does not exist must be refused");
+    assert_eq!(refusal.path, missing, "the refusal must name the path");
+    assert_eq!(
+        refusal.reason,
+        format!("cannot be opened ({cause})"),
+        "the refusal must carry the open's cause"
     );
 }
 
@@ -471,6 +523,30 @@ fn open_failure_reports_path_and_cause() {
         refusal.reason,
         format!("cannot be opened ({cause})"),
         "the refusal must carry the open's cause"
+    );
+}
+
+#[test]
+fn inspection_failure_reports_path_and_cause() {
+    let tmp = TempDir::new("bundle-inspection-failure");
+    let module = fixture_bundle(tmp.path()).join("capsule.wasm");
+
+    // The inspection of an open handle cannot be made to fail on demand, so
+    // the check gets an inspection that really failed in the OS: the answer
+    // for a path that does not exist.
+    let inspected = fs::metadata(tmp.path().join("no-such-file"));
+    let cause = inspected
+        .as_ref()
+        .expect_err("the inspection must fail")
+        .to_string();
+
+    let refusal = check_regular(&module, inspected)
+        .expect_err("a closure file that cannot be inspected must be refused");
+    assert_eq!(refusal.path, module, "the refusal must name the file");
+    assert_eq!(
+        refusal.reason,
+        format!("cannot be inspected ({cause})"),
+        "the refusal must carry the inspection's cause"
     );
 }
 

@@ -26,3 +26,10 @@
   fails → revert (falsify.py `lab` pending R1). Discovery re-checked: the name
   is `lab-sha256:<hex>`, never a CID. Pinned vector re-computed with
   `printf | shasum -a 256`; `capsule.wasm` unchanged (`6dd9af1a…`).
+- wc-003a round 2 (review fix): `open_regular(path)` builds its own read-only
+  options (caller-chosen options had let it empty or create a file), and its
+  handle check is `check_regular`, so a failed inspection is tested too. Tests
+  `the_one_open_never_writes_truncates_or_creates_a_file` and
+  `inspection_failure_reports_path_and_cause` (18 named tests); falsifiers
+  F-WC3-WRITABLE, -TRUNCATE, -CREATE and -INSPECT-CAUSE (24 for wc-003a), all
+  caught by hand (falsify.py `lab` pending R1).
