@@ -291,14 +291,14 @@
     },
     {
       "id": "PV19",
-      "title": "the missing-file refusal is bypassed, so a read error escapes",
+      "title": "the missing-file refusal is bypassed, so the read reason replaces it",
       "command": "selftest",
       "expect": "caught",
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    if not path.is_file():\n        load_refuse(path, \"the data file does not exist\")",
-          "new": "    if False:\n        load_refuse(path, \"the data file does not exist\")"
+          "old": "        if not path.is_file():\n            load_refuse(path, \"the data file does not exist\")",
+          "new": "        if False:\n            load_refuse(path, \"the data file does not exist\")"
         }
       ],
       "tests": [
@@ -432,6 +432,7 @@
       "tests": [
         "a missing data file is refused",
         "an unreadable data file is refused",
+        "an unreadable data path is refused",
         "an invalid utf8 data file is refused",
         "a duplicate id is refused",
         "an unknown command is refused",
@@ -452,7 +453,8 @@
         }
       ],
       "tests": [
-        "an unreadable data file is refused"
+        "an unreadable data file is refused",
+        "an unreadable data path is refused"
       ]
     },
     {
@@ -473,18 +475,18 @@
     },
     {
       "id": "PV30",
-      "title": "startup recovery searches only the agent-host directory",
+      "title": "startup recovery searches every repository lane",
       "command": "selftest",
       "expect": "caught",
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    for backup in REPO.rglob(\"*\" + BACKUP_SUFFIX):",
-          "new": "    for backup in HERE.rglob(\"*\" + BACKUP_SUFFIX):"
+          "old": "    for backup in HERE.rglob(\"*\" + BACKUP_SUFFIX):",
+          "new": "    for backup in REPO.rglob(\"*\" + BACKUP_SUFFIX):"
         }
       ],
       "tests": [
-        "a killed provider edit is recovered on restart"
+        "another lane's backup is not recovered"
       ]
     },
     {
