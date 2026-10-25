@@ -12,7 +12,7 @@ mod accounts;
 mod approvals;
 mod browser_signing;
 #[cfg(unix)]
-mod io_observer;
+pub(crate) mod io_observer;
 mod proofs;
 mod storage_boundary;
 mod support;

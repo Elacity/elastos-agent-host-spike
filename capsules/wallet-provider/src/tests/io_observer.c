@@ -132,6 +132,41 @@ static void observe(int dirfd, const char *path, int directory, int symlink,
 #define INTERPOSE(name)
 #endif
 
+// This probe is separate from path containment observation. The test thread
+// owns its state; the worker only changes links and acknowledges the pause.
+static char link_probe_path[PATH_MAX];
+static int link_probe_active, link_probe_socket, link_probe_result[5];
+void wallet_link_probe_begin(const char *path, int socket) {
+    snprintf(link_probe_path, sizeof(link_probe_path), "%s", path);
+    memset(link_probe_result, 0, sizeof(link_probe_result));
+    link_probe_socket = socket;
+    link_probe_active = 1;
+}
+void wallet_link_probe_end(int *result) {
+    link_probe_active = 0;
+    memcpy(result, link_probe_result, sizeof(link_probe_result));
+}
+static int link_probe_matches(int fd) {
+    if (!link_probe_active || observing) return 0;
+    char path[PATH_MAX];
+    return !fd_path(fd, path) && !strcmp(path, link_probe_path);
+}
+static void pause_after_fstat(int fd, const struct stat *snapshot) {
+    if (!link_probe_matches(fd) || link_probe_result[0]) return;
+    link_probe_result[0] = 1;
+    link_probe_result[1] = (int)snapshot->st_nlink;
+    char signal = 1;
+    if (REAL(write)(link_probe_socket, &signal, 1) != 1 ||
+        REAL(read)(link_probe_socket, &signal, 1) != 1 || signal != 1)
+        link_probe_result[4] = 1;
+}
+
+ssize_t HOOK(read)(int fd, void *buf, size_t count) {
+    if (link_probe_matches(fd)) ++link_probe_result[2];
+    return REAL(read)(fd, buf, count);
+}
+INTERPOSE(read)
+
 #define OPEN_HOOK(name) \
 int HOOK(name)(const char *path, int flags, ...) { \
     mode_t mode = 0; \
@@ -218,6 +253,7 @@ STAT_HOOK(lstat)
 int HOOK(fstat)(int fd, struct stat *buf) {
     int result = REAL(fstat)(fd, buf);
     int ok = result == 0;
+    if (ok) pause_after_fstat(fd, buf);
     observe(AT_FDCWD, "", ok && S_ISDIR(buf->st_mode), ok && S_ISLNK(buf->st_mode), fd, 1, ok ? 0 : 1);
     return result;
 }
@@ -239,6 +275,7 @@ int HOOK(chmod)(const char *path, mode_t mode) {
 INTERPOSE(chmod)
 
 int HOOK(fchmod)(int fd, mode_t mode) {
+    if (link_probe_matches(fd)) ++link_probe_result[3];
     int result = REAL(fchmod)(fd, mode);
     observe(AT_FDCWD, "", 0, 0, fd, 0, 0);
     return result;

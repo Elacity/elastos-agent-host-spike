@@ -1,4 +1,4 @@
-use super::io_observer::{run_observed_child, Observation};
+use super::io_observer::{run_observed_child, LinkRace, Observation};
 use super::support::*;
 use super::*;
 use std::collections::BTreeSet;
@@ -387,6 +387,77 @@ fn init_rejects_invalid_base_path() {
     assert!(
         !Path::new(missing_name).exists(),
         "relative base_path created a wallet outside the configured root"
+    );
+}
+
+#[cfg(unix)]
+fn assert_init_rejects_link_added_after_fstat(filename: &str, bytes: &[u8], reason: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("home");
+    let wallet = wallet_root(&base);
+    fs::create_dir_all(&wallet).unwrap();
+    let path = wallet.join(filename);
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let outside = dir.path().join(filename);
+    let linked_path = path.clone();
+    let linked_outside = outside.clone();
+    let race = LinkRace::begin(&path, move || {
+        fs::hard_link(linked_path, linked_outside).unwrap();
+    });
+    let mut provider = WalletProvider::new();
+    let response = decode_and_handle_outer(
+        &mut provider,
+        json!({ "op": "init", "config": { "base_path": base } }),
+    );
+    race.finish(1);
+    match response {
+        Response::Error { code, message } => {
+            assert_eq!(code, "storage_error");
+            assert_eq!(message, reason);
+        }
+        other => panic!("expected raced hard-link refusal, got {other:?}"),
+    }
+    assert!(provider.store_path.is_none());
+    assert!(provider.storage_root.is_none());
+    assert!(provider.storage_key.is_none());
+    assert_eq!(fs::read(&outside).unwrap(), bytes);
+    assert_eq!(
+        fs::metadata(&outside).unwrap().permissions().mode() & 0o7777,
+        0o644,
+        "the outside inode mode changed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wallet_init_rejects_key_link_added_after_fstat_before_io() {
+    if run_observed_child(
+        "tests::storage_boundary::wallet_init_rejects_key_link_added_after_fstat_before_io",
+    ) {
+        return;
+    }
+    assert_init_rejects_link_added_after_fstat(
+        WALLET_KEY_FILE,
+        format!("{}\n", "ab".repeat(32)).as_bytes(),
+        "wallet storage key must be owned by the wallet directory; it has 2 hard links",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wallet_init_rejects_store_link_added_after_fstat_before_io() {
+    if run_observed_child(
+        "tests::storage_boundary::wallet_init_rejects_store_link_added_after_fstat_before_io",
+    ) {
+        return;
+    }
+    assert_init_rejects_link_added_after_fstat(
+        "wallet-state.json",
+        &serde_json::to_vec_pretty(&WalletStore::default()).unwrap(),
+        "wallet store must be owned by the wallet directory; it has 2 hard links",
     );
 }
 

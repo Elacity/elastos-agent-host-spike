@@ -182,18 +182,19 @@ fn same_file(left: &Stat, right: &Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
-/// Wallet storage files must be owned by the wallet directory alone. A second
-/// hard link can point at a file the provider does not own, so any link count
-/// above one is refused before the file is opened, read, or have its mode
-/// changed.
-fn ensure_exclusive_wallet_link(metadata: &Stat, label: &str) -> Result<(), String> {
-    if metadata.st_nlink == 1 {
-        return Ok(());
+/// Each metadata snapshot must show exclusive ownership by the wallet directory.
+/// Check both descriptor and path snapshots: either can observe a link change
+/// that the other misses during admission or revalidation.
+fn ensure_exclusive_wallet_link(snapshots: &[&Stat], label: &str) -> Result<(), String> {
+    for metadata in snapshots {
+        if metadata.st_nlink != 1 {
+            return Err(format!(
+                "{label} must be owned by the wallet directory; it has {} hard links",
+                metadata.st_nlink
+            ));
+        }
     }
-    Err(format!(
-        "{label} must be owned by the wallet directory; it has {} hard links",
-        metadata.st_nlink
-    ))
+    Ok(())
 }
 
 fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<File>, String> {
@@ -205,7 +206,7 @@ fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<F
     if !metadata_is_regular_leaf(&before) {
         return Err(format!("{label} must be a regular non-symlink file"));
     }
-    ensure_exclusive_wallet_link(&before, label)?;
+    ensure_exclusive_wallet_link(&[&before], label)?;
     let file = path
         .open(OFlags::RDONLY)
         .map_err(|err| format!("failed to open {label}: {err}"))?;
@@ -221,7 +222,7 @@ fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<F
     {
         return Err(format!("{label} changed while it was being opened"));
     }
-    ensure_exclusive_wallet_link(&opened, label)?;
+    ensure_exclusive_wallet_link(&[&opened, &after], label)?;
     Ok(Some(file))
 }
 
@@ -236,7 +237,7 @@ fn verify_open_file_is_current(path: &Leaf<'_>, file: &File, label: &str) -> Res
     {
         return Err(format!("{label} changed during access"));
     }
-    Ok(())
+    ensure_exclusive_wallet_link(&[&opened, &current], label)
 }
 
 fn read_limited_file(file: &mut File, label: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
@@ -281,7 +282,7 @@ fn read_regular_file_if_present(
 fn ensure_regular_file_or_absent(path: &Leaf<'_>, label: &str) -> Result<(), String> {
     match path.stat() {
         Ok(metadata) if metadata_is_regular_leaf(&metadata) => {
-            ensure_exclusive_wallet_link(&metadata, label)
+            ensure_exclusive_wallet_link(&[&metadata], label)
         }
         Ok(_) => Err(format!("{label} must be a regular non-symlink file")),
         Err(Errno::NOENT) => Ok(()),
@@ -642,6 +643,74 @@ mod tests {
             path: path.to_path_buf(),
             directory: File::open(path).unwrap(),
         }
+    }
+
+    #[cfg(unix)]
+    fn assert_revalidation_rejects_link_change(remove_link: bool) {
+        use crate::tests::io_observer::LinkRace;
+
+        for (filename, label, reason) in [
+            (
+                WALLET_KEY_FILE,
+                "wallet storage key",
+                "wallet storage key must be owned by the wallet directory; it has 2 hard links",
+            ),
+            (
+                "wallet-state.json",
+                "wallet store",
+                "wallet store must be owned by the wallet directory; it has 2 hard links",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let wallet = dir.path().join("wallet");
+            fs::create_dir(&wallet).unwrap();
+            let path = wallet.join(filename);
+            fs::write(&path, b"synthetic wallet state").unwrap();
+            let outside = dir.path().join(filename);
+            if remove_link {
+                fs::hard_link(&path, &outside).unwrap();
+            }
+            let root = test_root(&wallet);
+            let leaf = root.bind(&path, label).unwrap();
+            let file = File::open(&path).unwrap();
+            let linked_path = path.clone();
+            let race = LinkRace::begin(&path, move || {
+                if remove_link {
+                    fs::remove_file(outside).unwrap();
+                } else {
+                    fs::hard_link(linked_path, outside).unwrap();
+                }
+            });
+            let result = verify_open_file_is_current(&leaf, &file, label);
+            race.finish(if remove_link { 2 } else { 1 });
+            assert_eq!(result.unwrap_err(), reason);
+            assert_eq!(
+                fs::metadata(&path).unwrap().nlink(),
+                if remove_link { 1 } else { 2 }
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wallet_revalidation_rejects_link_added_after_fstat() {
+        if crate::tests::io_observer::run_observed_child(
+            "storage::tests::wallet_revalidation_rejects_link_added_after_fstat",
+        ) {
+            return;
+        }
+        assert_revalidation_rejects_link_change(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wallet_revalidation_rejects_link_removed_after_fstat() {
+        if crate::tests::io_observer::run_observed_child(
+            "storage::tests::wallet_revalidation_rejects_link_removed_after_fstat",
+        ) {
+            return;
+        }
+        assert_revalidation_rejects_link_change(true);
     }
 
     #[test]

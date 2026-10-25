@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 // The observer is loaded before the test binary starts, so it sees std::fs and
 // descriptor-relative libc calls even when production code omits record_access.
-pub(super) fn run_observed_child(name: &str) -> bool {
+pub(crate) fn run_observed_child(name: &str) -> bool {
     if std::env::var("WALLET_IO_OBSERVER_CHILD").as_deref() == Ok(name) {
         return false;
     }
@@ -43,6 +43,69 @@ pub(super) fn run_observed_child(name: &str) -> bool {
         String::from_utf8_lossy(&output.stderr)
     );
     true
+}
+
+/// Pause the first fstat of this file after libc has filled its metadata.
+/// A second thread changes the links, then releases the provider to stat the
+/// path. The observer counts real reads and mode changes through the descriptor.
+pub(crate) struct LinkRace {
+    _connection: std::os::unix::net::UnixStream,
+    worker: std::thread::JoinHandle<()>,
+}
+
+impl LinkRace {
+    pub(crate) fn begin(path: &Path, change_links: impl FnOnce() + Send + 'static) -> Self {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (connection, mut worker_connection) = UnixStream::pair().unwrap();
+        let timeout = Some(std::time::Duration::from_secs(10));
+        for stream in [&connection, &worker_connection] {
+            stream.set_read_timeout(timeout).unwrap();
+            stream.set_write_timeout(timeout).unwrap();
+        }
+        let path =
+            std::ffi::CString::new(path.canonicalize().unwrap().as_os_str().as_encoded_bytes())
+                .unwrap();
+        unsafe {
+            let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"wallet_link_probe_begin".as_ptr());
+            assert!(!symbol.is_null());
+            let begin: unsafe extern "C" fn(*const libc::c_char, libc::c_int) =
+                std::mem::transmute(symbol);
+            begin(path.as_ptr(), connection.as_raw_fd());
+        }
+        let worker = std::thread::spawn(move || {
+            let mut ready = [0];
+            worker_connection.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, [1]);
+            change_links();
+            worker_connection.write_all(&[1]).unwrap();
+        });
+        Self {
+            _connection: connection,
+            worker,
+        }
+    }
+
+    pub(crate) fn finish(self, expected_snapshot_links: i32) {
+        self.worker.join().unwrap();
+        let mut result = [0; 5];
+        unsafe {
+            let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"wallet_link_probe_end".as_ptr());
+            assert!(!symbol.is_null());
+            let end: unsafe extern "C" fn(*mut libc::c_int) = std::mem::transmute(symbol);
+            end(result.as_mut_ptr());
+        }
+        assert_eq!(result[0], 1, "the race must pause exactly once after fstat");
+        assert_eq!(
+            result[1], expected_snapshot_links,
+            "unexpected fstat snapshot"
+        );
+        assert_eq!(result[2], 0, "the provider read the linked file");
+        assert_eq!(result[3], 0, "the provider changed the linked file's mode");
+        assert_eq!(result[4], 0, "the race synchronization failed");
+    }
 }
 
 pub(super) struct Observation;
