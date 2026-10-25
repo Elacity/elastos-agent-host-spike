@@ -524,11 +524,18 @@ impl DidProvider {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        // One owner: the identity library decides the nickname location,
-        // presence, read and decode rules. The provider only adds its context
-        // and keeps the refusal so a later request cannot read it as unset.
-        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+        // One loader owns the nickname location, presence, read and decode
+        // rules. The identity library's path loader treats a denied metadata
+        // lookup as absence, so the provider reads the same file once and
+        // decodes the same envelope itself. Tests bind the values and the
+        // refusals to the library's format.
+        let encrypted = read_optional_file(&nickname_path(&base_dir))
             .map_err(|error| format!("did-provider: failed to load nickname: {error}"))?;
+        self.nickname = encrypted
+            .map(|bytes| decode_nickname(&bytes, &dk))
+            .transpose()
+            .map_err(|error| format!("did-provider: failed to load nickname: {error}"))?
+            .flatten();
         Ok(())
     }
 
@@ -564,11 +571,48 @@ impl std::fmt::Display for OptionalFileError {
 fn read_optional_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, OptionalFileError> {
     match path.try_exists() {
         Ok(false) => Ok(None),
-        Ok(true) => std::fs::read(path)
-            .map(Some)
-            .map_err(OptionalFileError::Read),
+        Ok(true) => {
+            #[cfg(test)]
+            tests::after_file_metadata(path);
+            std::fs::read(path)
+                .map(Some)
+                .map_err(OptionalFileError::Read)
+        }
         Err(error) => Err(OptionalFileError::Metadata(error)),
     }
+}
+
+/// The nickname file the identity library writes and the provider reads.
+fn nickname_path(base_dir: &std::path::Path) -> std::path::PathBuf {
+    base_dir.join("did").join("nickname.enc")
+}
+
+/// Decode the identity library's nickname envelope from the bytes the single
+/// reader returned. Compatibility tests bind the values and the refusals to
+/// the library's format.
+fn decode_nickname(data: &[u8], device_key: &[u8; 32]) -> Result<Option<String>, String> {
+    #[derive(Deserialize)]
+    struct EncryptedEnvelope {
+        #[serde(rename = "version")]
+        _version: u8,
+        nonce: String,
+        ciphertext: String,
+    }
+
+    let envelope: EncryptedEnvelope = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    let nonce = hex::decode(&envelope.nonce).map_err(|e| e.to_string())?;
+    let ciphertext = hex::decode(&envelope.ciphertext).map_err(|e| e.to_string())?;
+    if nonce.len() != NONCE_LEN {
+        return Err(format!("invalid nonce length {}", nonce.len()));
+    }
+    let cipher = Aes256Gcm::new_from_slice(&derive_storage_key(device_key))
+        .map_err(|e| format!("AES key init: {e}"))?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|e| format!("decryption failed: {e}"))?;
+    let nickname = String::from_utf8(plaintext).map_err(|e| e.to_string())?;
+    let nickname = nickname.trim();
+    Ok((!nickname.is_empty()).then(|| nickname.to_string()))
 }
 
 // === Crypto helpers ===
@@ -778,6 +822,21 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type MetadataHook = Box<dyn FnOnce(&std::path::Path)>;
+    thread_local! {
+        static AFTER_FILE_METADATA: std::cell::RefCell<Option<MetadataHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Test-only seam between the presence lookup and the data read.
+    pub(super) fn after_file_metadata(path: &std::path::Path) {
+        AFTER_FILE_METADATA.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook(path);
+            }
+        });
+    }
 
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
@@ -1657,6 +1716,124 @@ mod tests {
         assert_storage_error(provider.get_nickname(), &reason);
         assert!(provider.nickname.is_none());
         assert!(matches!(provider.get_did(), Response::Ok { .. }));
+    }
+
+    /// A path change between the nickname presence lookup and its read is a
+    /// storage refusal, not an unset nickname.
+    ///
+    /// Runs this test binary under `confine.sb`. The hook swaps the stored
+    /// nickname for a symlink outside the root after the presence lookup
+    /// succeeded, so the data read gets EPERM. `Init` and `get_nickname` must
+    /// repeat that exact refusal, and a restored file must load again.
+    ///
+    /// Falsifier: let `read_optional_file` collapse the read error into
+    /// absence; `Init` succeeds and this test fails.
+    #[test]
+    fn nickname_metadata_change_reports_storage_error() {
+        use std::path::PathBuf;
+
+        const FIXTURE_ROOT: &str = "DID_PROVIDER_NICKNAME_CHANGE_ROOT";
+        const OUTSIDE_FILE: &str = "DID_PROVIDER_NICKNAME_CHANGE_OUTSIDE";
+
+        if let Some(storage) = std::env::var_os(FIXTURE_ROOT) {
+            let storage = PathBuf::from(storage);
+            let outside = PathBuf::from(std::env::var_os(OUTSIDE_FILE).unwrap());
+            let stored = storage.join("did/nickname.enc");
+            let saved = storage.join("did/saved.enc");
+            let hook_stored = stored.clone();
+            let hook_saved = saved.clone();
+            AFTER_FILE_METADATA.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |path| {
+                    // The presence lookup succeeded; swap the target before
+                    // the data read so the read reaches outside the root.
+                    assert_eq!(path, hook_stored);
+                    std::fs::rename(path, &hook_saved).unwrap();
+                    std::os::unix::fs::symlink(&outside, path).unwrap();
+                    assert_eq!(
+                        std::fs::metadata(path).unwrap_err().raw_os_error(),
+                        Some(1),
+                        "the swapped nickname path must be denied"
+                    );
+                }));
+            });
+            let reason = format!(
+                "did-provider: failed to load nickname: Read failed: {}",
+                std::io::Error::from_raw_os_error(1)
+            );
+            let mut provider = DidProvider::new();
+            let config = serde_json::json!({
+                "base_path": &storage,
+                "encryption_key": hex::encode(make_device_key()),
+            });
+            assert_storage_error(
+                provider.handle(Request::Init {
+                    config: config.clone(),
+                }),
+                &reason,
+            );
+            AFTER_FILE_METADATA.with(|hook| assert!(hook.borrow().is_none()));
+            assert_storage_error(provider.handle(Request::GetNickname), &reason);
+            assert!(provider.nickname.is_none());
+            assert!(matches!(
+                provider.handle(Request::GetDid),
+                Response::Ok { .. }
+            ));
+
+            std::fs::remove_file(&stored).unwrap();
+            std::fs::rename(&saved, &stored).unwrap();
+            assert!(matches!(
+                provider.handle(Request::Init { config }),
+                Response::Ok { .. }
+            ));
+            match provider.handle(Request::GetNickname) {
+                Response::Ok { data: Some(data) } => assert_eq!(data["nickname"], "alice"),
+                other => panic!("Expected the restored nickname, got {other:?}"),
+            }
+            return;
+        }
+
+        if !std::path::Path::new("/usr/bin/sandbox-exec").is_file() {
+            writeln!(
+                std::io::stderr().lock(),
+                "SKIP nickname_metadata_change_reports_storage_error: /usr/bin/sandbox-exec is unavailable"
+            )
+            .unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let storage = root.path().canonicalize().unwrap();
+        let external = outside.path().canonicalize().unwrap().join("nickname.enc");
+        elastos_identity::save_nickname_with_device_key(&storage, &make_device_key(), "alice")
+            .unwrap();
+        std::fs::copy(storage.join("did/nickname.enc"), &external).unwrap();
+        let before = std::fs::read(&external).unwrap();
+        let binary = std::env::current_exe().unwrap();
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb"))
+            .arg("-D")
+            .arg(format!("STORAGE_ROOT={}", storage.display()))
+            .arg("-D")
+            .arg(format!("PROVIDER_BINARY={}", binary.display()))
+            .arg(&binary)
+            .args([
+                "--exact",
+                "tests::nickname_metadata_change_reports_storage_error",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FIXTURE_ROOT, &storage)
+            .env(OUTSIDE_FILE, &external)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "controlled nickname refusal failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&external).unwrap(), before);
     }
 
     #[test]

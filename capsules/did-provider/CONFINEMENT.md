@@ -48,23 +48,20 @@ probe rather than invent a second path.
 
 ## Storage reads
 
-`read_optional_file` owns presence and read errors for persona files. Only a
-confirmed missing file permits key creation; a denied metadata lookup reports
-`Metadata lookup failed: ...` and a denied data read reports
-`Read failed: ...`.
+`read_optional_file` owns presence and read errors for persona and nickname
+files. Only a confirmed missing file permits key creation or an unset
+nickname; a denied metadata lookup reports `Metadata lookup failed: ...` and
+a denied data read reports `Read failed: ...`.
 
-Nickname loading stays with `elastos-identity`: the identity library owns the
-nickname location, presence, read and decode rules, so the provider keeps one
-path and one decoder. The provider adds its context
-(`did-provider: failed to load nickname: ...`) and caches that refusal, so
+The provider has one nickname loader, `try_load_nickname`: it reads the
+nickname file once through `read_optional_file` and decodes the identity
+library's envelope with `decode_nickname`. The provider does not call the
+identity library's path loader, because that loader treats a denied metadata
+lookup as absence. The provider adds its context
+(`did-provider: failed to load nickname: ...`) and caches the refusal, so
 `get_nickname` repeats the same reason instead of reporting an unset nickname.
-
-Prerequisite, outside this task's paths:
-`elastos/crates/elastos-identity/src/store.rs` must replace `Path::exists()`
-in `load_nickname_with_device_key` with `try_exists()` so a denied metadata
-lookup is an error rather than absence. The provider then reports that error
-through the same single call; until the change lands, the provider reports
-what the loader returns.
+Compatibility tests bind the decoded values and the refusal strings to the
+identity library's format.
 
 ## The one Runtime bridge change
 
@@ -117,11 +114,19 @@ storage root:
   key persistence denials separately, each with its exact operation name and
   permission error.
 - `outside_nickname_read_denied` moves the stored nickname outside the root
-  and links it back in. Its fixture profile grants metadata, so the refusal
-  happens at the data read. Both `Init` and the next `get_nickname` return the
-  exact `did-provider: failed to load nickname: Operation not permitted
-  (os error 1)`. Restoring the file and repeating `Init` restores normal
-  nickname access.
+  and links it back in, using the production profile unchanged. Both `Init`
+  and the next `get_nickname` return the exact
+  `did-provider: failed to load nickname: Metadata lookup failed: Operation
+  not permitted (os error 1)`. Restoring the file and repeating `Init`
+  restores normal nickname access.
+
+`nickname_metadata_change_reports_storage_error` runs the unit-test binary
+under the same profile. Test-only code swaps the stored nickname for a symlink
+outside the root after the presence lookup succeeded, so the data read gets
+EPERM. `Init` and `get_nickname` must repeat the exact
+`did-provider: failed to load nickname: Read failed: Operation not permitted
+(os error 1)`; restoring the file loads the nickname again and leaves the
+outside file unchanged.
 
 `nickname_load_refusal_reaches_init_and_get_nickname` writes a malformed
 nickname file and requires the identity library's own refusal, wrapped once as
@@ -149,23 +154,31 @@ the next run; every restored profile and test passes.
    `outside_persona_metadata_denied` failed with
    `Failed to persist persona key: Operation not permitted (os error 1)`
    instead of `Metadata lookup failed: Operation not permitted (os error 1)`.
-4. Swallowed the loader error in `try_load_nickname` with `unwrap_or(None)`.
+4. The same metadata-branch mutation observed at the nickname gate:
+   `outside_nickname_read_denied` failed at `expected an error response, got
+   {"data":{"protocol_version":"1.0","provider":"did"},"status":"ok"}`
+   because the denied lookup became absence.
+5. Changed the read branch in `read_optional_file` to `Ok(None)`.
+   `nickname_metadata_change_reports_storage_error` failed because `Init`
+   returned `Ok` instead of `did-provider: failed to load nickname: Read
+   failed: Operation not permitted (os error 1)`.
+6. Swallowed the loader error in `try_load_nickname` with `unwrap_or(None)`.
    `nickname_load_refusal_reaches_init_and_get_nickname` failed because `Init`
    returned `Ok` instead of `did-provider: failed to load nickname: EOF while
    parsing an object at line 1 column 1`; `outside_nickname_read_denied`
    failed at the same point.
-5. Removed the cached refusal from `get_nickname`. Both tests failed at
+7. Removed the cached refusal from `get_nickname`. Both tests failed at
    `get_nickname`: `left: "not_set"`, `right: "storage_error"`.
-6. Replaced the save reason with a generic
+8. Replaced the save reason with a generic
    `did-provider: failed to save nickname`. `outside_write_denied` failed at
    `left: "did-provider: failed to save nickname"`.
-7. Replaced the persona read reason with a generic `Read failed`.
+9. Replaced the persona read reason with a generic `Read failed`.
    `outside_read_denied` failed at `left: "Read failed"`.
-8. Replaced the persona create reason with a generic `Failed to create dir`,
-   then the persist reason with a generic `Failed to persist persona key`.
-   `persona_write_refusals_keep_their_reasons` failed once per mutation at
-   `left: "Failed to create dir"` and `left: "Failed to persist persona key"`.
-9. Corrupted one character of the returned `payload_hex` in
-   `sign_chat_message`. `all_operations_under_profile` failed at `the
-   provider's own signature must verify against the payload it returned`
-   (`left: Bool(false)`, `right: true`).
+10. Replaced the persona create reason with a generic `Failed to create dir`,
+    then the persist reason with a generic `Failed to persist persona key`.
+    `persona_write_refusals_keep_their_reasons` failed once per mutation at
+    `left: "Failed to create dir"` and `left: "Failed to persist persona key"`.
+11. Corrupted one character of the returned `payload_hex` in
+    `sign_chat_message`. `all_operations_under_profile` failed at `the
+    provider's own signature must verify against the payload it returned`
+    (`left: Bool(false)`, `right: true`).

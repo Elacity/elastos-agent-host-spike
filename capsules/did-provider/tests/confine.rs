@@ -494,13 +494,11 @@ fn persona_write_refusals_keep_their_reasons() {
     }
 }
 
-/// A nickname symlinked outside the root is refused at the data read; the
-/// loader's exact error reaches `Init` and `get_nickname`, and the provider
-/// keeps serving.
+/// A nickname symlinked outside the root is a storage refusal on `Init` and on
+/// `get_nickname`, using the production profile unchanged.
 ///
-/// The fixture permits metadata only, so the refusal happens at the data read.
-/// Falsifiers: swallow the loader error (`Init` succeeds) or drop the cached
-/// refusal (`get_nickname` reports `not_set`); both fail this test.
+/// Falsifier: let the loader treat a denied metadata lookup as absence;
+/// `Init` succeeds and this test fails.
 #[test]
 fn outside_nickname_read_denied() {
     if !require_sandbox("outside_nickname_read_denied") {
@@ -515,15 +513,9 @@ fn outside_nickname_read_denied() {
     std::os::unix::fs::symlink(&external, &stored).unwrap();
     let before = std::fs::read(&external).unwrap();
 
-    let profile = profile_with(r#"(allow file-read-metadata (subpath (param "OUTSIDE_ROOT")))"#);
-    let mut provider = ConfinedProvider::spawn_with_profile(
-        &storage,
-        profile.path(),
-        &[("OUTSIDE_ROOT", &outside)],
-    );
-    // The shared reader returns the OS refusal from the data read.
+    let mut provider = ConfinedProvider::spawn(&storage);
     let reason = format!(
-        "did-provider: failed to load nickname: {}",
+        "did-provider: failed to load nickname: Metadata lookup failed: {}",
         permission_error()
     );
 
