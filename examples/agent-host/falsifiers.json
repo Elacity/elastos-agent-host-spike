@@ -1212,6 +1212,54 @@
    "tests": [
     "tests::a_model_reply_without_assistant_text_is_not_a_completion"
    ]
+  },
+  {
+   "id": "FS59",
+   "title": "the stated skill CID is not compared, so content with another hash is admitted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if hex_digest(&sha256(text.as_bytes())) != cid {\n        return false;\n    }",
+     "new": "    if cid.is_empty() {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_cid_that_does_not_match_the_observed_text_is_refused"
+   ]
+  },
+  {
+   "id": "FS60",
+   "title": "a missing observation falls back to the last journal line, so unobserved content is admitted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(text) = current_observation(&journal.events, resource)\n        .filter(|row| row.version == version)\n        .and_then(|_| current_observed_text(&journal.events, resource))\n    else {\n        return false;\n    };",
+     "new": "    let text = current_observed_text(&journal.events, resource)\n        .or_else(|| journal.events.last().map(|node| node.text.clone()))\n        .unwrap_or_default();"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_from_unobserved_content_is_refused"
+   ]
+  },
+  {
+   "id": "FS61",
+   "title": "the skill is appended directly, so the budget and host-path rules are bypassed",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    admit_skill(journal, &text)",
+     "new": "    if text.is_empty() {\n        return false;\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text,\n        source: NodeSource::Skill,\n    });\n    true"
+    }
+   ],
+   "tests": [
+    "tests::an_over_budget_or_host_path_skill_from_a_read_is_still_refused"
+   ]
   }
  ]
 }

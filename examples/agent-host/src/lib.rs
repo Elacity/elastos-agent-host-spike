@@ -17,6 +17,8 @@
 //! not start a series. A checkpoint copies the model bytes before a step.
 //! Cancel after that copy does not dispatch, and a crash keeps its
 //! settlement word. A skill under 4000 bytes appends after the head.
+//! A skill from an observed read is admitted only when that read is current
+//! at the stated version and its text hashes to the stated CID.
 //! Over budget leaves the journal unchanged. Compaction keeps the skill.
 //! Opening a turn records a turn id. That id is not the series epoch, and
 //! the model bytes stay unchanged. Two steps in that turn share the epoch.
@@ -1219,6 +1221,26 @@ fn admit_skill(journal: &mut Journal, text: &str) -> bool {
         && journal.events.first().map(|node| node.text.clone()) == Some(head_text)
 }
 
+/// Admit a skill only from text the journal observed whole at `version`, and
+/// only when that text's SHA-256 equals `cid`. A read that never landed, a
+/// windowed or other-version read, and a wrong CID leave the journal
+/// unchanged. The budget, the host-path rule, and the head-first rule stay in
+/// `admit_skill`: this function adds the named-by-hash, from-a-granted-read
+/// gate and no second copy of those rules.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn admit_skill_from_read(journal: &mut Journal, resource: &str, version: u64, cid: &str) -> bool {
+    let Some(text) = current_observation(&journal.events, resource)
+        .filter(|row| row.version == version)
+        .and_then(|_| current_observed_text(&journal.events, resource))
+    else {
+        return false;
+    };
+    if hex_digest(&sha256(text.as_bytes())) != cid {
+        return false;
+    }
+    admit_skill(journal, &text)
+}
+
 /// The nodes compaction keeps after one summary, in order. Nothing when the
 /// summary does not shrink the shadowed range: the head plus the summary must
 /// be smaller than the nodes they replace. This is the only shrink rule;
@@ -1425,7 +1447,8 @@ fn compact(journal: &mut Journal, summary: &str) -> bool {
 }
 
 /// Lower-case hex of a digest. A summary step keeps its request digest in
-/// `new`, so an answer can be matched to the history the request saw.
+/// `new`, so an answer can be matched to the history the request saw. It is
+/// also the one hex spelling for a project digest and a skill CID.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn hex_digest(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2966,8 +2989,7 @@ fn quoted_digest_matches(events: &[SurfaceNode], project: &str, log: &str) -> bo
     let Some(digest) = project_tree_hash(&refs) else {
         return false;
     };
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    quoted == hex
+    quoted == hex_digest(&digest)
 }
 
 /// A `project note` line must be the current text of `notes.txt`.
@@ -4410,6 +4432,25 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a workspace snapshot was summarised".to_string(),
+            ));
+        }
+        let mut read_skill = journal.clone();
+        let skill_file = "localhost://Users/self/Projects/demo/SKILL.md";
+        let skill_cid = hex_digest(&sha256(skill.as_bytes()));
+        if !observe(&mut read_skill, skill_file, 1, skill)
+            || !admit_skill_from_read(&mut read_skill, skill_file, 1, &skill_cid)
+            || read_skill.events.last().map(|node| node.source.clone()) != Some(NodeSource::Skill)
+            || admit_skill_from_read(
+                &mut read_skill,
+                skill_file,
+                1,
+                &hex_digest(&sha256(b"other")),
+            )
+            || admit_skill_from_read(&mut read_skill, skill_file, 2, &skill_cid)
+            || read_skill.events.len() != journal.events.len() + 2
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a read-named skill was admitted without its observation".to_string(),
             ));
         }
         let visible = derive(&journal.events);
@@ -13218,6 +13259,82 @@ mod tests {
         let mut empty = empty_journal();
         assert!(!admit_skill(&mut empty, "Prefer the Runtime grant."));
         assert!(empty.events.is_empty());
+    }
+
+    #[test]
+    fn a_skill_from_an_observed_read_named_by_hash_is_admitted() {
+        let mut journal = two_turns();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        let text = "Prefer the Runtime grant.";
+        assert!(observe(&mut journal, resource, 1, text));
+        let cid = hex_digest(&sha256(text.as_bytes()));
+        assert!(admit_skill_from_read(&mut journal, resource, 1, &cid));
+        let last = journal.events.last().unwrap();
+        assert_eq!(last.text, text);
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.source, NodeSource::Skill);
+        assert_eq!(journal.events[0].source, NodeSource::Head);
+    }
+
+    #[test]
+    fn a_skill_cid_that_does_not_match_the_observed_text_is_refused() {
+        let mut journal = two_turns();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        let text = "Prefer the Runtime grant.";
+        assert!(observe(&mut journal, resource, 1, text));
+        let before = journal.clone();
+        let other = hex_digest(&sha256(b"Another skill."));
+        assert!(!admit_skill_from_read(&mut journal, resource, 1, &other));
+        assert_eq!(journal, before);
+        assert!(!admit_skill_from_read(&mut journal, resource, 1, ""));
+        assert_eq!(journal, before);
+        let padded = hex_digest(&sha256(format!("{text} ").as_bytes()));
+        assert!(!admit_skill_from_read(&mut journal, resource, 1, &padded));
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn a_skill_from_unobserved_content_is_refused() {
+        let mut journal = two_turns();
+        let text = "Prefer the Runtime grant.";
+        let cid = hex_digest(&sha256(text.as_bytes()));
+        // A person's line is journal text, but no granted read landed.
+        admit_user(&mut journal, text);
+        let before = journal.clone();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        assert!(!admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(journal, before);
+        // A read of another version is not a read of this one.
+        assert!(observe(&mut journal, resource, 2, text));
+        let seen = journal.clone();
+        assert!(!admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(journal, seen);
+        // A host path cannot be observed, so it cannot supply a skill.
+        assert!(!admit_skill_from_read(
+            &mut journal,
+            "/tmp/SKILL.md",
+            1,
+            &cid
+        ));
+        assert_eq!(journal, seen);
+    }
+
+    #[test]
+    fn an_over_budget_or_host_path_skill_from_a_read_is_still_refused() {
+        let mut journal = two_turns();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        let long = "x".repeat(4_001);
+        assert!(observe(&mut journal, resource, 1, &long));
+        let before = journal.clone();
+        let cid = hex_digest(&sha256(long.as_bytes()));
+        assert!(!admit_skill_from_read(&mut journal, resource, 1, &cid));
+        assert_eq!(journal, before);
+        let host = "/tmp";
+        assert!(observe(&mut journal, resource, 2, host));
+        let before = journal.clone();
+        let cid = hex_digest(&sha256(host.as_bytes()));
+        assert!(!admit_skill_from_read(&mut journal, resource, 2, &cid));
+        assert_eq!(journal, before);
     }
 
     #[test]
