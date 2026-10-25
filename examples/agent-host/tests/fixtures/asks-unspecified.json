@@ -1,0 +1,7 @@
+{
+  "schema": "elastos.agent-host.asks/v1",
+  "asks": [
+    {"kind": "read", "resource": "<principal>/"},
+    {"kind": "unspecified", "resource": "<principal>/"}
+  ]
+}

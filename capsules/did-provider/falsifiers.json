@@ -1,5 +1,5 @@
 {
-  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, and DID10 the storage-root state grant. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
+  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant, and DID11 returns `parse_error` instead of the non-hex signature refusal. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
   "falsifiers": [
     {
       "id": "DID01",
@@ -47,7 +47,8 @@
         }
       ],
       "tests": [
-        "tests::init_reports_nickname_read_error"
+        "tests::init_reports_nickname_read_error",
+        "outside_read_denied"
       ]
     },
     {
@@ -171,6 +172,22 @@
       "tests": [
         "confined_provider_serves_did_operations_under_its_root",
         "outside_write_denied"
+      ]
+    },
+    {
+      "id": "DID11",
+      "title": "verify_did_recovery returns parse_error instead of the non-hex signature refusal",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/src/main.rs",
+          "old": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(e) => {\n                return Response::error(\"invalid_signature\", &format!(\"Invalid hex sig: {}\", e))\n            }\n        };",
+          "new": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(e) => {\n                return Response::error(\"parse_error\", &format!(\"Invalid hex sig: {}\", e))\n            }\n        };"
+        }
+      ],
+      "tests": [
+        "verify_did_recovery_under_profile"
       ]
     }
   ]

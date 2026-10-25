@@ -24,11 +24,8 @@ directory while it creates Wallet. The parent receives no recursive grant.
 | Rule | Why the provider needs it |
 | --- | --- |
 | `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the Runtime named. |
-| `(allow file-read* (literal PROVIDER_EXECUTABLE))` | Read that one program image. |
 | `(allow file-read* (literal "/"))` | The kernel resolves every absolute path through the root directory. |
-| `(allow file-read* (subpath "/usr/lib") ... "/System/Library" ... "/Library/Apple")` | dyld reads the system shared cache and system libraries. |
 | `(allow sysctl-read)` | The loader and the allocator read kernel facts at startup. |
-| `(allow file-read* (literal "/dev/urandom"))` | Startup entropy for the storage key. |
 | `(allow file-read* (literal STORAGE_PARENT))` | Inspect and synchronize the existing parent during wallet directory creation. |
 | `(allow file-read* file-write* (subpath STORAGE_ROOT))` | One grant owns all account, key, challenge and approval state under the wallet directory. |
 
@@ -146,8 +143,37 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - `(allow network*)` makes `profile_denies_network` and
   `both_file_profiles_bind_one_storage_parameter_contract` fail.
 - Appending `(allow default)` also makes `profile_denies_network` fail.
-- Removing the storage-root write rule makes `Init` fail inside the root, so
-  the operation test fails.
+- Removing the storage-root write rule (WP18) makes `Init` fail inside the
+  root, so the operations and outside-write tests fail, and the shared contract
+  check fails.
+- Remove `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` (WP14):
+  the operations and outside tests fail because the provider cannot start, and
+  the shared contract check fails because the rule is pinned.
+- Remove `(allow file-read* (literal "/"))` (WP15): the operations and outside
+  tests fail because the provider cannot resolve its program path.
+- Remove `(allow sysctl-read)` (WP16): the operations and outside tests fail
+  because the loader cannot read the kernel facts it needs.
+- Remove `(allow file-read* (literal (param "STORAGE_PARENT")))` (WP17): `Init`
+  cannot inspect the parent, so the operations and outside-write tests fail,
+  and the shared contract check fails.
+
+Task 016 removed these allow forms because no named confinement test needed
+them on macOS 26.5.2 arm64:
+
+- `(allow file-read* (literal (param "PROVIDER_EXECUTABLE")))` removed: no
+  confinement test needed it on macOS 26.5.2 arm64.
+- `(allow file-read* (subpath "/usr/lib"))` removed: no confinement test needed
+  it on macOS 26.5.2 arm64.
+- `(allow file-read* (subpath "/System/Library"))` removed: no confinement test
+  needed it on macOS 26.5.2 arm64.
+- `(allow file-read* (subpath "/Library/Apple"))` removed: no confinement test
+  needed it on macOS 26.5.2 arm64.
+- `(allow file-read* (literal "/dev/urandom"))` removed: no confinement test
+  needed it on macOS 26.5.2 arm64.
+
+A host that needs one of the removed grants receives a sandbox denial for the
+affected access, so that operation fails closed with a reason. The grant comes
+back only together with a named test that needs it.
 
 Run `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml`
 from the repository root. The existing 102 unit tests remain part of this gate.
