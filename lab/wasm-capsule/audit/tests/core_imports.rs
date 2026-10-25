@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 use wasm_capsule_audit::{audit, audit_component, DeclaredImport, Refusal, AUDIT_API};
+use wasmparser::{Parser, Payload, Validator};
 
 fn import(module: &str, name: &str) -> DeclaredImport {
     DeclaredImport {
@@ -133,6 +134,65 @@ fn malformed_module_is_refused() {
 }
 
 #[test]
+fn audit_refusals_follow_the_documented_order() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "env" "a" (func))
+            (import "env" "b" (func))
+            (import "env" "c" (func)))"#,
+    )
+    .unwrap();
+    assert_undeclared(&wasm, &[import("env", "a")], &import("env", "b"));
+
+    // Section id, size, name length, name, then the magic in the data.
+    let custom = b"\0\x09\x04note\0asm";
+    let mut wasm = wat::parse_str(r#"(module (import "env" "b" (func)))"#).unwrap();
+    wasm.extend_from_slice(custom);
+    Validator::new().validate_all(&wasm).unwrap();
+    let import_end = Parser::new(0)
+        .parse_all(&wasm)
+        .find_map(|payload| match payload.unwrap() {
+            Payload::ImportSection(section) => Some(section.range().end),
+            _ => None,
+        })
+        .unwrap();
+    let import_end = usize::try_from(import_end).unwrap();
+    assert_eq!(
+        &wasm[import_end..],
+        custom,
+        "custom section follows imports"
+    );
+    let refusal = audit(&wasm, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::CodeInCustomSection);
+    assert_eq!(refusal.to_string(), "code in custom section");
+
+    let mut invalid = wat::parse_str("(module (func (result i32)))").unwrap();
+    invalid.splice(8..8, custom.iter().copied());
+    assert_eq!(&invalid[..8], b"\0asm\x01\0\0\0");
+    assert_eq!(
+        &invalid[8..8 + custom.len()],
+        custom,
+        "first section is custom"
+    );
+    let body_start = Parser::new(0)
+        .parse_all(&invalid)
+        .find_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(body.range().start),
+            _ => None,
+        })
+        .unwrap();
+    let body_start = usize::try_from(body_start).unwrap();
+    assert!(
+        body_start >= 8 + custom.len(),
+        "invalid body follows custom section"
+    );
+    assert!(Validator::new().validate_all(&invalid).is_err());
+    let refusal = audit(&invalid, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::Malformed);
+    assert_eq!(refusal.to_string(), "malformed module");
+}
+
+#[test]
 fn custom_section_carrying_code_is_refused() {
     fn with_custom(name: &[u8], data: &[u8]) -> Vec<u8> {
         let mut wasm = wat::parse_str("(module)").unwrap();
@@ -254,6 +314,37 @@ fn public_api_is_v1() {
     }
 
     let source = read_source("src/lib.rs");
+    for (file, contents) in [("src/lib.rs", &source), ("INTERFACE.md", &interface)] {
+        let lines: Vec<_> = contents.lines().collect();
+        for (item, attributes) in [
+            (
+                "pub struct DeclaredImport {",
+                ["#[derive(Debug, Clone, PartialEq, Eq)]"].as_slice(),
+            ),
+            (
+                "pub enum Refusal {",
+                [
+                    "#[derive(Debug, Clone, PartialEq, Eq)]",
+                    "#[non_exhaustive]",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let index = lines
+                .iter()
+                .position(|line| *line == item)
+                .unwrap_or_else(|| panic!("{file}: expected line {item}"));
+            for (offset, expected) in attributes.iter().rev().enumerate() {
+                let actual = index.checked_sub(offset + 1).map(|i| lines[i]);
+                assert_eq!(
+                    actual,
+                    Some(*expected),
+                    "{file}: expected line {expected} at offset -{} from {item}",
+                    offset + 1
+                );
+            }
+        }
+    }
     let prefixes = [
         "pub const AUDIT_API:",
         "pub struct DeclaredImport",
