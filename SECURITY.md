@@ -95,8 +95,9 @@ and slow-frame tests.
 **Status:** Open ([#341](https://github.com/Elacity/elastos-runtime/issues/341))
 
 A whole-object content fetch reply arrives as one line. It is refused while
-reading once it passes one 100 MiB file as base64 (about 134 MiB). Only two
-such fetches run at once, and one per peer.
+reading once it passes one 200 MiB file as base64 (about 268 MiB), the largest
+file Runtime downloads whole. Only two such fetches run at once, and one per
+peer.
 
 ## Resolved Findings
 
@@ -124,7 +125,7 @@ requests, read before their signature is checked, allow 64 KiB within 10
 seconds. Replies are capped by what the request can return: a full gossip
 topic for a pull, one importable object for a provider call, update metadata
 for an operator answer. Provider replies share a 256 MiB in-flight budget.
-Whole-object content fetch replies allow one 100 MiB file as base64; the open
+Whole-object content fetch replies allow one 200 MiB file as base64; the open
 item above tracks streaming them. Relays close after five minutes without bytes
 in either direction, and stream acknowledgements have deadlines.
 

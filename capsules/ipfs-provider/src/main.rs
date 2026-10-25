@@ -265,6 +265,9 @@ enum Request {
         bounded_read: bool,
         #[serde(default, deserialize_with = "deserialize_metadata_max")]
         max_bytes: Option<u64>,
+        /// A whole read's own limit, at most the shared whole-content ceiling.
+        #[serde(default)]
+        whole_max_bytes: Option<u64>,
         #[serde(default, rename = "_runtime_invocation")]
         _runtime_invocation: Option<serde_json::Value>,
     },
@@ -577,11 +580,16 @@ impl IpfsProvider {
         arg.split('/').next().unwrap_or(arg)
     }
 
-    fn kubo_cat_bytes(&mut self, arg: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    fn kubo_cat_bytes(
+        &mut self,
+        arg: &str,
+        timeout: Duration,
+        limit: u64,
+    ) -> Result<Vec<u8>, String> {
         let url = kubo_rpc_url(self.api_port, "cat", &[("arg", arg)]);
         match ureq::post(&url).timeout(timeout).call() {
             Ok(resp) if resp.status() == 200 => {
-                let bytes = read_whole_content(resp.into_reader(), "kubo cat")?;
+                let bytes = read_whole_content(resp.into_reader(), "kubo cat", limit)?;
                 update_coord_last_used(&self.data_dir);
                 Ok(bytes)
             }
@@ -620,11 +628,12 @@ impl IpfsProvider {
         }
     }
 
-    fn fetch_bytes(&mut self, arg: &str) -> Result<Vec<u8>, String> {
+    /// One whole read of `arg`, refused once it passes `limit` bytes.
+    fn fetch_bytes(&mut self, arg: &str, limit: u64) -> Result<Vec<u8>, String> {
         let mut failures = Vec::new();
 
         if self.ensure_kubo().is_ok() {
-            match self.kubo_cat_bytes(arg, LARGE_HTTP_TIMEOUT) {
+            match self.kubo_cat_bytes(arg, LARGE_HTTP_TIMEOUT, limit) {
                 Ok(bytes) => return Ok(bytes),
                 Err(err) if is_whole_content_too_large(&err) => return Err(err),
                 Err(err) => failures.push(err),
@@ -632,7 +641,7 @@ impl IpfsProvider {
 
             let root_cid = Self::root_cid(arg);
             match self.kubo_prefetch_cid(root_cid) {
-                Ok(()) => match self.kubo_cat_bytes(arg, LARGE_HTTP_TIMEOUT) {
+                Ok(()) => match self.kubo_cat_bytes(arg, LARGE_HTTP_TIMEOUT, limit) {
                     Ok(bytes) => return Ok(bytes),
                     Err(err) if is_whole_content_too_large(&err) => return Err(err),
                     Err(err) => failures.push(err),
@@ -641,7 +650,7 @@ impl IpfsProvider {
             }
         }
 
-        match self.fetch_from_local_gateway_with_timeout(arg, LARGE_HTTP_TIMEOUT) {
+        match self.fetch_from_local_gateway_with_timeout(arg, LARGE_HTTP_TIMEOUT, limit) {
             Ok(bytes) => Ok(bytes),
             Err(err) if is_whole_content_too_large(&err) => Err(err),
             Err(err) => {
@@ -784,25 +793,26 @@ impl IpfsProvider {
                 path,
                 bounded_read,
                 max_bytes,
+                whole_max_bytes,
                 _runtime_invocation,
             } => {
-                if bounded_read {
+                if bounded_read && whole_max_bytes.is_none() {
                     self.cat_bounded(
                         &cid,
                         path.as_deref(),
                         _runtime_invocation.as_ref(),
                         max_bytes,
                     )
-                } else if max_bytes.is_some() {
+                } else if bounded_read || max_bytes.is_some() {
                     Response::error("bounded_read_failed", "Bounded content read failed")
                 } else {
-                    self.cat(&cid, path.as_deref())
+                    self.cat(&cid, path.as_deref(), whole_max_bytes)
                 }
             }
             Request::CatToPath { cid, path, dest } => {
                 self.cat_to_path(&cid, path.as_deref(), &dest)
             }
-            Request::GetBytes { cid, path } => self.cat(&cid, path.as_deref()),
+            Request::GetBytes { cid, path } => self.cat(&cid, path.as_deref(), None),
             Request::Ls { cid } => self.ls(&cid),
             Request::DownloadDirectory { cid, dest } => self.download_directory(&cid, &dest),
             Request::Pin { cid, .. } => self.pin(&cid),
@@ -1395,13 +1405,25 @@ impl IpfsProvider {
         }
     }
 
-    fn cat(&mut self, cid: &str, path: Option<&str>) -> Response {
+    /// One whole file, refused once it passes `whole_max_bytes` (when given)
+    /// or the shared whole-content ceiling.
+    fn cat(&mut self, cid: &str, path: Option<&str>, whole_max_bytes: Option<u64>) -> Response {
+        let limit = match whole_max_bytes {
+            None => WHOLE_CONTENT_CEILING,
+            Some(limit) if (1..=WHOLE_CONTENT_CEILING).contains(&limit) => limit,
+            Some(_) => {
+                return Response::error(
+                    "invalid_request",
+                    "whole_max_bytes must be between 1 and the whole-content ceiling",
+                )
+            }
+        };
         let arg = match path {
             Some(p) if !p.is_empty() => format!("{}/{}", cid, p.trim_start_matches('/')),
             _ => cid.to_string(),
         };
 
-        match self.fetch_bytes(&arg) {
+        match self.fetch_bytes(&arg, limit) {
             Ok(bytes) => Response::ok(serde_json::json!({
                 "data": BASE64.encode(&bytes)
             })),
@@ -1516,7 +1538,11 @@ impl IpfsProvider {
             let bytes = match bytes {
                 Some(b) => b,
                 None => {
-                    match self.fetch_from_local_gateway_with_timeout(&arg, LARGE_HTTP_TIMEOUT) {
+                    match self.fetch_from_local_gateway_with_timeout(
+                        &arg,
+                        LARGE_HTTP_TIMEOUT,
+                        WHOLE_CONTENT_CEILING,
+                    ) {
                         Ok(b) => b,
                         Err(e) => {
                             errors.push(format!("{}: {}", file_path, e));
@@ -1812,6 +1838,7 @@ impl IpfsProvider {
         &self,
         arg: &str,
         timeout: Duration,
+        limit: u64,
     ) -> Result<Vec<u8>, String> {
         if self.gateway_port == 0 {
             return Err(format!(
@@ -1823,7 +1850,7 @@ impl IpfsProvider {
         let url = local_gateway_url(self.gateway_port, arg);
         match ureq::get(&url).timeout(timeout).call() {
             Ok(resp) if resp.status() == 200 => {
-                read_whole_content(resp.into_reader(), "local Elastos IPFS gateway")
+                read_whole_content(resp.into_reader(), "local Elastos IPFS gateway", limit)
             }
             Ok(resp) => Err(format!(
                 "local Elastos IPFS gateway -> HTTP {} for {}. No HTTP fallback is allowed.",
@@ -2090,18 +2117,21 @@ fn try_flock_exclusive(_file: &fs::File) -> bool {
     true
 }
 
-/// Starts every refusal of content past the whole-content limit. That refusal
-/// is final: another route would read the same content again.
+/// The largest file any whole read may return (one shared constant with
+/// Runtime's Carrier transfers).
+const WHOLE_CONTENT_CEILING: u64 = elastos_common::MAX_WHOLE_CONTENT_BYTES as u64;
+
+/// Starts every refusal of content past a whole read's limit. That refusal is
+/// final: another route would read the same content again.
 const WHOLE_CONTENT_TOO_LARGE: &str = "content exceeds the whole-content limit";
 
 fn is_whole_content_too_large(error: &str) -> bool {
     error.starts_with(WHOLE_CONTENT_TOO_LARGE)
 }
 
-/// Read one whole file into memory, refusing it once it passes the shared
-/// whole-content limit, before more than the limit is buffered.
-fn read_whole_content(reader: impl Read, source: &str) -> Result<Vec<u8>, String> {
-    let limit = elastos_common::MAX_WHOLE_CONTENT_BYTES as u64;
+/// Read one whole file into memory, refusing it once it passes `limit`, before
+/// more than `limit` bytes are buffered.
+fn read_whole_content(reader: impl Read, source: &str, limit: u64) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     reader
         .take(limit + 1)
@@ -3113,7 +3143,12 @@ mod tests {
                 .unwrap();
             headers
         });
-        assert_eq!(provider.fetch_bytes("release-cid").unwrap(), b"89ab");
+        assert_eq!(
+            provider
+                .fetch_bytes("release-cid", WHOLE_CONTENT_CEILING)
+                .unwrap(),
+            b"89ab"
+        );
         assert!(backend
             .join()
             .unwrap()
@@ -3122,53 +3157,95 @@ mod tests {
         assert!(provider.kubo_child.is_none());
     }
 
-    #[test]
-    fn whole_read_past_the_shared_limit_is_refused_while_reading() {
-        let limit = elastos_common::MAX_WHOLE_CONTENT_BYTES as u64;
-        // The direct Kubo read, then the local gateway once Kubo and pinning fail.
-        for (case, served_by) in [("kubo", "POST /api/v0/cat"), ("gateway", "GET /ipfs/")] {
-            let root = tempfile::tempdir().unwrap();
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let mut provider =
-                bounded_cat_fixture_provider(root.path(), listener.local_addr().unwrap().port());
-            let backend = std::thread::spawn(move || {
-                let mut requests = Vec::new();
-                loop {
-                    let mut socket = accept_bounded_fixture(&listener);
-                    let headers = read_bounded_fixture_headers(&mut socket);
-                    requests.push(headers.lines().next().unwrap_or_default().to_string());
-                    if !headers.starts_with(served_by) {
-                        socket
-                            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                            .unwrap();
-                        continue;
-                    }
-                    // One answer of three times the limit, with no declared length.
+    /// A Kubo double whose `served_by` request gets `answer`; every other
+    /// request fails, so the read reaches that route. The thread returns the
+    /// request lines and the body bytes `answer` managed to send.
+    fn kubo_answering<F>(
+        served_by: &'static str,
+        answer: F,
+    ) -> (u16, std::thread::JoinHandle<(Vec<String>, u64)>)
+    where
+        F: FnOnce(&mut std::net::TcpStream) -> u64 + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let serving = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            loop {
+                let mut socket = accept_bounded_fixture(&listener);
+                let headers = read_bounded_fixture_headers(&mut socket);
+                requests.push(headers.lines().next().unwrap_or_default().to_string());
+                if !headers.starts_with(served_by) {
                     socket
-                        .set_write_timeout(Some(Duration::from_secs(10)))
+                        .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                         .unwrap();
-                    let mut sent = 0u64;
-                    if socket
-                        .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
-                        .is_ok()
-                    {
-                        let piece = vec![b'a'; 1024 * 1024];
-                        while sent < 3 * limit && socket.write_all(&piece).is_ok() {
-                            sent += piece.len() as u64;
-                        }
-                    }
-                    return (requests, sent);
+                    continue;
                 }
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let sent = answer(&mut socket);
+                return (requests, sent);
+            }
+        });
+        (port, serving)
+    }
+
+    /// Writes `total` bytes of `byte` in 1 MiB pieces until the reader stops.
+    fn write_body(socket: &mut std::net::TcpStream, total: u64, byte: impl Fn(u64) -> u8) -> u64 {
+        let mut sent = 0u64;
+        while sent < total {
+            let piece: Vec<u8> = (sent..total.min(sent + 1024 * 1024)).map(&byte).collect();
+            if socket.write_all(&piece).is_err() {
+                break;
+            }
+            sent += piece.len() as u64;
+        }
+        sent
+    }
+
+    #[test]
+    fn whole_read_past_its_limit_is_refused_while_reading() {
+        let ceiling = elastos_common::MAX_WHOLE_CONTENT_BYTES as u64;
+        let gateway_file_limit = 100 * 1024 * 1024;
+        // The direct Kubo read, the local gateway once Kubo and pinning fail,
+        // and a read whose request carries its own smaller limit.
+        for (case, served_by, requested) in [
+            ("kubo", "POST /api/v0/cat", None),
+            ("gateway", "GET /ipfs/", None),
+            (
+                "requested limit",
+                "POST /api/v0/cat",
+                Some(gateway_file_limit),
+            ),
+        ] {
+            let limit = requested.unwrap_or(ceiling);
+            let root = tempfile::tempdir().unwrap();
+            // One answer of three times the limit, with no declared length.
+            let (port, backend) = kubo_answering(served_by, move |socket| {
+                if socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .is_err()
+                {
+                    return 0;
+                }
+                write_body(socket, 3 * limit, |_| b'a')
             });
-            let response = provider.cat("large-cid", None);
+            let mut provider = bounded_cat_fixture_provider(root.path(), port);
+            let mut request = serde_json::json!({"op": "cat", "cid": "large-cid"});
+            if let Some(requested) = requested {
+                request["whole_max_bytes"] = serde_json::json!(requested);
+            }
+            let response = provider.handle(serde_json::from_value(request).unwrap());
             let (requests, sent) = backend.join().unwrap();
             match &response {
                 Response::Error { code, message } => {
                     assert_eq!(code, "cat_failed", "{case}");
-                    assert!(
-                        message.starts_with(WHOLE_CONTENT_TOO_LARGE),
-                        "{case}: {message}"
+                    assert_eq!(
+                        message,
+                        &format!("{WHOLE_CONTENT_TOO_LARGE} of {limit} bytes"),
+                        "{case}"
                     );
                 }
                 Response::Ok { .. } => panic!("{case}: content past the limit was returned"),
@@ -3186,6 +3263,35 @@ mod tests {
                 "{case}: a refused read is not repeated: {requests:?}"
             );
         }
+    }
+
+    #[test]
+    fn whole_read_of_the_largest_release_artifact_succeeds() {
+        // elastos-x86_64-linux in the 0.8.0-alpha.24 signed set.
+        const SIZE: u64 = 115_118_616;
+        let byte = |offset: u64| (offset.wrapping_mul(2_654_435_761) >> 13) as u8;
+        let (port, backend) = kubo_answering("POST /api/v0/cat", move |socket| {
+            let header =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {SIZE}\r\nConnection: close\r\n\r\n");
+            if socket.write_all(header.as_bytes()).is_err() {
+                return 0;
+            }
+            write_body(socket, SIZE, byte)
+        });
+        let root = tempfile::tempdir().unwrap();
+        let mut provider = bounded_cat_fixture_provider(root.path(), port);
+        let response = provider.cat("release-cid", None, None);
+        let (_, sent) = backend.join().unwrap();
+        assert_eq!(sent, SIZE);
+        let Response::Ok { data: Some(data) } = response else {
+            panic!("release-sized read failed: {response:?}");
+        };
+        let bytes = BASE64.decode(data["data"].as_str().unwrap()).unwrap();
+        assert_eq!(bytes.len() as u64, SIZE);
+        assert!(bytes
+            .iter()
+            .enumerate()
+            .all(|(offset, value)| *value == byte(offset as u64)));
     }
 
     #[test]
@@ -3251,7 +3357,7 @@ mod tests {
 
         assert_eq!(unsafe { libc::kill(previous_pid as i32, libc::SIGTERM) }, 0);
         let started = Instant::now();
-        let result = provider.fetch_bytes("release-cid");
+        let result = provider.fetch_bytes("release-cid", WHOLE_CONTENT_CEILING);
         let elapsed = started.elapsed();
         let previous_reaped = !is_pid_alive(previous_pid);
         if let Some(mut replacement) = provider.kubo_child.take() {
@@ -4383,7 +4489,7 @@ mod tests {
                         Response::Error { .. } => None,
                     }
                 } else {
-                    match provider.cat(CID, Some(path)) {
+                    match provider.cat(CID, Some(path), None) {
                         Response::Ok { data: Some(data) } => data["data"]
                             .as_str()
                             .and_then(|encoded| BASE64.decode(encoded).ok()),

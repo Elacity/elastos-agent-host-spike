@@ -226,6 +226,8 @@ struct ContentFetchTransfer {
     progress: Option<ProviderProgress>,
     bounded_read: bool,
     max_bytes: Option<u64>,
+    /// A local whole read's own limit, applied by the local backend.
+    whole_max_bytes: Option<u64>,
 }
 
 impl ContentFetchTransfer {
@@ -316,11 +318,31 @@ impl ContentFetchTransfer {
                 "complete metadata requires a local bounded whole index".into(),
             ));
         }
+        let whole_max_bytes = request
+            .get("whole_max_bytes")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .filter(|n| (1..=elastos_common::MAX_WHOLE_CONTENT_BYTES as u64).contains(n))
+                    .ok_or_else(|| ProviderError::Provider("invalid whole read bound".into()))
+            })
+            .transpose()?;
+        if whole_max_bytes.is_some()
+            && (request.get("local_only") != Some(&Value::Bool(true))
+                || request.get("bounded_read").is_some()
+                || max_bytes.is_some()
+                || range.is_some())
+        {
+            return Err(ProviderError::Provider(
+                "a whole read bound requires a local whole read".into(),
+            ));
+        }
         Ok(Self {
             transfer,
             range,
             progress,
             max_bytes,
+            whole_max_bytes,
             bounded_read: match request.get("bounded_read") {
                 None | Some(Value::Bool(false)) => false,
                 Some(Value::Bool(true)) => true,
@@ -2747,6 +2769,7 @@ impl ModelPartReads {
             progress: None,
             bounded_read: true,
             max_bytes: index_read.then_some(limit),
+            whole_max_bytes: None,
         };
         let fetched = ContentProvider::fetch_from_availability_provider(
             registry,
@@ -2836,24 +2859,27 @@ pub async fn fetch_bytes_via_provider(
     cid: &str,
     path: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    fetch_bytes_via_content(registry, cid, path, false).await
+    fetch_bytes_via_content(registry, cid, path, None).await
 }
 
-/// Read through the local backend only (Kubo, which checks every block against
-/// its CID); a local miss never reaches availability holders.
+/// Read through the local backend only (Kubo, which checks every block it
+/// fetches against its CID), refused once the file passes `max_bytes`; a local
+/// miss never reaches availability holders.
 pub(crate) async fn fetch_verified_local_bytes_via_provider(
     registry: &ProviderRegistry,
     cid: &str,
     path: Option<&str>,
+    max_bytes: usize,
 ) -> anyhow::Result<Vec<u8>> {
-    fetch_bytes_via_content(registry, cid, path, true).await
+    fetch_bytes_via_content(registry, cid, path, Some(max_bytes)).await
 }
 
+/// `local_max_bytes` makes the read local-only and bounds it at the backend.
 async fn fetch_bytes_via_content(
     registry: &ProviderRegistry,
     cid: &str,
     path: Option<&str>,
-    local_only: bool,
+    local_max_bytes: Option<usize>,
 ) -> anyhow::Result<Vec<u8>> {
     let mut request = json!({
         "op": "fetch",
@@ -2864,8 +2890,9 @@ async fn fetch_bytes_via_content(
             "expected_bytes": Value::Null,
         },
     });
-    if local_only {
+    if let Some(max_bytes) = local_max_bytes {
         request["local_only"] = Value::Bool(true);
+        request["whole_max_bytes"] = json!(max_bytes);
     }
     if let Some(path) = path.filter(|path| !path.is_empty()) {
         request["path"] = Value::String(path.to_string());
@@ -3323,6 +3350,9 @@ impl ContentProvider {
         }
         if let Some(max_bytes) = transfer.max_bytes {
             ipfs_request["max_bytes"] = json!(max_bytes);
+        }
+        if let Some(whole_max_bytes) = transfer.whole_max_bytes {
+            ipfs_request["whole_max_bytes"] = json!(whole_max_bytes);
         }
         if !path.is_empty() {
             ipfs_request["path"] = Value::String(path.to_string());

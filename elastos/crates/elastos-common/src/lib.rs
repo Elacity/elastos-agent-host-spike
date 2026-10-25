@@ -30,9 +30,15 @@ use sha2::{Digest, Sha256};
 pub use timestamp::{SecureTimestamp, CLOCK_SKEW_TOLERANCE_SECS};
 pub use types::{CapsuleId, CapsuleStatus};
 
-/// Largest single file read whole into memory: one local IPFS read, one gateway
-/// response, one Library upload, one whole-content answer from a Carrier holder.
-pub const MAX_WHOLE_CONTENT_BYTES: usize = 100 * 1024 * 1024;
+/// Largest single file moved whole through memory: one ipfs-provider whole
+/// read, one Carrier `content_fetch` download (release components, binaries and
+/// update files) and one whole-content Carrier provider answer. It equals the
+/// release download ceiling that installed Runtimes already apply, so a holder
+/// serves every file a client accepts. The largest published file on these
+/// paths is elastos-x86_64-linux (115,118,616 bytes in 0.8.0-alpha.24); release
+/// input admission refuses any larger than this. Callers that serve less, such
+/// as the gateway, pass their own smaller limit.
+pub const MAX_WHOLE_CONTENT_BYTES: usize = 200 * 1024 * 1024;
 
 /// Convert a Runtime principal/profile label into the non-reversible Browser
 /// profile key used for profile-disk names and guest boot args.

@@ -524,6 +524,42 @@ async fn gateway_serves_literal_file_paths_exactly_on_every_cid_route() {
 }
 
 #[tokio::test]
+async fn gateway_reads_ask_the_local_store_for_at_most_the_gateway_file_limit() {
+    let limit = MAX_GATEWAY_FILE_SIZE as u64;
+    let dir = tempfile::tempdir().unwrap();
+    write_bundle_site_head(dir.path());
+    let over = vec![b'x'; MAX_GATEWAY_FILE_SIZE + 1];
+    let (state, _holder, store) = local_store_state(
+        dir.path(),
+        &[
+            (TEST_CIDV1, "", over.as_slice()),
+            (TEST_CIDV1, "big.bin", over.as_slice()),
+            (TEST_CIDV1, "small.txt", b"small"),
+        ],
+    )
+    .await;
+    let app = gateway_router(state);
+
+    for path in [
+        format!("/content/{TEST_CIDV1}"),
+        format!("/s/{TEST_CIDV1}/big.bin"),
+        format!("/ipfs/{TEST_CIDV1}/big.bin"),
+        "/big.bin".to_string(),
+    ] {
+        let (status, _) = gateway_get(&app, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    let (status, body) = gateway_get(&app, &format!("/s/{TEST_CIDV1}/small.txt")).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, &b"small"[..]));
+    let limits = store.whole_limits.lock().unwrap().clone();
+    assert!(!limits.is_empty());
+    assert!(
+        limits.iter().all(|requested| *requested == Some(limit)),
+        "every gateway read carries the gateway file limit: {limits:?}"
+    );
+}
+
+#[tokio::test]
 async fn gateway_serves_cid_content_only_from_the_verified_local_store() {
     let dir = tempfile::tempdir().unwrap();
     write_bundle_site_head(dir.path());

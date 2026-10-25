@@ -149,9 +149,12 @@ fn test_state(cache_dir: &std::path::Path) -> GatewayState {
 }
 
 /// The local content backend: it answers only the (CID, exact path) pairs it
-/// holds.
+/// holds and, like ipfs-provider, refuses a whole read past its request's
+/// `whole_max_bytes`. It records each whole read's requested limit.
+#[derive(Default)]
 struct LocalStoreFixture {
     files: HashMap<(String, String), Vec<u8>>,
+    whole_limits: std::sync::Mutex<Vec<Option<u64>>>,
 }
 
 #[async_trait::async_trait]
@@ -171,11 +174,22 @@ impl Provider for LocalStoreFixture {
     async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
         let cid = request.get("cid").and_then(Value::as_str).unwrap_or("");
         let path = request.get("path").and_then(Value::as_str).unwrap_or("");
+        if request["op"] != "cat" {
+            return Ok(json!({"status": "error", "code": "unsupported", "message": "cat only"}));
+        }
+        let limit = request.get("whole_max_bytes").and_then(Value::as_u64);
+        self.whole_limits.lock().unwrap().push(limit);
         Ok(match self.files.get(&(cid.to_string(), path.to_string())) {
-            Some(bytes) if request["op"] == "cat" => json!({"status": "ok", "data": {
+            Some(bytes) if limit.is_some_and(|limit| bytes.len() as u64 > limit) => json!({
+                "status": "error", "code": "cat_failed",
+                "message": format!("content exceeds the whole-content limit of {} bytes", limit.unwrap()),
+            }),
+            Some(bytes) => json!({"status": "ok", "data": {
                 "data": base64::engine::general_purpose::STANDARD.encode(bytes),
             }}),
-            _ => json!({"status": "error", "code": "not_found", "message": "not in local store"}),
+            None => {
+                json!({"status": "error", "code": "not_found", "message": "not in local store"})
+            }
         })
     }
 }
@@ -216,13 +230,24 @@ async fn verified_store_state(
     dir: &std::path::Path,
     local_files: &[(&str, &str, &[u8])],
 ) -> (GatewayState, Arc<HolderFixture>) {
+    let (state, holder, _store) = local_store_state(dir, local_files).await;
+    (state, holder)
+}
+
+async fn local_store_state(
+    dir: &std::path::Path,
+    local_files: &[(&str, &str, &[u8])],
+) -> (GatewayState, Arc<HolderFixture>, Arc<LocalStoreFixture>) {
     let registry = Arc::new(ProviderRegistry::new());
-    let files = local_files
-        .iter()
-        .map(|(cid, path, bytes)| ((cid.to_string(), path.to_string()), bytes.to_vec()))
-        .collect();
+    let store = Arc::new(LocalStoreFixture {
+        files: local_files
+            .iter()
+            .map(|(cid, path, bytes)| ((cid.to_string(), path.to_string()), bytes.to_vec()))
+            .collect(),
+        ..Default::default()
+    });
     registry
-        .register_sub_provider("ipfs", Arc::new(LocalStoreFixture { files }))
+        .register_sub_provider("ipfs", store.clone())
         .await
         .unwrap();
     let holder = Arc::new(HolderFixture::default());
@@ -238,7 +263,7 @@ async fn verified_store_state(
         .unwrap();
     let mut state = test_state(dir);
     state.provider_registry = Some(registry);
-    (state, holder)
+    (state, holder, store)
 }
 
 #[tokio::test]

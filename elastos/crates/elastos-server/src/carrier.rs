@@ -9042,7 +9042,8 @@ impl CarrierClient {
     }
 
     pub async fn fetch_file(&self, path: &str) -> Result<Vec<u8>> {
-        self.fetch_file_bounded(path, MAX_DOWNLOAD_BYTES).await
+        self.fetch_file_bounded(path, elastos_common::MAX_WHOLE_CONTENT_BYTES)
+            .await
     }
 
     pub(crate) async fn fetch_file_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>> {
@@ -9059,8 +9060,13 @@ impl CarrierClient {
         if let Some(path) = path.filter(|path| !path.is_empty()) {
             msg["path"] = serde_json::Value::String(path.to_string());
         }
-        self.fetch_bytes(msg, "content fetch", cid, MAX_DOWNLOAD_BYTES)
-            .await
+        self.fetch_bytes(
+            msg,
+            "content fetch",
+            cid,
+            elastos_common::MAX_WHOLE_CONTENT_BYTES,
+        )
+        .await
     }
 
     pub(crate) async fn fetch_content_bounded(
@@ -9349,9 +9355,6 @@ pub(crate) const DOWNLOAD_IDLE_TIMEOUT: Duration =
 /// seed (8 Oct 2026): at most 1.6 s for 92 MB; bound = max(60 s, 4x worst).
 const DOWNLOAD_HEADER_WAIT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 60 });
 
-/// Size ceiling for a release download whose signed size is not known.
-pub(crate) const MAX_DOWNLOAD_BYTES: usize = 200 * 1024 * 1024;
-
 /// Fetches the signed CID when present, else the release name, then closes.
 async fn fetch_and_close(
     client: CarrierClient,
@@ -9625,6 +9628,77 @@ pub(crate) mod tests {
             "Runtime stopped reading near the limit, not at the offered size ({sent} bytes sent)"
         );
         server.close().await;
+    }
+
+    /// A holder's local IPFS backend that answers every whole read with `bytes`.
+    struct WholeFileIpfsBackend {
+        bytes: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for WholeFileIpfsBackend {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> std::result::Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw requests only".into()))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "whole-file-ipfs-backend"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, ProviderError> {
+            assert_eq!(request["op"], "cat");
+            Ok(serde_json::json!({"status": "ok", "data": {
+                "data": base64::engine::general_purpose::STANDARD.encode(&self.bytes),
+            }}))
+        }
+    }
+
+    #[tokio::test]
+    async fn release_sized_component_arrives_over_carrier_content_fetch() {
+        // elastos-x86_64-linux in the 0.8.0-alpha.24 signed set, the largest
+        // artifact a holder serves through `content_fetch`.
+        let bytes: Vec<u8> = (0..115_118_616u64)
+            .map(|offset| (offset.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let holder = start_holder_runtime(
+            91,
+            Arc::new(MockCarrierContentProvider),
+            Some(Arc::new(WholeFileIpfsBackend {
+                bytes: bytes.clone(),
+            })),
+        )
+        .await;
+        let runtime = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind()
+            .await
+            .unwrap();
+        let client = CarrierClient::connect_known_endpoint(&runtime, holder.addr.clone(), 5)
+            .await
+            .unwrap();
+        let fetched = tokio::time::timeout(
+            Duration::from_secs(120),
+            client.fetch_content(
+                "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(fetched == bytes, "content_fetch returned other bytes");
+        client.close().await;
+        runtime.close().await;
+        shutdown_test_carrier_node(holder.node).await;
     }
 
     #[tokio::test]
@@ -11969,9 +12043,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fetch_and_close(client, None, "artifact", MAX_DOWNLOAD_BYTES)
-                .await
-                .unwrap(),
+            fetch_and_close(
+                client,
+                None,
+                "artifact",
+                elastos_common::MAX_WHOLE_CONTENT_BYTES
+            )
+            .await
+            .unwrap(),
             b"fixture"
         );
         assert!(!runtime.is_closed());
@@ -12128,7 +12207,13 @@ pub(crate) mod tests {
         let client = CarrierClient::connect_owned_endpoint(endpoint, address, 5)
             .await
             .unwrap();
-        let result = fetch_and_close(client, None, "artifact", MAX_DOWNLOAD_BYTES).await;
+        let result = fetch_and_close(
+            client,
+            None,
+            "artifact",
+            elastos_common::MAX_WHOLE_CONTENT_BYTES,
+        )
+        .await;
         let closed_before_return = observer.is_closed();
         observer.close().await;
         let remote_close = tokio::time::timeout(Duration::from_secs(5), serving)
@@ -18266,7 +18351,7 @@ pub(crate) mod tests {
             "fixture",
             1,
             None,
-            MAX_DOWNLOAD_BYTES,
+            elastos_common::MAX_WHOLE_CONTENT_BYTES,
         )
         .await
         .unwrap_err();
