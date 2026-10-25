@@ -100,6 +100,7 @@ pub enum ExecCommand {
     TestEdited,
     Files,
     Note,
+    CargoTest,
 }
 
 impl ExecCommand {
@@ -113,6 +114,7 @@ impl ExecCommand {
             Self::TestEdited => "test-edited",
             Self::Files => "files",
             Self::Note => "note",
+            Self::CargoTest => "cargo-test",
         }
     }
 }
@@ -175,8 +177,9 @@ pub fn admit_listed_file(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Name a program the image can run. `cargo` is not in the image.
-/// Anything else is refused. This does not boot.
+/// Name a program the image can run. Exactly `cargo test` is admitted; the
+/// image may not carry `/bin/cargo` yet, and init then says so. Every other
+/// cargo form and every other program is refused. This does not boot.
 pub fn admit_exec_argv(argv: &[&str]) -> Result<ExecCommand, &'static str> {
     match argv {
         ["files"] => Ok(ExecCommand::Files),
@@ -186,6 +189,7 @@ pub fn admit_exec_argv(argv: &[&str]) -> Result<ExecCommand, &'static str> {
         ["vm-smoke", "tests::project_is_ready"] => Ok(ExecCommand::TestPass),
         ["vm-smoke", "tests::a_missing_piece_fails"] => Ok(ExecCommand::TestFail),
         ["vm-smoke", "tests::project_was_edited"] => Ok(ExecCommand::TestEdited),
+        ["cargo", "test"] => Ok(ExecCommand::CargoTest),
         ["cargo"] | ["cargo", _] => Err("program missing"),
         _ => Err("command refused"),
     }
@@ -471,6 +475,7 @@ mod tests {
 
     struct RecordingLauncher {
         called: bool,
+        expected: ExecCommand,
         console: String,
         exit_report: Option<Vec<u8>>,
     }
@@ -483,7 +488,7 @@ mod tests {
             command: ExecCommand,
         ) -> Result<ExecRun, String> {
             assert_eq!(adapter, ExecAdapter::AppleVirtualization);
-            assert_eq!(command, ExecCommand::TestPass);
+            assert_eq!(command, self.expected);
             self.called = true;
             Ok(ExecRun {
                 console: self.console.clone(),
@@ -518,6 +523,7 @@ mod tests {
         let image = dir.path().join("rootfs.ext4");
         let mut launcher = RecordingLauncher {
             called: false,
+            expected: ExecCommand::TestPass,
             console: "must not run".into(),
             exit_report: Some(b"0\n".to_vec()),
         };
@@ -537,6 +543,7 @@ mod tests {
         let image = ext4_image(&dir);
         let mut launcher = RecordingLauncher {
             called: false,
+            expected: ExecCommand::TestPass,
             console: "cargo test: ok".into(),
             exit_report: Some(b"0\n".to_vec()),
         };
@@ -644,6 +651,7 @@ mod tests {
         let image = ext4_image(&dir);
         let mut launcher = RecordingLauncher {
             called: false,
+            expected: ExecCommand::TestPass,
             console: log.clone(),
             exit_report: Some(b"0\n".to_vec()),
         };
@@ -751,8 +759,19 @@ mod tests {
     fn cargo_is_not_in_the_image_and_an_unknown_command_does_not_launch() {
         assert!(admit_listed_file("notes.txt").is_ok());
         assert_eq!(admit_listed_file("/tmp/secret"), Err("host path"));
-        assert_eq!(admit_exec_argv(&["cargo", "test"]), Err("program missing"));
-        assert_eq!(admit_exec_argv(&["nope"]), Err("command refused"));
+        assert_eq!(
+            admit_exec_argv(&["cargo", "test"]),
+            Ok(ExecCommand::CargoTest)
+        );
+        assert_eq!(ExecCommand::CargoTest.token(), "cargo-test");
+        for (argv, reason) in [
+            (&["cargo"][..], "program missing"),
+            (&["cargo", "build"][..], "program missing"),
+            (&["cargo", "test", "--offline"][..], "command refused"),
+            (&["nope"][..], "command refused"),
+        ] {
+            assert_eq!(admit_exec_argv(argv), Err(reason), "{argv:?}");
+        }
         assert_eq!(
             admit_exec_argv(&["vm-smoke", "tests::project_is_ready"]),
             Ok(ExecCommand::TestPass)
@@ -791,15 +810,30 @@ mod tests {
         let image = ext4_image(&dir);
         let mut launcher = RecordingLauncher {
             called: false,
-            console: "must not run".into(),
+            expected: ExecCommand::CargoTest,
+            console: "cargo test: ok".into(),
             exit_report: Some(b"0\n".to_vec()),
         };
         let mut ask = ready(&image, Some("grant-1"), ExecHost::Macos);
         ask.argv = &["cargo", "test"];
-        assert_eq!(begin_exec(&ask, &mut launcher), Err("program missing"));
-        assert!(!launcher.called);
-        ask.argv = &["nope"];
-        assert_eq!(begin_exec(&ask, &mut launcher), Err("command refused"));
+        assert_eq!(
+            begin_exec(&ask, &mut launcher).map(|body| body.exit_code),
+            Ok(0)
+        );
+        assert!(launcher.called);
+        launcher.called = false;
+        for (argv, reason) in [
+            (&["cargo"][..], "program missing"),
+            (&["cargo", "build"][..], "program missing"),
+            (&["cargo", "test", "--offline"][..], "command refused"),
+            (&["nope"][..], "command refused"),
+        ] {
+            ask.argv = argv;
+            assert_eq!(begin_exec(&ask, &mut launcher), Err(reason), "{argv:?}");
+            assert!(!launcher.called);
+        }
+        ask.workspace = "/tmp/demo";
+        assert_eq!(begin_exec(&ask, &mut launcher), Err("host path"));
         assert!(!launcher.called);
     }
 

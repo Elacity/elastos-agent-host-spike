@@ -950,6 +950,14 @@ async fn exec_smoke_image_prints_hello() {
 
     assert_eq!(
         elastos_compute::exec_vm::admit_exec_argv(&["cargo", "test"]),
+        Ok(elastos_compute::exec_vm::ExecCommand::CargoTest)
+    );
+    assert_eq!(
+        elastos_compute::exec_vm::ExecCommand::CargoTest.token(),
+        "cargo-test"
+    );
+    assert_eq!(
+        elastos_compute::exec_vm::admit_exec_argv(&["cargo", "build"]),
         Err("program missing")
     );
     assert_eq!(
