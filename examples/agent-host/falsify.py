@@ -40,6 +40,7 @@ import contextlib
 import io
 import json
 import inspect
+import multiprocessing
 import os
 import pathlib
 import re
@@ -47,8 +48,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -220,8 +223,9 @@ def load(path=DATA):
 
 
 def recover_backups():
-    """Put back any original left by a run that was killed mid-falsifier."""
-    for backup in HERE.rglob("*" + BACKUP_SUFFIX):
+    """Put back killed-run originals across the repository (task 005).
+    Provider edits can live outside HERE, regardless of the selected list."""
+    for backup in REPO.rglob("*" + BACKUP_SUFFIX):
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
         os.utime(target)
@@ -862,6 +866,92 @@ def interruption_at_the_end_of_the_edit():
     return interrupted and restored and not backup.exists()
 
 
+def a_killed_provider_edit_is_recovered_on_restart():
+    """Kill the real MP01 edit in an isolated repo, then restart main().
+    Recovery owns host, provider and other repository targets even when the
+    restarted runner selects a list that does not name those edits."""
+    entry = next(entry for entry in load(PROVIDER_MANIFEST.parent / "falsifiers.json")
+                 if entry["id"] == "MP01")
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="restart-", dir=SELF_TEST_DIR) as directory:
+        repo = pathlib.Path(directory)
+        here = repo / "examples" / "agent-host"
+        here.mkdir(parents=True)
+        data = here / "falsifiers.json"
+        data.write_text('{"falsifiers": []}', encoding="utf-8")
+        originals = {}
+        for edit in entry["edits"]:
+            target = (here / edit["file"]).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            originals[target] = (HERE / edit["file"]).read_bytes()
+        edits = list(entry["edits"])
+        for name in ("host.txt", "../../capsules/other-provider/src/lib.rs"):
+            target = (here / name).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            originals[target] = b"original bytes\n"
+            edits.append({"file": name, "old": "original", "new": "mutated"})
+        for target, original in originals.items():
+            target.write_bytes(original)
+            os.utime(target, (1, 1))
+        entry = dict(entry, edits=edits)
+        # Fork inherits the candidate functions, including an in-memory
+        # falsifier. Both children use only this fixture's repository paths.
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+
+        def mutate():
+            with Mutation(entry, here):
+                ready.set()
+                while True:
+                    signal.pause()
+
+        def restart():
+            globals().update(HERE=here, REPO=repo, DATA=data,
+                             SELF_TEST_DIR=repo / "self-test")
+            raise SystemExit(main(["--from", str(data), "--list"]))
+
+        children = []
+        try:
+            child = context.Process(target=mutate)
+            child.start()
+            children.append(child)
+            if not ready.wait(10):
+                return False
+            child.kill()
+            child.join(10)
+            if child.exitcode != -signal.SIGKILL:
+                return False
+            for target, original in originals.items():
+                backup = target.with_name(target.name + BACKUP_SUFFIX)
+                if target.read_bytes() == original or backup.read_bytes() != original:
+                    return False
+            child = context.Process(target=restart)
+            child.start()
+            children.append(child)
+            child.join(10)
+            if child.exitcode != 0:
+                return False
+            for target, original in originals.items():
+                backup = target.with_name(target.name + BACKUP_SUFFIX)
+                if (target.read_bytes() != original or backup.exists()
+                        or target.stat().st_mtime <= 1):
+                    return False
+            # The same edit must match again, then restore its original bytes.
+            with Mutation(entry, here):
+                if any(target.read_bytes() == original
+                       for target, original in originals.items()):
+                    return False
+            return all(target.read_bytes() == original
+                       and not target.with_name(target.name + BACKUP_SUFFIX).exists()
+                       for target, original in originals.items())
+        finally:
+            for child in children:
+                if child.is_alive():
+                    child.kill()
+                child.join()
+                child.close()
+
+
 def the_streams_keep_their_own_lines():
     """stdout and stderr are joined at a line boundary, so a marker at the
     start of stderr is still at the start of a line when stdout ends without
@@ -935,7 +1025,10 @@ def a_data_file_refusal(name, text, reason):
         path = SELF_TEST_DIR / name
         if text is not None:
             SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            if isinstance(text, bytes):
+                path.write_bytes(text)
+            else:
+                path.write_text(text, encoding="utf-8")
         return load_refused(path, reason)
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -944,6 +1037,19 @@ def a_data_file_refusal(name, text, reason):
 def a_missing_data_file_is_refused():
     """A path with no file is a refusal, not an empty run."""
     return a_data_file_refusal("missing.json", None, "the data file does not exist")
+
+
+def an_unreadable_data_file_is_refused():
+    """An existing file whose read fails gives the exact read refusal."""
+    with mock.patch.object(pathlib.Path, "read_text", side_effect=PermissionError("denied")):
+        return a_data_file_refusal("unreadable.json", '{"falsifiers": []}',
+                                   "the data file cannot be read")
+
+
+def an_invalid_utf8_data_file_is_refused():
+    """Invalid UTF-8 reaches the decode refusal before JSON parsing."""
+    return a_data_file_refusal("invalid-utf8.json", b'{"falsifiers": []}\xff',
+                               "the data file is not JSON")
 
 
 def a_non_json_data_file_is_refused():
@@ -1291,7 +1397,10 @@ SELF_TEST_CASES = {
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
+    "a killed provider edit is recovered on restart": a_killed_provider_edit_is_recovered_on_restart,
     "a missing data file is refused": a_missing_data_file_is_refused,
+    "an unreadable data file is refused": an_unreadable_data_file_is_refused,
+    "an invalid utf8 data file is refused": an_invalid_utf8_data_file_is_refused,
     "a non-json data file is refused": a_non_json_data_file_is_refused,
     "a data document must be an object": a_data_document_must_be_an_object,
     "a data document needs a falsifiers list": a_data_document_needs_a_falsifiers_list,

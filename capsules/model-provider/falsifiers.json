@@ -431,10 +431,60 @@
       ],
       "tests": [
         "a missing data file is refused",
+        "an unreadable data file is refused",
+        "an invalid utf8 data file is refused",
         "a duplicate id is refused",
         "an unknown command is refused",
         "an unknown expect is refused",
         "a survivor needs its named test to run"
+      ]
+    },
+    {
+      "id": "PV28",
+      "title": "the read-error refusal is bypassed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    except OSError:\n        load_refuse(path, \"the data file cannot be read\")",
+          "new": "    except OSError:\n        raise"
+        }
+      ],
+      "tests": [
+        "an unreadable data file is refused"
+      ]
+    },
+    {
+      "id": "PV29",
+      "title": "the invalid-UTF-8 refusal is bypassed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    except UnicodeDecodeError:\n        load_refuse(path, \"the data file is not JSON\")",
+          "new": "    except UnicodeDecodeError:\n        raise"
+        }
+      ],
+      "tests": [
+        "an invalid utf8 data file is refused"
+      ]
+    },
+    {
+      "id": "PV30",
+      "title": "startup recovery searches only the agent-host directory",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    for backup in REPO.rglob(\"*\" + BACKUP_SUFFIX):",
+          "new": "    for backup in HERE.rglob(\"*\" + BACKUP_SUFFIX):"
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered on restart"
       ]
     },
     {
