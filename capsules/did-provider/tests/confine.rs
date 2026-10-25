@@ -190,6 +190,72 @@ fn confined_provider_serves_did_operations_under_its_root() {
     reopened.shutdown();
 }
 
+/// `verify_did_recovery` answers under the profile without a genuine proof.
+///
+/// No provider operation produces a recovery proof, so building one here would
+/// copy the signing path inside the test (P10). This case sends a complete,
+/// valid request whose signature is not hex; the handler rejects it on its own
+/// merits. Genuine-proof correctness lives in the in-process unit tests in
+/// `src/main.rs`: `test_verify_did_recovery_accepts_typed_did_key_proof`,
+/// `test_verify_did_recovery_rejects_noncanonical_root_binding`,
+/// `test_verify_did_recovery_rejects_tampered_payload_binding`,
+/// `test_verify_did_recovery_rejects_expired_proof`,
+/// `test_verify_did_recovery_rejects_noncanonical_alias_did_via_shared_codec`,
+/// `test_verify_did_recovery_rejects_overlong_did_via_shared_codec` and
+/// `test_verify_did_recovery_rejects_did_elastos_until_resolver_exists`.
+///
+/// Falsifier: panic in the `hex::decode(sig_hex)` error branch of
+/// `verify_did_recovery` in `src/main.rs`; the confined process dies and this
+/// case fails because no response line comes back.
+#[test]
+fn verify_did_recovery_under_profile() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    let mut provider = ConfinedProvider::start(&root);
+    provider.init(&root);
+
+    let did = provider.ok(json!({ "op": "get_did" }))["did"]
+        .as_str()
+        .expect("device DID")
+        .to_string();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after the epoch")
+        .as_secs();
+
+    let response = provider.send(json!({
+        "op": "verify_did_recovery",
+        "did": did,
+        "principal_id": "person:local:confined",
+        "localhost_root": "localhost://Users/person:local:confined",
+        "protector_id": "protector:did:confined",
+        "data_key_id": "pdek:confined",
+        "nonce": "nonce:confined",
+        "issued_at": now,
+        "expires_at": now + 300,
+        "signature": "not-hex"
+    }));
+    assert_eq!(
+        response["status"], "error",
+        "the refusal must be handled, not a crash: {response}"
+    );
+    assert_eq!(response["code"], "invalid_signature");
+    assert!(
+        response["message"]
+            .as_str()
+            .expect("refusal must state a reason")
+            .starts_with("Invalid hex sig:"),
+        "the refusal must come from the signature decode: {response}"
+    );
+
+    // The handled refusal left the provider in service.
+    provider.ok(json!({ "op": "get_did" }));
+    provider.shutdown();
+}
+
 /// A write through a symlink that leaves the storage root is denied, and the
 /// provider reports it and stays in service.
 ///
