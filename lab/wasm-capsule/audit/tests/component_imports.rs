@@ -93,6 +93,26 @@ fn a_different_version_of_a_declared_interface_is_refused() {
 }
 
 #[test]
+fn component_import_names_with_options_are_refused() {
+    for (name, option) in [
+        ("elastos:bus/runtime@1.0.0", r#"(versionsuffix "-rc.1")"#),
+        ("cache", r#"(implements "wasi:filesystem/types@0.2.0")"#),
+        ("elastos:bus/runtime@1.0.0", r#"(external-id "x")"#),
+    ] {
+        let source = format!(r#"(component (import "{name}" {option} (instance)))"#);
+        let wasm = wat::parse_str(&source).unwrap();
+        let result = audit_component(&wasm, &[name]);
+        assert_eq!(result, Err(Refusal::NotAComponent), "{source}");
+        assert_eq!(result.unwrap_err().to_string(), "not a component");
+    }
+
+    for name in ["cache", "elastos:bus/runtime@1.0.0"] {
+        let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
+        assert_eq!(audit_component(&wasm, &[name]), Ok(vec![name.into()]));
+    }
+}
+
+#[test]
 fn core_module_bytes_are_not_accepted_as_a_component() {
     let wasm = wat::parse_str("(module)").unwrap();
     let refusal = audit_component(&wasm, &[]).unwrap_err();
