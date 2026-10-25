@@ -11,7 +11,7 @@ home](#operator-in-a-throwaway-home). Its verdict gates the earlier 006 launch
 and grant examples. Tasks 008/009 now own the guard and data-directory proof;
 the later grant-controller task owns positive-grant acceptance.
 
-## Launch and data directory (006, source evidence)
+## Launch and data directory (006 discovery, 009 no-operator proof)
 
 The non-interactive component command is `elastos run <component-directory>`.
 The content-addressed form is `elastos run --cid <bundle-CID>`
@@ -35,8 +35,9 @@ appends `elastos` (`elastos/crates/elastos-server/src/sources.rs:12-17`). On thi
 Mac the platform rule is `$HOME/Library/Application Support/elastos`;
 `XDG_DATA_HOME` does not move it. The comment above that function describes the
 Linux rule. A child-process `HOME="$AC_HOME"` moves the Mac data directory to
-`$AC_HOME/Library/Application Support/elastos`. Task 007 must verify that resolved
-path under its fresh temporary root. `run` has no `--data-dir` option
+`$AC_HOME/Library/Application Support/elastos`. Task 009's
+`runtime_data_dir_is_under_throwaway_home` checks this resolution by observing
+Runtime remove a decoy at 008's guarded path. `run` has no `--data-dir` option
 (`main.rs:90-113`). Both the operator and its `run` child need the same fixture
 Home. Clear inherited `ELASTOS_RUNTIME_COORDS_FILE`, which otherwise overrides
 coordinate lookup (`runtime_control.rs:446-450`), and select the fixture's
@@ -69,8 +70,10 @@ at lines 62 and 70. `create_runtime` constructs `LocalFSProvider`
 `create_dir_all` (`elastos/crates/elastos-storage/src/providers/local.rs:18-20`).
 Changing `HOME` or the operator's `serve --storage-path` does not relocate this
 second storage constructor. Thus the commands above establish the launch API,
-not complete throwaway-root isolation. Task 007 must keep that isolation gate
-BLOCKED until this path is contained. Runtime change that flips the blocker:
+not complete throwaway-root isolation. This gate stays BLOCKED until the path
+is contained. Task 009's `run_without_operator_is_refused_with_reason` reaches
+the operator lookup at `run_cmd.rs:230` and returns before this constructor.
+Its contained refusal does not close AC-006-STORAGE. Runtime change that flips the blocker:
 Anders makes the existing component launcher derive storage from the selected
 Home's data directory instead of the fixed path. This lane adds no launcher.
 
@@ -276,13 +279,13 @@ even after AC-010-OFFLINE is resolved. No blocker here receives a passing grade.
 ## Positive-grant decision for 003
 
 **seam exists (operator Runtime's shell-authenticated HTTP approval) —
-fixture/command recipe 003 uses:** after 007 establishes isolation, start the
+fixture/command recipe 003 uses:** after the operator isolation gate passes, start the
 fixture operator as above, then run one build-time-fixed effect probe. The guest
 requests one action within its manifest's resource bound. A fixture-owned shell
 controller approves that exact pending request through the existing API while
 the guest's bridge waits. This is a live-test route in the source, not a measured
 grant or effect result. There is no missing-grant-seam blocker; current execution
-still depends on AC-006-STORAGE and 007. Runtime-selected effects and a guest
+still depends on AC-006-STORAGE and the operator prerequisites in 010. Runtime-selected effects and a guest
 success payload remain BLOCKED under AC-002-ARGS.
 
 1. The fixture controller uses its own operator's `POST /api/auth/attach` with
@@ -373,12 +376,16 @@ requested import scope.
 
 The existing tests cover component bytes, manifest/WIT agreement, imports and
 two independent builds on this machine. They grade artifact properties only.
-Signed-bundle identity, Runtime admission, launch and effect evidence remain
-with 003/007; the harness half of stopped 001 is now 007. These prerequisites
+Signed-bundle identity, Runtime admission and effect evidence remain with later
+tasks. Stopped 007 split into 008's harness and 009's contained refusal; 010
+owns operator discovery for 003. These prerequisites
 are outstanding work, not additional Runtime API blockers or passing grades.
 
-Task 006 made zero spike launches and skipped the full Runtime build: source
-evidence is sufficient for this discovery, and AC-006-STORAGE needs resolution
-before an isolated launch. Mac data-root resolution, real-Home byte identity,
-grant delivery and refusal stderr are **to confirm in 003**, after 007's safety
-guard. No real Home was inspected or started for this discovery.
+Task 006 made zero spike launches and skipped the full Runtime build. Task 009
+checks Mac data-root resolution in `tests/runtime.rs::runtime_data_dir_is_under_throwaway_home`
+and no-operator refusal stderr in `tests/runtime.rs::run_without_operator_is_refused_with_reason`.
+Task 008's guard and cleared launch environment protect the real Home by
+construction; this lane reads only its fixture Home. The real-Home digest was
+dropped when 007 split into 008 and 009. Grant delivery and component-effect
+refusal stderr remain **to confirm in 003** after the operator prerequisites.
+Every blocker above remains open.
