@@ -232,11 +232,13 @@ def load(path=DATA):
 
 # The provider files this runner's falsifiers mutate, relative to REPO. Each
 # exact target is restored on startup; every other provider file stays with
-# its owning runner.
+# its owning runner. The model provider's confinement profile is a target
+# because cc-model-confine's list mutates it through the `provider` command.
 PROVIDER_TARGETS = (
     "capsules/model-provider/src/local_memory.rs",
     "capsules/model-provider/src/journal.rs",
     "capsules/model-provider/src/contract.rs",
+    "capsules/model-provider/confine.sb",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -1000,17 +1002,21 @@ def another_lanes_backup_is_not_recovered():
 def a_killed_provider_edit_is_recovered():
     """Kill real provider edits in an isolated tree, restart through main(),
     and repeat the edit. This lane's memory, journal, journal-contract,
-    idle-engine and adapter targets all come back in either startup mode.
-    Foreign backups stay with their owners."""
+    idle-engine, adapter and model-profile targets all come back in either
+    startup mode. Foreign backups, including the model provider's confinement
+    document, stay with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
+    profile = "../../capsules/model-provider/confine.sb"
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
-             + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"}]}
+             + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
+                {"file": profile, "old": "original bytes", "new": "mutated bytes"}]}
     originals = {edit["file"]: (HERE / edit["file"]).read_bytes()
                  for owned_entry in owned.values() for edit in owned_entry["edits"]}
     originals["owned.txt"] = b"original bytes\n"
+    originals[profile] = b"original bytes\n"
     child = """import json, os, pathlib, runpy, signal, sys
 runner = runpy.run_path(sys.argv[1])
 runner['Mutation'](json.loads(sys.argv[2]), pathlib.Path(sys.argv[3])).__enter__()
@@ -1035,7 +1041,8 @@ os.kill(os.getpid(), signal.SIGKILL)
                 target.write_bytes(original)
                 os.utime(target, (1, 1))
             foreign_targets = [repo / "capsules/wallet-provider/src/local_memory.rs",
-                               repo / "capsules/model-provider/src/lib.rs"]
+                               repo / "capsules/model-provider/src/lib.rs",
+                               repo / "capsules/model-provider/CONFINEMENT.md"]
             for target in foreign_targets:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"foreign mutation\n")

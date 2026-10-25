@@ -921,6 +921,22 @@
       "tests": [
         "a killed provider edit is recovered"
       ]
+    },
+    {
+      "id": "PV42",
+      "title": "startup recovery skips the model provider's confinement profile",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/model-provider/src/contract.rs\",\n    \"capsules/model-provider/confine.sb\",",
+          "new": "    \"capsules/model-provider/src/contract.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
     }
   ]
 }
