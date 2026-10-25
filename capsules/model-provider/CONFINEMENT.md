@@ -99,6 +99,38 @@ This test has no unconfined control. F-cc1c (see Falsifiers) is the evidence
 that the profile refuses the read: with the `STORAGE_PARENT` read widened to
 its subtree, the same `runs_get` returns the run.
 
+## Writes outside the storage root
+
+The profile grants writes only under `STORAGE_ROOT`. Two confined tests send
+the same redirected `init`: `STORAGE_ROOT/escape` is a link to
+`STORAGE_PARENT/outside`, a sibling of the journal root, and the journal path
+`STORAGE_ROOT/escape/inner` leads to the existing directory `outside/inner`.
+`RunJournal::open` in `src/journal.rs` inspects the journal root and then
+`runs/`, and creates a missing `runs/`. Each test watches one refused step:
+
+- The profile refuses the metadata inspect of the outside path, before any
+  write. `init` answers `journal_corrupt`. Test: `model_outside_write_denied`.
+- When only a metadata read of the outside path is added, the sandbox refuses
+  the journal create, and the provider reports `journal_access_denied`
+  (provider task 012). It logs the create of `<journal_dir>/runs` with
+  `Operation not permitted`. Test:
+  `model_outside_create_reports_access_denied`.
+
+The second test runs a test-time copy of `confine.sb` with one fixture grant:
+`file-read-metadata` of `outside/inner`, bound as a resolved path. It is
+metadata only. The fixture adds no content read and no write. The inspect of
+`runs/`, which does not exist yet, needs no grant: the sandbox answers it with
+not-found. The test also checks that the outside sibling keeps its entries,
+modes and bytes, and that a later normal `init` on `STORAGE_ROOT` succeeds.
+
+`redirect_journal_materializes_outside_when_unconfined` is the control for
+both tests: the same fixture and request without a profile create the journal
+under the outside sibling. F-cc8c (see Falsifiers) keeps `(deny default)` and
+every rule, and adds only a write grant on `STORAGE_PARENT`. The create then
+succeeds and `runs/` appears under the outside sibling, so the second test
+fails: it watches the write grant itself. `model_outside_write_denied` still
+passes under F-cc8c, because it is refused at a read.
+
 ## What the profile does not grant: the local engine
 
 A local model run needs three things, and this profile grants none of them:
@@ -184,6 +216,12 @@ profile does not grant: the local engine".
 - `model_outside_read_denied`: a stored run reads back from `STORAGE_ROOT`,
   and the same `runs_get` is refused once the record lives in a sibling of the
   root. See "Reads outside the storage root".
+- `model_outside_create_reports_access_denied`: the same redirected `init`
+  under a test-time copy of `confine.sb` that adds only a metadata read of the
+  outside journal root. The sandbox refuses the journal create, and the
+  answer is `journal_access_denied`. Its control is
+  `redirect_journal_materializes_outside_when_unconfined`. See "Writes
+  outside the storage root".
 - `model_local_offer_fails_closed_under_profile`: an `init` whose one offer is
   a local engine offer fails closed under the profile, writes nothing, and
   leaves the provider in service. See "What the profile does not grant: the
@@ -193,7 +231,9 @@ profile does not grant: the local engine".
   ready. It sends no `runs_create`, so no engine starts.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
-and the JSON answer carries only that code. The detail goes to stderr only.
+and `journal_access_denied` is its code for a refused journal create or write
+(provider task 012). The JSON answer carries only the code and its fixed
+message. The detail goes to stderr only.
 EPERM (`Operation not permitted`) on the redirected path is how the macOS
 sandbox refuses; a corrupt journal or a bad request logs a different detail.
 The control shows that the same request succeeds without the profile, so the
@@ -222,8 +262,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses command `provider` and `expect: caught`. Each
-mutates `confine.sb` only, except F-cc1e, which removes the outside-read
-fixture rule from `tests/confine/main.rs`.
+mutates `confine.sb` only, except the two entries that edit
+`tests/confine/main.rs`: F-cc1e removes the outside-read fixture rule, and
+F-cc8-rm-journal removes the outside-create fixture grant.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -239,15 +280,16 @@ fixture rule from `tests/confine/main.rs`.
 | F-cc1e | Remove the outside-read fixture rule from the test | `model_outside_read_denied` | `runs_get` stops at the record's existence check (`model run is unreadable`), before the open, so the check for EPERM on the open fails. |
 | F-cc7a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_local_offer_fails_closed_under_profile` | The local offer's `init` answers `ok`. `(deny network*)` stays, so no run could complete; the test sends none. |
 | F-cc7b | One line, `(allow file-read*)`, is added after the last rule; `(deny default)` and every other rule stay | `model_local_offer_fails_closed_under_profile` | With reads alone added, the same `init` answers `ok`. So the test watches the profile's read boundary at `base_path`, not only `(deny default)`. |
+| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The redirected `init` answers `ok`. |
+| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
+| F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
-observes is the content open, not a precursor stat. The runner rebuilds the
-test for it. The runner's startup recovery does not restore
-`tests/confine/main.rs`. A run killed during F-cc1e leaves the edited test and
-its `.falsify-original` backup in place. Until the backup is moved back by
-hand, the next F-cc1e run stops with `NO MATCH` and `model_outside_read_denied`
-fails. Adding the file to the runner's recovery list is a change to
-`examples/agent-host/falsify.py`, which the provider lane owns.
+observes is the content open, not a precursor stat. F-cc8-rm-journal does the
+same for the outside-create grant: the refusal that test observes is the
+create, not the inspect before it. The runner rebuilds the test for both. Its
+startup recovery restores `tests/confine/main.rs` after a killed run (provider
+task 015), as it restores `confine.sb`.
 
 The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
 skip and pass, so the runner reports each entry as SURVIVED there.

@@ -489,8 +489,9 @@ fn model_provider_ops_under_profile() {
     provider.shutdown();
 }
 
-/// The redirect fixture shared by `model_outside_write_denied` and its
-/// unconfined control. It creates `STORAGE_ROOT` to hold the link
+/// The redirect fixture shared by `model_outside_write_denied`,
+/// `model_outside_create_reports_access_denied` and their unconfined control.
+/// It creates `STORAGE_ROOT` to hold the link
 /// `STORAGE_ROOT/escape`, which points at `STORAGE_PARENT/outside`, a sibling
 /// of the journal root. The configured journal path
 /// `STORAGE_ROOT/escape/inner` names a place inside the root while it leads
@@ -749,6 +750,90 @@ fn model_outside_read_denied() {
         provider.ok(&run.get),
         stored,
         "the record must read back from STORAGE_ROOT"
+    );
+    provider.shutdown();
+}
+
+/// The outside-create fixture's one rule: metadata, never content, of the
+/// redirected journal root `STORAGE_PARENT/outside/inner`. `RunJournal::open`
+/// inspects that directory, as the journal root and again as the parent of
+/// `runs/`, before it creates `runs/`; this rule lets those inspects pass, so
+/// the operation the profile refuses is the create. The inspect of `runs/`,
+/// which does not exist yet, needs no rule: the sandbox answers it with
+/// not-found, and the provider goes on to create it.
+const CREATE_FIXTURE_RULE: &str =
+    r#"(allow file-read-metadata (literal (param "CREATE_FIXTURE_JOURNAL")))"#;
+
+/// Under the profile the sandbox refuses the redirected journal at the write
+/// itself, and the provider then says that access was denied.
+///
+/// The test runs a fixture copy of `confine.sb` that adds only
+/// `CREATE_FIXTURE_RULE`. With it, the `Redirect` request's `init` passes the
+/// inspect that `model_outside_write_denied` is refused at, and the refused
+/// step is the create of `<journal_dir>/runs` (`fs::create_dir` in
+/// `create_missing_journal_directory`, `src/journal.rs`). The answer is
+/// `journal_access_denied`, the provider logs that create with EPERM
+/// (`Operation not permitted`), the outside sibling keeps its entries, modes
+/// and bytes, and a later normal `init` on `STORAGE_ROOT` succeeds.
+/// `redirect_journal_materializes_outside_when_unconfined` is the control: the
+/// same fixture and request without a profile create the journal under the
+/// outside sibling.
+///
+/// Falsifiers: F-cc8a (`(allow default)`) lets the redirected `init` answer
+/// ok. F-cc8c keeps `(deny default)` and adds only a `file-write*` grant on
+/// `STORAGE_PARENT`; the create then succeeds, `runs/` appears under the
+/// outside sibling, and the answer is no longer `journal_access_denied`, so
+/// this test watches the write grant itself. F-cc8-rm-journal removes the
+/// fixture rule; the sandbox then refuses the inspect first, and `init`
+/// answers `journal_corrupt`.
+#[test]
+fn model_outside_create_reports_access_denied() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = Redirect::prepare("outside-create");
+    // `Storage` resolves its paths, so this is the path the sandbox matches.
+    let profile = FixtureProfile::write(
+        &fixture.storage,
+        CREATE_FIXTURE_RULE,
+        vec![("CREATE_FIXTURE_JOURNAL", fixture.outside.join("inner"))],
+    );
+    let before = tree_snapshot(&fixture.outside);
+    let mut provider = Provider::start(Launch::Fixture(&fixture.storage, &profile));
+
+    let denied = provider.request(&fixture.request);
+    assert_eq!(
+        denied,
+        json!({
+            "status": "error",
+            "code": "journal_access_denied",
+            "message": "model run journal is not writable"
+        }),
+        "the redirected journal create must be refused as access denied"
+    );
+    let logged = provider
+        .logged_fault("journal_access_denied")
+        .expect("the provider must log the journal_access_denied detail");
+    let refused = format!(
+        "create provider journal directory {} (Operation not permitted",
+        fixture.journal_dir.join("runs").display()
+    );
+    assert!(
+        logged.contains(&refused),
+        "the sandbox must refuse the create of runs/ with EPERM: {logged}"
+    );
+
+    assert_eq!(
+        tree_snapshot(&fixture.outside),
+        before,
+        "the outside sibling must keep its entries, modes and bytes"
+    );
+
+    assert!(!fixture.storage.root.join("runs").exists());
+    assert_serving(&provider.ok(&init_request(&fixture.storage, None)));
+    assert!(
+        fixture.storage.root.join("runs").is_dir(),
+        "the later normal init must use STORAGE_ROOT"
     );
     provider.shutdown();
 }
