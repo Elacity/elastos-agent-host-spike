@@ -1,0 +1,24 @@
+;; Seatbelt profile for model-provider: the one source of its confinement.
+;; Under the shared file-profile contract, a launch runs
+;; /usr/bin/sandbox-exec -f confine.sb and binds three resolved paths, the same
+;; names every file profile uses:
+;;   PROVIDER_EXECUTABLE  - the canonical provider binary
+;;   STORAGE_ROOT         - the model journal root: Init.base_path/providers/model-provider,
+;;                          or the configured absolute journal_dir
+;;   STORAGE_PARENT       - the existing parent of STORAGE_ROOT
+;; Every operation no rule grants is refused, including every network operation.
+(version 1)
+(deny default)
+;; The provider speaks stdin/stdout only; no socket or listener is granted.
+(deny network*)
+
+;; Startup: execute only the bound provider binary.
+(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
+;; Startup: every process reads the root directory before main runs.
+(allow file-read-data (literal "/"))
+;; Startup: the Rust runtime reads the page size to place its stack guard page.
+(allow sysctl-read)
+;; Journal: inspect the existing parent while creating the journal root.
+(allow file-read* (literal (param "STORAGE_PARENT")))
+;; Journal: one grant covers the run records under the journal root.
+(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
