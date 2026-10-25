@@ -148,6 +148,15 @@ fn test_state(cache_dir: &std::path::Path) -> GatewayState {
     }
 }
 
+/// Seed the gateway's verified cache with `files` (exact path, bytes) of `cid`.
+fn seed_verified_cache(cache_dir: &std::path::Path, cid: &str, files: &[(&str, &[u8])]) {
+    for (path, bytes) in files {
+        let entry = verified_cache_entry(cache_dir, cid, path);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(entry, bytes).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn gateway_allows_opaque_capsule_preflight_without_granting_unrelated_origins() {
     let dir = tempfile::tempdir().unwrap();

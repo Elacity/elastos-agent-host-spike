@@ -540,9 +540,7 @@ pub(super) async fn serve_ipfs_cid_root(
         return (StatusCode::BAD_REQUEST, "Invalid CID").into_response();
     }
 
-    let cache_root = verified_gateway_cache(&state.cache_dir);
-    let raw_cache = cache_root.join(format!("{}.raw", cid));
-    if let Ok(bytes) = tokio::fs::read(&raw_cache).await {
+    if let Some(bytes) = read_verified_cache(&state, &cid, "").await {
         return (
             StatusCode::OK,
             [("content-type", "application/octet-stream")],
@@ -551,15 +549,13 @@ pub(super) async fn serve_ipfs_cid_root(
             .into_response();
     }
 
-    let cached_index = cache_root.join(&cid).join("index.html");
-    if cached_index.is_file() {
+    if verified_cache_entry(&state.cache_dir, &cid, "index.html").is_file() {
         return serve_directory_root(&state, &cid).await;
     }
 
     match fetch_file_inline(&state, &cid, "").await {
         Ok(bytes) => {
-            let _ = tokio::fs::create_dir_all(&cache_root).await;
-            let _ = tokio::fs::write(&raw_cache, &bytes).await;
+            write_verified_cache(&state, &cid, "", &bytes).await;
             (
                 StatusCode::OK,
                 [("content-type", "application/octet-stream")],
@@ -586,29 +582,15 @@ async fn serve_cid_path_result(
     validate_file_path(file_path).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Fast path: check local cache.
-    let cid_dir = verified_gateway_cache(&state.cache_dir).join(cid);
-    let requested = cid_dir.join(file_path);
-    if cid_dir.is_dir() {
-        let canonical_cid_dir = cid_dir.canonicalize().unwrap_or_else(|_| cid_dir.clone());
-        let canonical_requested = requested
-            .canonicalize()
-            .unwrap_or_else(|_| cid_dir.join(file_path));
-        if canonical_requested.starts_with(&canonical_cid_dir) {
-            if let Ok(bytes) = tokio::fs::read(&requested).await {
-                let ct = content_type(file_path);
-                return Ok((StatusCode::OK, [("content-type", ct)], bytes).into_response());
-            }
-        }
+    if let Some(bytes) = read_verified_cache(state, cid, file_path).await {
+        let ct = content_type(file_path);
+        return Ok((StatusCode::OK, [("content-type", ct)], bytes).into_response());
     }
 
     // Cache miss: fetch the individual file through the content provider.
     match fetch_file_inline(state, cid, file_path).await {
         Ok(bytes) => {
-            let cache_path = cid_dir.join(file_path);
-            if let Some(parent) = cache_path.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            let _ = tokio::fs::write(&cache_path, &bytes).await;
+            write_verified_cache(state, cid, file_path, &bytes).await;
             let ct = content_type(file_path);
             Ok((StatusCode::OK, [("content-type", ct)], bytes).into_response())
         }
@@ -756,16 +738,53 @@ pub(super) async fn serve_cid_file(
     }
 }
 
-/// The gateway cache holds only bytes read through the verified local store,
-/// under this subdirectory. Entries that earlier releases wrote directly under
-/// the cache directory are never read.
-pub(super) fn verified_gateway_cache(cache_dir: &std::path::Path) -> std::path::PathBuf {
-    cache_dir.join("verified")
+/// The gateway cache holds only bytes read through the verified local store:
+/// one file per CID and exact path under `verified/`, named by a SHA-256 of
+/// both, so the volume's case or path rules never merge two paths. Entries that
+/// earlier releases wrote directly under the cache directory are never read.
+pub(super) fn verified_cache_entry(
+    cache_dir: &std::path::Path,
+    cid: &str,
+    path: &str,
+) -> std::path::PathBuf {
+    use sha2::Digest as _;
+    // A CID never contains NUL, so the pair is encoded unambiguously.
+    let key = sha2::Sha256::new()
+        .chain_update(cid.as_bytes())
+        .chain_update([0])
+        .chain_update(path.as_bytes())
+        .finalize();
+    cache_dir.join("verified").join(hex::encode(key))
+}
+
+async fn read_verified_cache(state: &GatewayState, cid: &str, path: &str) -> Option<Vec<u8>> {
+    tokio::fs::read(verified_cache_entry(&state.cache_dir, cid, path))
+        .await
+        .ok()
+}
+
+/// Store one verified read. The bytes take the entry's name only once they are
+/// completely written, so an interrupted write is never served.
+async fn write_verified_cache(state: &GatewayState, cid: &str, path: &str, bytes: &[u8]) {
+    let entry = verified_cache_entry(&state.cache_dir, cid, path);
+    let Some(dir) = entry.parent() else {
+        return;
+    };
+    if tokio::fs::create_dir_all(dir).await.is_err() {
+        return;
+    }
+    let partial = entry.with_extension(format!("partial-{:016x}", rand::random::<u64>()));
+    if tokio::fs::write(&partial, bytes).await.is_err()
+        || tokio::fs::rename(&partial, &entry).await.is_err()
+    {
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
 }
 
 /// Fetch a single file through the local content backend only. Kubo checks each
-/// block against its CID, so the gateway serves and caches only bytes that match
-/// the requested CID; content held only by availability replicas is not served.
+/// block it fetches against its CID, so the gateway serves and caches only bytes
+/// that match the requested CID; content held only by availability replicas is
+/// not served.
 async fn fetch_file_inline(state: &GatewayState, cid: &str, path: &str) -> anyhow::Result<Vec<u8>> {
     let registry = state
         .provider_registry
