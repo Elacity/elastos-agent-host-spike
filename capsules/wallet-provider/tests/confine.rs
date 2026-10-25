@@ -441,6 +441,13 @@ fn is_network_allow(form: &str) -> bool {
     form.starts_with("(allow ") && form.contains("network")
 }
 
+/// Whether `form` is a top-level allow rule that grants every operation by
+/// default. This is the one copy of the rule, used both by the provider's own
+/// profile test and by the shared file-profile contract check (P10).
+fn is_default_allow(form: &str) -> bool {
+    form.starts_with("(allow ") && form.split([' ', '(', ')']).any(|token| token == "default")
+}
+
 /// The profile denies every network operation: it starts from `(deny default)`
 /// and grants no network rule. The provider has no network path of its own,
 /// so this rule is what keeps that true if a later change adds one.
@@ -461,8 +468,7 @@ fn profile_denies_network() {
     );
     for form in &forms {
         assert!(
-            !(form.starts_with("(allow ")
-                && form.split([' ', '(', ')']).any(|token| token == "default")),
+            !is_default_allow(form),
             "the profile must reject allow default, including after deny default: {form}"
         );
         assert!(
@@ -509,9 +515,7 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         ));
     }
     for form in &forms {
-        if form.starts_with("(allow ")
-            && form.split([' ', '(', ')']).any(|token| token == "default")
-        {
+        if is_default_allow(form) {
             return Err(format!("{name} must reject (allow default): {form}"));
         }
         if is_network_allow(form) {
@@ -691,6 +695,50 @@ fn file_profile_contract_rejects_a_network_allow() {
             "the refusal must say a network allow is refused: {refusal}"
         );
     }
+}
+
+/// The one contract check refuses a profile that adds `(allow default)` after
+/// its default denial and names that rule and the profile. The fixture is
+/// built in the test; no file is read.
+///
+/// Falsifier: remove the allow-default rule from `check_profile_contract`;
+/// this test fails because the granting fixture passes.
+#[test]
+fn file_profile_contract_rejects_an_allow_default() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+    let profile = format!("{complete}(allow default)\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a profile with an (allow default) form must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
+        "the refusal must name the profile and the rule: {refusal}"
+    );
+}
+
+/// The one contract check refuses a profile that binds a parameter token the
+/// Runtime bridge does not supply, and names the profile and that token. The
+/// fixtures are built in the test; no file is read.
+///
+/// Falsifier: remove the canonical-token refusal from
+/// `check_profile_contract`; this test fails because the extra-token fixture
+/// passes.
+#[test]
+fn file_profile_contract_rejects_a_non_canonical_token() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+    let profile = format!("{complete}(allow file-read* (literal (param \"READ_FIXTURE_KEY\")))\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a profile with a non-canonical parameter token must fail");
+    assert!(
+        refusal.contains("fixture-provider")
+            && refusal.contains("non-canonical parameter token READ_FIXTURE_KEY"),
+        "the refusal must name the profile and the token: {refusal}"
+    );
 }
 
 /// The list function runs the one contract check over the model profile
