@@ -99,6 +99,54 @@ This test has no unconfined control. F-cc1c (see Falsifiers) is the evidence
 that the profile refuses the read: with the `STORAGE_PARENT` read widened to
 its subtree, the same `runs_get` returns the run.
 
+## What the profile does not grant: the local engine
+
+A local model run needs three things, and this profile grants none of them:
+
+- Reads of the engine and model files under `base_path`, outside
+  `STORAGE_ROOT`. The `init` check reads them (`src/config.rs:815`), and so
+  does the run's hash (`src/config.rs:858`).
+- Executing the configured engine. `PROVIDER_EXECUTABLE` covers the guard,
+  which re-executes the provider binary (`src/local_llama.rs:550`), but not
+  the engine itself.
+- The engine transport: a loopback port the provider reserves for each start
+  (`src/local_llama.rs:704`), or the Unix socket an init config passes in
+  `runtime_local_sockets`.
+
+The first step the profile refuses is `init`, so no run, engine start or port
+is ever reached. The `init` check resolves `base_path` before it reads either
+file, and the profile grants no read of `base_path` or of the directories
+above it. `init` answers `status: error`, `code: internal_error`,
+`message: model provider failed`, and the provider logs
+`[model-provider] internal_error: invalid model provider init config: base_path is unavailable`.
+The check runs before the journal opens, so nothing is written, not even
+`STORAGE_ROOT`. The provider stays in service: a later `init` with the hosted
+offer succeeds.
+
+- `model_local_offer_fails_closed_under_profile` proves this under the
+  profile. It also checks that the engine and model folders keep their
+  entries and bytes.
+- `model_local_offer_accepted_when_unconfined` is the control: the same
+  `init` without the profile answers `status: ok` with the offer ready.
+
+The provider drops the OS error at that step, so the log line carries no
+EPERM. Three things show that the sandbox refused, not a bad fixture: the
+control, F-cc7a (`(allow default)`) and F-cc7b, which keeps `(deny default)`
+and adds only `(allow file-read*)`. Under each falsifier the same `init`
+answers `ok`. So the first engine need this profile does not grant is a read.
+
+The storage operations work under this profile; a configuration with a local
+model offer does not. Do not use this profile for a provider configured with a
+local model offer.
+
+Granting the engine is an open decision for Sasha and Rong. A grant that lets
+a local run complete changes the shared file-profile contract: its one check,
+`both_file_profiles_bind_one_storage_parameter_contract` (see Tests), and its
+Runtime half, "The Runtime bridge change" in `../did-provider/CONFINEMENT.md`.
+The Runtime half of any extension is Anders's (P4). Until the decision lands,
+this profile has no engine grant, and
+`model_local_offer_fails_closed_under_profile` holds the edge closed.
+
 ## Tests
 
 `tests/confine/main.rs` (the cargo test target `confine`) holds this crate's
@@ -110,7 +158,8 @@ profile takes effect without a rebuild. A fixture launch runs a test-time copy
 of `confine.sb` with fixture rules appended. The copy is read from the same
 source, so a profile edit reaches it too. The `init` config carries one hosted
 offer, which touches no file at `init`. A local engine offer reads files
-outside `STORAGE_ROOT`, and this profile does not grant them.
+outside `STORAGE_ROOT`, and this profile does not grant them: see "What the
+profile does not grant: the local engine".
 
 - `model_provider_ops_under_profile`: `STORAGE_PARENT` exists at launch and
   `STORAGE_ROOT` does not. The test drives `init`, `status` and `offers_list`,
@@ -135,6 +184,13 @@ outside `STORAGE_ROOT`, and this profile does not grant them.
 - `model_outside_read_denied`: a stored run reads back from `STORAGE_ROOT`,
   and the same `runs_get` is refused once the record lives in a sibling of the
   root. See "Reads outside the storage root".
+- `model_local_offer_fails_closed_under_profile`: an `init` whose one offer is
+  a local engine offer fails closed under the profile, writes nothing, and
+  leaves the provider in service. See "What the profile does not grant: the
+  local engine".
+- `model_local_offer_accepted_when_unconfined`: the control. The same fixture
+  and the same `init`, without the profile, answer `status: ok` with the offer
+  ready. It sends no `runs_create`, so no engine starts.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and the JSON answer carries only that code. The detail goes to stderr only.
@@ -145,7 +201,7 @@ profile is the only difference between the two runs.
 
 The confined tests print a skip reason and return when `/usr/bin/sandbox-exec`
 is absent. When it is present and the sandbox refuses to launch the binary,
-they fail. The control needs no sandbox and runs on every Unix host.
+they fail. The controls need no sandbox and run on every Unix host.
 
 The profile shape has one check (P10):
 `both_file_profiles_bind_one_storage_parameter_contract` in
@@ -181,6 +237,8 @@ fixture rule from `tests/confine/main.rs`.
 | F-cc1c | The `STORAGE_PARENT` read becomes `subpath`, so it covers the parent's whole subtree | `model_outside_read_denied` | The outside `runs_get` answers `ok` with the run: the record outside the root is read and returned. |
 | F-cc1d | The `STORAGE_ROOT` grant keeps `file-write*` and loses `file-read*` | `model_outside_read_denied` | The first `init` answers `journal_corrupt`: the provider cannot inspect its own journal root, so the test fails before its in-root read. |
 | F-cc1e | Remove the outside-read fixture rule from the test | `model_outside_read_denied` | `runs_get` stops at the record's existence check (`model run is unreadable`), before the open, so the check for EPERM on the open fails. |
+| F-cc7a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_local_offer_fails_closed_under_profile` | The local offer's `init` answers `ok`. `(deny network*)` stays, so no run could complete; the test sends none. |
+| F-cc7b | One line, `(allow file-read*)`, is added after the last rule; `(deny default)` and every other rule stay | `model_local_offer_fails_closed_under_profile` | With reads alone added, the same `init` answers `ok`. So the test watches the profile's read boundary at `base_path`, not only `(deny default)`. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. The runner rebuilds the
