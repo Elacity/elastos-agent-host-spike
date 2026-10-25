@@ -193,3 +193,8 @@ back only together with a named test that needs it.
 
 Run `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml`
 from the repository root. The existing 102 unit tests remain part of this gate.
+
+The one runner applies and restores each registered falsifier with
+`python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`
+from the repository root; the list's edit paths are relative to
+`examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
