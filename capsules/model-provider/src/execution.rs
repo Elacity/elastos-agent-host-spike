@@ -3453,6 +3453,81 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_llama_refuses_input_and_output_that_reach_the_context_window() {
+        let root = temp_root("local-llama-context-window-full");
+        let (offer, events, root) = local_llama_offer(&root, "healthy");
+        let limits = offer.summary().context.unwrap();
+        assert_eq!(limits.context_window_tokens, 256);
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+
+        // The fixture counts one user message as its UTF-8 length plus 8
+        // template tokens: 216 + 8 = 224; 224 + 32 = 256, the whole window.
+        let input = json!({
+            "schema": elastos_model_contract::TEXT_INPUT_V2_SCHEMA,
+            "messages": [{"role":"user","content":"x".repeat(216)}],
+            "max_output_tokens": 32,
+        });
+        let binding = create_binding("request:budget-at-window", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "failed", "{terminal:#}");
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["code"], "context_rejected",
+            "{terminal:#}"
+        );
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["message"], "model context is full",
+            "{terminal:#}"
+        );
+        let lines = fake_llama_events(&events);
+        assert!(lines.iter().any(|line| line == "count:224"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("request:"))
+                .count(),
+            0,
+            "a full context must not reach generation: {lines:?}"
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_llama_generates_when_input_and_output_stay_under_the_context_window() {
+        let root = temp_root("local-llama-context-window-under");
+        let (offer, events, root) = local_llama_offer(&root, "healthy");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+
+        // One token under the window: 215 + 8 = 223; 223 + 32 = 255.
+        let input = json!({
+            "schema": elastos_model_contract::TEXT_INPUT_V2_SCHEMA,
+            "messages": [{"role":"user","content":"x".repeat(215)}],
+            "max_output_tokens": 32,
+        });
+        let binding = create_binding("request:budget-under-window", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "completed", "{terminal:#}");
+        let lines = fake_llama_events(&events);
+        assert!(lines.iter().any(|line| line == "count:223"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("request:"))
+                .count(),
+            1,
+            "one token under the window must reach generation: {lines:?}"
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_llama_missing_count_fails_before_generation() {
         let root = temp_root("local-llama-missing-count");
         let (offer, events, root) = local_llama_offer(&root, "incomplete_count");
@@ -3464,6 +3539,53 @@ mod tests {
         let run_id = created["data"]["run_id"].as_str().unwrap();
         let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
         assert_eq!(terminal["data"]["status"], "failed");
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["code"],
+            "response_malformed"
+        );
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["message"],
+            "model backend returned invalid data"
+        );
+        assert_eq!(
+            crate::test_support::adapter_detail_for(run_id).as_deref(),
+            Some("missing chat input token count")
+        );
+        assert_eq!(
+            fake_llama_events(&events)
+                .iter()
+                .filter(|line| line.starts_with("request:"))
+                .count(),
+            0
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_llama_zero_count_fails_before_generation() {
+        let root = temp_root("local-llama-zero-count");
+        let (offer, events, root) = local_llama_offer(&root, "zero_count");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+        let input = text_input("hello");
+        let binding = create_binding("request:zero-count", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "failed");
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["code"],
+            "response_malformed"
+        );
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["message"],
+            "model backend returned invalid data"
+        );
+        assert_eq!(
+            crate::test_support::adapter_detail_for(run_id).as_deref(),
+            Some("missing chat input token count")
+        );
         assert_eq!(
             fake_llama_events(&events)
                 .iter()

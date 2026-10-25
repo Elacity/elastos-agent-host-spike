@@ -1488,6 +1488,10 @@ async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
             return true;
         }
         Err(fault) => {
+            // The public terminal carries the error class, not the detail.
+            // The test seam keeps it, keyed by this run.
+            #[cfg(test)]
+            crate::test_support::record_adapter_detail(&task.run_id, fault.detail.as_deref());
             if let Some(timing) = &timing {
                 timing.record(LocalTimingStage::RunFailed);
             }
