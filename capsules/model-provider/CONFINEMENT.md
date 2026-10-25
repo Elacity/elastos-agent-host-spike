@@ -59,6 +59,46 @@ startup needs.
 `(deny network*)` is held by the shared contract check, not by a behaviour
 test here (see Tests).
 
+## Reads outside the storage root
+
+Outside `STORAGE_ROOT` the profile allows only the startup reads (the root
+directory `/` and kernel facts) and the `STORAGE_PARENT` directory itself,
+nothing below it. `(deny default)` refuses every other read, including the
+contents of every file outside the root. So the provider cannot adopt or
+disclose state it was not granted (P3, P11). A run record outside the root can
+be neither read nor returned. An outside journal root cannot even be inspected
+(`model_outside_write_denied`).
+
+`model_outside_read_denied` proves this with the provider's run read,
+`runs_get`. `RunJournal::load_run` in `src/journal.rs` serves it. It first
+checks that the run record exists and is a private regular file, then opens
+the record and reads its contents.
+
+- A first launch under `confine.sb` stores one run of the hosted offer with
+  `runs_create` and reads it back with `runs_get`. The binary refuses hosted
+  dispatch before any socket, so the run is stored as failed and needs no
+  backend. This is a real content read inside the root.
+- A second launch runs a test-time copy of `confine.sb` with one fixture
+  rule: `file-read-metadata` of the record at its outside path. Under the real
+  profile even that metadata is refused. The rule lets `runs_get` pass its
+  existence checks, so the refused operation is the open that reads the
+  record. The fixture adds no content read and no write.
+- After `init`, the test moves `STORAGE_ROOT/runs` to
+  `STORAGE_PARENT/outside/runs`, under `outside`, a sibling of the journal
+  root, and links `STORAGE_ROOT/runs` to it. The record's path still names a
+  place inside the root, but it leads outside. The link comes after `init`
+  because the provider itself refuses a symlinked run directory at `init`; the
+  test needs the sandbox to decide.
+- The same `runs_get` answers `journal_corrupt` with no run data. The provider
+  logs `failed to open model run journal: Operation not permitted`. The
+  outside sibling keeps its entries and bytes, and the provider still answers
+  `offers_list`. With the link removed and the directory moved back,
+  `runs_get` returns the stored run again.
+
+This test has no unconfined control. F-cc1c (see Falsifiers) is the evidence
+that the profile refuses the read: with the `STORAGE_PARENT` read widened to
+its subtree, the same `runs_get` returns the run.
+
 ## Tests
 
 `tests/confine/main.rs` (the cargo test target `confine`) holds this crate's
@@ -66,7 +106,9 @@ one sandboxed launcher. It runs the built binary under
 `/usr/bin/sandbox-exec -f confine.sb`, binds the three parameters to resolved
 paths, and speaks the normal stdin/stdout protocol. `sandbox-exec` reads
 `confine.sb` from `CARGO_MANIFEST_DIR` at every launch, so an edit to the
-profile takes effect without a rebuild. The `init` config carries one hosted
+profile takes effect without a rebuild. A fixture launch runs a test-time copy
+of `confine.sb` with fixture rules appended. The copy is read from the same
+source, so a profile edit reaches it too. The `init` config carries one hosted
 offer, which touches no file at `init`. A local engine offer reads files
 outside `STORAGE_ROOT`, and this profile does not grant them.
 
@@ -90,6 +132,9 @@ outside `STORAGE_ROOT`, and this profile does not grant them.
 - `redirect_journal_materializes_outside_when_unconfined`: the control. The
   same fixture and the same request, without the profile, answer `status: ok`
   and create the journal (`outside/inner/runs`) under the outside sibling.
+- `model_outside_read_denied`: a stored run reads back from `STORAGE_ROOT`,
+  and the same `runs_get` is refused once the record lives in a sibling of the
+  root. See "Reads outside the storage root".
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and the JSON answer carries only that code. The detail goes to stderr only.
@@ -120,8 +165,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 ## Falsifiers
 
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
-runner. Every entry uses command `provider` and `expect: caught`, and each
-mutates `confine.sb` only.
+runner. Every entry uses command `provider` and `expect: caught`. Each
+mutates `confine.sb` only, except F-cc1e, which removes the outside-read
+fixture rule from `tests/confine/main.rs`.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -132,6 +178,18 @@ mutates `confine.sb` only.
 | F-cc1-rm-sysctl | Remove `(allow sysctl-read)` | `model_provider_ops_under_profile` | No answer to `init`: SIGABRT. |
 | F-cc1-rm-parent | Remove the `STORAGE_PARENT` read | `model_provider_ops_under_profile` | `init` answers `journal_corrupt`. |
 | F-cc1-rm-storage | Remove the `STORAGE_ROOT` read/write grant | `model_provider_ops_under_profile` | `init` answers `journal_access_denied` (provider task 012). |
+| F-cc1c | The `STORAGE_PARENT` read becomes `subpath`, so it covers the parent's whole subtree | `model_outside_read_denied` | The outside `runs_get` answers `ok` with the run: the record outside the root is read and returned. |
+| F-cc1d | The `STORAGE_ROOT` grant keeps `file-write*` and loses `file-read*` | `model_outside_read_denied` | The first `init` answers `journal_corrupt`: the provider cannot inspect its own journal root, so the test fails before its in-root read. |
+| F-cc1e | Remove the outside-read fixture rule from the test | `model_outside_read_denied` | `runs_get` stops at the record's existence check (`model run is unreadable`), before the open, so the check for EPERM on the open fails. |
+
+F-cc1e proves that the fixture rule is needed, so the refusal the test
+observes is the content open, not a precursor stat. The runner rebuilds the
+test for it. The runner's startup recovery does not restore
+`tests/confine/main.rs`. A run killed during F-cc1e leaves the edited test and
+its `.falsify-original` backup in place. Until the backup is moved back by
+hand, the next F-cc1e run stops with `NO MATCH` and `model_outside_read_denied`
+fails. Adding the file to the runner's recovery list is a change to
+`examples/agent-host/falsify.py`, which the provider lane owns.
 
 The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
 skip and pass, so the runner reports each entry as SURVIVED there.

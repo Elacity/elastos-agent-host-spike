@@ -8,7 +8,9 @@
 //!
 //! `Provider` is the crate's one sandboxed launcher. Its unconfined launch
 //! runs the same binary with the same pipes and differs only by the profile,
-//! so a control run shows what the profile stops.
+//! so a control run shows what the profile stops. Its fixture launch runs a
+//! test-time copy of `confine.sb` with fixture rules appended; the copy is
+//! made from the one profile source, so a `confine.sb` edit reaches it too.
 //!
 //! When `/usr/bin/sandbox-exec` is absent a confined test prints why it did
 //! not run and returns; it never passes silently. The one profile-shape check
@@ -17,11 +19,16 @@
 
 #![cfg(unix)]
 
-// This target uses only the temporary root helper and the event timeout.
+// This target uses only the temporary root helper, the request id helper and
+// the event timeout.
 #[allow(dead_code)]
 #[path = "../../src/test_support.rs"]
 mod test_support;
 
+use elastos_model_contract::{
+    model_input_hash, model_run_id, RuntimeAccessBinding, RuntimeCreateBinding,
+    RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA, TEXT_INPUT_V1_SCHEMA,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -81,8 +88,55 @@ impl Storage {
 enum Launch<'a> {
     /// Under `confine.sb`, with the contract's three parameters bound.
     Confined(&'a Storage),
+    /// Under a test-time copy of `confine.sb` with fixture rules appended,
+    /// with the contract's three parameters and the fixture's own bound.
+    Fixture(&'a Storage, &'a FixtureProfile),
     /// The same binary and pipes without the profile: a control run.
     Unconfined,
+}
+
+/// A test-time copy of `confine.sb` with fixture rules appended. The copy is
+/// read from the one profile source when the test writes it, so a
+/// `confine.sb` edit reaches the fixture launch as it reaches the plain one.
+/// A fixture rule grants only what one test needs to reach the operation it
+/// proves refused.
+struct FixtureProfile {
+    path: PathBuf,
+    parameters: Vec<(&'static str, PathBuf)>,
+}
+
+impl FixtureProfile {
+    fn write(storage: &Storage, rules: &str, parameters: Vec<(&'static str, PathBuf)>) -> Self {
+        let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
+        let path = storage.base.join("fixture-confine.sb");
+        fs::write(&path, format!("{profile}\n{rules}\n")).expect("fixture profile");
+        Self { path, parameters }
+    }
+}
+
+/// `sandbox-exec` starting `binary` under `profile`, with the contract's three
+/// parameters and any fixture parameters bound.
+fn sandboxed(
+    profile: &Path,
+    storage: &Storage,
+    fixture: &[(&'static str, PathBuf)],
+    binary: &Path,
+) -> Command {
+    let mut command = Command::new(SANDBOX_EXEC);
+    command
+        .arg("-f")
+        .arg(profile)
+        .arg("-D")
+        .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()))
+        .arg("-D")
+        .arg(format!("STORAGE_ROOT={}", storage.root.display()))
+        .arg("-D")
+        .arg(format!("STORAGE_PARENT={}", storage.parent.display()));
+    for (name, path) in fixture {
+        command.arg("-D").arg(format!("{name}={}", path.display()));
+    }
+    command.arg(binary);
+    command
 }
 
 /// The real provider binary speaking its line-delimited JSON protocol.
@@ -97,19 +151,9 @@ impl Provider {
     fn start(launch: Launch<'_>) -> Self {
         let binary = resolved(Path::new(PROVIDER_BINARY));
         let mut command = match launch {
-            Launch::Confined(storage) => {
-                let mut command = Command::new(SANDBOX_EXEC);
-                command
-                    .arg("-f")
-                    .arg(PROFILE_PATH)
-                    .arg("-D")
-                    .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()))
-                    .arg("-D")
-                    .arg(format!("STORAGE_ROOT={}", storage.root.display()))
-                    .arg("-D")
-                    .arg(format!("STORAGE_PARENT={}", storage.parent.display()))
-                    .arg(&binary);
-                command
+            Launch::Confined(storage) => sandboxed(Path::new(PROFILE_PATH), storage, &[], &binary),
+            Launch::Fixture(storage, fixture) => {
+                sandboxed(&fixture.path, storage, &fixture.parameters, &binary)
             }
             Launch::Unconfined => Command::new(&binary),
         };
@@ -309,6 +353,55 @@ fn assert_serving(data: &Value) {
     assert_eq!(data["offers_ready"], 1, "{data}");
 }
 
+/// One run of the hosted offer: the `runs_create` that stores it and the
+/// `runs_get` that reads it back from the journal. The binary refuses hosted
+/// dispatch before any socket, so the run is stored as failed and needs no
+/// backend.
+struct HostedRun {
+    create: Value,
+    get: Value,
+}
+
+impl HostedRun {
+    fn new(label: &str) -> Self {
+        let input = json!({ "schema": TEXT_INPUT_V1_SCHEMA, "prompt": "confined read" });
+        let binding = RuntimeCreateBinding {
+            schema: RUNTIME_CREATE_BINDING_SCHEMA.into(),
+            principal_id: "person:local:confine".into(),
+            session_id: "session:confine".into(),
+            capsule_id: "assistant".into(),
+            grant_id: "grant:confine".into(),
+            request_id: test_support::fixture_model_request_id(label),
+            offer_id: HOSTED_OFFER.into(),
+            operation: "text.generate".into(),
+            input_hash: model_input_hash(&input).expect("fixture input hash"),
+        };
+        let access = RuntimeAccessBinding {
+            schema: RUNTIME_ACCESS_BINDING_SCHEMA.into(),
+            principal_id: binding.principal_id.clone(),
+            session_id: binding.session_id.clone(),
+            capsule_id: binding.capsule_id.clone(),
+            grant_id: binding.grant_id.clone(),
+            request_id: binding.request_id.clone(),
+            run_id: model_run_id(&binding),
+        };
+        Self {
+            create: json!({
+                "op": "runs_create",
+                "offer_id": HOSTED_OFFER,
+                "operation": "text.generate",
+                "input": input,
+                "runtime_binding": binding
+            }),
+            get: json!({
+                "op": "runs_get",
+                "run_id": access.run_id,
+                "runtime_binding": access
+            }),
+        }
+    }
+}
+
 /// The confined provider serves `init`, `status` and `offers_list`, and
 /// `init` creates the journal root with `runs/` under `STORAGE_ROOT`.
 ///
@@ -491,5 +584,127 @@ fn redirect_journal_materializes_outside_when_unconfined() {
         "without the profile the redirected journal must land under the outside sibling"
     );
 
+    provider.shutdown();
+}
+
+/// The outside-read fixture's one rule: metadata, never content, of the run
+/// record at its outside path. `runs_get` checks that the record exists and
+/// is a private regular file before it opens it; this rule lets those checks
+/// pass, so the operation the profile refuses is the open that reads the
+/// record.
+const READ_FIXTURE_RULE: &str =
+    r#"(allow file-read-metadata (literal (param "READ_FIXTURE_RECORD")))"#;
+
+/// The one record a single stored run leaves under `runs/`.
+fn only_record(runs: &Path) -> PathBuf {
+    let records: Vec<PathBuf> = fs::read_dir(runs)
+        .expect("readable run directory")
+        .map(|entry| entry.expect("run directory entry").path())
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "one stored run must leave one record: {records:?}"
+    );
+    assert!(
+        records[0].is_file(),
+        "the run record is a file: {records:?}"
+    );
+    records.into_iter().next().expect("one record")
+}
+
+/// Under the profile `runs_get` reads a stored run back from `STORAGE_ROOT`,
+/// and the sandbox refuses the same read once the record lives outside it.
+///
+/// A first launch under `confine.sb` stores one run of the hosted offer and
+/// reads it back: a real content read inside the root. A second launch runs a
+/// fixture copy of `confine.sb` that adds only `READ_FIXTURE_RULE`. After its
+/// `init`, the test moves `STORAGE_ROOT/runs` to `STORAGE_PARENT/outside/runs`,
+/// under a sibling of the journal root, and links `STORAGE_ROOT/runs` to it, so
+/// the record's path still names a place inside the root. The link comes after
+/// `init` because the provider itself refuses a symlinked run directory
+/// there; this test needs the sandbox to decide. The same `runs_get` then
+/// answers `journal_corrupt` with no run data, the provider logs EPERM
+/// (`Operation not permitted`) for the open that reads the record, the outside
+/// sibling keeps its entries and bytes, and the provider still answers
+/// `offers_list`. Moved back, the record reads as before.
+///
+/// Falsifiers: F-cc1c (the `STORAGE_PARENT` read widened to a subpath) lets
+/// the outside read return the run; F-cc1d (the `STORAGE_ROOT` grant without
+/// `file-read*`) fails the first `init`, which cannot inspect the journal
+/// root; F-cc1e (no fixture rule) stops `runs_get` at the record's existence
+/// check (`model run is unreadable`), before the open.
+#[test]
+fn model_outside_read_denied() {
+    if !sandbox_available() {
+        return;
+    }
+    let storage = Storage::prepare("outside-read");
+    let runs = storage.root.join("runs");
+    let run = HostedRun::new("request:outside-read");
+
+    let mut provider = Provider::start(Launch::Confined(&storage));
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    let created = provider.ok(&run.create);
+    assert_eq!(
+        created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
+        "the binary must refuse hosted dispatch before any socket: {created}"
+    );
+    let record = only_record(&runs);
+    let stored = provider.ok(&run.get);
+    assert_eq!(stored, created, "runs_get must return the stored run");
+    provider.shutdown();
+
+    // The fixture binds the record's exact outside path at launch, which the
+    // first launch's stored record names.
+    let outside = storage.parent.join("outside");
+    let outside_runs = outside.join("runs");
+    let outside_record = outside_runs.join(record.file_name().expect("record name"));
+    let fixture = FixtureProfile::write(
+        &storage,
+        READ_FIXTURE_RULE,
+        vec![("READ_FIXTURE_RECORD", outside_record)],
+    );
+    let mut provider = Provider::start(Launch::Fixture(&storage, &fixture));
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    owner_only_directory(&outside);
+    fs::rename(&runs, &outside_runs).expect("move the run directory outside");
+    std::os::unix::fs::symlink(&outside_runs, &runs).expect("link the run directory");
+    let before = tree_snapshot(&outside);
+
+    let denied = provider.request(&run.get);
+    assert_eq!(
+        denied["status"], "error",
+        "the outside read must be refused: {denied}"
+    );
+    assert_eq!(
+        denied["code"], "journal_corrupt",
+        "the refusal must use the provider's unavailable-journal code: {denied}"
+    );
+    assert!(
+        denied.get("data").is_none(),
+        "the refusal must return no run data: {denied}"
+    );
+    let logged = provider
+        .logged_fault("journal_corrupt")
+        .expect("the provider must log the journal_corrupt detail");
+    assert!(
+        logged.contains("failed to open model run journal: Operation not permitted"),
+        "the sandbox must refuse the open that reads the record with EPERM: {logged}"
+    );
+    assert_eq!(
+        tree_snapshot(&outside),
+        before,
+        "the outside sibling must keep its entries and bytes"
+    );
+    provider.ok(&json!({ "op": "offers_list" }));
+
+    fs::remove_file(&runs).expect("remove the run directory link");
+    fs::rename(&outside_runs, &runs).expect("move the run directory back");
+    assert_eq!(
+        provider.ok(&run.get),
+        stored,
+        "the record must read back from STORAGE_ROOT"
+    );
     provider.shutdown();
 }
