@@ -10784,6 +10784,17 @@ mod tests {
         id
     }
 
+    /// The assistant text of an OpenAI-compatible reply, unchanged. The summary
+    /// check judges the model's bytes, so nothing trims or rewrites them here.
+    fn assistant_content(reply: &str) -> String {
+        let reply: serde_json::Value = serde_json::from_str(reply)
+            .unwrap_or_else(|error| panic!("reply is not JSON: {error}"));
+        reply["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_else(|| panic!("reply has no assistant content"))
+            .to_string()
+    }
+
     #[test]
     fn a_compaction_summary_request_uses_the_hosted_model_path() {
         let mut journal = summary_journal();
@@ -11040,6 +11051,36 @@ mod tests {
             .events
             .iter()
             .any(|node| node.text == "a new instruction"));
+    }
+
+    /// The model answer is judged unchanged. A padded answer that the shared
+    /// checker refuses as not shrinking stays unshrunk, so the same model bytes
+    /// cannot get a different verdict.
+    #[test]
+    fn a_padded_model_answer_is_not_trimmed_before_the_check() {
+        let padded = format!("{}hello second turn", " ".repeat(10_000));
+        let reply = serde_json::json!({
+            "choices": [{"message": {"content": padded}}],
+        })
+        .to_string();
+        let answer = assistant_content(&reply);
+        assert_eq!(answer, padded);
+        let required = ["hello".to_string(), "second turn".to_string()];
+        assert_eq!(
+            compact_refusal(&summary_journal(), &answer, &required),
+            Some("summary does not shrink")
+        );
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(answer)),
+            Err("summary does not shrink")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
     }
 
     #[test]

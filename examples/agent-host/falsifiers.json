@@ -553,6 +553,22 @@
    "tests": [
     "a named test that does not run is not a catch"
    ]
+  },
+  {
+   "id": "FS46",
+   "title": "the model answer is trimmed before the summary check, so padded bytes get a different verdict",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or_else(|| panic!(\"reply has no assistant content\"))\n            .to_string()",
+     "new": "        reply[\"choices\"][0][\"message\"][\"content\"]\n            .as_str()\n            .unwrap_or_else(|| panic!(\"reply has no assistant content\"))\n            .trim()\n            .to_string()"
+    }
+   ],
+   "tests": [
+    "tests::a_padded_model_answer_is_not_trimmed_before_the_check"
+   ]
   }
  ]
 }
