@@ -235,6 +235,8 @@ def load(path=DATA):
 # its owning runner.
 PROVIDER_TARGETS = (
     "capsules/model-provider/src/local_memory.rs",
+    "capsules/model-provider/src/journal.rs",
+    "capsules/model-provider/src/contract.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -997,13 +999,13 @@ def another_lanes_backup_is_not_recovered():
 
 def a_killed_provider_edit_is_recovered():
     """Kill real provider edits in an isolated tree, restart through main(),
-    and repeat the edit. This lane's memory, idle-engine and adapter targets
-    all come back in either startup mode. Foreign backups stay with their
-    owners."""
+    and repeat the edit. This lane's memory, journal, journal-contract,
+    idle-engine and adapter targets all come back in either startup mode.
+    Foreign backups stay with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
-             if entry["id"] in ("MP01", "MP02", "MP05")}
-    entry = {"id": "MP01+MP02+MP05",
+             if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
+    entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"}]}
     originals = {edit["file"]: (HERE / edit["file"]).read_bytes()
