@@ -494,9 +494,18 @@ fn persona_write_refusals_keep_their_reasons() {
     }
 }
 
-/// A nickname symlinked outside the root is a storage refusal on `Init` and on
-/// `get_nickname`; a denied lookup never reads as an unset nickname.
-fn nickname_refusal(allow_metadata: bool) {
+/// A nickname symlinked outside the root is refused at the data read; the
+/// loader's exact error reaches `Init` and `get_nickname`, and the provider
+/// keeps serving.
+///
+/// The fixture permits metadata only, so the refusal happens at the data read.
+/// Falsifiers: swallow the loader error (`Init` succeeds) or drop the cached
+/// refusal (`get_nickname` reports `not_set`); both fail this test.
+#[test]
+fn outside_nickname_read_denied() {
+    if !require_sandbox("outside_nickname_read_denied") {
+        return;
+    }
     let (_root, storage) = canonical_tempdir();
     let (_outside, outside) = canonical_tempdir();
     elastos_identity::save_nickname_with_device_key(&storage, &DEVICE_KEY, "alice").unwrap();
@@ -507,27 +516,16 @@ fn nickname_refusal(allow_metadata: bool) {
     let before = std::fs::read(&external).unwrap();
 
     let profile = profile_with(r#"(allow file-read-metadata (subpath (param "OUTSIDE_ROOT")))"#);
-    let mut provider = if allow_metadata {
-        ConfinedProvider::spawn_with_profile(
-            &storage,
-            profile.path(),
-            &[("OUTSIDE_ROOT", &outside)],
-        )
-    } else {
-        ConfinedProvider::spawn(&storage)
-    };
-    let reason = if allow_metadata {
-        // The shared reader returns the OS refusal from the data read.
-        format!(
-            "did-provider: failed to load nickname: {}",
-            permission_error()
-        )
-    } else {
-        format!(
-            "did-provider: failed to load nickname: Metadata lookup failed: {}",
-            permission_error()
-        )
-    };
+    let mut provider = ConfinedProvider::spawn_with_profile(
+        &storage,
+        profile.path(),
+        &[("OUTSIDE_ROOT", &outside)],
+    );
+    // The shared reader returns the OS refusal from the data read.
+    let reason = format!(
+        "did-provider: failed to load nickname: {}",
+        permission_error()
+    );
 
     assert_refusal(&provider.init(&storage), "storage_error", &reason);
     assert_refusal(
@@ -546,18 +544,4 @@ fn nickname_refusal(allow_metadata: bool) {
     assert_ok(&nickname);
     assert_eq!(nickname["data"]["nickname"], "alice");
     assert_ok(&provider.shutdown());
-}
-
-#[test]
-fn outside_nickname_metadata_denied() {
-    if require_sandbox("outside_nickname_metadata_denied") {
-        nickname_refusal(false);
-    }
-}
-
-#[test]
-fn outside_nickname_read_denied() {
-    if require_sandbox("outside_nickname_read_denied") {
-        nickname_refusal(true);
-    }
 }

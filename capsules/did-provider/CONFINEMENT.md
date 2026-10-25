@@ -53,12 +53,18 @@ confirmed missing file permits key creation; a denied metadata lookup reports
 `Metadata lookup failed: ...` and a denied data read reports
 `Read failed: ...`.
 
-Nickname decoding stays with `elastos-identity`: the identity library owns the
-envelope format, the device-key derivation and the trimming rule, so the
-provider keeps one decoder. Before the provider treats a nickname as unset it
-confirms the stored file is absent; a refused lookup becomes the same
-`storage_error` as a refused read. `Init` keeps that refusal and
-`get_nickname` repeats it, so a denied lookup never reads as an unset nickname.
+Nickname loading stays with `elastos-identity`: the identity library owns the
+nickname location, presence, read and decode rules, so the provider keeps one
+path and one decoder. The provider adds its context
+(`did-provider: failed to load nickname: ...`) and caches that refusal, so
+`get_nickname` repeats the same reason instead of reporting an unset nickname.
+
+Prerequisite, outside this task's paths:
+`elastos/crates/elastos-identity/src/store.rs` must replace `Path::exists()`
+in `load_nickname_with_device_key` with `try_exists()` so a denied metadata
+lookup is an error rather than absence. The provider then reports that error
+through the same single call; until the change lands, the provider reports
+what the loader returns.
 
 ## The one Runtime bridge change
 
@@ -110,18 +116,17 @@ storage root:
 - `persona_write_refusals_keep_their_reasons` checks directory creation and
   key persistence denials separately, each with its exact operation name and
   permission error.
-- `outside_nickname_metadata_denied` and `outside_nickname_read_denied` check
-  the two nickname refusals separately. Both `Init` and the next `get_nickname`
-  return the exact storage error. Restoring the file and repeating `Init`
-  restores normal nickname access.
+- `outside_nickname_read_denied` moves the stored nickname outside the root
+  and links it back in. Its fixture profile grants metadata, so the refusal
+  happens at the data read. Both `Init` and the next `get_nickname` return the
+  exact `did-provider: failed to load nickname: Operation not permitted
+  (os error 1)`. Restoring the file and repeating `Init` restores normal
+  nickname access.
 
-`nickname_metadata_change_reports_storage_error` runs the unit-test binary
-under the same profile. The inner run swaps the stored nickname for a symlink
-outside the root, confirms the lookup gets EPERM, and requires both `Init` and
-`get_nickname` to return
-`did-provider: failed to load nickname: Metadata lookup failed: Operation not
-permitted (os error 1)`. Restoring the file and repeating `Init` loads the
-nickname again and leaves the outside file unchanged.
+`nickname_load_refusal_reaches_init_and_get_nickname` writes a malformed
+nickname file and requires the identity library's own refusal, wrapped once as
+`did-provider: failed to load nickname: ...`, from both `Init` and
+`get_nickname`, while `get_did` keeps working. It needs no sandbox.
 
 The tests write skip reasons directly to stderr when `/usr/bin/sandbox-exec`
 is unavailable, so ordinary successful `cargo test` output shows which
@@ -144,21 +149,23 @@ the next run; every restored profile and test passes.
    `outside_persona_metadata_denied` failed with
    `Failed to persist persona key: Operation not permitted (os error 1)`
    instead of `Metadata lookup failed: Operation not permitted (os error 1)`.
-4. Changed the refusal branch in `confirm_nickname_absence` to `Ok(())`.
-   `nickname_metadata_change_reports_storage_error` failed because `Init`
-   returned `Ok` instead of
-   `did-provider: failed to load nickname: Metadata lookup failed: Operation
-   not permitted (os error 1)`.
-5. Replaced the save reason with a generic
+4. Swallowed the loader error in `try_load_nickname` with `unwrap_or(None)`.
+   `nickname_load_refusal_reaches_init_and_get_nickname` failed because `Init`
+   returned `Ok` instead of `did-provider: failed to load nickname: EOF while
+   parsing an object at line 1 column 1`; `outside_nickname_read_denied`
+   failed at the same point.
+5. Removed the cached refusal from `get_nickname`. Both tests failed at
+   `get_nickname`: `left: "not_set"`, `right: "storage_error"`.
+6. Replaced the save reason with a generic
    `did-provider: failed to save nickname`. `outside_write_denied` failed at
    `left: "did-provider: failed to save nickname"`.
-6. Replaced the persona read reason with a generic `Read failed`.
+7. Replaced the persona read reason with a generic `Read failed`.
    `outside_read_denied` failed at `left: "Read failed"`.
-7. Replaced the persona create reason with a generic `Failed to create dir`,
+8. Replaced the persona create reason with a generic `Failed to create dir`,
    then the persist reason with a generic `Failed to persist persona key`.
    `persona_write_refusals_keep_their_reasons` failed once per mutation at
    `left: "Failed to create dir"` and `left: "Failed to persist persona key"`.
-8. Corrupted one character of the returned `payload_hex` in
+9. Corrupted one character of the returned `payload_hex` in
    `sign_chat_message`. `all_operations_under_profile` failed at `the
    provider's own signature must verify against the payload it returned`
    (`left: Bool(false)`, `right: true`).

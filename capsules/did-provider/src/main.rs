@@ -524,16 +524,11 @@ impl DidProvider {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        // One decoder: the identity library owns the nickname envelope, the
-        // device-key derivation and the trimming rule.
-        let nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+        // One owner: the identity library decides the nickname location,
+        // presence, read and decode rules. The provider only adds its context
+        // and keeps the refusal so a later request cannot read it as unset.
+        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
             .map_err(|error| format!("did-provider: failed to load nickname: {error}"))?;
-        if nickname.is_none() {
-            // A refused lookup must not read as an unset nickname. Confirm the
-            // absence with the one path check, and keep the refusal visible.
-            confirm_nickname_absence(&base_dir)?;
-        }
-        self.nickname = nickname;
         Ok(())
     }
 
@@ -573,22 +568,6 @@ fn read_optional_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, Optiona
             .map(Some)
             .map_err(OptionalFileError::Read),
         Err(error) => Err(OptionalFileError::Metadata(error)),
-    }
-}
-
-/// The nickname location the identity library reads and writes.
-fn stored_nickname_path(base_dir: &std::path::Path) -> std::path::PathBuf {
-    base_dir.join("did").join("nickname.enc")
-}
-
-/// Confirm that an unset nickname means a missing or empty file, not a refused
-/// lookup. A denied metadata lookup becomes the storage refusal.
-fn confirm_nickname_absence(base_dir: &std::path::Path) -> Result<(), String> {
-    match stored_nickname_path(base_dir).try_exists() {
-        Ok(_) => Ok(()),
-        Err(error) => Err(format!(
-            "did-provider: failed to load nickname: Metadata lookup failed: {error}"
-        )),
     }
 }
 
@@ -1643,111 +1622,41 @@ mod tests {
         }
     }
 
-    /// A denied nickname lookup is a storage refusal, not an unset nickname.
+    /// A refused nickname load keeps its exact reason through `Init` and
+    /// `get_nickname`.
     ///
-    /// Runs this test binary under `confine.sb`. The inner run swaps the stored
-    /// nickname for a symlink outside the root, so the presence check gets
-    /// EPERM. `Init` and `get_nickname` must repeat the exact refusal, the
-    /// outside file must stay unchanged, and a restored file must load again.
+    /// The identity library owns the nickname read; the provider adds its
+    /// context and caches the refusal so a later request cannot read it as an
+    /// unset nickname. A normal request still succeeds.
     ///
-    /// Falsifier: collapse the metadata refusal into absence; `Init` succeeds
-    /// and this test fails.
+    /// Falsifier: swallow the loader error in `try_load_nickname`; `Init`
+    /// succeeds and this test fails. Falsifier: drop the cached refusal from
+    /// `get_nickname`; it reports `not_set` and this test fails.
     #[test]
-    fn nickname_metadata_change_reports_storage_error() {
-        use std::path::PathBuf;
+    fn nickname_load_refusal_reaches_init_and_get_nickname() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().to_str().unwrap();
+        let path = dir.path().join("did/nickname.enc");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+        // The identity library owns the exact refusal; the provider only adds
+        // its context to that same reason.
+        let library_error =
+            elastos_identity::load_nickname_with_device_key(dir.path(), &make_device_key())
+                .expect_err("the identity library must reject the malformed nickname");
+        let reason = format!("did-provider: failed to load nickname: {library_error}");
 
-        const FIXTURE_ROOT: &str = "DID_PROVIDER_NICKNAME_RACE_ROOT";
-        const OUTSIDE_FILE: &str = "DID_PROVIDER_NICKNAME_RACE_OUTSIDE";
-
-        if let Some(storage) = std::env::var_os(FIXTURE_ROOT) {
-            let storage = PathBuf::from(storage);
-            let outside = PathBuf::from(std::env::var_os(OUTSIDE_FILE).unwrap());
-            let stored = storage.join("did/nickname.enc");
-            let saved = storage.join("did/saved.enc");
-            std::fs::rename(&stored, &saved).unwrap();
-            std::os::unix::fs::symlink(&outside, &stored).unwrap();
-            assert_eq!(
-                std::fs::metadata(&stored).unwrap_err().raw_os_error(),
-                Some(1),
-                "the nickname lookup must be denied"
-            );
-            let reason = format!(
-                "did-provider: failed to load nickname: Metadata lookup failed: {}",
-                std::io::Error::from_raw_os_error(1)
-            );
-            let mut provider = DidProvider::new();
-            let config = serde_json::json!({
-                "base_path": &storage,
+        let mut provider = DidProvider::new();
+        assert_storage_error(
+            provider.init(serde_json::json!({
+                "base_path": base_path,
                 "encryption_key": hex::encode(make_device_key()),
-            });
-            assert_storage_error(
-                provider.handle(Request::Init {
-                    config: config.clone(),
-                }),
-                &reason,
-            );
-            assert_storage_error(provider.handle(Request::GetNickname), &reason);
-            assert!(provider.nickname.is_none());
-            assert!(matches!(
-                provider.handle(Request::GetDid),
-                Response::Ok { .. }
-            ));
-
-            std::fs::remove_file(&stored).unwrap();
-            std::fs::rename(&saved, &stored).unwrap();
-            assert!(matches!(
-                provider.handle(Request::Init { config }),
-                Response::Ok { .. }
-            ));
-            match provider.handle(Request::GetNickname) {
-                Response::Ok { data: Some(data) } => assert_eq!(data["nickname"], "alice"),
-                other => panic!("Expected the restored nickname, got {other:?}"),
-            }
-            return;
-        }
-
-        if !std::path::Path::new("/usr/bin/sandbox-exec").is_file() {
-            writeln!(
-                std::io::stderr().lock(),
-                "SKIP nickname_metadata_change_reports_storage_error: /usr/bin/sandbox-exec is unavailable"
-            )
-            .unwrap();
-            return;
-        }
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let storage = root.path().canonicalize().unwrap();
-        let external = outside.path().canonicalize().unwrap().join("nickname.enc");
-        elastos_identity::save_nickname_with_device_key(&storage, &make_device_key(), "alice")
-            .unwrap();
-        std::fs::copy(storage.join("did/nickname.enc"), &external).unwrap();
-        let before = std::fs::read(&external).unwrap();
-        let binary = std::env::current_exe().unwrap();
-        let output = std::process::Command::new("/usr/bin/sandbox-exec")
-            .arg("-f")
-            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb"))
-            .arg("-D")
-            .arg(format!("STORAGE_ROOT={}", storage.display()))
-            .arg("-D")
-            .arg(format!("PROVIDER_BINARY={}", binary.display()))
-            .arg(&binary)
-            .args([
-                "--exact",
-                "tests::nickname_metadata_change_reports_storage_error",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(FIXTURE_ROOT, &storage)
-            .env(OUTSIDE_FILE, &external)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "controlled nickname refusal failed: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            })),
+            &reason,
         );
-        assert_eq!(std::fs::read(&external).unwrap(), before);
+        assert_storage_error(provider.get_nickname(), &reason);
+        assert!(provider.nickname.is_none());
+        assert!(matches!(provider.get_did(), Response::Ok { .. }));
     }
 
     #[test]
