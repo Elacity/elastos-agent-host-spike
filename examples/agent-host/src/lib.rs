@@ -17,6 +17,8 @@
 //! not start a series. A checkpoint copies the model bytes before a step.
 //! Cancel after that copy does not dispatch, and a crash keeps its
 //! settlement word. A skill under 4000 bytes appends after the head.
+//! A skill from an observed read is admitted only when that read is current
+//! at the stated version and its text hashes to the stated CID.
 //! Over budget leaves the journal unchanged. Compaction keeps the skill.
 //! Opening a turn records a turn id. That id is not the series epoch, and
 //! the model bytes stay unchanged. Two steps in that turn share the epoch.
@@ -1196,17 +1198,24 @@ fn admit_snapshot(journal: &mut Journal, cwd: &str, time: &str, open_files: &str
 const SKILL_BUDGET: usize = 4_000;
 
 /// Append one skill after the head. Empty, over-budget, or host-path text
-/// leaves the journal unchanged.
+/// leaves the journal unchanged and names its cause (`empty`, `over budget`,
+/// `host path`). A journal with no system head refuses as `no head`.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn admit_skill(journal: &mut Journal, text: &str) -> bool {
-    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {
-        return false;
+fn admit_skill(journal: &mut Journal, text: &str) -> Result<(), &'static str> {
+    if text.is_empty() {
+        return Err("empty");
+    }
+    if text.len() > SKILL_BUDGET {
+        return Err("over budget");
+    }
+    if host_path(text) {
+        return Err("host path");
     }
     let Some(head) = journal.events.first() else {
-        return false;
+        return Err("no head");
     };
     if head.role != Role::System || head.source != NodeSource::Head {
-        return false;
+        return Err("no head");
     }
     let head_text = head.text.clone();
     let epoch = journal.epoch;
@@ -1215,8 +1224,42 @@ fn admit_skill(journal: &mut Journal, text: &str) -> bool {
         text: text.to_string(),
         source: NodeSource::Skill,
     });
-    journal.epoch == epoch
+    if journal.epoch == epoch
         && journal.events.first().map(|node| node.text.clone()) == Some(head_text)
+    {
+        Ok(())
+    } else {
+        Err("head moved")
+    }
+}
+
+/// Admit a skill only from text the journal observed whole at `version`, and
+/// only when that text's SHA-256 equals `cid`. Each refusal names its cause:
+/// `not observed`, `stale`, `not whole`, `wrong cid`, and the cause
+/// `admit_skill` returns. The budget, the host-path rule, and the head-first
+/// rule stay in `admit_skill`: this function adds the named-by-hash,
+/// from-a-granted-read gate and no second copy of those rules.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn admit_skill_from_read(
+    journal: &mut Journal,
+    resource: &str,
+    version: u64,
+    cid: &str,
+) -> Result<(), &'static str> {
+    let Some(text) = current_observation(&journal.events, resource)
+        .filter(|row| row.version == version)
+        .and_then(|_| current_observed_text(&journal.events, resource))
+    else {
+        return Err(match current_observation(&journal.events, resource) {
+            None => "not observed",
+            Some(row) if row.version != version => "stale",
+            Some(_) => "not whole",
+        });
+    };
+    if hex_digest(&sha256(text.as_bytes())) != cid {
+        return Err("wrong cid");
+    }
+    admit_skill(journal, &text)
 }
 
 /// The nodes compaction keeps after one summary, in order. Nothing when the
@@ -1425,7 +1468,8 @@ fn compact(journal: &mut Journal, summary: &str) -> bool {
 }
 
 /// Lower-case hex of a digest. A summary step keeps its request digest in
-/// `new`, so an answer can be matched to the history the request saw.
+/// `new`, so an answer can be matched to the history the request saw. It is
+/// also the one hex spelling for a project digest and a skill CID.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn hex_digest(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2966,8 +3010,7 @@ fn quoted_digest_matches(events: &[SurfaceNode], project: &str, log: &str) -> bo
     let Some(digest) = project_tree_hash(&refs) else {
         return false;
     };
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    quoted == hex
+    quoted == hex_digest(&digest)
 }
 
 /// A `project note` line must be the current text of `notes.txt`.
@@ -4371,14 +4414,14 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let len_before_skill = journal.events.len();
         let skill = "Prefer the Runtime grant.";
-        if !admit_skill(&mut journal, skill)
+        if admit_skill(&mut journal, skill).is_err()
             || journal.epoch != epoch
             || journal.events.first().map(|node| node.text.as_str()) != Some(head.as_str())
             || journal.events.len() != len_before_skill + 1
             || journal.events.last().map(|node| node.source.clone()) != Some(NodeSource::Skill)
-            || admit_skill(&mut journal, "")
-            || admit_skill(&mut journal, &"x".repeat(4_001))
-            || admit_skill(&mut journal, "/tmp")
+            || admit_skill(&mut journal, "").is_ok()
+            || admit_skill(&mut journal, &"x".repeat(4_001)).is_ok()
+            || admit_skill(&mut journal, "/tmp").is_ok()
             || journal.events.len() != len_before_skill + 1
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -4410,6 +4453,26 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a workspace snapshot was summarised".to_string(),
+            ));
+        }
+        let mut read_skill = journal.clone();
+        let skill_file = "localhost://Users/self/Projects/demo/SKILL.md";
+        let skill_cid = hex_digest(&sha256(skill.as_bytes()));
+        if !observe(&mut read_skill, skill_file, 1, skill)
+            || admit_skill_from_read(&mut read_skill, skill_file, 1, &skill_cid).is_err()
+            || read_skill.events.last().map(|node| node.source.clone()) != Some(NodeSource::Skill)
+            || admit_skill_from_read(
+                &mut read_skill,
+                skill_file,
+                1,
+                &hex_digest(&sha256(b"other")),
+            )
+            .is_ok()
+            || admit_skill_from_read(&mut read_skill, skill_file, 2, &skill_cid).is_ok()
+            || read_skill.events.len() != journal.events.len() + 2
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a read-named skill was admitted without its observation".to_string(),
             ));
         }
         let visible = derive(&journal.events);
@@ -5925,7 +5988,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut tree = two_turns();
-        if !admit_skill(&mut tree, "Prefer the Runtime grant.")
+        if admit_skill(&mut tree, "Prefer the Runtime grant.").is_err()
             || !observe(
                 &mut tree,
                 "localhost://Users/self/Projects/demo/index.html",
@@ -9155,7 +9218,10 @@ mod tests {
             VisibleRecord::Goal,
             "ship it"
         ));
-        assert!(!admit_skill(&mut journal, "Prefer the Runtime grant."));
+        assert_eq!(
+            admit_skill(&mut journal, "Prefer the Runtime grant."),
+            Err("no head")
+        );
         assert!(!admit_snapshot(
             &mut journal,
             "localhost://Users/self/Projects/demo",
@@ -9189,7 +9255,10 @@ mod tests {
         let notes = "localhost://Users/self/Projects/demo/notes.txt";
         let mut journal = two_turns();
         assert!(observe(&mut journal, notes, 1, "hello from the project"));
-        assert!(admit_skill(&mut journal, &format!("spill\n{notes}\n1")));
+        assert_eq!(
+            admit_skill(&mut journal, &format!("spill\n{notes}\n1")),
+            Ok(())
+        );
         assert_eq!(text_at_spill(&journal.events, notes), None);
         journal.events.push(SurfaceNode {
             role: Role::User,
@@ -9801,7 +9870,7 @@ mod tests {
     fn a_crash_during_compaction_restores_the_saved_bytes() {
         let mut journal = two_turns();
         let skill = "Prefer the Runtime grant.";
-        assert!(admit_skill(&mut journal, skill));
+        assert_eq!(admit_skill(&mut journal, skill), Ok(()));
         let before = journal.clone();
         assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
         assert!(journal.compaction_open);
@@ -12647,7 +12716,10 @@ mod tests {
             "2026-10-20T01:00:00Z",
             "localhost://Users/self/Projects/demo/index.html",
         ));
-        assert!(admit_skill(&mut journal, "Prefer the Runtime grant."));
+        assert_eq!(
+            admit_skill(&mut journal, "Prefer the Runtime grant."),
+            Ok(())
+        );
         admit_assistant(&mut journal, "");
         let note = "localhost://Users/self/Projects/demo/notes.txt";
         assert!(observe(&mut journal, note, 1, "hello from the project"));
@@ -13204,20 +13276,165 @@ mod tests {
     fn an_over_budget_skill_leaves_the_journal_unchanged() {
         let mut journal = two_turns();
         let before = journal.clone();
-        assert!(!admit_skill(&mut journal, ""));
+        assert_eq!(admit_skill(&mut journal, ""), Err("empty"));
         assert_eq!(journal, before);
-        assert!(!admit_skill(&mut journal, "/tmp"));
+        assert_eq!(admit_skill(&mut journal, "/tmp"), Err("host path"));
         assert_eq!(journal, before);
-        assert!(!admit_skill(&mut journal, &"x".repeat(4_001)));
+        assert_eq!(
+            admit_skill(&mut journal, &"x".repeat(4_001)),
+            Err("over budget")
+        );
         assert_eq!(journal, before);
-        assert!(admit_skill(&mut journal, &"x".repeat(SKILL_BUDGET)));
+        assert_eq!(admit_skill(&mut journal, &"x".repeat(SKILL_BUDGET)), Ok(()));
         assert_eq!(journal.events.last().unwrap().text.len(), SKILL_BUDGET);
         assert_eq!(journal.events.last().unwrap().source, NodeSource::Skill);
         assert_eq!(journal.epoch, before.epoch);
         assert_eq!(journal.events[0].text, before.events[0].text);
         let mut empty = empty_journal();
-        assert!(!admit_skill(&mut empty, "Prefer the Runtime grant."));
+        assert_eq!(
+            admit_skill(&mut empty, "Prefer the Runtime grant."),
+            Err("no head")
+        );
         assert!(empty.events.is_empty());
+    }
+
+    #[test]
+    fn a_skill_from_an_observed_read_named_by_hash_is_admitted() {
+        let mut journal = two_turns();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        let text = "Prefer the Runtime grant.";
+        assert!(observe(&mut journal, resource, 1, text));
+        let cid = hex_digest(&sha256(text.as_bytes()));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Ok(())
+        );
+        let last = journal.events.last().unwrap();
+        assert_eq!(last.text, text);
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.source, NodeSource::Skill);
+        assert_eq!(journal.events[0].source, NodeSource::Head);
+    }
+
+    #[test]
+    fn a_skill_cid_that_does_not_match_the_observed_text_is_refused() {
+        let mut journal = two_turns();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        let text = "Prefer the Runtime grant.";
+        assert!(observe(&mut journal, resource, 1, text));
+        let before = journal.clone();
+        let other = hex_digest(&sha256(b"Another skill."));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &other),
+            Err("wrong cid")
+        );
+        assert_eq!(journal, before);
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, ""),
+            Err("wrong cid")
+        );
+        assert_eq!(journal, before);
+        let padded = hex_digest(&sha256(format!("{text} ").as_bytes()));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &padded),
+            Err("wrong cid")
+        );
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn a_skill_from_unobserved_content_is_refused() {
+        let mut journal = two_turns();
+        let text = "Prefer the Runtime grant.";
+        let cid = hex_digest(&sha256(text.as_bytes()));
+        // A person's line is journal text, but no granted read landed.
+        admit_user(&mut journal, text);
+        let before = journal.clone();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Err("not observed")
+        );
+        assert_eq!(journal, before);
+        // A read of another version is not a read of this one.
+        assert!(observe(&mut journal, resource, 2, text));
+        let seen = journal.clone();
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Err("stale")
+        );
+        assert_eq!(journal, seen);
+        // A host path cannot be observed, so it cannot supply a skill.
+        assert_eq!(
+            admit_skill_from_read(&mut journal, "/tmp/SKILL.md", 1, &cid),
+            Err("not observed")
+        );
+        assert_eq!(journal, seen);
+        // A windowed read does not show the whole text, so it cannot.
+        let windowed = "localhost://Users/self/Projects/demo/window.md";
+        assert!(observe_read(
+            &mut journal,
+            windowed,
+            1,
+            "rn-1",
+            Some(2),
+            true,
+            "beta\ngam"
+        ));
+        let seen = journal.clone();
+        assert_eq!(
+            admit_skill_from_read(
+                &mut journal,
+                windowed,
+                1,
+                &hex_digest(&sha256(b"beta\ngam"))
+            ),
+            Err("not whole")
+        );
+        assert_eq!(journal, seen);
+    }
+
+    #[test]
+    fn an_over_budget_or_host_path_skill_from_a_read_is_still_refused() {
+        let mut journal = two_turns();
+        let resource = "localhost://Users/self/Projects/demo/SKILL.md";
+        let long = "x".repeat(4_001);
+        assert!(observe(&mut journal, resource, 1, &long));
+        let before = journal.clone();
+        let cid = hex_digest(&sha256(long.as_bytes()));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 1, &cid),
+            Err("over budget")
+        );
+        assert_eq!(journal, before);
+        let host = "/tmp";
+        assert!(observe(&mut journal, resource, 2, host));
+        let before = journal.clone();
+        let cid = hex_digest(&sha256(host.as_bytes()));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 2, &cid),
+            Err("host path")
+        );
+        assert_eq!(journal, before);
+        assert!(observe(&mut journal, resource, 3, ""));
+        let before = journal.clone();
+        let cid = hex_digest(&sha256(b""));
+        assert_eq!(
+            admit_skill_from_read(&mut journal, resource, 3, &cid),
+            Err("empty")
+        );
+        assert_eq!(journal, before);
+        // A whole, matching read still needs the system head.
+        let text = "Prefer the Runtime grant.";
+        let cid = hex_digest(&sha256(text.as_bytes()));
+        let mut headless = empty_journal();
+        assert!(observe(&mut headless, resource, 1, text));
+        let before = headless.clone();
+        assert_eq!(
+            admit_skill_from_read(&mut headless, resource, 1, &cid),
+            Err("no head")
+        );
+        assert_eq!(headless, before);
     }
 
     #[test]
@@ -13225,7 +13442,7 @@ mod tests {
         let mut journal = two_turns();
         let skill = "Prefer the Runtime grant.";
         let head = journal.events[0].text.clone();
-        assert!(admit_skill(&mut journal, skill));
+        assert_eq!(admit_skill(&mut journal, skill), Ok(()));
         assert!(compact(&mut journal, COMPACTION_SUMMARY));
         assert_eq!(journal.events[0].text, head);
         assert_eq!(journal.events[0].source, NodeSource::Head);
@@ -13317,7 +13534,10 @@ mod tests {
     fn compaction_keeps_the_project_tree() {
         let mut journal = two_turns();
         let project = "localhost://Users/self/Projects/demo";
-        assert!(admit_skill(&mut journal, "Prefer the Runtime grant."));
+        assert_eq!(
+            admit_skill(&mut journal, "Prefer the Runtime grant."),
+            Ok(())
+        );
         assert!(observe(
             &mut journal,
             "localhost://Users/self/Projects/demo/index.html",
@@ -15283,7 +15503,10 @@ mod tests {
         let head = journal.events[0].text.clone();
         admit_tool_result(&mut journal, &"x".repeat(200));
         admit_tool_result(&mut journal, "ok");
-        assert!(admit_skill(&mut journal, "Prefer the Runtime grant."));
+        assert_eq!(
+            admit_skill(&mut journal, "Prefer the Runtime grant."),
+            Ok(())
+        );
         let before = shadowed_summary_input(&journal).unwrap();
         assert!(before.starts_with(SYSTEM_HEAD));
         assert!(before.contains(&"x".repeat(200)));
@@ -15320,7 +15543,10 @@ mod tests {
     #[test]
     fn a_skill_replays_with_its_source() {
         let mut journal = two_turns();
-        assert!(admit_skill(&mut journal, "Prefer the Runtime grant."));
+        assert_eq!(
+            admit_skill(&mut journal, "Prefer the Runtime grant."),
+            Ok(())
+        );
         let recorded = model_bytes(&journal.events).unwrap();
         let restored = replay(&recorded).unwrap();
         assert_eq!(restored, journal.events);

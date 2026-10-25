@@ -10,8 +10,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {",
-     "new": "    if text.is_empty() || host_path(text) {"
+     "old": "    if text.len() > SKILL_BUDGET {\n        return Err(\"over budget\");\n    }",
+     "new": "    if text.len() > SKILL_BUDGET && false {\n        return Err(\"over budget\");\n    }"
     }
    ],
    "tests": [
@@ -26,8 +26,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {",
-     "new": "    if text.is_empty() || text.len() > SKILL_BUDGET {"
+     "old": "    if host_path(text) {\n        return Err(\"host path\");\n    }",
+     "new": "    if host_path(text) && false {\n        return Err(\"host path\");\n    }"
     }
    ],
    "tests": [
@@ -42,8 +42,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {",
-     "new": "    if text.len() > SKILL_BUDGET || host_path(text) {"
+     "old": "    if text.is_empty() {\n        return Err(\"empty\");\n    }\n    if text.len() > SKILL_BUDGET {",
+     "new": "    if text.is_empty() && false {\n        return Err(\"empty\");\n    }\n    if text.len() > SKILL_BUDGET {"
     }
    ],
    "tests": [
@@ -1211,6 +1211,86 @@
    ],
    "tests": [
     "tests::a_model_reply_without_assistant_text_is_not_a_completion"
+   ]
+  },
+  {
+   "id": "FS59",
+   "title": "the stated skill CID is not compared, so content with another hash is admitted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if hex_digest(&sha256(text.as_bytes())) != cid {\n        return Err(\"wrong cid\");\n    }",
+     "new": "    if cid.is_empty() {\n        return Err(\"wrong cid\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_cid_that_does_not_match_the_observed_text_is_refused"
+   ]
+  },
+  {
+   "id": "FS60",
+   "title": "a missing observation falls back to the last journal line, so unobserved content is admitted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(text) = current_observation(&journal.events, resource)\n        .filter(|row| row.version == version)\n        .and_then(|_| current_observed_text(&journal.events, resource))\n    else {\n        return Err(match current_observation(&journal.events, resource) {\n            None => \"not observed\",\n            Some(row) if row.version != version => \"stale\",\n            Some(_) => \"not whole\",\n        });\n    };",
+     "new": "    let text = current_observed_text(&journal.events, resource)\n        .or_else(|| journal.events.last().map(|node| node.text.clone()))\n        .unwrap_or_default();"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_from_unobserved_content_is_refused"
+   ]
+  },
+  {
+   "id": "FS61",
+   "title": "the skill is appended directly, so the budget and host-path rules are bypassed",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    admit_skill(journal, &text)",
+     "new": "    if text.is_empty() {\n        return Err(\"empty\");\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text,\n        source: NodeSource::Skill,\n    });\n    Ok(())"
+    }
+   ],
+   "tests": [
+    "tests::an_over_budget_or_host_path_skill_from_a_read_is_still_refused"
+   ]
+  },
+  {
+   "id": "FS62",
+   "title": "the requested version is ignored, so a skill is admitted from another version's read",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .filter(|row| row.version == version)",
+     "new": "        .filter(|_row| true)"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_from_unobserved_content_is_refused"
+   ]
+  },
+  {
+   "id": "FS63",
+   "title": "a windowed read supplies the whole text, so a partial read is admitted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .and_then(|_| current_observed_text(&journal.events, resource))",
+     "new": "        .and_then(|_| journal.events.last().map(|node| node.text.clone()))"
+    }
+   ],
+   "tests": [
+    "tests::a_skill_from_unobserved_content_is_refused"
    ]
   }
  ]
