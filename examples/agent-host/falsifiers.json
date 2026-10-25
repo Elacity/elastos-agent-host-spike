@@ -1537,6 +1537,86 @@
   ]
  },
  {
+  "id": "F-AH3g",
+  "title": "the journal ask widens to every agent's journal",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "asks.json",
+    "old": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/agent-host/\"}",
+    "new": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/\"}"
+   }
+  ],
+  "tests": [
+   "tests::the_journal_ask_is_the_capsules_own_root"
+  ]
+ },
+ {
+  "id": "F-AH3h",
+  "title": "the principal marker matches any Users/<name> again",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "        Some(tail) => format!(\"{LAUNCHING_PRINCIPAL}{tail}\"),",
+    "new": "        Some(tail) => format!(\"Users{tail}\"),"
+   }
+  ],
+  "tests": [
+   "tests::a_declared_ask_names_only_the_launching_principal"
+  ]
+ },
+ {
+  "id": "F-AH3i",
+  "title": "a declared pattern is matched with a plain prefix test",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))",
+    "new": "        .is_some_and(|path| path.starts_with(&ask_pattern_root(&ask.pattern)))"
+   }
+  ],
+  "tests": [
+   "tests::a_declared_pattern_covers_only_at_a_path_boundary"
+  ]
+ },
+ {
+  "id": "F-AH3j",
+  "title": "a declared ask may hold a host route",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "    if pattern.contains(':') {\n        return Some(\"asks host route\");\n    }",
+    "new": "    if false {\n        return Some(\"asks host route\");\n    }"
+   }
+  ],
+  "tests": [
+   "tests::asks_parser_refuses_each_shape_with_its_reason"
+  ]
+ },
+ {
+  "id": "F-AH3k",
+  "title": "a marker pattern need not end at a directory boundary",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "        Some(tail) if !tail.ends_with('/') => return Some(\"asks marker directory\"),",
+    "new": "        Some(tail) if false => return Some(\"asks marker directory\"),"
+   }
+  ],
+  "tests": [
+   "tests::asks_parser_refuses_each_shape_with_its_reason"
+  ]
+ },
+ {
   "id": "F-AH3v01",
   "title": "a declared ask carries a URL",
   "command": "host",
