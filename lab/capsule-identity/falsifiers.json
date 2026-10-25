@@ -1,0 +1,345 @@
+{
+  "about": "cc-capsule-identity 001 lab falsifiers. Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, or the wc-001 test driver, and requires every named test to FAIL for its own reason, never from a build error. command is \"lab\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so each is proved by hand until R1 lands: break, run the named tests with `cargo test --locked` in this lane, see each fail, revert.",
+  "falsifiers": [
+    {
+      "id": "F-CI1a",
+      "title": "name files in listing order: the encoder drops its sort",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "lab_cid_does_not_depend_on_listing_order"
+      ]
+    },
+    {
+      "id": "F-CI1b",
+      "title": "drop the two length prefixes, so path and content boundaries can collide",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        hasher.update((entry.path.len() as u64).to_be_bytes());\n        hasher.update(entry.path.as_bytes());\n        hasher.update((entry.content.len() as u64).to_be_bytes());\n        hasher.update(&entry.content);\n",
+          "new": "        hasher.update(entry.path.as_bytes());\n        hasher.update(&entry.content);\n"
+        }
+      ],
+      "tests": [
+        "path_and_content_boundaries_cannot_collide"
+      ]
+    },
+    {
+      "id": "F-CI1c",
+      "title": "fold the wall-clock time into the stream",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    hasher.update(FRAMING_TAG);\n",
+          "new": "    hasher.update(FRAMING_TAG);\n    hasher.update(\n        std::time::SystemTime::now()\n            .duration_since(std::time::UNIX_EPOCH)\n            .unwrap_or_default()\n            .as_nanos()\n            .to_be_bytes(),\n    );\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI1d",
+      "title": "print the bare hex, without the lab-cid:sha256: label",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        write!(f, \"{LAB_CID_PREFIX}{}\", hex::encode(self.0))\n",
+          "new": "        write!(f, \"{}\", hex::encode(self.0))\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_prints_with_the_lab_label"
+      ]
+    },
+    {
+      "id": "F-CI1e",
+      "title": "a fixture manifest gains a field the Runtime type does not know",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/fixtures/wc001-core/capsule.json",
+          "old": "  \"schema\": \"elastos.capsule/v1\",\n",
+          "new": "  \"schema\": \"elastos.capsule/v1\",\n  \"lab_cid\": \"x\",\n"
+        }
+      ],
+      "tests": [
+        "fixture_manifests_parse_and_validate_with_the_runtime_type"
+      ]
+    },
+    {
+      "id": "F-CI1f",
+      "title": "name a bundle that has no capsule.json",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n",
+          "new": "    if let Some(manifest) = entries.iter().find(|entry| entry.path == MANIFEST_FILE) {\n        check_manifest(&manifest.content)?;\n    }\n"
+        }
+      ],
+      "tests": [
+        "bundle_without_capsule_json_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI1g",
+      "title": "parse capsule.json as plain JSON instead of the Runtime type when the Runtime type refuses it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let manifest: CapsuleManifest = serde_json::from_slice(bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n",
+          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok(());\n    };\n"
+        }
+      ],
+      "tests": [
+        "manifest_with_an_unknown_field_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI1h",
+      "title": "skip the Runtime's validate() call",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    manifest.validate().map_err(Refusal::ManifestInvalid)\n",
+          "new": "    let _ = manifest;\n    Ok(())\n"
+        }
+      ],
+      "tests": [
+        "manifest_that_fails_runtime_validate_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI1i",
+      "title": "follow links: metadata instead of symlink_metadata",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            let file_type = fs::symlink_metadata(&on_disk)\n",
+          "new": "            let file_type = fs::metadata(&on_disk)\n"
+        }
+      ],
+      "tests": [
+        "symlink_in_bundle_is_refused_with_its_path"
+      ]
+    },
+    {
+      "id": "F-CI1j",
+      "title": "the helper that reads wc-001's output writes a stub module instead",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    fs::read(out_dir.join(\"capsule.wasm\")).expect(\"read wc-001 capsule.wasm\")\n",
+          "new": "    let stub = b\"\\0asm\\x01\\0\\0\\0\".to_vec();\n    fs::write(out_dir.join(\"capsule.wasm\"), &stub).expect(\"write a stub module\");\n    stub\n"
+        }
+      ],
+      "tests": [
+        "wc001_capsule_bundle_gets_a_stable_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI1k",
+      "title": "leave capsule.json out of the stream",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != MANIFEST_FILE)\n        .collect();\n    encode_entries(&entries)\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI1l",
+      "title": "name only the manifest and its entrypoint, leaving browser/app.js out",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI1m",
+      "title": "read capsule.json before its type check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            let on_disk = item.path();\n",
+          "new": "            let on_disk = item.path();\n            if path == MANIFEST_FILE {\n                let content = fs::read(&on_disk).map_err(|error| unreadable(&path, error))?;\n                entries.push(BundleEntry { path, content });\n                continue;\n            }\n"
+        }
+      ],
+      "tests": [
+        "special_file_manifest_is_refused_before_read::symlink",
+        "special_file_manifest_is_refused_before_read::fifo"
+      ]
+    },
+    {
+      "id": "F-CI1n",
+      "title": "skip a symlink, FIFO, socket or device silently instead of refusing it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                EntryKind::Special(kind) => return Err(Refusal::NotRegularFile { path, kind }),\n",
+          "new": "                EntryKind::Special(_) => continue,\n"
+        }
+      ],
+      "tests": [
+        "special_payload_is_refused_with_its_path::fifo",
+        "special_payload_is_refused_with_its_path::socket"
+      ]
+    },
+    {
+      "id": "F-CI1o",
+      "title": "convert a name that is not UTF-8 lossily instead of refusing it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    match name.to_str() {\n",
+          "new": "    match Some(name.to_string_lossy()).as_deref() {\n"
+        }
+      ],
+      "tests": [
+        "non_utf8_path_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI1p",
+      "title": "drop only the path length prefix",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        hasher.update((entry.path.len() as u64).to_be_bytes());\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "path_and_content_boundaries_cannot_collide"
+      ]
+    },
+    {
+      "id": "F-CI1q",
+      "title": "drop only the content length prefix",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        hasher.update((entry.content.len() as u64).to_be_bytes());\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "path_and_content_boundaries_cannot_collide"
+      ]
+    },
+    {
+      "id": "F-CI1r",
+      "title": "the encoder accepts two entries with one path",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if let Some(pair) = sorted.windows(2).find(|pair| pair[0].path == pair[1].path) {\n        return Err(Refusal::DuplicatePath {\n            path: pair[0].path.clone(),\n        });\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "encoder_refuses_a_duplicate_path"
+      ]
+    },
+    {
+      "id": "F-CI1s",
+      "title": "skip a folder the walk cannot read instead of refusing the bundle",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let listing = fs::read_dir(&folder).map_err(|error| unreadable(&prefix, error))?;\n",
+          "new": "        let Ok(listing) = fs::read_dir(&folder) else {\n            continue;\n        };\n"
+        }
+      ],
+      "tests": [
+        "unreadable_folder_is_refused_with_its_path"
+      ]
+    },
+    {
+      "id": "F-CI1t",
+      "title": "accept a capsule.json below the bundle root as the manifest",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n",
+          "new": "        .find(|entry| entry.path.ends_with(MANIFEST_FILE))\n        .ok_or(Refusal::NoManifest)?;\n"
+        }
+      ],
+      "tests": [
+        "bundle_without_capsule_json_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI1u",
+      "title": "treat every entry that is not a folder or a link as a regular file",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    } else if file_type.is_file() {\n",
+          "new": "    } else if !file_type.is_symlink() {\n"
+        }
+      ],
+      "tests": [
+        "special_payload_is_refused_with_its_path::fifo",
+        "special_payload_is_refused_with_its_path::socket",
+        "special_payload_is_refused_with_its_path::device"
+      ]
+    }
+  ]
+}
