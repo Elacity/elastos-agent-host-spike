@@ -540,7 +540,8 @@ pub(super) async fn serve_ipfs_cid_root(
         return (StatusCode::BAD_REQUEST, "Invalid CID").into_response();
     }
 
-    let raw_cache = state.cache_dir.join(format!("{}.raw", cid));
+    let cache_root = verified_gateway_cache(&state.cache_dir);
+    let raw_cache = cache_root.join(format!("{}.raw", cid));
     if let Ok(bytes) = tokio::fs::read(&raw_cache).await {
         return (
             StatusCode::OK,
@@ -550,14 +551,14 @@ pub(super) async fn serve_ipfs_cid_root(
             .into_response();
     }
 
-    let cached_index = state.cache_dir.join(&cid).join("index.html");
+    let cached_index = cache_root.join(&cid).join("index.html");
     if cached_index.is_file() {
         return serve_directory_root(&state, &cid).await;
     }
 
     match fetch_file_inline(&state, &cid, "").await {
         Ok(bytes) => {
-            let _ = tokio::fs::create_dir_all(&state.cache_dir).await;
+            let _ = tokio::fs::create_dir_all(&cache_root).await;
             let _ = tokio::fs::write(&raw_cache, &bytes).await;
             (
                 StatusCode::OK,
@@ -585,7 +586,7 @@ async fn serve_cid_path_result(
     validate_file_path(file_path).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Fast path: check local cache.
-    let cid_dir = state.cache_dir.join(cid);
+    let cid_dir = verified_gateway_cache(&state.cache_dir).join(cid);
     let requested = cid_dir.join(file_path);
     if cid_dir.is_dir() {
         let canonical_cid_dir = cid_dir.canonicalize().unwrap_or_else(|_| cid_dir.clone());
@@ -603,7 +604,7 @@ async fn serve_cid_path_result(
     // Cache miss: fetch the individual file through the content provider.
     match fetch_file_inline(state, cid, file_path).await {
         Ok(bytes) => {
-            let cache_path = state.cache_dir.join(cid).join(file_path);
+            let cache_path = cid_dir.join(file_path);
             if let Some(parent) = cache_path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
@@ -755,17 +756,27 @@ pub(super) async fn serve_cid_file(
     }
 }
 
-/// Fetch a single file through the content availability provider.
-/// Returns raw bytes; the provider decides whether the current backend is local IPFS,
-/// an availability replica, or a future repair/fetch path.
+/// The gateway cache holds only bytes read through the verified local store,
+/// under this subdirectory. Entries that earlier releases wrote directly under
+/// the cache directory are never read.
+pub(super) fn verified_gateway_cache(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    cache_dir.join("verified")
+}
+
+/// Fetch a single file through the local content backend only. Kubo checks each
+/// block against its CID, so the gateway serves and caches only bytes that match
+/// the requested CID; content held only by availability replicas is not served.
 async fn fetch_file_inline(state: &GatewayState, cid: &str, path: &str) -> anyhow::Result<Vec<u8>> {
     let registry = state
         .provider_registry
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("gateway provider registry unavailable"))?;
-    let bytes =
-        crate::content::fetch_bytes_via_provider(registry, cid, (!path.is_empty()).then_some(path))
-            .await?;
+    let bytes = crate::content::fetch_verified_local_bytes_via_provider(
+        registry,
+        cid,
+        (!path.is_empty()).then_some(path),
+    )
+    .await?;
     if bytes.len() > MAX_GATEWAY_FILE_SIZE {
         anyhow::bail!("file exceeds size limit");
     }

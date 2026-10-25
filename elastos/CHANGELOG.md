@@ -15,6 +15,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   About, Status with the download size and memory fit, Available actions and
   Technical details, with Get, Retry, Stop or Open in Assistant beside Close.
   Shared model details show where prompts go.
+- Content links (`/s/`, `/ipfs/`, `/content/` and published sites) open only
+  what this Home's IPFS store holds or can fetch, and it checks every block
+  against the link. Content that only a Carrier peer offers no longer opens
+  from such a link. Pages saved by earlier versions are fetched again.
 
 ### Fixed
 

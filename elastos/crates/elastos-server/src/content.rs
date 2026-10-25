@@ -2839,6 +2839,25 @@ pub async fn fetch_bytes_via_provider(
     cid: &str,
     path: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
+    fetch_bytes_via_content(registry, cid, path, false).await
+}
+
+/// Read through the local backend only (Kubo, which checks every block against
+/// its CID); a local miss never reaches availability holders.
+pub(crate) async fn fetch_verified_local_bytes_via_provider(
+    registry: &ProviderRegistry,
+    cid: &str,
+    path: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    fetch_bytes_via_content(registry, cid, path, true).await
+}
+
+async fn fetch_bytes_via_content(
+    registry: &ProviderRegistry,
+    cid: &str,
+    path: Option<&str>,
+    local_only: bool,
+) -> anyhow::Result<Vec<u8>> {
     let mut request = json!({
         "op": "fetch",
         "cid": cid,
@@ -2848,6 +2867,9 @@ pub async fn fetch_bytes_via_provider(
             "expected_bytes": Value::Null,
         },
     });
+    if local_only {
+        request["local_only"] = Value::Bool(true);
+    }
     if let Some(path) = path.filter(|path| !path.is_empty()) {
         request["path"] = Value::String(path.to_string());
     }
