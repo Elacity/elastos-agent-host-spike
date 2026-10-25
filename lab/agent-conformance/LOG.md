@@ -638,3 +638,298 @@ files match. An empty Git status awaits that supervisor commit. Cached
 upstream divergence is 0 ahead / 0 behind; remote freshness is unverified
 under the network restriction. Ignored build outputs and the two failed-test
 roots have removal conditions in the local lifecycle inventory.
+
+
+## 012 — first serve refuses a provider whose bytes differ from its hash
+
+- 012: Added the cached provider build, shared operator-Home writer, checksum-refusal test and F-ac1i; the runner shows both native hashes.
+
+Runtime owns provider admission. `localhost_provider_under_test()` shares
+`build_native` and `sha256_file` with the Runtime helper. Each native result,
+including failure, is cached once per process. `tests/common::write_operator_home`
+runs the Home guard first, copies executable bytes, and writes only the source
+manifest's localhost-provider entry plus empty profiles. The current Mac
+platform receives the copied bytes' SHA-256, size and install path. The source
+entry owns the other fields. The fixture supports both Mac platform keys;
+this run exercised darwin-arm64.
+
+The test appends one byte, launches through the existing primitive with a
+10-second bound, and requires the checksum reason. It also requires in-root
+storage and an absent readiness file. The normal and planted launches stop
+at provider verification, before Carrier and HTTP startup. The test reserves
+and closes a free loopback port without connecting. Task 013 owns the ready
+operator; the AC-010-OFFLINE verdict and other GAPS blockers remain unchanged.
+
+The existing native target was warm. The first successful refusal check measured
+localhost-provider build plus SHA-256 at **0.12 seconds** and Runtime at
+**0.82 seconds**. `du -sk lab/agent-conformance/target/runtime` reported
+**2183616 KiB** afterwards. These are cached-build measurements. The volume
+had 36159464 KiB free before the build, above the 12 GiB estimate plus the
+2 GiB reserve. The supervisor's rerun owns the retained build outputs and
+their removal condition in the local lifecycle inventory.
+
+The first sandboxed attempt stopped at the test's loopback bind with
+`Operation not permitted`, before Runtime launch. The authorized local-bind
+rerun passed. All commands below held the repository's existing heavy-build
+lease and used these settings from the repository root:
+
+```sh
+export CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-012/tmp"
+```
+
+F-ac1i changes only the writer's installed filename to
+`bin/localhost-provider-copy`; the manifest continues to name
+`bin/localhost-provider`. The test appends its byte to the returned copy.
+Runtime therefore reports a missing provider, and the test fails on its
+checksum-reason assertion. The provider bytes remain mismatched in both
+cases, so the falsifier cannot advance startup to Carrier.
+
+The exact test command, run once with the edit planted and once after restoration:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime serve_refuses_provider_whose_bytes_differ_from_its_hash -- --exact --nocapture
+```
+
+The mutation and restoration used the list's exact edit with one matching anchor:
+
+```python
+item = next(f for f in json.loads((lane / 'falsifiers.json').read_text())['falsifiers'] if f['id'] == 'F-ac1i')
+edit = item['edits'][0]
+path = lane / edit['file']
+original = path.read_bytes()
+assert original.count(edit['old'].encode()) == 1
+try:
+    path.write_bytes(original.replace(edit['old'].encode(), edit['new'].encode(), 1))
+    # Run the exact Cargo command above and require exit 101, the named test's
+    # failed result, and the missing-provider reason at the checksum assertion.
+finally:
+    path.write_bytes(original)
+# Run the same Cargo command again and require exit 0.
+```
+
+Exact planted output (exit 101). Raw ESC bytes appear as `\x1b`; the test's
+stderr string uses lossless Rust escapes. `<lane>` replaces the absolute
+lane directory prefix throughout these transcripts:
+
+```text
+   Compiling agent-conformance v0.1.0 (<lane>)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running tests/runtime.rs (lab/agent-conformance/target/host-build/debug/deps/runtime-c27987e729dd278e)
+
+running 1 test
+elastos build finished in 0.90s
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider build finished in 0.13s
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+Provider refusal stderr: "\u{1b}[2m2026-10-25T20:01:34.271610Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos\u{1b}[0m\u{1b}[2m:\u{1b}[0m open-file soft limit 1048575 (was 1048575)\nElastOS Runtime v0.8.0-dev starting on 127.0.0.1:60893\n\u{1b}[2m2026-10-25T20:01:34.604617Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos::serve_cmd\u{1b}[0m\u{1b}[2m:\u{1b}[0m Starting ElastOS Runtime server v0.8.0-dev on 127.0.0.1:60893\n\u{1b}[2m2026-10-25T20:01:34.605184Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_server::runtime\u{1b}[0m\u{1b}[2m:\u{1b}[0m Capsule signatures enforced with 0 trusted key(s)\n\u{1b}[2m2026-10-25T20:01:34.623652Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::capability::manager\u{1b}[0m\u{1b}[2m:\u{1b}[0m Generated and saved new capability signing key to \"<lane>/target/home-52945-1792958493000767000-0/home/Library/Application Support/elastos/signing_key\"\n\u{1b}[2m2026-10-25T20:01:34.623901Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Generating new ElastOS CA certificate...\n\u{1b}[2m2026-10-25T20:01:34.624431Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m CA certificate written to <lane>/target/home-52945-1792958493000767000-0/home/Library/Application Support/elastos/ca.pem\n\u{1b}[2m2026-10-25T20:01:34.624438Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Trust this CA on your devices: elastos tls trust\n\u{1b}[2m2026-10-25T20:01:34.625873Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Detected IPs for TLS cert: [\"127.0.0.1\"]\n\u{1b}[2m2026-10-25T20:01:34.625899Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Generating TLS leaf certificate...\n\u{1b}[2m2026-10-25T20:01:34.626265Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m TLS leaf certificate written to <lane>/target/home-52945-1792958493000767000-0/home/Library/Application Support/elastos/tls.pem\n\u{1b}[2m2026-10-25T20:01:34.626599Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos::server_infra\u{1b}[0m\u{1b}[2m:\u{1b}[0m TLS enabled (self-signed CA)\n\u{1b}[2m2026-10-25T20:01:34.627336Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered provider 'content-provider' for scheme 'content'\n\u{1b}[2m2026-10-25T20:01:34.627502Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered sub-provider 'content-provider' for elastos://content/...\n\u{1b}[2m2026-10-25T20:01:34.627584Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered provider 'documents-provider' for scheme 'documents'\n\u{1b}[2m2026-10-25T20:01:34.627619Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered provider 'inspect' for scheme 'inspect'\n\u{1b}[2m2026-10-25T20:01:34.627634Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered sub-provider 'inspect' for elastos://inspect/...\nError: localhost-provider not installed.\n  Run:\n  elastos setup --with localhost-provider\n"
+
+thread 'serve_refuses_provider_whose_bytes_differ_from_its_hash' (23392766) panicked at tests/runtime.rs:147:5:
+expected provider checksum refusal; stderr:
+\x1b[2m2026-10-25T20:01:34.271610Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos\x1b[0m\x1b[2m:\x1b[0m open-file soft limit 1048575 (was 1048575)
+ElastOS Runtime v0.8.0-dev starting on 127.0.0.1:60893
+\x1b[2m2026-10-25T20:01:34.604617Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos::serve_cmd\x1b[0m\x1b[2m:\x1b[0m Starting ElastOS Runtime server v0.8.0-dev on 127.0.0.1:60893
+\x1b[2m2026-10-25T20:01:34.605184Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_server::runtime\x1b[0m\x1b[2m:\x1b[0m Capsule signatures enforced with 0 trusted key(s)
+\x1b[2m2026-10-25T20:01:34.623652Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_runtime::capability::manager\x1b[0m\x1b[2m:\x1b[0m Generated and saved new capability signing key to "<lane>/target/home-52945-1792958493000767000-0/home/Library/Application Support/elastos/signing_key"
+\x1b[2m2026-10-25T20:01:34.623901Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_tls\x1b[0m\x1b[2m:\x1b[0m Generating new ElastOS CA certificate...
+\x1b[2m2026-10-25T20:01:34.624431Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_tls\x1b[0m\x1b[2m:\x1b[0m CA certificate written to <lane>/target/home-52945-1792958493000767000-0/home/Library/Application Support/elastos/ca.pem
+\x1b[2m2026-10-25T20:01:34.624438Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_tls\x1b[0m\x1b[2m:\x1b[0m Trust this CA on your devices: elastos tls trust
+\x1b[2m2026-10-25T20:01:34.625873Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_tls\x1b[0m\x1b[2m:\x1b[0m Detected IPs for TLS cert: ["127.0.0.1"]
+\x1b[2m2026-10-25T20:01:34.625899Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_tls\x1b[0m\x1b[2m:\x1b[0m Generating TLS leaf certificate...
+\x1b[2m2026-10-25T20:01:34.626265Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_tls\x1b[0m\x1b[2m:\x1b[0m TLS leaf certificate written to <lane>/target/home-52945-1792958493000767000-0/home/Library/Application Support/elastos/tls.pem
+\x1b[2m2026-10-25T20:01:34.626599Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos::server_infra\x1b[0m\x1b[2m:\x1b[0m TLS enabled (self-signed CA)
+\x1b[2m2026-10-25T20:01:34.627336Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_runtime::provider::registry\x1b[0m\x1b[2m:\x1b[0m Registered provider 'content-provider' for scheme 'content'
+\x1b[2m2026-10-25T20:01:34.627502Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_runtime::provider::registry\x1b[0m\x1b[2m:\x1b[0m Registered sub-provider 'content-provider' for elastos://content/...
+\x1b[2m2026-10-25T20:01:34.627584Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_runtime::provider::registry\x1b[0m\x1b[2m:\x1b[0m Registered provider 'documents-provider' for scheme 'documents'
+\x1b[2m2026-10-25T20:01:34.627619Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_runtime::provider::registry\x1b[0m\x1b[2m:\x1b[0m Registered provider 'inspect' for scheme 'inspect'
+\x1b[2m2026-10-25T20:01:34.627634Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2melastos_runtime::provider::registry\x1b[0m\x1b[2m:\x1b[0m Registered sub-provider 'inspect' for elastos://inspect/...
+Error: localhost-provider not installed.
+  Run:
+  elastos setup --with localhost-provider
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: lab/agent-conformance/target/home-52945-1792958493000767000-0
+test serve_refuses_provider_whose_bytes_differ_from_its_hash ... FAILED
+
+failures:
+
+failures:
+    serve_refuses_provider_whose_bytes_differ_from_its_hash
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.54s
+
+error: test failed, to rerun pass `-p agent-conformance --test runtime`
+```
+
+Exact restored output (exit 0), including the complete Runtime checksum-refusal stderr:
+
+```text
+   Compiling agent-conformance v0.1.0 (<lane>)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/runtime.rs (lab/agent-conformance/target/host-build/debug/deps/runtime-c27987e729dd278e)
+
+running 1 test
+elastos build finished in 0.58s
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider build finished in 0.11s
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+Provider refusal stderr: "\u{1b}[2m2026-10-25T20:01:37.111530Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos\u{1b}[0m\u{1b}[2m:\u{1b}[0m open-file soft limit 1048575 (was 1048575)\nElastOS Runtime v0.8.0-dev starting on 127.0.0.1:60897\n\u{1b}[2m2026-10-25T20:01:37.432711Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos::serve_cmd\u{1b}[0m\u{1b}[2m:\u{1b}[0m Starting ElastOS Runtime server v0.8.0-dev on 127.0.0.1:60897\n\u{1b}[2m2026-10-25T20:01:37.433276Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_server::runtime\u{1b}[0m\u{1b}[2m:\u{1b}[0m Capsule signatures enforced with 0 trusted key(s)\n\u{1b}[2m2026-10-25T20:01:37.452764Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::capability::manager\u{1b}[0m\u{1b}[2m:\u{1b}[0m Generated and saved new capability signing key to \"<lane>/target/home-53339-1792958495814064000-0/home/Library/Application Support/elastos/signing_key\"\n\u{1b}[2m2026-10-25T20:01:37.453007Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Generating new ElastOS CA certificate...\n\u{1b}[2m2026-10-25T20:01:37.453531Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m CA certificate written to <lane>/target/home-53339-1792958495814064000-0/home/Library/Application Support/elastos/ca.pem\n\u{1b}[2m2026-10-25T20:01:37.453536Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Trust this CA on your devices: elastos tls trust\n\u{1b}[2m2026-10-25T20:01:37.455197Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Detected IPs for TLS cert: [\"127.0.0.1\"]\n\u{1b}[2m2026-10-25T20:01:37.455218Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m Generating TLS leaf certificate...\n\u{1b}[2m2026-10-25T20:01:37.455508Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_tls\u{1b}[0m\u{1b}[2m:\u{1b}[0m TLS leaf certificate written to <lane>/target/home-53339-1792958495814064000-0/home/Library/Application Support/elastos/tls.pem\n\u{1b}[2m2026-10-25T20:01:37.455806Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos::server_infra\u{1b}[0m\u{1b}[2m:\u{1b}[0m TLS enabled (self-signed CA)\n\u{1b}[2m2026-10-25T20:01:37.456310Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered provider 'content-provider' for scheme 'content'\n\u{1b}[2m2026-10-25T20:01:37.456444Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered sub-provider 'content-provider' for elastos://content/...\n\u{1b}[2m2026-10-25T20:01:37.456511Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered provider 'documents-provider' for scheme 'documents'\n\u{1b}[2m2026-10-25T20:01:37.456539Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered provider 'inspect' for scheme 'inspect'\n\u{1b}[2m2026-10-25T20:01:37.456550Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2melastos_runtime::provider::registry\u{1b}[0m\u{1b}[2m:\u{1b}[0m Registered sub-provider 'inspect' for elastos://inspect/...\nError: installed component 'localhost-provider' at <lane>/target/home-53339-1792958495814064000-0/home/Library/Application Support/elastos/bin/localhost-provider failed checksum verification against <lane>/target/home-53339-1792958495814064000-0/home/Library/Application Support/elastos/components.json\n"
+test serve_refuses_provider_whose_bytes_differ_from_its_hash ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.24s
+
+```
+
+Final lane checks, all exit 0:
+
+```sh
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+The full test command took **41.68 seconds** and the
+report command took **37.31 seconds**. Each ran
+13 tests: 13 passed, 0 failed, 0 ignored. The unchanged Home guard and complete
+environment tests passed. Exact report output:
+
+```text
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+test | PASS/FAIL/BLOCKED (id)
+foreign_and_wrong_version_imports_are_refused | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+non_component_and_invalid_component_are_refused | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+serve_refuses_provider_whose_bytes_differ_from_its_hash | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+```
+
+The basic repository gate passed: `git diff --check`, the product-data check
+(42 capsules, 2 profiles, 28 method contracts), its 99 tests, Runtime workspace
+formatting and chain-provider formatting. `bash -n lab/agent-conformance/run.sh`
+also passed. All 13 falsifier IDs are unique and their edit anchors match
+exactly once. F-ac1i was the new mutation run; earlier falsifiers retain their
+recorded proof, and their normal tests passed here.
+
+Source bytes and `git status --porcelain` were unchanged across the gates.
+The worktree started clean; its remaining source edits are this task's candidate.
+An empty Git status awaits the supervisor's commit, because this builder's
+instructions reserve all Git mutations for the supervisor. Cached upstream
+was 0 ahead / 4 behind at the final check; remote freshness remains unverified
+under the network restriction. The supervisor owns integration and the PR;
+the F-ac1i command and transcripts above are ready for its review record.
+The two failed-test roots were removed after result review and empty open-file
+checks. Passed roots remove themselves through the existing harness. The local
+lifecycle inventory records the retained build and proof cleanup conditions.
+
+Principles check (paths below are relative to this lane):
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name/URL in place of a code/content hash? | No. `src/runtime.rs:65` computes the binary hash; `tests/common/mod.rs:44` stamps the installed copy's hash. Names locate the entry and file. |
+| 2. New ambient or UI authority? | No. `tests/runtime.rs:127` uses the existing guarded launch; `src/harness.rs:205` retains the three-entry environment. |
+| 3. A second path or copy of a rule? | No. `src/runtime.rs:35` owns both native builds, `src/runtime.rs:75` owns hashing, and `tests/common/mod.rs:21` owns the operator fixture. |
+| 4. Does the trusted Runtime core grow? | No. All changed source stays under this lane; `tests/runtime.rs:128` runs the existing binary as a black box. |
+| 5. Does refusal fail closed with a reason? | Yes. `tests/runtime.rs:143` requires a failed exit and `tests/runtime.rs:148` requires the checksum reason. |
+| 6. Does capsule logic stay inside and trap down through grants? | Yes. The probe stays unchanged; `probe/src/lib.rs:8` retains its typed Bus bindings. This task changes fixture code only. |
+| 7. Do tests and a caught falsifier prove the new rule? | Yes. `tests/runtime.rs:83` passed, failed on its reason check under F-ac1i, then passed restored; `falsifiers.json:198` owns the edit. |
+
+## 014 — 012 re-landed on the moved base
+
+- 014: Restored 012's eight reviewed files from `622cf488f`; added this fresh F-ac1i result and the exact edit commands.
+
+Both guards passed at base `de37cb412`: the lane diff from `c6709039d` was
+empty, and `tests/common/mod.rs` was absent. The seven required files match
+`622cf488f` byte for byte. This section follows the complete, unchanged 012 log.
+The supervisor owns the commit and the checks against that committed head.
+
+All lane runs held the shared heavy-build lease and used 012's settings:
+
+```sh
+export CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-012/tmp"
+```
+
+The volume had 35797712 KiB free before the runs, above the 12 GiB build
+estimate plus the 2 GiB reserve. Both native binaries were already cached.
+A sandbox preflight refused the loopback bind before Runtime launch; the
+runs below used the approved local-bind permission. Cargo stayed offline.
+Both serve cases stopped at provider verification, before Carrier startup.
+
+Exact shell commands, in execution order (restoration ran in a `finally`
+block around the planted test):
+
+```sh
+python3 - <<'EDIT'
+import json
+from pathlib import Path
+lane = Path('lab/agent-conformance')
+item = next(f for f in json.loads((lane / 'falsifiers.json').read_text())['falsifiers'] if f['id'] == 'F-ac1i')
+assert len(item['edits']) == 1
+edit = item['edits'][0]
+path = lane / edit['file']
+original = path.read_bytes()
+assert original.count(edit['old'].encode()) == 1
+assert original.count(edit['new'].encode()) == 0
+path.write_bytes(original.replace(edit['old'].encode(), edit['new'].encode(), 1))
+print('F-ac1i planted; exact anchor count: 1')
+EDIT
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime serve_refuses_provider_whose_bytes_differ_from_its_hash -- --exact --nocapture
+python3 - <<'EDIT'
+import json
+from pathlib import Path
+import subprocess
+lane = Path('lab/agent-conformance')
+item = next(f for f in json.loads((lane / 'falsifiers.json').read_text())['falsifiers'] if f['id'] == 'F-ac1i')
+edit = item['edits'][0]
+path = lane / edit['file']
+original = subprocess.check_output(['git', 'show', '622cf488f:' + path.as_posix()])
+assert path.read_bytes() == original.replace(edit['old'].encode(), edit['new'].encode(), 1)
+path.write_bytes(original)
+print('F-ac1i restored byte for byte from 622cf488f')
+EDIT
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime serve_refuses_provider_whose_bytes_differ_from_its_hash -- --exact --nocapture
+```
+
+| Run | Exit | Result | Provider build plus SHA-256 |
+| --- | --- | --- | --- |
+| F-ac1i planted once | 101 | The sole named test failed at `tests/runtime.rs:147`: checksum reason expected, `localhost-provider not installed.` received. | 0.13 s, warm |
+| Exact bytes restored | 0 | The same test passed: 1 passed, 0 failed, 0 ignored. | 0.15 s, warm |
+
+Both runs reported these exact binary identities:
+
+```text
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+```
+
+Final gates, each exit 0:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 13 passed, 0 failed, 0 ignored; 44.83 s |
+| `lab/agent-conformance/run.sh` | Both hashes above the table; all 13 rows PASS; 36.59 s |
+
+The basic repository gate also passed: `git diff --check`, product-data
+validation (42 capsules, 2 profiles, 28 method contracts), all 99 product-data
+tests, Runtime workspace formatting and chain-provider formatting.
+`bash -n lab/agent-conformance/run.sh` passed. Gate runs preserved candidate
+bytes and Git status; the eight task files are the only visible changes.
+The failed-test Home was removed after result review and an empty open-file
+check; passing Homes removed themselves. Ignored build and proof outputs stay
+for the supervisor rerun, with its cleanup condition in the local inventory.
+The fetched upstream is 0 ahead / 0 behind; remote freshness awaits the
+supervisor's network-enabled check. This builder kept Git state unchanged.
