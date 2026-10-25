@@ -288,11 +288,6 @@ fn render_record(node: &SurfaceNode) -> String {
     }
 }
 
-/// The format the rendering table belongs to. A test fails when this is not
-/// `JOURNAL_FORMAT`.
-#[cfg(test)]
-const RENDERING_FORMAT: u16 = 2;
-
 /// Role tags in the log. Assistant is 3 and a tool result is 4.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn role_tag(role: Role) -> u8 {
@@ -3288,351 +3283,6 @@ fn propose_scaffold(
 #[cfg(any(test, target_arch = "wasm32"))]
 fn host_path(text: &str) -> bool {
     text.starts_with('/') || text.contains('\\') || text.split('/').any(|part| part == "..")
-}
-
-/// This test-only block sits above production code, so one line added or removed here changes the guest hash.
-/// The declared per-step asks, compiled in from `asks.json` in this lane. The
-/// file is an auditable declaration, not the policy check: the Runtime
-/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
-/// manifest and retires into that one place when the Runtime defines per-step
-/// asks (P10). It is read by this module's tests only, so the shipped guest
-/// keeps no new production path.
-#[cfg(test)]
-const ASKS_JSON: &str = include_str!("../asks.json");
-
-#[cfg(test)]
-const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
-
-/// The one marker a declared pattern may hold: the user-namespace root,
-/// `Users/<one name>`. The declaration names no person and no host path.
-#[cfg(test)]
-const PRINCIPAL_MARKER: &str = "<principal>";
-
-/// The one principal a declared pattern may name. The guest names only
-/// `Users/self`, which the Runtime scopes to the launching person, so the
-/// declaration covers that person and no other `Users/<name>`.
-#[cfg(test)]
-const LAUNCHING_PRINCIPAL: &str = "Users/self";
-
-/// One declared ask: a proposal kind and the resource pattern after
-/// `localhost://` that it may name.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Ask {
-    kind: ProposalKind,
-    pattern: String,
-}
-
-/// The declared name of one kind. The match has no wildcard, so a new
-/// `ProposalKind` does not compile until it is named here or marked as the
-/// placeholder. `Unspecified` marks a step opened without a proposal and is
-/// not an ask.
-#[cfg(test)]
-fn ask_kind_name(kind: ProposalKind) -> Option<&'static str> {
-    match kind {
-        ProposalKind::Unspecified => None,
-        ProposalKind::Read => Some("read"),
-        ProposalKind::Edit => Some("edit"),
-        ProposalKind::Run => Some("run"),
-        ProposalKind::Restore => Some("restore"),
-        ProposalKind::Hosted => Some("hosted"),
-        ProposalKind::Child => Some("child"),
-        ProposalKind::Init => Some("init"),
-        ProposalKind::JournalAppend => Some("journal-append"),
-    }
-}
-
-#[cfg(test)]
-fn proposal_kind(name: &str) -> Option<ProposalKind> {
-    match name {
-        "read" => Some(ProposalKind::Read),
-        "edit" => Some(ProposalKind::Edit),
-        "run" => Some(ProposalKind::Run),
-        "restore" => Some(ProposalKind::Restore),
-        "hosted" => Some(ProposalKind::Hosted),
-        "child" => Some(ProposalKind::Child),
-        "init" => Some(ProposalKind::Init),
-        "journal-append" => Some(ProposalKind::JournalAppend),
-        _ => None,
-    }
-}
-
-/// Every kind the guest can propose. `ask_kind_name` names each one, so this
-/// list and that match cannot disagree without a failing test.
-#[cfg(test)]
-const PROPOSABLE_KINDS: &[ProposalKind] = &[
-    ProposalKind::Read,
-    ProposalKind::Edit,
-    ProposalKind::Run,
-    ProposalKind::Restore,
-    ProposalKind::Hosted,
-    ProposalKind::Child,
-    ProposalKind::Init,
-    ProposalKind::JournalAppend,
-];
-
-/// A key that appears twice in one object. `serde_json::Value` keeps only the
-/// last one, so the declaration text is scanned before any value is read: a
-/// repeated key is refused, not silently collapsed. Keys are decoded as JSON
-/// strings, so an escaped spelling is the same key.
-#[cfg(test)]
-fn repeated_object_key(text: &str) -> Option<String> {
-    struct Frame {
-        keys: Vec<String>,
-        object: bool,
-        expect_key: bool,
-    }
-    let bytes = text.as_bytes();
-    let mut stack: Vec<Frame> = Vec::new();
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            b'{' => {
-                stack.push(Frame {
-                    keys: Vec::new(),
-                    object: true,
-                    expect_key: true,
-                });
-                at += 1;
-            }
-            b'[' => {
-                stack.push(Frame {
-                    keys: Vec::new(),
-                    object: false,
-                    expect_key: false,
-                });
-                at += 1;
-            }
-            b'}' | b']' => {
-                stack.pop();
-                at += 1;
-            }
-            b',' => {
-                if let Some(frame) = stack.last_mut() {
-                    if frame.object {
-                        frame.expect_key = true;
-                    }
-                }
-                at += 1;
-            }
-            b'"' => {
-                let start = at;
-                at += 1;
-                while at < bytes.len() {
-                    match bytes[at] {
-                        b'\\' => at += 2,
-                        b'"' => {
-                            at += 1;
-                            break;
-                        }
-                        _ => at += 1,
-                    }
-                }
-                if stack
-                    .last()
-                    .is_some_and(|frame| frame.object && frame.expect_key)
-                {
-                    let key = serde_json::from_str::<String>(text.get(start..at)?).ok()?;
-                    let frame = stack.last_mut()?;
-                    if frame.keys.contains(&key) {
-                        return Some(key);
-                    }
-                    frame.keys.push(key);
-                    frame.expect_key = false;
-                }
-            }
-            _ => at += 1,
-        }
-    }
-    None
-}
-
-/// A declaration value that reads as a credential. The declaration carries
-/// no secret, so a value that names one is refused.
-#[cfg(test)]
-fn secret_shaped(text: &str) -> bool {
-    const WORDS: &[&str] = &[
-        "secret",
-        "password",
-        "passwd",
-        "token",
-        "api_key",
-        "api-key",
-        "apikey",
-        "bearer ",
-        "sk-",
-        "ghp_",
-        "xox",
-        "-----begin",
-    ];
-    WORDS.iter().any(|word| text.contains(word))
-}
-
-/// The one rule for a declared resource pattern: it names a resource and no
-/// URL, host path, routed `Users/` path, secret, or misplaced marker. The
-/// first match names its cause. `parse_asks` and the declaration test use
-/// this same function, so the rule has one copy.
-#[cfg(test)]
-fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
-    let lower = pattern.to_ascii_lowercase();
-    if pattern.contains("://") {
-        return Some("asks url");
-    }
-    if pattern.split_once(':').is_some_and(|(scheme, _)| {
-        scheme
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic)
-            && scheme
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
-    }) {
-        return Some("asks url scheme");
-    }
-    if pattern.contains(':') {
-        return Some("asks host route");
-    }
-    if lower.contains("users/") {
-        return Some("asks users path");
-    }
-    if pattern.starts_with('/') {
-        return Some("asks absolute host path");
-    }
-    if pattern.starts_with('~') {
-        return Some("asks home host path");
-    }
-    if pattern.contains('\\') {
-        return Some("asks backslash host path");
-    }
-    if pattern.split('/').any(|segment| segment == ".") {
-        return Some("asks current directory");
-    }
-    if pattern.split('/').any(|segment| segment == "..") {
-        return Some("asks parent directory");
-    }
-    if secret_shaped(&lower) {
-        return Some("asks secret");
-    }
-    if pattern.matches(PRINCIPAL_MARKER).count() > 1 {
-        return Some("asks repeated marker");
-    }
-    if pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER) {
-        return Some("asks misplaced marker");
-    }
-    match pattern.strip_prefix(PRINCIPAL_MARKER) {
-        Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {
-            return Some("asks marker tail");
-        }
-        Some(tail) if !tail.ends_with('/') => return Some("asks marker directory"),
-        None if !pattern.ends_with('/') => return Some("asks literal directory"),
-        _ => {}
-    }
-    None
-}
-
-/// Parse the declaration with its closed shape: only `schema` and `asks`,
-/// only `kind` and `resource` in each ask, and no repeated key. Each refusal
-/// names its own cause; a kind the guest cannot propose, the `unspecified`
-/// placeholder, and a forbidden resource value each have their own reason.
-#[cfg(test)]
-fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
-    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
-    if repeated_object_key(text).is_some() {
-        return Err("asks duplicate field");
-    }
-    let document = document.as_object().ok_or("asks root")?;
-    if document.keys().any(|key| key != "schema" && key != "asks") {
-        return Err("asks unknown field");
-    }
-    let schema = document.get("schema").ok_or("asks schema missing")?;
-    let schema = schema.as_str().ok_or("asks schema type")?;
-    if schema != ASKS_SCHEMA {
-        return Err("asks schema unsupported");
-    }
-    let entries = document.get("asks").ok_or("asks list missing")?;
-    let entries = entries.as_array().ok_or("asks list type")?;
-    if entries.is_empty() {
-        return Err("asks empty");
-    }
-    let mut asks = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let entry = entry.as_object().ok_or("asks entry")?;
-        if entry.keys().any(|key| key != "kind" && key != "resource") {
-            return Err("asks entry field");
-        }
-        let kind = entry.get("kind").ok_or("asks kind missing")?;
-        let kind = kind.as_str().ok_or("asks kind type")?;
-        if kind == "unspecified" {
-            return Err("asks kind unspecified");
-        }
-        let kind = proposal_kind(kind).ok_or("asks kind unknown")?;
-        let pattern = entry.get("resource").ok_or("asks resource missing")?;
-        let pattern = pattern.as_str().ok_or("asks resource type")?;
-        if pattern.is_empty() {
-            return Err("asks resource empty");
-        }
-        if pattern.chars().any(char::is_whitespace) {
-            return Err("asks whitespace");
-        }
-        if let Some(reason) = ask_resource_refusal(pattern) {
-            return Err(reason);
-        }
-        asks.push(Ask {
-            kind,
-            pattern: pattern.to_string(),
-        });
-    }
-    Ok(asks)
-}
-
-/// The declaration, parsed once from the compiled-in file. Immutable after
-/// that parse, so it holds no per-session state. Keep a malformed declaration's
-/// reason so every reader fails with that reason (fail closed, P11).
-#[cfg(test)]
-static DECLARED_ASKS: std::sync::LazyLock<Result<Vec<Ask>, &'static str>> =
-    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON));
-
-#[cfg(test)]
-fn require_parsed_asks<'a>(parsed: &'a Result<Vec<Ask>, &'static str>) -> &'a [Ask] {
-    parsed
-        .as_deref()
-        .unwrap_or_else(|reason| panic!("{reason}"))
-}
-
-#[cfg(test)]
-fn declared_asks() -> &'static [Ask] {
-    require_parsed_asks(&DECLARED_ASKS)
-}
-
-/// The one root a declared pattern names: the pattern with `<principal>`
-/// expanded to the launching person, and its trailing `/` dropped so the
-/// directory itself is the prefix. `ask_covers` gives this root to
-/// `resource_covers`, so "under this pattern" has one boundary rule (P10).
-#[cfg(test)]
-fn ask_pattern_root(pattern: &str) -> String {
-    let expanded = match pattern.strip_prefix(PRINCIPAL_MARKER) {
-        Some(tail) => format!("{LAUNCHING_PRINCIPAL}{tail}"),
-        None => pattern.to_string(),
-    };
-    expanded.trim_end_matches('/').to_string()
-}
-
-/// Whether one declared ask's pattern covers a proposed resource. The
-/// pattern's root is expanded once and `resource_covers` decides the
-/// boundary, so a sibling such as `ProjectsX` stays outside `Projects` (P10).
-#[cfg(test)]
-fn ask_covers(ask: &Ask, resource: &str) -> bool {
-    resource
-        .strip_prefix("localhost://")
-        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))
-}
-
-/// The declaration's answer for one proposal. `Unspecified` matches nothing.
-#[cfg(test)]
-fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
-    declared_asks()
-        .iter()
-        .any(|ask| ask.kind == kind && ask_covers(ask, resource))
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -8488,6 +8138,355 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
 
 #[cfg(target_arch = "wasm32")]
 export!(AgentHost);
+
+/// The format the rendering table belongs to. A test fails when this is not
+/// `JOURNAL_FORMAT`.
+#[cfg(test)]
+const RENDERING_FORMAT: u16 = 2;
+
+/// The declared per-step asks, compiled in from `asks.json` in this lane. The
+/// file is an auditable declaration, not the policy check: the Runtime
+/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
+/// manifest and retires into that one place when the Runtime defines per-step
+/// asks (P10). It is read by this module's tests only, so the shipped guest
+/// keeps no new production path.
+#[cfg(test)]
+const ASKS_JSON: &str = include_str!("../asks.json");
+
+#[cfg(test)]
+const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+
+/// The one marker a declared pattern may hold: the user-namespace root,
+/// `Users/<one name>`. The declaration names no person and no host path.
+#[cfg(test)]
+const PRINCIPAL_MARKER: &str = "<principal>";
+
+/// The one principal a declared pattern may name. The guest names only
+/// `Users/self`, which the Runtime scopes to the launching person, so the
+/// declaration covers that person and no other `Users/<name>`.
+#[cfg(test)]
+const LAUNCHING_PRINCIPAL: &str = "Users/self";
+
+/// One declared ask: a proposal kind and the resource pattern after
+/// `localhost://` that it may name.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ask {
+    kind: ProposalKind,
+    pattern: String,
+}
+
+/// The declared name of one kind. The match has no wildcard, so a new
+/// `ProposalKind` does not compile until it is named here or marked as the
+/// placeholder. `Unspecified` marks a step opened without a proposal and is
+/// not an ask.
+#[cfg(test)]
+fn ask_kind_name(kind: ProposalKind) -> Option<&'static str> {
+    match kind {
+        ProposalKind::Unspecified => None,
+        ProposalKind::Read => Some("read"),
+        ProposalKind::Edit => Some("edit"),
+        ProposalKind::Run => Some("run"),
+        ProposalKind::Restore => Some("restore"),
+        ProposalKind::Hosted => Some("hosted"),
+        ProposalKind::Child => Some("child"),
+        ProposalKind::Init => Some("init"),
+        ProposalKind::JournalAppend => Some("journal-append"),
+    }
+}
+
+#[cfg(test)]
+fn proposal_kind(name: &str) -> Option<ProposalKind> {
+    match name {
+        "read" => Some(ProposalKind::Read),
+        "edit" => Some(ProposalKind::Edit),
+        "run" => Some(ProposalKind::Run),
+        "restore" => Some(ProposalKind::Restore),
+        "hosted" => Some(ProposalKind::Hosted),
+        "child" => Some(ProposalKind::Child),
+        "init" => Some(ProposalKind::Init),
+        "journal-append" => Some(ProposalKind::JournalAppend),
+        _ => None,
+    }
+}
+
+/// Every kind the guest can propose. `ask_kind_name` names each one, so this
+/// list and that match cannot disagree without a failing test.
+#[cfg(test)]
+const PROPOSABLE_KINDS: &[ProposalKind] = &[
+    ProposalKind::Read,
+    ProposalKind::Edit,
+    ProposalKind::Run,
+    ProposalKind::Restore,
+    ProposalKind::Hosted,
+    ProposalKind::Child,
+    ProposalKind::Init,
+    ProposalKind::JournalAppend,
+];
+
+/// A key that appears twice in one object. `serde_json::Value` keeps only the
+/// last one, so the declaration text is scanned before any value is read: a
+/// repeated key is refused, not silently collapsed. Keys are decoded as JSON
+/// strings, so an escaped spelling is the same key.
+#[cfg(test)]
+fn repeated_object_key(text: &str) -> Option<String> {
+    struct Frame {
+        keys: Vec<String>,
+        object: bool,
+        expect_key: bool,
+    }
+    let bytes = text.as_bytes();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'{' => {
+                stack.push(Frame {
+                    keys: Vec::new(),
+                    object: true,
+                    expect_key: true,
+                });
+                at += 1;
+            }
+            b'[' => {
+                stack.push(Frame {
+                    keys: Vec::new(),
+                    object: false,
+                    expect_key: false,
+                });
+                at += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                at += 1;
+            }
+            b',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object {
+                        frame.expect_key = true;
+                    }
+                }
+                at += 1;
+            }
+            b'"' => {
+                let start = at;
+                at += 1;
+                while at < bytes.len() {
+                    match bytes[at] {
+                        b'\\' => at += 2,
+                        b'"' => {
+                            at += 1;
+                            break;
+                        }
+                        _ => at += 1,
+                    }
+                }
+                if stack
+                    .last()
+                    .is_some_and(|frame| frame.object && frame.expect_key)
+                {
+                    let key = serde_json::from_str::<String>(text.get(start..at)?).ok()?;
+                    let frame = stack.last_mut()?;
+                    if frame.keys.contains(&key) {
+                        return Some(key);
+                    }
+                    frame.keys.push(key);
+                    frame.expect_key = false;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// A declaration value that reads as a credential. The declaration carries
+/// no secret, so a value that names one is refused.
+#[cfg(test)]
+fn secret_shaped(text: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "api_key",
+        "api-key",
+        "apikey",
+        "bearer ",
+        "sk-",
+        "ghp_",
+        "xox",
+        "-----begin",
+    ];
+    WORDS.iter().any(|word| text.contains(word))
+}
+
+/// The one rule for a declared resource pattern: it names a resource and no
+/// URL, host path, routed `Users/` path, secret, or misplaced marker. The
+/// first match names its cause. `parse_asks` and the declaration test use
+/// this same function, so the rule has one copy.
+#[cfg(test)]
+fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
+    let lower = pattern.to_ascii_lowercase();
+    if pattern.contains("://") {
+        return Some("asks url");
+    }
+    if pattern.split_once(':').is_some_and(|(scheme, _)| {
+        scheme
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    }) {
+        return Some("asks url scheme");
+    }
+    if pattern.contains(':') {
+        return Some("asks host route");
+    }
+    if lower.contains("users/") {
+        return Some("asks users path");
+    }
+    if pattern.starts_with('/') {
+        return Some("asks absolute host path");
+    }
+    if pattern.starts_with('~') {
+        return Some("asks home host path");
+    }
+    if pattern.contains('\\') {
+        return Some("asks backslash host path");
+    }
+    if pattern.split('/').any(|segment| segment == ".") {
+        return Some("asks current directory");
+    }
+    if pattern.split('/').any(|segment| segment == "..") {
+        return Some("asks parent directory");
+    }
+    if secret_shaped(&lower) {
+        return Some("asks secret");
+    }
+    if pattern.matches(PRINCIPAL_MARKER).count() > 1 {
+        return Some("asks repeated marker");
+    }
+    if pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER) {
+        return Some("asks misplaced marker");
+    }
+    match pattern.strip_prefix(PRINCIPAL_MARKER) {
+        Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {
+            return Some("asks marker tail");
+        }
+        Some(tail) if !tail.ends_with('/') => return Some("asks marker directory"),
+        None if !pattern.ends_with('/') => return Some("asks literal directory"),
+        _ => {}
+    }
+    None
+}
+
+/// Parse the declaration with its closed shape: only `schema` and `asks`,
+/// only `kind` and `resource` in each ask, and no repeated key. Each refusal
+/// names its own cause; a kind the guest cannot propose, the `unspecified`
+/// placeholder, and a forbidden resource value each have their own reason.
+#[cfg(test)]
+fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
+    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
+    if repeated_object_key(text).is_some() {
+        return Err("asks duplicate field");
+    }
+    let document = document.as_object().ok_or("asks root")?;
+    if document.keys().any(|key| key != "schema" && key != "asks") {
+        return Err("asks unknown field");
+    }
+    let schema = document.get("schema").ok_or("asks schema missing")?;
+    let schema = schema.as_str().ok_or("asks schema type")?;
+    if schema != ASKS_SCHEMA {
+        return Err("asks schema unsupported");
+    }
+    let entries = document.get("asks").ok_or("asks list missing")?;
+    let entries = entries.as_array().ok_or("asks list type")?;
+    if entries.is_empty() {
+        return Err("asks empty");
+    }
+    let mut asks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry.as_object().ok_or("asks entry")?;
+        if entry.keys().any(|key| key != "kind" && key != "resource") {
+            return Err("asks entry field");
+        }
+        let kind = entry.get("kind").ok_or("asks kind missing")?;
+        let kind = kind.as_str().ok_or("asks kind type")?;
+        if kind == "unspecified" {
+            return Err("asks kind unspecified");
+        }
+        let kind = proposal_kind(kind).ok_or("asks kind unknown")?;
+        let pattern = entry.get("resource").ok_or("asks resource missing")?;
+        let pattern = pattern.as_str().ok_or("asks resource type")?;
+        if pattern.is_empty() {
+            return Err("asks resource empty");
+        }
+        if pattern.chars().any(char::is_whitespace) {
+            return Err("asks whitespace");
+        }
+        if let Some(reason) = ask_resource_refusal(pattern) {
+            return Err(reason);
+        }
+        asks.push(Ask {
+            kind,
+            pattern: pattern.to_string(),
+        });
+    }
+    Ok(asks)
+}
+
+/// The declaration, parsed once from the compiled-in file. Immutable after
+/// that parse, so it holds no per-session state. Keep a malformed declaration's
+/// reason so every reader fails with that reason (fail closed, P11).
+#[cfg(test)]
+static DECLARED_ASKS: std::sync::LazyLock<Result<Vec<Ask>, &'static str>> =
+    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON));
+
+#[cfg(test)]
+fn require_parsed_asks<'a>(parsed: &'a Result<Vec<Ask>, &'static str>) -> &'a [Ask] {
+    parsed
+        .as_deref()
+        .unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+#[cfg(test)]
+fn declared_asks() -> &'static [Ask] {
+    require_parsed_asks(&DECLARED_ASKS)
+}
+
+/// The one root a declared pattern names: the pattern with `<principal>`
+/// expanded to the launching person, and its trailing `/` dropped so the
+/// directory itself is the prefix. `ask_covers` gives this root to
+/// `resource_covers`, so "under this pattern" has one boundary rule (P10).
+#[cfg(test)]
+fn ask_pattern_root(pattern: &str) -> String {
+    let expanded = match pattern.strip_prefix(PRINCIPAL_MARKER) {
+        Some(tail) => format!("{LAUNCHING_PRINCIPAL}{tail}"),
+        None => pattern.to_string(),
+    };
+    expanded.trim_end_matches('/').to_string()
+}
+
+/// Whether one declared ask's pattern covers a proposed resource. The
+/// pattern's root is expanded once and `resource_covers` decides the
+/// boundary, so a sibling such as `ProjectsX` stays outside `Projects` (P10).
+#[cfg(test)]
+fn ask_covers(ask: &Ask, resource: &str) -> bool {
+    resource
+        .strip_prefix("localhost://")
+        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))
+}
+
+/// The declaration's answer for one proposal. `Unspecified` matches nothing.
+#[cfg(test)]
+fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
+    declared_asks()
+        .iter()
+        .any(|ask| ask.kind == kind && ask_covers(ask, resource))
+}
 
 /// Test-only HTTP client and loopback mock server for the Sparks model.
 ///
@@ -20382,5 +20381,35 @@ mod tests {
             ProposalKind::Hosted,
             "localhost://Models/compaction"
         ));
+    }
+
+    /// The guest is named by its hash, and the wasm keeps each panic's file,
+    /// line and column, so a test-only item above the export moves the hash
+    /// when a test changes. Every `#[cfg(test)]` item stays below the export,
+    /// except `Refusal::ALL`, which the `refusals!` macro builds from the
+    /// production refusal list.
+    #[test]
+    fn no_test_only_item_sits_above_the_export() {
+        let source = include_str!("lib.rs");
+        let (above, _) = source
+            .split_once("export!(AgentHost);")
+            .expect("the guest keeps one export");
+        let lines: Vec<&str> = above.lines().collect();
+        let mut found = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim() != "#[cfg(test)]" {
+                continue;
+            }
+            let is_refusal_all = lines
+                .get(index + 1)
+                .is_some_and(|next| next.trim_start().starts_with("const ALL"));
+            if !is_refusal_all {
+                found.push(index + 1);
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "test-only items sit above the export at lines {found:?}"
+        );
     }
 }

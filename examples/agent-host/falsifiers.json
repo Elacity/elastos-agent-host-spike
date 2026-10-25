@@ -2305,6 +2305,22 @@
   "tests": [
    "tests::asks_declare_no_urls_secrets_or_users_paths"
   ]
+ },
+ {
+  "id": "F-AH5a",
+  "title": "a test-only item sits above the export and changes the guest hash",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "#[cfg(any(test, target_arch = \"wasm32\"))]\nfn host_path(text: &str) -> bool {",
+    "new": "#[cfg(test)]\nconst F_AH5A_PROBE: u8 = 0;\n\n#[cfg(any(test, target_arch = \"wasm32\"))]\nfn host_path(text: &str) -> bool {"
+   }
+  ],
+  "tests": [
+   "tests::no_test_only_item_sits_above_the_export"
+  ]
  }
  ]
 }
