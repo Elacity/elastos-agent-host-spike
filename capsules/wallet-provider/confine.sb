@@ -1,0 +1,38 @@
+;; Seatbelt profile for wallet-provider.
+;;
+;; This file is the single source for the profile. The Runtime loads it from
+;; the signed provider bundle and passes two resolved paths:
+;;   PROVIDER_EXECUTABLE  - the signed provider binary it starts
+;;   WALLET_STORAGE_ROOT  - the wallet data root it also sends to `Init`
+;; Everything else is denied, including every network operation.
+(version 1)
+
+;; Deny by default: a file, device, socket or process operation that no rule
+;; below grants is refused, so an unexpected request fails closed.
+(deny default)
+
+;; Startup: exec and the program read are pinned to the one binary the Runtime
+;; named, so the provider cannot start any other program.
+(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
+(allow file-read* (literal (param "PROVIDER_EXECUTABLE")))
+
+;; Startup: the kernel resolves every absolute path through the root directory,
+;; so the loader can reach the binary it was given.
+(allow file-read* (literal "/"))
+
+;; Startup: dyld reads the system shared cache and system libraries; the signed
+;; bundle ships no other library.
+(allow file-read*
+  (subpath "/usr/lib")
+  (subpath "/System/Library")
+  (subpath "/Library/Apple"))
+
+;; Startup: the loader and the allocator read kernel facts and the entropy
+;; device before the stdin/stdout protocol starts.
+(allow sysctl-read)
+(allow file-read* (literal "/dev/urandom"))
+
+;; Wallet state: the account, key, challenge and approval files live under the
+;; data root the Runtime named, and the provider reads and writes only there.
+(allow file-read* (subpath (param "WALLET_STORAGE_ROOT")))
+(allow file-write* (subpath (param "WALLET_STORAGE_ROOT")))
