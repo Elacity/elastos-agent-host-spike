@@ -1,0 +1,46 @@
+; did-provider deny-by-default profile (macOS Seatbelt).
+;
+; Start the provider with:
+;   /usr/bin/sandbox-exec -f confine.sb \
+;     -D STORAGE_ROOT=<absolute canonical storage root> \
+;     -D PROVIDER_BINARY=<installed did-provider binary> \
+;     <installed did-provider binary>
+;
+; The provider speaks line-delimited JSON over inherited stdin/stdout, so it
+; needs no network, no host paths and no ambient file authority.
+
+(version 1)
+
+; Start closed: every operation below is an explicit grant.
+(deny default)
+
+; The provider protocol has no network operation; deny sockets outright.
+(deny network*)
+
+; Exec the reviewed provider binary and nothing else.
+(allow process-exec (literal (param "PROVIDER_BINARY")))
+
+; Read the provider binary so exec and dyld can map it.
+(allow file-read* (literal (param "PROVIDER_BINARY")))
+
+; Rust sizes its stack guard pages from kernel facts at startup.
+(allow sysctl-read)
+
+; Absolute path lookup starts at the filesystem root; read only its own entry.
+(allow file-read* (literal "/"))
+
+; dyld maps libSystem and libiconv from the system library directories.
+(allow file-read* (subpath "/usr/lib") (subpath "/System/Library") (subpath "/Library/Apple/System/Library"))
+
+; Identity and persona key generation read kernel randomness.
+(allow file-read-data (literal "/dev/urandom"))
+
+; Diagnostics read the null streams.
+(allow file-read-data (literal "/dev/null") (literal "/dev/zero"))
+
+; Diagnostics are discarded rather than persisted.
+(allow file-write-data (literal "/dev/null"))
+
+; The sole mutable boundary: identity, nickname and persona state under the
+; canonical root the Runtime passes as STORAGE_ROOT.
+(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
