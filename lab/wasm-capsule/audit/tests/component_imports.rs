@@ -1,4 +1,5 @@
 use wasm_capsule_audit::{audit_component, Refusal};
+use wasmparser::{Parser, Payload, Validator};
 
 fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
     let refusal =
@@ -65,16 +66,86 @@ fn core_module_bytes_are_not_accepted_as_a_component() {
 }
 
 #[test]
+fn component_refusals_follow_the_documented_order() {
+    let wasm = wat::parse_str(
+        r#"(component
+            (import "elastos:bus/a@1.0.0" (instance))
+            (import "elastos:bus/b@1.0.0" (instance))
+            (import "elastos:bus/c@1.0.0" (instance)))"#,
+    )
+    .unwrap();
+    assert_undeclared(&wasm, &["elastos:bus/a@1.0.0"], "elastos:bus/b@1.0.0");
+
+    // Section id, size, name length, name, then the magic in the data.
+    let custom = b"\0\x09\x04note\0asm";
+    let mut wasm =
+        wat::parse_str(r#"(component (import "elastos:bus/b@1.0.0" (instance)))"#).unwrap();
+    wasm.extend_from_slice(custom);
+    Validator::new().validate_all(&wasm).unwrap();
+    let import_end = Parser::new(0)
+        .parse_all(&wasm)
+        .find_map(|payload| match payload.unwrap() {
+            Payload::ComponentImportSection(section) => Some(section.range().end),
+            _ => None,
+        })
+        .unwrap();
+    let import_end = usize::try_from(import_end).unwrap();
+    assert_eq!(
+        &wasm[import_end..],
+        custom,
+        "custom section follows imports"
+    );
+    let refusal = audit_component(&wasm, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::CodeInCustomSection);
+    assert_eq!(refusal.to_string(), "code in custom section");
+
+    let mut invalid = wat::parse_str("(component (core module (func (result i32))))").unwrap();
+    invalid.splice(8..8, custom.iter().copied());
+    assert_eq!(&invalid[..8], b"\0asm\x0d\0\x01\0");
+    assert_eq!(
+        &invalid[8..8 + custom.len()],
+        custom,
+        "first section is custom"
+    );
+    let body_start = Parser::new(0)
+        .parse_all(&invalid)
+        .find_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(body.range().start),
+            _ => None,
+        })
+        .unwrap();
+    let body_start = usize::try_from(body_start).unwrap();
+    assert!(
+        body_start >= 8 + custom.len(),
+        "invalid body follows custom section"
+    );
+    assert!(Validator::new().validate_all(&invalid).is_err());
+    let refusal = audit_component(&invalid, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::NotAComponent);
+    assert_eq!(refusal.to_string(), "not a component");
+}
+
+#[test]
 fn component_custom_section_carrying_code_is_refused() {
-    for (payload, expected) in [
-        (r#"\00asm\01\00\00\00"#, Err(Refusal::CodeInCustomSection)),
+    for (name, data, expected) in [
         (
+            "x",
+            r#"\00asm\01\00\00\00"#,
+            Err(Refusal::CodeInCustomSection),
+        ),
+        (
+            "x",
             r#"text\00asm\01\00\00\00tail"#,
             Err(Refusal::CodeInCustomSection),
         ),
-        ("plain text", Ok(vec![])),
+        (
+            r#"\00asm\01\00\00\00"#,
+            "plain text",
+            Err(Refusal::CodeInCustomSection),
+        ),
+        ("x", "plain text", Ok(vec![])),
     ] {
-        let section = format!(r#"(@custom "x" "{payload}")"#);
+        let section = format!(r#"(@custom "{name}" "{data}")"#);
         for source in [
             format!("(component {section})"),
             format!("(component (core module {section}))"),

@@ -1,5 +1,5 @@
 {
-  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant, and DID11 returns `parse_error` instead of the non-hex signature refusal. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
+  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant, and DID11 returns `parse_error` instead of the non-hex signature refusal. Task 022 adds DID12 for a failure message that drops the child's standard error, DID13 for a spawn that drops the stderr pipe instead of draining it, DID14 for a failure message that omits the request, DID15 for one that omits the exit status, and DID16/DID17 for the failed-write and response-stream branches bypassing the shared diagnostic. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
   "falsifiers": [
     {
       "id": "DID01",
@@ -188,6 +188,102 @@
       ],
       "tests": [
         "verify_did_recovery_under_profile"
+      ]
+    },
+    {
+      "id": "DID12",
+      "title": "the harness failure drops the child's standard error",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        let exit = self.wait_for_exit();\n        let stderr = self.stderr().to_string();\n        format!(\n            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"\n        )",
+          "new": "        let exit = self.wait_for_exit();\n        format!(\"provider did not answer request {request} ({cause}); child {exit}\")"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID13",
+      "title": "the spawn drops the stderr pipe instead of draining it",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        let mut stderr_pipe = child.stderr.take().expect(\"provider stderr\");\n        let stderr_reader = std::thread::spawn(move || {\n            let mut bytes = Vec::new();\n            let _ = stderr_pipe.read_to_end(&mut bytes);\n            String::from_utf8_lossy(&bytes).into_owned()\n        });",
+          "new": "        drop(child.stderr.take().expect(\"provider stderr\"));\n        let stderr_reader = std::thread::spawn(|| String::new());"
+        }
+      ],
+      "tests": [
+        "stderr_is_drained_before_wait"
+      ]
+    },
+    {
+      "id": "DID14",
+      "title": "the harness failure omits the request it could not answer",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"",
+          "new": "            \"provider did not answer ({cause}); child {exit}; standard error: {stderr}\""
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID15",
+      "title": "the harness failure omits the child's exit status",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"",
+          "new": "            \"provider did not answer request {request} ({cause}); standard error: {stderr}\""
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID16",
+      "title": "the failed-write branch bypasses the shared diagnostic",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "        if let Err(err) = written {\n            return Err(self.unanswered(request, &format!(\"writing the request failed: {err}\")));\n        }",
+          "new": "        if written.is_err() {\n            return Err(\"provider stdin must accept a request\".to_string());\n        }"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID17",
+      "title": "the response-stream branch bypasses the shared diagnostic",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "capsules/did-provider/tests/confine.rs",
+          "old": "            Ok(0) => Err(self.unanswered(request, \"the response stream ended\")),",
+          "new": "            Ok(0) => Err(\"provider exited without a response\".to_string()),"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
       ]
     }
   ]

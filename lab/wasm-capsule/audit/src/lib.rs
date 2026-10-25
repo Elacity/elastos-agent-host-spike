@@ -102,7 +102,11 @@ fn inspect(
             Payload::Version { .. } => depth += 1,
             Payload::End(_) => depth -= 1,
             Payload::CustomSection(section) => {
-                if section.data().windows(4).any(|bytes| bytes == b"\0asm") {
+                let range = section.range();
+                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;
+                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;
+                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;
+                if content.windows(4).any(|bytes| bytes == b"\0asm") {
                     return Err(Refusal::CodeInCustomSection);
                 }
             }
