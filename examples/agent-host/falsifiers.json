@@ -553,6 +553,102 @@
    "tests": [
     "a named test that does not run is not a catch"
    ]
+  },
+  {
+   "id": "FS23",
+   "title": "the chunked coding name is substring-matched, so xchunked is treated as chunked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if !coding.eq_ignore_ascii_case(\"chunked\") {",
+     "new": "            if !coding.contains(\"chunked\") {"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_chunked_body_is_decoded_and_the_coding_name_is_matched_exactly"
+   ]
+  },
+  {
+   "id": "FS24",
+   "title": "a content-length body reads one byte too many, so a complete response is a short read",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let Some(length) = content_lengths.first().copied() else {",
+     "new": "        let Some(length) = content_lengths.first().map(|length| length + 1) else {"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_content_length_body_is_decoded"
+   ]
+  },
+  {
+   "id": "FS25",
+   "title": "an unsupported transfer coding falls through to the plain body",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if !coding.eq_ignore_ascii_case(\"chunked\") {\n                return Err(format!(\"unsupported transfer coding {coding:?}\"));\n            }\n            return decode_chunked(body);",
+     "new": "            let _ = coding;\n            return Ok(String::from_utf8_lossy(body).into_owned());"
+    }
+   ],
+   "tests": [
+    "sparks_http::an_unsupported_transfer_coding_is_refused_not_read_as_a_plain_body"
+   ]
+  },
+  {
+   "id": "FS26",
+   "title": "transfer-encoding and content-length together are accepted, so the framing is ambiguous",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !transfer_codings.is_empty() && !content_lengths.is_empty() {\n            return Err(\"conflicting framing: transfer-encoding and content-length\".to_string());\n        }",
+     "new": "        // transfer-encoding takes precedence over content-length."
+    }
+   ],
+   "tests": [
+    "sparks_http::conflicting_framing_is_refused"
+   ]
+  },
+  {
+   "id": "FS27",
+   "title": "a short read returns an empty success instead of an error",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if body.len() < length {\n            return Err(format!(\"short read: {} of {length} body bytes\", body.len()));\n        }",
+     "new": "        if body.len() < length {\n            return Ok(String::new());\n        }"
+    }
+   ],
+   "tests": [
+    "sparks_http::a_short_read_is_an_error_not_an_empty_success"
+   ]
+  },
+  {
+   "id": "FS28",
+   "title": "the skip-guard ignores SPARKS_MODEL_URL, so the opt-in decision is lost",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        std::env::var(\"SPARKS_MODEL_URL\")\n            .ok()\n            .filter(|url| !url.is_empty())",
+     "new": "        let _ = std::env::var(\"SPARKS_MODEL_URL\");\n        None"
+    }
+   ],
+   "tests": [
+    "sparks_http::the_model_url_opt_in_is_one_guard"
+   ]
   }
  ]
 }

@@ -8025,6 +8025,320 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
 #[cfg(target_arch = "wasm32")]
 export!(AgentHost);
 
+/// Test-only HTTP client and loopback mock server for the Sparks model.
+///
+/// One client, one skip-guard. `post_json` reads exactly one response framing:
+/// `Transfer-Encoding` must be the single exact coding `chunked`, or the body
+/// must carry `Content-Length`. `gzip`, `xchunked`, mixed framings and short
+/// reads are refused with their reason, never decoded as a plain body.
+#[cfg(test)]
+mod sparks_http {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    /// The single opt-in decision: no `SPARKS_MODEL_URL` means the model is
+    /// skipped. No other code in this crate reads that variable.
+    pub(crate) fn sparks_model_url() -> Option<String> {
+        std::env::var("SPARKS_MODEL_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+    }
+
+    /// One canned loopback server. It accepts one connection, reads the whole
+    /// request, writes `response`, and closes. `request()` joins it and returns
+    /// the bytes the client sent.
+    pub(crate) struct MockServer {
+        url: String,
+        handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    }
+
+    impl MockServer {
+        pub(crate) fn serve_once(response: &[u8]) -> MockServer {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let response = response.to_vec();
+            let handle = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_request(&stream);
+                let mut writer = stream;
+                writer.write_all(&response).unwrap();
+                request
+            });
+            MockServer {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        pub(crate) fn url(&self) -> &str {
+            &self.url
+        }
+
+        pub(crate) fn request(mut self) -> Vec<u8> {
+            self.handle.take().unwrap().join().unwrap()
+        }
+    }
+
+    /// Read one request: headers, then exactly `Content-Length` body bytes.
+    fn read_request(mut stream: &TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                return request;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if let Some(headers_end) = find_subslice(&request, b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..headers_end]);
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let body_start = headers_end + 4;
+                if request.len() >= body_start + length {
+                    return request;
+                }
+            }
+        }
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    /// POST a JSON body and return the decoded response body, or a reason.
+    pub(crate) fn post_json(base_url: &str, path: &str, body: &str) -> Result<String, String> {
+        let address = base_url
+            .strip_prefix("http://")
+            .ok_or_else(|| format!("unsupported url {base_url}"))?;
+        let mut stream =
+            TcpStream::connect(address).map_err(|error| format!("connect failed: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|error| format!("timeout setup failed: {error}"))?;
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("write failed: {error}"))?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|error| format!("read failed: {error}"))?;
+        decode_response(&response)
+    }
+
+    /// Decode one HTTP/1.1 response. Framing is decided once, before the body.
+    fn decode_response(response: &[u8]) -> Result<String, String> {
+        let headers_end = find_subslice(response, b"\r\n\r\n")
+            .ok_or_else(|| "response headers are incomplete".to_string())?;
+        let head = String::from_utf8(response[..headers_end].to_vec())
+            .map_err(|_| "response headers are not UTF-8".to_string())?;
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .ok_or_else(|| "response status line is missing".to_string())?;
+        let code = status
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .ok_or_else(|| "response status line is malformed".to_string())?;
+        if !(200..300).contains(&code) {
+            return Err(format!("http status {code}"));
+        }
+        let mut transfer_codings = Vec::new();
+        let mut content_lengths = Vec::new();
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                for coding in value.split(',') {
+                    transfer_codings.push(coding.trim().to_string());
+                }
+            } else if name.eq_ignore_ascii_case("content-length") {
+                content_lengths.push(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid content-length {value:?}"))?,
+                );
+            }
+        }
+        let body = &response[headers_end + 4..];
+        if !transfer_codings.is_empty() && !content_lengths.is_empty() {
+            return Err("conflicting framing: transfer-encoding and content-length".to_string());
+        }
+        if !transfer_codings.is_empty() {
+            if transfer_codings.len() != 1 {
+                return Err(format!(
+                    "conflicting transfer codings: {}",
+                    transfer_codings.join(", ")
+                ));
+            }
+            let coding = &transfer_codings[0];
+            if !coding.eq_ignore_ascii_case("chunked") {
+                return Err(format!("unsupported transfer coding {coding:?}"));
+            }
+            return decode_chunked(body);
+        }
+        if content_lengths.len() > 1 {
+            return Err("conflicting content-length values".to_string());
+        }
+        let Some(length) = content_lengths.first().copied() else {
+            return Err("response has no framing".to_string());
+        };
+        if body.len() < length {
+            return Err(format!("short read: {} of {length} body bytes", body.len()));
+        }
+        String::from_utf8(body[..length].to_vec())
+            .map_err(|_| "response body is not UTF-8".to_string())
+    }
+
+    /// Decode a chunked body. Every chunk must be complete, with its CRLF.
+    fn decode_chunked(body: &[u8]) -> Result<String, String> {
+        let mut decoded = Vec::new();
+        let mut at = 0;
+        loop {
+            let line_end = body[at..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .map(|offset| at + offset)
+                .ok_or_else(|| "short read: chunk size line is incomplete".to_string())?;
+            let line = String::from_utf8(body[at..line_end].to_vec())
+                .map_err(|_| "chunk size line is not UTF-8".to_string())?;
+            let size_text = line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
+            at = line_end + 2;
+            if size == 0 {
+                return String::from_utf8(decoded)
+                    .map_err(|_| "response body is not UTF-8".to_string());
+            }
+            if body.len() < at + size + 2 {
+                return Err("short read: chunk data is incomplete".to_string());
+            }
+            if &body[at + size..at + size + 2] != b"\r\n" {
+                return Err("chunk is not ended by CRLF".to_string());
+            }
+            decoded.extend_from_slice(&body[at..at + size]);
+            at += size + 2;
+        }
+    }
+
+    fn chunked(body: &str) -> Vec<u8> {
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len()).as_bytes());
+        response
+    }
+
+    const JSON: &str = r#"{"answer":"ok"}"#;
+
+    #[test]
+    fn a_chunked_body_is_decoded_and_the_coding_name_is_matched_exactly() {
+        let server = MockServer::serve_once(&chunked(JSON));
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Ok(JSON.to_string())
+        );
+        assert!(server.request().starts_with(b"POST /v1/chat HTTP/1.1\r\n"));
+
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: xchunked\r\n\r\n{\"answer\":\"ok\"}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported transfer coding \"xchunked\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_content_length_body_is_decoded() {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{JSON}",
+            JSON.len()
+        );
+        let server = MockServer::serve_once(response.as_bytes());
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Ok(JSON.to_string())
+        );
+        let request = String::from_utf8(server.request()).unwrap();
+        assert!(request.contains(r#"Content-Length: 2"#));
+        assert!(request.ends_with("{}"));
+    }
+
+    #[test]
+    fn an_unsupported_transfer_coding_is_refused_not_read_as_a_plain_body() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n{\"answer\":\"ok\"}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("unsupported transfer coding \"gzip\"".to_string())
+        );
+    }
+
+    #[test]
+    fn conflicting_framing_is_refused() {
+        let both =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello";
+        let server = MockServer::serve_once(both);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("conflicting framing: transfer-encoding and content-length".to_string())
+        );
+
+        let two =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n";
+        let server = MockServer::serve_once(two);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("conflicting transfer codings: chunked, gzip".to_string())
+        );
+    }
+
+    #[test]
+    fn a_short_read_is_an_error_not_an_empty_success() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}";
+        let server = MockServer::serve_once(response);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("short read: 2 of 20 body bytes".to_string())
+        );
+
+        let incomplete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab";
+        let server = MockServer::serve_once(incomplete);
+        assert_eq!(
+            post_json(server.url(), "/v1/chat", "{}"),
+            Err("short read: chunk data is incomplete".to_string())
+        );
+
+        assert!(post_json("http://127.0.0.1:1", "/v1/chat", "{}").is_err());
+    }
+
+    #[test]
+    fn the_model_url_opt_in_is_one_guard() {
+        std::env::remove_var("SPARKS_MODEL_URL");
+        assert_eq!(sparks_model_url(), None);
+        std::env::set_var("SPARKS_MODEL_URL", "http://127.0.0.1:9");
+        assert_eq!(sparks_model_url(), Some("http://127.0.0.1:9".to_string()));
+        std::env::remove_var("SPARKS_MODEL_URL");
+        assert_eq!(sparks_model_url(), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
