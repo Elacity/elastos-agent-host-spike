@@ -6,14 +6,16 @@ Usage (from anywhere):
   python3 -I examples/agent-host/falsify.py FS           # one prefix
   python3 -I examples/agent-host/falsify.py FS01 FS03    # some ids
   python3 -I examples/agent-host/falsify.py --list       # ids, commands, expectations
+  python3 -I examples/agent-host/falsify.py --list FILE  # run that list (MP01, or ids too)
   python3 -I examples/agent-host/falsify.py --self-test  # the runner checks itself
   python3 -I examples/agent-host/falsify.py --self-test --with-repo  # and one real falsifier
   python3 -I examples/agent-host/falsify.py --self-test-case NAME  # one named case
 
-The falsifiers are data, in falsifiers.json next to this file. Each one
-replaces exact text (found exactly once) in a file and requires every named
-test to FAIL. The verdict comes from exit codes: the mutated code is built
-first (a build that fails is its own result); then each named test is listed
+The falsifiers are data, in falsifiers.json next to this file; `--list FILE`
+reads that file instead. Each one replaces exact text (found exactly once) in
+a file and requires every named test to FAIL. The verdict comes from exit
+codes: the mutated code is built first (a build that fails is its own result);
+then each named test is listed
 with `--exact` (exactly one test must match) and run alone with `--exact`.
 A non-zero exit alone is not a catch: the harness evidence must be error-free
 (a harness or loader error marker at any position on a line, on either
@@ -52,7 +54,8 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
-COMMANDS = ("host", "e2e", "selftest")
+COMMANDS = ("host", "provider", "e2e", "selftest")
+EXPECTS = ("caught", "compile_error", "survives")
 SELF_TEST_DIR = HERE / ".falsify-selftest"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
@@ -100,21 +103,39 @@ class DiskFull(Exception):
     pass
 
 
+class ListError(SystemExit):
+    """A list that cannot be read or trusted: exit 2, with its own reason.
+    SystemExit keeps one refusal type inside load(), and main() turns it into
+    the usage status."""
+
+    exit_status = 2
+
+
 def load(path=DATA):
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not path.is_file():
+        raise ListError(f"{path}: the list file does not exist")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ListError(f"{path}: the list is not JSON: {error}") from error
+    if not isinstance(doc, dict) or not isinstance(doc.get("falsifiers"), list):
+        raise ListError(f'{path}: the list is not a {{"falsifiers": [...]}} document')
     entries = doc["falsifiers"]
+    for entry in entries:
+        if not isinstance(entry, dict) or any(
+                key not in entry for key in ("id", "command", "expect", "tests")):
+            raise ListError(f"{path}: every falsifier needs an id, a command, an expect and a tests list")
     ids = [entry["id"] for entry in entries]
     if len(ids) != len(set(ids)):
-        sys.exit("falsifiers.json: an id is used twice")
+        raise ListError(f"{path}: an id is used twice")
     for entry in entries:
-        if entry["command"] not in COMMANDS or entry["expect"] not in (
-            "caught",
-            "compile_error",
-            "survives",
-        ):
-            sys.exit(f"falsifiers.json: {entry['id']}: unknown command or expect")
+        if entry["command"] not in COMMANDS:
+            raise ListError(f"{path}: {entry['id']}: unknown command {entry['command']!r}")
+        if entry["expect"] not in EXPECTS:
+            raise ListError(f"{path}: {entry['id']}: unknown expectation {entry['expect']!r}")
         if entry["expect"] in ("caught", "survives") and not entry["tests"]:
-            sys.exit(f"falsifiers.json: {entry['id']}: no named tests")
+            kind = "a caught entry" if entry["expect"] == "caught" else "a survives entry"
+            raise ListError(f"{path}: {entry['id']}: {kind} needs at least one named test")
     return entries
 
 
@@ -228,6 +249,15 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
             "build": [(cargo + ["--no-run"], REPO)],
             "one": (cargo + ["--"], REPO, []),
         }
+    if command == "provider":
+        # The provider crate is its own workspace: same locked, no-run build
+        # and one-test run, against its own manifest.
+        cargo = ["cargo", "test", *cargo_flags, "--manifest-path",
+                 str(manifest or REPO / "capsules/model-provider/Cargo.toml")]
+        return {
+            "build": [(cargo + ["--no-run"], REPO)],
+            "one": (cargo + ["--"], REPO, []),
+        }
     if command == "selftest":
         # A change to this runner is checked by its own self-test. A fresh
         # process reads the mutated file; --keep-backups stops it from taking
@@ -257,6 +287,25 @@ def run(argv, cwd):
     if any(word in output for word in DISK_FULL):
         raise DiskFull("a command reported a full disk")
     return done.returncode, output
+
+
+def list_path(argv):
+    """The one list a run reads: the file after --list, else the default."""
+    if "--list" in argv:
+        at = argv.index("--list")
+        if at + 1 < len(argv) and not argv[at + 1].startswith("--"):
+            return pathlib.Path(argv[at + 1])
+    return DATA
+
+
+def list_args(argv):
+    """The id or prefix arguments, without --list and the path it selected."""
+    args = [arg for arg in argv if not arg.startswith("--")]
+    if "--list" in argv:
+        at = argv.index("--list")
+        if at + 1 < len(argv) and not argv[at + 1].startswith("--"):
+            args.remove(argv[at + 1])
+    return args
 
 
 def harness_results(output):
@@ -813,7 +862,7 @@ def a_survivor_needs_its_named_test_to_run():
         try:
             load(data)
         except SystemExit as error:
-            refused = "no named tests" in str(error)
+            refused = str(error) == f"{data}: ST: a survives entry needs at least one named test"
         print(f"self-test: a survives entry with no named test: refused={refused}")
         if not refused:
             ok = False
@@ -853,10 +902,143 @@ def a_survivor_is_proved_by_its_named_tests():
     return ok
 
 
+def provider_spec_uses_locked_manifest():
+    """The provider command builds and runs the provider crate's own tests,
+    with the lock held, one named test at a time."""
+    how = spec("provider")
+    build = how["build"][0][0]
+    one = how["one"][0]
+    manifest = str(REPO / "capsules/model-provider/Cargo.toml")
+    ok = ("--locked" in build and "--locked" in one
+          and manifest in build and manifest in one)
+    print(f"self-test: provider build argv: {' '.join(build)}")
+    print(f"self-test: provider run argv: {' '.join(one)}")
+    return ok
+
+
+def list_option_selects_path():
+    """--list <path> selects that path; a run with neither reads the default.
+    The argv is the only input, so this proves the routing, not just load()."""
+    chosen = SELF_TEST_DIR / "chosen.json"
+    got = list_path(["--list", str(chosen)])
+    print(f"self-test: --list path selected: {got}")
+    return got == chosen and list_path([]) == DATA and list_path(["FS01"]) == DATA
+
+
+def the_selected_path_is_not_a_falsifier_id():
+    """The path --list selected is not an id or a prefix to match."""
+    path = str(REPO / "capsules/model-provider/falsifiers.json")
+    got = list_args(["--list", path, "MP01"])
+    print(f"self-test: ids beside --list: {got}")
+    return got == ["MP01"] and list_args([]) == [] and list_args(["FS01"]) == ["FS01"]
+
+
+def bare_list_option_behavior():
+    """A bare --list still shows the default list."""
+    got = list_path(["--list"])
+    print(f"self-test: bare --list path: {got}")
+    return got == DATA
+
+
+def refusal_reason(path):
+    """The one reason load() gives for a crafted list, or None when it reads
+    the list. Any other error is not a refusal, so the case that expects a
+    reason fails on it."""
+    try:
+        load(path)
+    except ListError as error:
+        return str(error)
+    except Exception as error:
+        return f"raised {type(error).__name__}: {error}"
+    return None
+
+
+def the_one_refusal(write):
+    """Craft one list, load it, and return (path, reason). The reason is None
+    when load() accepted the list."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        path = SELF_TEST_DIR / "falsifiers.json"
+        write(path)
+        return path, refusal_reason(path)
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def one_entry(**fields):
+    entry = {"id": "ST", "command": "host", "expect": "caught",
+             "edits": [], "tests": ["tests::planted_check"]}
+    entry.update(fields)
+    return json.dumps({"falsifiers": [entry]})
+
+
+def missing_list_file_is_refused():
+    """A list path that does not exist is a refusal with its own reason."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "absent.json"
+        reason = refusal_reason(path)
+        print(f"self-test: missing list file: {reason}")
+        return reason == f"{path}: the list file does not exist"
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def a_list_that_is_not_json_is_refused():
+    """Text that is not JSON is refused; the reason names the file."""
+    path, reason = the_one_refusal(lambda p: p.write_text("not json at all", encoding="utf-8"))
+    print(f"self-test: a list that is not JSON: {reason}")
+    return reason is not None and reason.startswith(f"{path}: the list is not JSON: ")
+
+
+def a_list_without_falsifiers_is_refused():
+    """A JSON document with no falsifiers list is refused."""
+    path, reason = the_one_refusal(
+        lambda p: p.write_text(json.dumps({"entries": []}), encoding="utf-8"))
+    print(f"self-test: a list without falsifiers: {reason}")
+    return reason == f'{path}: the list is not a {{"falsifiers": [...]}} document'
+
+
+def an_unknown_command_is_refused():
+    """A command the runner does not know is refused, with its own reason."""
+    path, reason = the_one_refusal(
+        lambda p: p.write_text(one_entry(command="curl"), encoding="utf-8"))
+    print(f"self-test: an unknown command: {reason}")
+    return reason == f"{path}: ST: unknown command 'curl'"
+
+
+def an_unknown_expectation_is_refused():
+    """An expectation the runner does not know is refused, with its own reason."""
+    path, reason = the_one_refusal(
+        lambda p: p.write_text(one_entry(expect="maybe"), encoding="utf-8"))
+    print(f"self-test: an unknown expectation: {reason}")
+    return reason == f"{path}: ST: unknown expectation 'maybe'"
+
+
+def a_caught_entry_needs_named_tests():
+    """A caught entry with no named test is refused, with its own reason."""
+    path, reason = the_one_refusal(
+        lambda p: p.write_text(one_entry(tests=[]), encoding="utf-8"))
+    print(f"self-test: a caught entry with no named test: {reason}")
+    return reason == f"{path}: ST: a caught entry needs at least one named test"
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
 SELF_TEST_CASES = {
+    "provider spec uses the locked manifest": provider_spec_uses_locked_manifest,
+    "list option selects its path": list_option_selects_path,
+    "the selected path is not a falsifier id": the_selected_path_is_not_a_falsifier_id,
+    "bare list option behavior": bare_list_option_behavior,
+    "a missing list file is refused": missing_list_file_is_refused,
+    "a list that is not JSON is refused": a_list_that_is_not_json_is_refused,
+    "a list without falsifiers is refused": a_list_without_falsifiers_is_refused,
+    "an unknown command is refused": an_unknown_command_is_refused,
+    "an unknown expectation is refused": an_unknown_expectation_is_refused,
+    "a caught entry needs named tests": a_caught_entry_needs_named_tests,
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
@@ -910,8 +1092,12 @@ def main(argv):
     # file: the backup belongs to the caller's mutation, not to a killed run.
     if "--keep-backups" not in argv:
         recover_backups()
-    entries = load()
-    if "--list" in argv:
+    try:
+        entries = load(list_path(argv))
+    except ListError as error:
+        print(f"falsify.py: {error}", file=sys.stderr)
+        return error.exit_status
+    if "--list" in argv and list_path(argv) == DATA:
         for entry in entries:
             print(f"{entry['id']:6} {entry['command']:8} {entry['expect']:13} {entry['title']}")
         return 0
@@ -937,8 +1123,9 @@ def main(argv):
         return CASE_PASSED if ok else CASE_FAILED
     if "--self-test" in argv:
         return 0 if self_test(entries, "--with-repo" in argv) else 1
-    chosen = [entry for entry in entries if not argv or any(
-        entry["id"] == arg or entry["id"].startswith(arg) for arg in argv)]
+    wanted = list_args(argv)
+    chosen = [entry for entry in entries if not wanted or any(
+        entry["id"] == arg or entry["id"].startswith(arg) for arg in wanted)]
     if not chosen:
         print("no falsifier matches", " ".join(argv))
         return 2

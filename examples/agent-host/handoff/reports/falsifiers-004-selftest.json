@@ -1,0 +1,182 @@
+{
+ "about": "Self-test falsifiers for task 004: each entry breaks one check in examples/agent-host/falsify.py (exact text, replaced once), and every named self-test case must then FAIL. Run with: python3 -I examples/agent-host/falsify.py --list examples/agent-host/handoff/reports/falsifiers-004-selftest.json. These cases are pure load()/argv checks: no case calls main() and no case runs a list.",
+ "falsifiers": [
+  {
+   "id": "ST01",
+   "title": "the provider arm drops the lock",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        cargo = [\"cargo\", \"test\", *cargo_flags, \"--manifest-path\",\n                 str(manifest or REPO / \"capsules/model-provider/Cargo.toml\")]",
+     "new": "        cargo = [\"cargo\", \"test\", \"--manifest-path\",\n                 str(manifest or REPO / \"capsules/model-provider/Cargo.toml\")]"
+    }
+   ],
+   "tests": [
+    "provider spec uses the locked manifest"
+   ]
+  },
+  {
+   "id": "ST02",
+   "title": "the selected list path is discarded",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return pathlib.Path(argv[at + 1])\n    return DATA",
+     "new": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return DATA\n    return DATA"
+    }
+   ],
+   "tests": [
+    "list option selects its path"
+   ]
+  },
+  {
+   "id": "ST03",
+   "title": "a bare --list reads a path from the argv",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return pathlib.Path(argv[at + 1])\n    return DATA",
+     "new": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            return pathlib.Path(argv[at + 1])\n        return pathlib.Path(argv[0])\n    return DATA"
+    }
+   ],
+   "tests": [
+    "bare list option behavior"
+   ]
+  },
+  {
+   "id": "ST04",
+   "title": "a missing list file is read anyway",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if not path.is_file():",
+     "new": "    if path.is_file() and False:"
+    }
+   ],
+   "tests": [
+    "a missing list file is refused"
+   ]
+  },
+  {
+   "id": "ST05",
+   "title": "a list that is not JSON is not refused",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    except (json.JSONDecodeError, UnicodeDecodeError) as error:",
+     "new": "    except (UnicodeDecodeError,) as error:"
+    }
+   ],
+   "tests": [
+    "a list that is not JSON is refused"
+   ]
+  },
+  {
+   "id": "ST06",
+   "title": "a document without a falsifiers list is not refused",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if not isinstance(doc, dict) or not isinstance(doc.get(\"falsifiers\"), list):",
+     "new": "    if not isinstance(doc, dict):"
+    }
+   ],
+   "tests": [
+    "a list without falsifiers is refused"
+   ]
+  },
+  {
+   "id": "ST07",
+   "title": "an unknown command is accepted",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if entry[\"command\"] not in COMMANDS:",
+     "new": "        if False and entry[\"command\"] not in COMMANDS:"
+    }
+   ],
+   "tests": [
+    "an unknown command is refused"
+   ]
+  },
+  {
+   "id": "ST08",
+   "title": "an unknown expectation is accepted",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if entry[\"expect\"] not in EXPECTS:",
+     "new": "        if False and entry[\"expect\"] not in EXPECTS:"
+    }
+   ],
+   "tests": [
+    "an unknown expectation is refused"
+   ]
+  },
+  {
+   "id": "ST09",
+   "title": "a caught entry with no named test gets the survives reason",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            kind = \"a caught entry\" if entry[\"expect\"] == \"caught\" else \"a survives entry\"",
+     "new": "            kind = \"a survives entry\""
+    }
+   ],
+   "tests": [
+    "a caught entry needs named tests"
+   ]
+  },
+  {
+   "id": "ST10",
+   "title": "a caught or survives entry with no named test is accepted",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if entry[\"expect\"] in (\"caught\", \"survives\") and not entry[\"tests\"]:",
+     "new": "        if entry[\"expect\"] == \"compile_error\" and not entry[\"tests\"]:"
+    }
+   ],
+   "tests": [
+    "a caught entry needs named tests",
+    "a survivor needs its named test to run"
+   ]
+  },
+  {
+   "id": "ST11",
+   "title": "the selected list path becomes an id to match",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            args.remove(argv[at + 1])\n    return args",
+     "new": "        if at + 1 < len(argv) and not argv[at + 1].startswith(\"--\"):\n            pass\n    return args"
+    }
+   ],
+   "tests": [
+    "the selected path is not a falsifier id"
+   ]
+  }
+ ]
+}
