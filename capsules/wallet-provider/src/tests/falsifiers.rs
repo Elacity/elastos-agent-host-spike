@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The committed list records the three storage-root refusals, the two
-/// profile mutations, the five shared-contract mutations, the did-profile
+/// profile mutations, the shared-contract mutations, the did-profile
 /// shared-rule removal, the two network-allow check mutations, task 016's
 /// five wallet allow-rule removals, task 020's allow-default check removal
 /// and appended profile rule, task 021's canonical-token check removal
 /// with the wallet rename, the did rename and the sibling-read allowance,
-/// and WP25, which resolves edit paths from the repository root again.
-const EXPECTED_FALSIFIERS: usize = 25;
+/// WP25, which resolves edit paths from the repository root again, and
+/// task 026's re-anchored WP07 on the one required list with WP26's missing
+/// model profile skip. Task 026 also retires WP08 and WP10, whose model-only
+/// branch is gone.
+const EXPECTED_FALSIFIERS: usize = 24;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

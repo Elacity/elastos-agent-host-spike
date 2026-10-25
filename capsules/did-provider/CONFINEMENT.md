@@ -11,8 +11,8 @@ The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
 confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
 parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
 bridge work, parameterized by the profile path and the storage root, starts
-`did-provider` and `wallet-provider`, so the Runtime has one path for starting
-a provider under its profile (P10). The Runtime loads `confine.sb` only from
+`did-provider`, `wallet-provider` and `model-provider`, so the Runtime has one
+path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
 the signed provider bundle, checks its hash, refuses any profile with
 `(allow default)` or a network allow, and fails closed with a reason; the
 provider proposes, the Runtime checks (P4, P11).
@@ -34,6 +34,9 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The model provider's own file profile, `../model-provider/confine.sb`,
+presents this contract and the shared test requires it; moving the Runtime
+from its inline policy to that file is part of the same bridge change.
 
 ## Host-OS status
 
@@ -127,11 +130,10 @@ contract: `(version 1)` first, `(deny default)` second, an explicit
 `STORAGE_ROOT` / `STORAGE_PARENT` parameter tokens, no `(allow default)` rule,
 and the three shared rules verbatim. One list function runs that check over
 `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
-and `capsules/model-provider/confine.sb`: the did and wallet profiles are
-required, and the model profile is checked whenever that file exists and
-skipped with a printed reason while it is absent. The test runs on every
-platform because it reads files and starts no process. It does not claim
-that the model provider meets the contract today.
+and `capsules/model-provider/confine.sb`. All three profiles are required,
+and a missing or unreadable profile fails the check with a reason that names
+its path. The test runs on every platform because it reads files and starts
+no process.
 
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
 the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
@@ -223,7 +225,8 @@ status and all the provider wrote to standard error. The grant comes back only
 together with a named test that needs it.
 
 The wallet provider keeps its own profile and tests in `../wallet-provider/`.
-Both providers present the same file-based contract to the Runtime bridge:
+did-provider, wallet-provider and model-provider present the same file-based
+contract to the Runtime bridge:
 `(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT` /
 `STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the
 `/usr/bin/sandbox-exec -f confine.sb` launch shape.

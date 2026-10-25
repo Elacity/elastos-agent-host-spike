@@ -1,9 +1,11 @@
 //! The lane's one owner of throwaway Homes and bounded Runtime launches.
 
+use std::cell::Cell;
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -71,6 +73,7 @@ pub struct ThrowawayHome {
     data: PathBuf,
     temp: PathBuf,
     removed: bool,
+    keep: Cell<bool>,
 }
 
 impl ThrowawayHome {
@@ -116,6 +119,7 @@ impl ThrowawayHome {
             data: PathBuf::new(),
             temp: root.join("tmp"),
             removed: false,
+            keep: Cell::new(false),
         };
         match include_str!("../fixtures/home-source.txt").trim() {
             "throwaway" => {}
@@ -186,25 +190,25 @@ impl ThrowawayHome {
         Ok(())
     }
 
-    /// All Runtime process starts belong here. Future operator support extends
-    /// this primitive and its environment test instead of adding another spawn.
-    pub fn launch(&self, program: &Path, args: &[&str], bound: Duration) -> Result<Output> {
+    /// The only spawn site, shared by bounded launches and managed operators.
+    fn spawn(&self, program: &Path, args: &[&str]) -> Result<CapturedChild> {
         self.guard(&self.home, &self.data)?;
         // Files avoid pipe backpressure and inherited-pipe EOF hangs. They are
         // created exclusively inside the guarded root and retained on failure.
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let mut stdout = File::create_new(self.root.join(format!("stdout-{serial}")))
+        let stdout = File::create_new(self.root.join(format!("stdout-{serial}")))
             .map_err(|_| "could not create child stdout capture")?;
-        let mut stderr = File::create_new(self.root.join(format!("stderr-{serial}")))
+        let stderr = File::create_new(self.root.join(format!("stderr-{serial}")))
             .map_err(|_| "could not create child stderr capture")?;
-        let started = Instant::now();
-        let mut child = Command::new(program)
+        let child = Command::new(program)
             .args(args)
             .current_dir(&self.home)
             .env_clear()
             .env("HOME", &self.home)
             .env("TMPDIR", &self.temp)
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("ELASTOS_CARRIER_MDNS", "0")
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(
                 stdout
@@ -218,6 +222,17 @@ impl ThrowawayHome {
             )
             .spawn()
             .map_err(|_| "could not start child process")?;
+        Ok(CapturedChild {
+            child,
+            stdout,
+            stderr,
+        })
+    }
+
+    pub fn launch(&self, program: &Path, args: &[&str], bound: Duration) -> Result<Output> {
+        let started = Instant::now();
+        let mut spawned = self.spawn(program, args)?;
+        let child = &mut spawned.child;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
@@ -241,16 +256,150 @@ impl ThrowawayHome {
         };
         Ok(Output {
             status,
-            stdout: capture(&mut stdout)?,
-            stderr: capture(&mut stderr)?,
+            stdout: capture(&mut spawned.stdout)?,
+            stderr: capture(&mut spawned.stderr)?,
         })
     }
 
+    pub fn start(&self, program: &Path, args: &[&str]) -> Result<RunningChild<'_>> {
+        Ok(RunningChild {
+            home: self,
+            spawned: self.spawn(program, args)?,
+            stopped: false,
+        })
+    }
+
+    pub fn group_is_alive(&self, pgid: u32) -> Result<bool> {
+        let output = self.launch(
+            Path::new("/usr/bin/pgrep"),
+            &["-g", &pgid.to_string()],
+            Duration::from_secs(1),
+        )?;
+        if !output.stderr.is_empty() {
+            return Err("could not inspect child process group");
+        }
+        match output.status.code() {
+            Some(1) if output.stdout.is_empty() => Ok(false),
+            Some(0) => {
+                let text = std::str::from_utf8(&output.stdout)
+                    .map_err(|_| "process group listing is not UTF-8")?;
+                if text.lines().next().is_none()
+                    || !text
+                        .lines()
+                        .all(|line| line.parse::<u32>().is_ok_and(|pid| pid > 0))
+                {
+                    return Err("process group listing is empty or unparseable");
+                }
+                Ok(true)
+            }
+            _ => Err("could not inspect child process group"),
+        }
+    }
+
     pub fn finish(mut self) -> Result<()> {
+        if self.keep.get() {
+            return Err("keep the root after an unstopped child or failed stop");
+        }
         self.check_root()?;
         fs::remove_dir_all(&self.root).map_err(|_| "could not remove the passed test root")?;
         self.removed = true;
         Ok(())
+    }
+}
+
+struct CapturedChild {
+    child: Child,
+    stdout: File,
+    stderr: File,
+}
+
+/// Borrows the Home so its root cannot be removed while the child is owned.
+/// Captures stay in the root; operator output and attach data remain unread.
+pub struct RunningChild<'a> {
+    home: &'a ThrowawayHome,
+    spawned: CapturedChild,
+    stopped: bool,
+}
+
+impl RunningChild<'_> {
+    pub fn pgid(&self) -> u32 {
+        self.spawned.child.id()
+    }
+
+    pub fn is_alive(&mut self) -> Result<bool> {
+        self.spawned
+            .child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|_| "could not inspect managed child")
+    }
+
+    fn signal(&self, signal: &str, group: bool) -> Result<()> {
+        let target = if group {
+            format!("-{}", self.pgid())
+        } else {
+            self.pgid().to_string()
+        };
+        let output = self.home.launch(
+            Path::new("/bin/kill"),
+            &[signal, &target],
+            Duration::from_secs(1),
+        )?;
+        if !output.status.success() {
+            return Err("could not signal managed child or its group");
+        }
+        Ok(())
+    }
+
+    fn kill_group(&mut self) -> Result<()> {
+        // Signal first even if the leader exited: its children can still live.
+        let _ = self.signal("-KILL", true);
+        let bound = Instant::now();
+        while bound.elapsed() < Duration::from_secs(2) {
+            if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err("managed process group remains after SIGKILL")
+    }
+
+    pub fn stop(&mut self) -> Result<()> {
+        if self.stopped {
+            return Ok(());
+        }
+        let result = self.stop_within_bound();
+        if result.is_err() {
+            self.home.keep.set(true);
+            self.kill_group()?;
+        }
+        self.stopped = true;
+        result
+    }
+
+    fn stop_within_bound(&mut self) -> Result<()> {
+        let started = Instant::now();
+        if self.is_alive()? {
+            self.signal("-TERM", false)?;
+        }
+        while started.elapsed() < Duration::from_secs(10) {
+            if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err("managed child or its group exceeded the 10 second stop bound")
+    }
+}
+
+impl Drop for RunningChild<'_> {
+    fn drop(&mut self) {
+        if !self.stopped {
+            self.home.keep.set(true);
+            if let Err(reason) = self.kill_group() {
+                eprintln!("managed child cleanup failed: {reason}");
+            }
+        }
     }
 }
 

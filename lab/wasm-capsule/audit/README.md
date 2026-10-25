@@ -29,17 +29,22 @@ cargo fmt --manifest-path lab/wasm-capsule/audit/Cargo.toml -- --check
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml
 ```
 
-The eight `core_imports` tests cover default features, named refusals, exact
-declarations, malformed bytes, custom-section content, compact import groups and API
-v1. The two retained `skeleton` tests pin the manifest and workspace boundary.
-The seven `component_imports` tests cover exact names and versions, section
-order, unused declarations, core-module refusal, full Component validation,
+The nine `core_imports` tests cover default features, named refusals, exact
+declarations, malformed bytes, custom-section content, compact import groups,
+refusal order and API v1. The two retained `skeleton` tests pin the manifest
+and workspace boundary. The eight `component_imports` tests cover exact names
+and versions, section order, unused declarations, core-module refusal, full Component validation,
 internal imports, and custom-section content in Components and embedded modules.
 Custom-section cases cover code in the name and data, runs across their boundary,
 and a run that starts in the name's length byte. Component cases cover a module
 header in the name at all four tested depths, plus plain names and data.
+The API test pins the derives and `#[non_exhaustive]` lines in both the source
+and API document. Both refusal-order tests require full validation first,
+then custom-section checks, then the first undeclared entry. Their fixtures
+check section order in the encoded bytes and exact refusal variants and strings.
 Component fixtures are built in the tests with the pinned `wat`; malformed
-fixtures also truncate or extend those bytes. Tests read no external WIT files.
+fixtures also truncate, extend or splice those bytes. Tests read no external
+WIT files.
 
 ## Falsifiers
 
@@ -72,6 +77,13 @@ apply and verify each entry by hand in this workspace.
 | F-CWA2g | Treat nested Component imports as outside authority | `embedded_imports_are_internal` |
 | F-CWA3a | Scan only custom-section data, skipping the name and its length | `custom_section_carrying_code_is_refused`, `component_custom_section_carrying_code_is_refused` |
 | F-CWA3b | Scan the name and data separately, missing runs across fields | `custom_section_carrying_code_is_refused` |
+| F-CWA4a | Remove `Eq` from `Refusal`'s source derive | `public_api_is_v1` |
+| F-CWA4b | Remove `#[non_exhaustive]` from `Refusal` in the source | `public_api_is_v1` |
+| F-CWA4c | Remove `#[non_exhaustive]` from the API document | `public_api_is_v1` |
+| F-CWA4d | Reverse both loops to name the last undeclared entry | `audit_refusals_follow_the_documented_order`, `component_refusals_follow_the_documented_order` |
+| F-CWA4e | Refuse undeclared entries during parsing, before later custom sections | `audit_refusals_follow_the_documented_order`, `component_refusals_follow_the_documented_order` |
+| F-CWA4f | Run full validation after parsing and custom-section checks | `audit_refusals_follow_the_documented_order`, `component_refusals_follow_the_documented_order` |
+| F-CWA4g | Skip the core header check | `malformed_module_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -84,7 +96,7 @@ cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
 
 Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
-F-CWA3a's Component test:
+the Component tests of F-CWA3a and F-CWA4d through F-CWA4f:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -124,3 +136,16 @@ workspace's missing lockfile. Every edited file restored byte-identical,
 checked by SHA-256. The clean format and locked-test checks passed all 17 tests
 offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The audit manifest,
 workspace manifest and workspace lockfile stayed unchanged.
+
+The cwa-004 in-tree run caught all 27 `caught` entries: all 33 named test runs
+built and failed at assertions. F-CWA4a through F-CWA4c failed the API attribute
+checks and named the affected file and expected line. F-CWA4d returned `c`
+instead of `b` in both order tests; F-CWA4e returned an undeclared refusal
+instead of `CodeInCustomSection`; F-CWA4f returned `CodeInCustomSection` instead
+of `Malformed` or `NotAComponent`. F-CWA4g failed on the Component case in
+`malformed_module_is_refused`. F-CWA0c failed before tests because `--locked`
+refused the nested workspace's missing lockfile. Every edited file restored
+byte-identical, checked by SHA-256. The clean format and locked-test checks
+passed all 19 tests offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+The implementation, API document, audit manifest, workspace manifest and
+workspace lockfile stayed unchanged.

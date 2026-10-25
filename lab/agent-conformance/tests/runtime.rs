@@ -8,7 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const REFUSAL: &str = "This command requires a running runtime.";
 
@@ -158,4 +158,77 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
         "serve must create the in-root storage directory"
     );
     home.finish().unwrap();
+}
+
+#[test]
+fn fixture_operator_starts_ready_and_stops_cleanly() {
+    let home = ThrowawayHome::new().unwrap();
+    let mut operator =
+        common::operator::Operator::start(&home).expect("install and start operator");
+    operator.ready().expect("operator readiness");
+    assert_eq!(
+        fs::read(home.data().join("config.toml")).unwrap(),
+        include_bytes!("../fixtures/operator-config.toml")
+    );
+    assert!(home.root().join("storage").is_dir());
+    // Also check this operator before retaining it for any later fixture work.
+    operator.census().expect("ready operator socket census");
+    let pgid = operator.child.pgid();
+    operator.child.stop().expect("clean operator stop");
+    assert!(!operator.child.is_alive().unwrap());
+    assert!(!home.group_is_alive(pgid).unwrap());
+    drop(operator);
+    home.finish().unwrap();
+}
+
+#[test]
+fn fixture_operator_sockets_are_loopback_only() {
+    let home = ThrowawayHome::new().unwrap();
+    let mut operator =
+        common::operator::Operator::start(&home).expect("install and start operator");
+    operator.ready().expect("operator readiness");
+    let first = operator.census().expect("first operator socket census");
+    let sampled = Instant::now();
+    while sampled.elapsed() < Duration::from_secs(3) {
+        operator
+            .require_alive()
+            .expect("operator stays alive between samples");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let second = operator.census().expect("second operator socket census");
+    operator.child.stop().expect("clean operator stop");
+    println!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped");
+    drop(operator);
+    home.finish().unwrap();
+}
+
+#[test]
+fn socket_census_requires_parseable_loopback_endpoints_and_api_listener() {
+    use common::operator::loopback_socket_count;
+    let api = "p123\nf12\ntIPv4\nPTCP\nn127.0.0.1:9000\nTST=LISTEN\n";
+    let udp = "f13\ntIPv6\nPUDP\nn[::1]:4321\n";
+    let connected = "f14\ntIPv4\nPTCP\nn127.0.0.1:12->127.0.0.1:13\nTST=ESTABLISHED\n";
+    assert_eq!(
+        loopback_socket_count(&format!("{api}{udp}{connected}"), 9000),
+        Ok(3)
+    );
+    for invalid in [
+        String::new(),
+        "unparseable".into(),
+        api.replace("9000", "9001"),
+        api.replace("127.0.0.1", "*"),
+        api.replace("127.0.0.1", "0.0.0.0"),
+        api.replace("127.0.0.1", "127.0.0.2"),
+        api.replace("TST=LISTEN", "TST=ESTABLISHED"),
+        api.replace("tIPv4\n", ""),
+        api.replace("n127.0.0.1:9000", "n127.0.0.1:9000\nn127.0.0.1:9000"),
+        format!("{api}{}", connected.replace("->127.0.0.1", "->192.0.2.1")),
+        format!("{api}{}", udp.replace("[::1]", "[::]")),
+        format!("{api}f20\ntIPv4\nPUDP\nnunknown\n"),
+    ] {
+        assert!(
+            loopback_socket_count(&invalid, 9000).is_err(),
+            "census must refuse incomplete or non-loopback evidence"
+        );
+    }
 }
