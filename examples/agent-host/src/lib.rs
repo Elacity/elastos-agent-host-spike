@@ -8164,6 +8164,71 @@ mod sparks_http {
         request_with_timeout("GET", base_url, path, "", READ_TIMEOUT)
     }
 
+    /// One published prefill value: the scalar sample or the histogram pair.
+    /// Both forms come from the same exact-name rule below.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) enum PrefillSeconds {
+        Scalar(f64),
+        Histogram { sum: f64, count: f64 },
+    }
+
+    /// The two counters this engine publishes for one turn.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) struct PublishedCounters {
+        pub(crate) prompt_tokens: f64,
+        pub(crate) prefill: PrefillSeconds,
+    }
+
+    /// The value of one exact Prometheus sample name. A label set after the
+    /// name is ignored; a longer name is not this metric. The value must be a
+    /// finite number on the same line.
+    pub(crate) fn sample_value(text: &str, name: &str) -> Option<f64> {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let sample = fields.next()?;
+                let sample_name = sample.split('{').next().unwrap_or(sample);
+                if sample_name != name {
+                    return None;
+                }
+                fields
+                    .next()?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+            })
+    }
+
+    /// Read the two counters this engine publishes. `request_prefill_seconds`
+    /// is the scalar sample or the `_sum` and `_count` pair; every other
+    /// suffix is unrelated. An absent name or value is a refusal that says
+    /// which counter is missing.
+    pub(crate) fn published_counters(text: &str) -> Result<PublishedCounters, String> {
+        let prompt_tokens = sample_value(text, "tensorfold:prompt_tokens_total")
+            .ok_or_else(|| "tensorfold:prompt_tokens_total has no numeric value".to_string())?;
+        let prefill = if let Some(value) = sample_value(text, "tensorfold:request_prefill_seconds")
+        {
+            PrefillSeconds::Scalar(value)
+        } else {
+            match (
+                sample_value(text, "tensorfold:request_prefill_seconds_sum"),
+                sample_value(text, "tensorfold:request_prefill_seconds_count"),
+            ) {
+                (Some(sum), Some(count)) => PrefillSeconds::Histogram { sum, count },
+                _ => {
+                    return Err(
+                        "tensorfold:request_prefill_seconds has no numeric value".to_string()
+                    )
+                }
+            }
+        };
+        Ok(PublishedCounters {
+            prompt_tokens,
+            prefill,
+        })
+    }
+
     /// One client path; `method` and `read_timeout` choose the request and
     /// only bound the read.
     fn request_with_timeout(
@@ -8698,6 +8763,101 @@ mod sparks_http {
         assert_eq!(sparks_model_url(), Some("http://127.0.0.1:9".to_string()));
         std::env::remove_var("SPARKS_MODEL_URL");
         assert_eq!(sparks_model_url(), None);
+    }
+
+    #[test]
+    fn a_metric_sample_without_a_numeric_value_is_not_a_counter() {
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total{model=\"x\"} 12\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            Some(12.0)
+        );
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total not-a-number\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total\ntensorfold:request_prefill_seconds 1\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total has no numeric value"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_metric_suffix_is_not_the_named_counter() {
+        assert_eq!(
+            sample_value(
+                "tensorfold:prompt_tokens_total_extra 3\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            sample_value(
+                "tensorfold:request_prefill_seconds_unrelated 3\n",
+                "tensorfold:request_prefill_seconds"
+            ),
+            None
+        );
+        assert_eq!(
+            published_counters(
+                "tensorfold:prompt_tokens_total 1\ntensorfold:request_prefill_seconds_unrelated 3\n"
+            )
+            .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no numeric value"
+        );
+    }
+
+    #[test]
+    fn the_prefill_metric_accepts_only_its_scalar_or_sum_and_count_forms() {
+        let base = "tensorfold:prompt_tokens_total 1\n";
+        assert_eq!(
+            published_counters(&format!("{base}tensorfold:request_prefill_seconds 2.5\n")).unwrap(),
+            PublishedCounters {
+                prompt_tokens: 1.0,
+                prefill: PrefillSeconds::Scalar(2.5),
+            }
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_sum 3\n\
+                 tensorfold:request_prefill_seconds_count 4\n"
+            ))
+            .unwrap(),
+            PublishedCounters {
+                prompt_tokens: 1.0,
+                prefill: PrefillSeconds::Histogram {
+                    sum: 3.0,
+                    count: 4.0,
+                },
+            }
+        );
+        assert_eq!(
+            published_counters(&format!("{base}tensorfold:request_prefill_seconds_sum 3\n"))
+                .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no numeric value"
+        );
+        assert_eq!(
+            published_counters(&format!(
+                "{base}tensorfold:request_prefill_seconds_bucket{{le=\"1\"}} 3\n"
+            ))
+            .unwrap_err(),
+            "tensorfold:request_prefill_seconds has no numeric value"
+        );
     }
 }
 
@@ -9338,32 +9498,19 @@ mod tests {
             "the packed prefix moved between two consecutive turns"
         );
 
-        // Only the two names this engine publishes. A prefix-hit counter is
-        // not read, so its absence cannot fail the test.
-        fn sample_name(line: &str) -> &str {
-            line.split_whitespace()
-                .next()
-                .unwrap_or("")
-                .split('{')
-                .next()
-                .unwrap_or("")
-        }
-        let wanted = |name: &str| {
-            name == "tensorfold:prompt_tokens_total"
-                || name == "tensorfold:request_prefill_seconds"
-                || name.starts_with("tensorfold:request_prefill_seconds_")
-        };
-        let samples = |text: &str| -> Vec<String> {
-            text.lines()
-                .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
-                .filter(|line| wanted(sample_name(line)))
-                .map(|line| line.trim().to_string())
-                .collect()
+        let describe = |prefill: sparks_http::PrefillSeconds| -> String {
+            match prefill {
+                sparks_http::PrefillSeconds::Scalar(value) => format!("value {value}"),
+                sparks_http::PrefillSeconds::Histogram { sum, count } => {
+                    format!("sum {sum} count {count}")
+                }
+            }
         };
 
         let before_text = sparks_http::get_text(&base_url, "/metrics")
             .unwrap_or_else(|error| panic!("/metrics before the turns failed: {error}"));
-        let before_samples = samples(&before_text);
+        let before = sparks_http::published_counters(&before_text)
+            .unwrap_or_else(|error| panic!("/metrics before the turns: {error}"));
 
         let body = |prompt: &str| {
             serde_json::json!({
@@ -9392,30 +9539,18 @@ mod tests {
 
         let after_text = sparks_http::get_text(&base_url, "/metrics")
             .unwrap_or_else(|error| panic!("/metrics after the turns failed: {error}"));
-        let after_samples = samples(&after_text);
+        let after = sparks_http::published_counters(&after_text)
+            .unwrap_or_else(|error| panic!("/metrics after the turns: {error}"));
 
-        let published = |lines: &[String], name: &str| {
-            lines.iter().any(|line| {
-                let sample = sample_name(line);
-                sample == name
-                    || (name == "tensorfold:request_prefill_seconds"
-                        && sample.starts_with("tensorfold:request_prefill_seconds_"))
-            })
-        };
-        for (when, lines) in [("before", &before_samples), ("after", &after_samples)] {
-            assert!(
-                published(lines, "tensorfold:prompt_tokens_total"),
-                "tensorfold:prompt_tokens_total is absent {when} the turns"
-            );
-            assert!(
-                published(lines, "tensorfold:request_prefill_seconds"),
-                "tensorfold:request_prefill_seconds is absent {when} the turns"
-            );
-            eprintln!("tensorfold counters {when} the turns:");
-            for line in lines {
-                eprintln!("  {line}");
-            }
-        }
+        eprintln!(
+            "tensorfold:prompt_tokens_total: before={} after={}",
+            before.prompt_tokens, after.prompt_tokens
+        );
+        eprintln!(
+            "tensorfold:request_prefill_seconds: before={} after={}",
+            describe(before.prefill),
+            describe(after.prefill)
+        );
 
         eprintln!(
             "real model: both turns ok; the packed prefix is {} bytes and byte-identical across the two turns",
