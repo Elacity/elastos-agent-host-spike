@@ -54,8 +54,17 @@ from unittest import mock
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
-# The provider crate is its own workspace with its own lockfile.
+# Each provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
+# One table for every provider crate. Each entry is the crate's workspace
+# manifest, so a provider command exists only with the manifest its spec
+# builds and tests: a second branch per crate would be a second copy of the
+# same rule (P10).
+PROVIDER_CRATES = {
+    "provider": PROVIDER_MANIFEST,
+    "did": REPO / "capsules" / "did-provider" / "Cargo.toml",
+    "wallet": REPO / "capsules" / "wallet-provider" / "Cargo.toml",
+}
 BACKUP_SUFFIX = ".falsify-original"
 # Capture ancestor ownership once. The environment then publishes that set
 # plus this process's live backups to children; it is not a local ownership
@@ -66,7 +75,7 @@ INHERITED_BACKUPS = frozenset(
     for name in os.environ.get(OWNED_BACKUPS_ENV, "").split(os.pathsep) if name)
 OWNED_BACKUPS = set()
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
-COMMANDS = ("host", "provider", "e2e", "selftest")
+COMMANDS = ("host", *PROVIDER_CRATES, "e2e", "selftest")
 # Self-test scratch stays in this lane's report directory, so a run writes
 # only below a path the lane owns.
 SELF_TEST_DIR = HERE / "handoff" / "reports" / ".falsify-selftest"
@@ -234,11 +243,18 @@ def load(path=DATA):
 # exact target is restored on startup; every other provider file stays with
 # its owning runner. The model provider's confinement profile is a target
 # because cc-model-confine's list mutates it through the `provider` command.
+# The did and wallet files are the confine lane's edit files, which its
+# `did` and `wallet` lists name from the repository root.
 PROVIDER_TARGETS = (
     "capsules/model-provider/src/local_memory.rs",
     "capsules/model-provider/src/journal.rs",
     "capsules/model-provider/src/contract.rs",
     "capsules/model-provider/confine.sb",
+    "capsules/did-provider/src/main.rs",
+    "capsules/did-provider/confine.sb",
+    "capsules/wallet-provider/src/main.rs",
+    "capsules/wallet-provider/confine.sb",
+    "capsules/wallet-provider/tests/confine.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -330,6 +346,13 @@ class Mutation:
         texts = {}
         for name, edits in by_file.items():
             path = self.base / name
+            # One path rule: an edit names a file under examples/agent-host.
+            # A missing file is a refusal with its reason, not a read error,
+            # and it is decided before any link or write (P11).
+            if not path.is_file():
+                raise LookupError(
+                    f"{name}: the file does not exist; "
+                    "edit paths are relative to examples/agent-host")
             text = path.read_text(encoding="utf-8")
             for edit in edits:
                 count = text.count(edit["old"])
@@ -408,11 +431,11 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
             "build": [(cargo + ["--no-run"], REPO)],
             "one": (cargo + ["--"], REPO, []),
         }
-    if command == "provider":
-        # The provider workspace pins its own lockfile, so its test command
-        # names --locked and that manifest directly.
+    if command in PROVIDER_CRATES:
+        # Each provider crate is its own workspace with its own lockfile, so
+        # its test command names --locked and that crate's manifest directly.
         cargo = ["cargo", "test", "--locked",
-                 "--manifest-path", str(manifest or PROVIDER_MANIFEST)]
+                 "--manifest-path", str(manifest or PROVIDER_CRATES[command])]
         return {
             "build": [(cargo + ["--no-run"], REPO)],
             "one": (cargo + ["--"], REPO, []),
@@ -1000,23 +1023,36 @@ def another_lanes_backup_is_not_recovered():
 
 
 def a_killed_provider_edit_is_recovered():
-    """Kill real provider edits in an isolated tree, restart through main(),
-    and repeat the edit. This lane's memory, journal, journal-contract,
-    idle-engine, adapter and model-profile targets all come back in either
-    startup mode. Foreign backups, including the model provider's confinement
-    document, stay with their owners."""
+    """Kill real and synthetic provider edits in an isolated tree, restart
+    through main(), and repeat the edit. This lane's model-provider targets
+    and the confine lane's five did/wallet targets all come back in either
+    startup mode. Foreign backups, including the model provider's and the did
+    provider's confinement documents, stay with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
     profile = "../../capsules/model-provider/confine.sb"
+    # The did and wallet targets are named here, not read from the table, so
+    # a target dropped from PROVIDER_TARGETS is caught (PV44, PV45). Their
+    # original bytes are written in the isolated tree, never read from the
+    # real crates.
+    synthetic = ("../../capsules/did-provider/src/main.rs",
+                 "../../capsules/did-provider/confine.sb",
+                 "../../capsules/wallet-provider/src/main.rs",
+                 "../../capsules/wallet-provider/confine.sb",
+                 "../../capsules/wallet-provider/tests/confine.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
-                {"file": profile, "old": "original bytes", "new": "mutated bytes"}]}
+                {"file": profile, "old": "original bytes", "new": "mutated bytes"}]
+             + [{"file": name, "old": "original bytes", "new": "mutated bytes"}
+                for name in synthetic]}
     originals = {edit["file"]: (HERE / edit["file"]).read_bytes()
                  for owned_entry in owned.values() for edit in owned_entry["edits"]}
     originals["owned.txt"] = b"original bytes\n"
     originals[profile] = b"original bytes\n"
+    for name in synthetic:
+        originals[name] = b"original bytes\n"
     child = """import json, os, pathlib, runpy, signal, sys
 runner = runpy.run_path(sys.argv[1])
 runner['Mutation'](json.loads(sys.argv[2]), pathlib.Path(sys.argv[3])).__enter__()
@@ -1042,7 +1078,8 @@ os.kill(os.getpid(), signal.SIGKILL)
                 os.utime(target, (1, 1))
             foreign_targets = [repo / "capsules/wallet-provider/src/local_memory.rs",
                                repo / "capsules/model-provider/src/lib.rs",
-                               repo / "capsules/model-provider/CONFINEMENT.md"]
+                               repo / "capsules/model-provider/CONFINEMENT.md",
+                               repo / "capsules/did-provider/CONFINEMENT.md"]
             for target in foreign_targets:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"foreign mutation\n")
@@ -1085,6 +1122,44 @@ os.kill(os.getpid(), signal.SIGKILL)
     except Exception as error:
         print(f"self-test: provider restart raised {type(error).__name__}: {error}")
         return False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_edit_of_a_missing_file_is_refused():
+    """An edit whose file does not exist is refused by Mutation before any
+    link or write, with the one path-rule reason; reported() returns it as
+    NO MATCH, so a missing file is never a catch (task 014). An exception
+    escaping reported() fails this case instead of erroring it out."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        name = "missing.txt"
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "edits": [{"file": name, "old": "original bytes",
+                            "new": "mutated bytes"}],
+                 "tests": ["tests::planted_check"]}
+        reason = (f"{name}: the file does not exist; "
+                  "edit paths are relative to examples/agent-host")
+        path = SELF_TEST_DIR / name
+        backup = path.with_name(path.name + BACKUP_SUFFIX)
+        real_mutation = Mutation
+        got = None
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: real_mutation(item, SELF_TEST_DIR)):
+            try:
+                got = reported(entry)
+            except BaseException as error:
+                print(f"self-test: missing file raised {type(error).__name__}: {error}")
+                ok = False
+        created = path.exists() or backup.exists()
+        print(f"self-test: edit of a missing file: {got}, created={created}")
+        if got != (False, "NO MATCH", reason):
+            ok = False
+        if created:
+            ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
@@ -1484,36 +1559,46 @@ def argv_refusal_precedes_work():
 
 
 def provider_spec_uses_locked_manifest():
-    """provider is a registered command, and both its build and run argv name
-    --locked and the provider workspace manifest directly."""
+    """Every provider crate is a registered command, and both its build and
+    run argv name --locked and the manifest that follows --manifest-path.
+    The expected manifests are written here, so a table that maps one crate
+    to another crate's manifest is caught (PV43)."""
     ok = True
-    manifest = str(REPO / "capsules" / "model-provider" / "Cargo.toml")
-    if "provider" not in COMMANDS:
-        print("self-test: provider is not a registered command")
-        ok = False
-    how = spec("provider")
-    build = how["build"]
-    one, _cwd, _extra = how["one"]
-    print(f"self-test: provider build {[argv for argv, _cwd in build]}")
-    print(f"self-test: provider run {one}")
-    if len(build) != 1:
-        ok = False
-    else:
-        argv = build[0][0]
-        if (argv[:2] != ["cargo", "test"] or "--locked" not in argv
-                or manifest not in argv or "--no-run" not in argv):
+    expected = {
+        "provider": str(REPO / "capsules" / "model-provider" / "Cargo.toml"),
+        "did": str(REPO / "capsules" / "did-provider" / "Cargo.toml"),
+        "wallet": str(REPO / "capsules" / "wallet-provider" / "Cargo.toml"),
+    }
+    for command, manifest in expected.items():
+        if command not in COMMANDS:
+            print(f"self-test: {command} is not a registered command")
             ok = False
-        if ("--manifest-path" not in argv
-                or argv[argv.index("--manifest-path") + 1:argv.index("--manifest-path") + 2]
+            continue
+        how = spec(command)
+        build = how["build"]
+        one, cwd, _extra = how["one"]
+        print(f"self-test: {command} build {[argv for argv, _cwd in build]}")
+        print(f"self-test: {command} run {one}")
+        if cwd != REPO:
+            ok = False
+        if len(build) != 1 or build[0][1] != REPO:
+            ok = False
+        else:
+            argv = build[0][0]
+            if (argv[:2] != ["cargo", "test"] or "--locked" not in argv
+                    or "--no-run" not in argv):
+                ok = False
+            if ("--manifest-path" not in argv
+                    or argv[argv.index("--manifest-path") + 1:argv.index("--manifest-path") + 2]
+                    != [manifest]):
+                ok = False
+        if (one[:2] != ["cargo", "test"] or "--locked" not in one
+                or "--" not in one or "--no-run" in one):
+            ok = False
+        if ("--manifest-path" not in one
+                or one[one.index("--manifest-path") + 1:one.index("--manifest-path") + 2]
                 != [manifest]):
             ok = False
-    if (one[:2] != ["cargo", "test"] or "--locked" not in one
-            or manifest not in one or "--" not in one or "--no-run" in one):
-        ok = False
-    if ("--manifest-path" not in one
-            or one[one.index("--manifest-path") + 1:one.index("--manifest-path") + 2]
-            != [manifest]):
-        ok = False
     return ok
 
 
@@ -1760,6 +1845,7 @@ SELF_TEST_CASES = {
     "an interrupted edit is restored": interruption_restores,
     "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
     "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
+    "an edit of a missing file is refused": an_edit_of_a_missing_file_is_refused,
     "a missing data file is refused": a_missing_data_file_is_refused,
     "an unreadable data file is refused": an_unreadable_data_file_is_refused,
     "an unreadable data path is refused": an_unreadable_data_path_is_refused,
