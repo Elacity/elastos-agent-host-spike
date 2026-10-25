@@ -295,14 +295,19 @@ class BuildExecInitrd(unittest.TestCase):
         for line in init.splitlines():
             stripped = line.strip()
             for token in ["true", "false", "test-pass", "test-fail", "test-edited", "note", "files",
-                          "fake-exit", "probe-bind", "probe-report", "kill-self", "*"]:
+                          "cargo-test", "fake-exit", "probe-bind", "probe-report", "kill-self", "*"]:
                 if stripped.startswith(token + ") "):
                     cases[token] = stripped
-        self.assertEqual(len(cases), 12, sorted(cases))
+        self.assertEqual(len(cases), 13, sorted(cases))
         for token, line in cases.items():
             self.assertIn(") run ", line, token)
         self.assertIn("init: command refused", cases["*"])
         self.assertIn("exit 1", cases["*"])
+        cargo = cases["cargo-test"]
+        self.assertIn("if [ -x /bin/cargo ]; then exec /bin/cargo test; fi", cargo)
+        self.assertIn('echo "init: cargo is not in the image"; exit 1', cargo)
+        self.assertNotIn("/bin/cargo build", cargo)
+        self.assertNotIn("exit 0", cargo)
         self.assertIn("/sbin/exec-supervisor run --", init)
         self.assertIn("$(cat /etc/exec-modules)", init)
         # The only exit-looking line is the fixture's forged one.

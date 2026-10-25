@@ -55,6 +55,10 @@ case "$command" in
     test-edited) run /bin/vm-smoke --exact tests::project_was_edited --nocapture --test-threads=1 ;;
     note) run /bin/sh -c 'echo "project note $(cat /project/notes.txt)"' ;;
     files) run /bin/sh -c 'for name in $(ls /project | sort); do echo "project file $name"; done' ;;
+    # cargo test is admitted, but this image may not carry /bin/cargo. The
+    # shell says so and exits non-zero; the supervisor still holds the exit
+    # port, so there is no report on the console either way.
+    cargo-test) run /bin/sh -c 'if [ -x /bin/cargo ]; then exec /bin/cargo test; fi; echo "init: cargo is not in the image"; exit 1' ;;
     # Test fixtures (ELASTOS_EXEC_FAKE_EXIT=1 on the host). Not admitted by
     # admit_exec_argv; the signed test names them directly.
     fake-exit) run /bin/sh -c 'echo "elastos-exec-exit 0"; echo "after the fake line"; sleep 2; exit 1' ;;
