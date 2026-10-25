@@ -22,6 +22,12 @@ const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 // Isolated fixture input, unrelated to any installed Home or production key.
 const DEVICE_KEY: [u8; 32] = [0x42; 32];
 
+#[test]
+#[ignore = "fixture for the falsifier list's ignored-test check"]
+fn ignored_falsifier_fixture() {
+    panic!("the ignored fixture must be refused by the falsifier list");
+}
+
 fn sandbox_available() -> bool {
     if Path::new(SANDBOX_EXEC).is_file() {
         return true;

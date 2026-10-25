@@ -779,35 +779,49 @@ mod tests {
         false
     }
 
-    /// The tests the compiled target registers, by full selector.
-    fn harness_tests(executable: &Path) -> HashSet<String> {
-        let output = Command::new(executable)
-            .args(["--list", "--format", "terse"])
-            .output()
-            .unwrap_or_else(|err| {
+    struct HarnessTests {
+        registered: HashSet<String>,
+        ignored: HashSet<String>,
+    }
+
+    /// The compiled target owns registration and ignore status, including
+    /// attributes applied through `cfg_attr`, for each full selector.
+    fn harness_tests(executable: &Path) -> HarnessTests {
+        let list = |ignored| {
+            let mut command = Command::new(executable);
+            command.args(["--list", "--format", "terse"]);
+            if ignored {
+                command.arg("--ignored");
+            }
+            let output = command.output().unwrap_or_else(|err| {
                 panic!(
                     "test executable {} must list its tests: {err}",
                     executable.display()
                 )
             });
-        assert!(
-            output.status.success(),
-            "test executable {} --list must succeed: {}",
-            executable.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout)
-            .expect("test executable --list output must be UTF-8")
-            .lines()
-            .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
-            .collect()
+            assert!(
+                output.status.success(),
+                "test executable {} --list must succeed: {}",
+                executable.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("test executable --list output must be UTF-8")
+                .lines()
+                .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
+                .collect()
+        };
+        HarnessTests {
+            registered: list(false),
+            ignored: list(true),
+        }
     }
 
     /// The compiled `tests/confine.rs` target sits beside the unit test target.
     ///
     /// The shared build directory also holds other crates' `confine` targets, so
     /// a candidate counts only when cargo's dep-info names this crate's manifest.
-    fn integration_harness() -> HashSet<String> {
+    fn integration_harness() -> HarnessTests {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let unit =
             std::env::current_exe().expect("the unit test executable path must be available");
@@ -969,8 +983,12 @@ mod tests {
                     source_path.display()
                 );
                 assert!(
-                    registered.contains(name),
+                    registered.registered.contains(name),
                     "{id}: {name} must be registered in the test executable"
+                );
+                assert!(
+                    !registered.ignored.contains(name),
+                    "{id}: {name} must not be ignored in the test executable"
                 );
             }
         }
@@ -996,10 +1014,33 @@ mod tests {
     ///
     /// Falsifier: replace one `old` snippet with text that is not in the source,
     /// delete the DID06 record, empty an `edits`/`tests` array, change a test
-    /// name's prefix, or remove its `#[test]`; this test fails on each.
+    /// name's prefix, remove its `#[test]`, or mark it ignored; this test fails
+    /// on each.
     #[test]
     fn falsifiers_list_is_honest() {
         assert_falsifiers_list_is_honest(&read_falsifiers_list());
+    }
+
+    #[test]
+    #[cfg_attr(test, ignore = "fixture for the falsifier list's ignored-test check")]
+    fn ignored_falsifier_fixture() {
+        panic!("the ignored fixture must be refused by the falsifier list");
+    }
+
+    #[test]
+    fn falsifiers_list_rejects_ignored_tests() {
+        for (index, selector) in [
+            (0, "tests::ignored_falsifier_fixture"),
+            (3, "ignored_falsifier_fixture"),
+        ] {
+            let mut doc = read_falsifiers_list();
+            let id = doc["falsifiers"][index]["id"].as_str().unwrap().to_owned();
+            doc["falsifiers"][index]["tests"][0] = selector.into();
+            let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+                .expect_err("the falsifier list must refuse an ignored test");
+            let expected = format!("{id}: {selector} must not be ignored in the test executable");
+            assert_eq!(refusal.downcast_ref::<String>(), Some(&expected));
+        }
     }
 
     // Keep the test declaration in source while removing it from the harness.
