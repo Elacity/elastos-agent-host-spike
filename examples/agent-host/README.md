@@ -198,6 +198,17 @@ stays the same record. A checkpoint matches the bytes again when cancel or
 a crash stops the step. A skill changes the bytes by appending, and node 0
 stays the same record.
 
+## Declared asks
+
+`asks.json` lists every per-step ask this guest makes, as a proposal kind and a
+resource pattern. It is an auditable declaration, not the policy check: the
+Runtime enforces each grant, and a capsule receives only what it was granted.
+The declaration names no URL, no host route and no `Users/` path; the model
+resource is named, not routed. The host tests keep the declaration equal to
+what the guest proposes, in both directions. This file is a lane-local
+stand-in, and it retires into the Runtime manifest when the Runtime defines
+per-step asks, so one source of truth owns the asks.
+
 ## Build and test
 
 From this directory:
