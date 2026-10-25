@@ -52,21 +52,31 @@ until a later task deliberately adds one (one workspace root — P10).
 
 ## Honesty rules this lane keeps
 
-- **SKIP is never PASS (guard d).** `sandbox-exec` is macOS-only. If it is
-  absent, or a stock binary cannot even start under the profile on this OS, the
-  whole suite SKIPs with that reason — the deny results would otherwise be
-  vacuous. A positive control that fails for any other reason is a real failure,
-  not a skip.
-- **A harness error is never confinement.** A denial is told from a broken
-  fixture by its reason: a seatbelt deny surfaces `Operation not permitted`
-  (and the program leaks no bytes / changes no outside file); a missing profile
-  or missing binary says `No such file or directory` and is rejected by the
-  deny check, so it shows as a failure, never a pass.
+- **SKIP is never PASS (guard d).** `sandbox-exec` is macOS-only. SKIP is
+  reserved for a genuine platform limitation: `sandbox-exec` absent, a stock
+  binary absent, or seatbelt itself refusing to start a stock binary under a
+  *valid* profile (an EPERM canary) — there the deny results would be vacuous. A
+  positive control that fails for any other reason is a real failure, not a skip.
+- **A harness error is never confinement, and never a skip.** A broken fixture —
+  a missing or malformed profile, a usage error — exits nonzero *without*
+  `Operation not permitted`, so it is neither a seatbelt deny nor a platform
+  limit: it is a `HarnessError` that FAILS the run. This is proved by driving the
+  preflight through unittest and inspecting the result
+  (`test_missing_profile_setup_errors_through_unittest`,
+  `test_malformed_profile_setup_errors_through_unittest`): a harness error must
+  ERROR, never SKIP, never pass.
+- **A denied read must leak nothing.** A seatbelt deny surfaces `Operation not
+  permitted`, and a denied *read* leaves stdout empty — a *partial* leak fails
+  just as a full marker would (`test_partial_read_leak_is_not_a_deny`). A denied
+  write must change no file outside the root.
 - **Findings stay here (guard b).** A reproduced defect is written to
   `findings/<owner-lane>-<nnn>.md` (naming the owner lane), kept as a probe
   marked `@unittest.expectedFailure` carrying the finding id, and never deleted.
-  Expected-failure is reserved for a confirmed, recorded escape — an unrelated
-  error must still fail.
+  Expected-failure is reserved for a confirmed, recorded escape: an unrelated or
+  setup error still surfaces as a failure
+  (`test_unrelated_error_is_not_expected_failure` injects a setUp error through
+  unittest and checks it is not absorbed), and every marked probe must name a
+  finding file that exists (`test_expected_failures_are_recorded_findings`).
 - **Escapes are CRITICAL and not batched (guard c).** A confinement escape — an
   allow where a deny is required — is written at once as its own
   `findings/CRITICAL-*.md`, appended to `lab/redteam/CRITICAL.md`, with
@@ -84,6 +94,9 @@ On this commit the read is denied, so no finding is written.
 
 ## Files
 
+- `BACKLOG.md` — the in-repo copy of the lane goal, Rong's guards (a)–(e), and
+  the scope the probes are written against, so a reviewer finds the guards this
+  suite claims to keep without leaving the repo.
 - `py/sbx.py` — the one direct `sandbox-exec` runner (P10: a single copy;
   sibling tasks 002/003 do not import it, a later provider-confine task reuses
   it). Not a test (name does not match `test*.py`).
