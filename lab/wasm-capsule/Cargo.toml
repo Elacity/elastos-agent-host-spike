@@ -1,10 +1,13 @@
-# wc-001 lab capsule. Its own workspace (empty `[workspace]`) and Cargo.lock,
-# kept out of the root ElastOS workspace so the Runtime core never grows for lab
-# tooling. One package: the guest lives in capsule/src, the host-side build and
-# verification tooling lives in tests/ (never compiled into the capsule).
+# wc-001 lab capsule. Its own workspace and Cargo.lock, kept out of the root
+# ElastOS workspace so the Runtime core never grows for lab tooling. Two
+# members. The root package `capsule`: the guest lives in capsule/src, the
+# host-side build and verification tooling lives in tests/ (never compiled into
+# the capsule). And `audit/`: the cx-wasm-audit lane's `wasm-capsule-audit`
+# crate, the one import-audit path (PRINCIPLES P10) for wc-004's verifier.
 #
 # `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
-# act on this single package, so they need no `--all`/`--workspace`.
+# act on the root package `capsule` only (there is no `default-members`). Test
+# the audit from this directory with `cargo test -p wasm-capsule-audit --locked`.
 [package]
 name = "capsule"
 version = "0.1.0"
@@ -29,5 +32,7 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Stay out of the root ElastOS workspace.
+# Stay out of the root ElastOS workspace. The root package `capsule` is always
+# a member; `audit` declares no `[workspace]` of its own and shares Cargo.lock.
 [workspace]
+members = ["audit"]

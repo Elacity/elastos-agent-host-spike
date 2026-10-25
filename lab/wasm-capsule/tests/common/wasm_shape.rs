@@ -5,8 +5,8 @@
 //! It is deliberately tiny and dependency-free, and it is NOT a validator: it
 //! reads only the sections those facts need and fails closed with a named
 //! reason (PRINCIPLES P11) on anything it cannot read. Keeping it in the lane's
-//! own tooling, with no external crate, keeps the surface minimal (P18) and the
-//! lane's Cargo.lock free of the network.
+//! own tooling, with no external crate, keeps the surface minimal (P18) and
+//! adds nothing to the lane's Cargo.lock.
 
 /// A Wasm value type, as far as wc-001 needs to tell them apart.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
