@@ -1,39 +1,86 @@
 # did-provider confinement
 
-`confine.sb` supplies the DID reference pattern for provider confinement.
-It starts with `(version 1)` and `(deny default)`. The process reads requests
-from stdin and writes responses to stdout. It opens no network listener or
-socket, and the profile grants no network operation.
-
-Runtime passes the canonical `PROVIDER_EXECUTABLE`, `DID_STORAGE_ROOT`
-(`Init.base_path/did`), and `DID_STORAGE_PARENT` (`Init.base_path`). Runtime
-creates the base before launch. One recursive read/write grant covers the
-identity directory. The existing parent has literal read access for startup.
-The other grants let the process load its binary and system libraries, read
-kernel facts, and obtain entropy from `/dev/urandom`.
+`capsules/did-provider/confine.sb` is the single confinement profile for this
+provider. It starts with `(version 1)` and `(deny default)`, and it denies every
+network operation. The process reads line-delimited JSON from stdin and writes
+one JSON response per line to stdout; it opens no listener or socket.
 
 The Runtime owns the profile: it loads `confine.sb` only from the signed
 provider bundle, checks its hash, refuses any profile with `(allow default)` or
 a network allow, and fails closed with a reason; the provider proposes, the
-Runtime checks (P4, P11). The bridge integration loads this file and binds the
-three parameters when it launches the provider. This document specifies the
-Runtime half; the reference files exercise the provider directly.
+Runtime checks (P4, P11). The bridge integration loads this file and binds its
+parameters when it launches the provider. This document specifies the Runtime
+half; the reference files exercise the provider directly.
 
-`tests/confine.rs` runs the real binary under `/usr/bin/sandbox-exec` and uses
-the line-delimited JSON protocol. It covers every operation in `capsule.json`,
-persists an encrypted nickname and persona, reloads them, and checks refusal
-of writes to both an unrelated base and a sibling under the shared base.
-The provider must answer after each refusal. The test uses a disposable key
-held only in its process and removes its temporary state on completion.
+Runtime binds three parameters and creates the base before launch:
 
-Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml`
-from the repository root. When `sandbox-exec` is absent, native tests print a
-skip reason. A present sandbox that refuses to launch the child fails the test.
-`profile_denies_network` runs on every platform and rejects a network grant or
-`(allow default)`, including one appended after `(deny default)`.
+- `PROVIDER_EXECUTABLE`: the canonical provider binary path.
+- `STORAGE_ROOT`: `Init.base_path/did`.
+- `STORAGE_PARENT`: `Init.base_path`.
 
-To falsify the write boundary, temporarily replace `(deny default)` with
-`(allow default)` and run `confined_outside_write_is_denied`; the outside
-nickname write succeeds and the test fails. Restore the profile afterward.
-The wallet reference uses the same launch and subtree-grant pattern in
-`../wallet-provider/`, with a separate test that reaches an outside key read.
+## What the profile allows
+
+- Exec and read the program selected through `PROVIDER_EXECUTABLE`; the
+  Runtime chooses the binary and the provider starts from it.
+- Read `/` to resolve the absolute program path.
+- Read `/usr/lib`, `/System/Library` and `/Library/Apple`; dyld loads system
+  libraries and the shared cache from there.
+- Read kernel facts through `sysctl-read`; the loader and allocator request
+  them at startup.
+- Read and write `/dev/null`; the Runtime may bind child streams to the null
+  device.
+- Read `/dev/urandom`; the encryption code takes its nonce entropy there.
+- Read `STORAGE_PARENT`; the provider inspects the existing parent while it
+  creates the identity directory.
+- Read and write under `STORAGE_ROOT`; one grant covers encrypted nickname and
+  persona state.
+
+Every other file read, file write, process and network operation falls to
+`(deny default)`.
+
+## Tests
+
+`tests/confine.rs` runs the real binary under `/usr/bin/sandbox-exec` with a
+temporary absolute storage root and speaks the normal line-delimited JSON
+protocol. It covers `Init`, `get_did`, `get_persona_did`, `get_nickname`,
+`set_nickname` (the reload returns the stored value), and `resolve` of the
+provider's own DID.
+
+For message signing the test calls `sign_chat_message`, which returns the
+payload it signed next to the signature. The test feeds both back to `verify`
+unchanged and expects `valid: true`, then flips one character of the provider's
+signature and expects `valid: false`. The test renders no signing payload and
+constructs no signature. Recovery-proof verification has its own case and is
+not exercised here.
+
+Two symlink cases check the boundary. `outside_write_denied` points the granted
+nickname file at an unrelated directory and expects `storage_error`, no file
+outside the root, and a later write under the root to succeed.
+`outside_read_denied` points the same path at real encrypted nickname state
+outside the root and expects `Init` to refuse with the nickname-read reason,
+the outside file to stay unchanged, the provider to report no nickname for its
+own root, and a normal request to succeed after the link is removed. Both cases
+fail when `(deny default)` becomes `(allow default)`.
+
+`profile_denies_network` reads the profile and requires `(version 1)` first,
+`(deny default)`, and an explicit `(deny network*)`, with no network grant and
+no default grant. It runs on every platform, and removing `(deny network*)`
+makes it fail. The test runs no TCP probe: the provider has no network path, so
+a probe would test the host network stack while the profile rule is the
+property that must hold.
+
+Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
+the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
+print a skip reason; a present sandbox that refuses to launch the child fails
+the test.
+
+## Falsifiers
+
+- Replace `(deny default)` with `(allow default)`, keeping `(version 1)` first:
+  both outside cases fail because the symlinked write and read succeed.
+- Remove `(deny network*)`: `profile_denies_network` fails.
+- Restore the `if let Ok(Some(nick))` swallow in `try_load_nickname`:
+  `outside_read_denied` fails because the denied read becomes "no nickname".
+
+The wallet provider keeps its own profile and tests in `../wallet-provider/`
+with the same launch and subtree-grant pattern.
