@@ -817,19 +817,18 @@ mod tests {
         }
     }
 
-    /// The compiled `tests/confine.rs` target sits beside the unit test target.
+    /// The compiled integration target that matches the current source.
     ///
-    /// The shared build directory also holds other crates' `confine` targets, so
-    /// a candidate counts only when cargo's dep-info names this crate's manifest.
-    fn integration_harness() -> HarnessTests {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let unit =
-            std::env::current_exe().expect("the unit test executable path must be available");
-        let deps = unit
-            .parent()
-            .expect("the unit test executable sits in the deps directory");
+    /// A candidate counts only when it sits in the current test executable's
+    /// deps directory, names this crate's manifest in cargo's dep-info, and is
+    /// no older than `tests/confine.rs`. A stale executable would otherwise
+    /// report tests that the current source disables as active.
+    fn source_bound_target(deps: &Path, manifest: &str, source: &Path) -> Result<PathBuf, String> {
+        let source_modified = fs::metadata(source)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| format!("{} must carry a time: {err}", source.display()))?;
         let mut candidates: Vec<PathBuf> = fs::read_dir(deps)
-            .expect("the deps directory must be readable")
+            .map_err(|err| format!("{} must be readable: {err}", deps.display()))?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| {
@@ -840,20 +839,46 @@ mod tests {
                 if !name.starts_with("confine-") || name.contains('.') {
                     return false;
                 }
-                let dep_info = path.with_extension("d");
-                fs::read_to_string(dep_info)
+                fs::read_to_string(path.with_extension("d"))
                     .map(|info| info.contains(&format!("CARGO_MANIFEST_DIR={manifest}")))
                     .unwrap_or(false)
             })
             .collect();
         candidates.sort_by_key(|path| path.metadata().and_then(|meta| meta.modified()).ok());
-        let newest = candidates.pop().unwrap_or_else(|| {
-            panic!(
-                "the compiled confine integration test target for {manifest} must sit beside {}",
-                unit.display()
+        let newest = candidates.pop().ok_or_else(|| {
+            format!(
+                "the compiled confine integration test target for {manifest} must sit in {}",
+                deps.display()
             )
-        });
-        harness_tests(&newest)
+        })?;
+        let target_modified = fs::metadata(&newest)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| format!("{} must carry a time: {err}", newest.display()))?;
+        if target_modified < source_modified {
+            return Err(format!(
+                "{} is older than {}; rebuild the integration test target before this check",
+                newest.display(),
+                source.display()
+            ));
+        }
+        Ok(newest)
+    }
+
+    /// The compiled `tests/confine.rs` target sits beside the unit test target.
+    ///
+    /// The shared build directory also holds other crates' `confine` targets, so
+    /// `source_bound_target` keeps only this crate's current executable.
+    fn integration_harness() -> HarnessTests {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let unit =
+            std::env::current_exe().expect("the unit test executable path must be available");
+        let deps = unit
+            .parent()
+            .expect("the unit test executable sits in the deps directory");
+        let source = Path::new(manifest).join("tests/confine.rs");
+        let target = source_bound_target(deps, manifest, &source)
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        harness_tests(&target)
     }
 
     fn read_falsifiers_list() -> serde_json::Value {
@@ -1070,6 +1095,54 @@ mod tests {
         doc["falsifiers"][0]["tests"][0] =
             serde_json::Value::String("tests::missing::init_requires_storage_without_key".into());
         assert_falsifiers_list_is_honest(&doc);
+    }
+
+    /// A stale integration executable must not stand in for the current source.
+    ///
+    /// Regression: `#[ignore]` added to `verify_did_recovery_under_profile` was
+    /// concealed because `--bin did-provider` left the earlier integration
+    /// executable in place and it reported the test as active.
+    #[test]
+    fn falsifiers_list_rejects_stale_integration_evidence() {
+        let dir = tempfile::tempdir().expect("temporary deps directory");
+        let source = dir.path().join("confine.rs");
+        let target = dir.path().join("confine-deadbeef");
+        fs::write(&source, "").expect("source fixture");
+        fs::write(&target, "").expect("target fixture");
+        fs::write(
+            target.with_extension("d"),
+            format!("CARGO_MANIFEST_DIR={}\n", env!("CARGO_MANIFEST_DIR")),
+        )
+        .expect("dep-info fixture");
+
+        let set_modified =
+            |path: &Path, seconds: u64| {
+                fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .expect("fixture must open for its time")
+                    .set_times(fs::FileTimes::new().set_modified(
+                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ))
+                    .expect("fixture time must be set");
+            };
+        set_modified(&source, 2_000_000);
+        set_modified(&target, 1_000_000);
+
+        let stale = source_bound_target(dir.path(), env!("CARGO_MANIFEST_DIR"), &source)
+            .expect_err("a target older than its source must be refused");
+        assert!(
+            stale.contains("is older than"),
+            "the refusal must state the staleness: {stale}"
+        );
+
+        set_modified(&target, 2_000_000);
+        assert_eq!(
+            source_bound_target(dir.path(), env!("CARGO_MANIFEST_DIR"), &source)
+                .expect("a current target must be selected"),
+            target,
+            "the current integration target"
+        );
     }
 
     fn make_device_key() -> [u8; 32] {
