@@ -573,6 +573,7 @@ jobs:
               - 'elastos/crates/elastos-protected-content-*/**'
               # Path dependencies of the capsules above.
               - 'elastos/crates/elastos-auth/**'
+              - 'elastos/crates/elastos-common/**'
               - 'elastos/crates/elastos-guest/**'
               - 'elastos/crates/elastos-identity/**'
               # Targeted, not the whole elastos-server crate (which would
