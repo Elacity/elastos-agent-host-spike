@@ -1037,18 +1037,18 @@
   },
   {
    "id": "FE03",
-   "title": "the single write path records edits only, so a granted restore is not recorded",
+   "title": "the single-write recorder also takes a restore, so a refused request becomes a recorded result",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if !is_write(step.kind)\n        || step.state != StepState::Dispatched",
-     "new": "    if step.kind != ProposalKind::Edit\n        || step.state != StepState::Dispatched"
+     "old": "    if step.kind != ProposalKind::Edit\n        || step.state != StepState::Dispatched",
+     "new": "    if !is_write(step.kind)\n        || step.state != StepState::Dispatched"
     }
    ],
    "tests": [
-    "tests::a_granted_restore_is_recorded_by_the_single_write_path"
+    "tests::a_restore_is_not_recorded_by_the_single_write_path"
    ]
   },
   {

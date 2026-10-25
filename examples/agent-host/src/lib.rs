@@ -2813,10 +2813,13 @@ fn provider_write_may_be_asked(journal: &Journal, step_id: u64, seen_version: u6
     row.version == seen_version
 }
 
-/// Record that the provider wrote one granted edit or restore. The new text
-/// becomes the current read. A write that can never apply is denied, so it
-/// does not keep later writes waiting. This does not write a file on the
-/// host, and a grant string in the journal is not a Runtime grant.
+/// Record that the provider wrote one granted edit. A restore is recorded
+/// only by `note_change_wrote`, which binds it through `bind_change`; this
+/// entry does not validate a binding, so it does not take one and creates no
+/// read. The new text becomes the current read. A write that can never apply
+/// is denied, so it does not keep later writes waiting. This does not write a
+/// file on the host, and a grant string in the journal is not a Runtime
+/// grant.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn note_provider_wrote(journal: &mut Journal, step_id: u64) -> bool {
     let Some(index) = journal.steps.iter().position(|step| step.id == step_id) else {
@@ -2831,7 +2834,7 @@ fn note_provider_wrote(journal: &mut Journal, step_id: u64) -> bool {
     {
         return false;
     }
-    if !is_write(step.kind)
+    if step.kind != ProposalKind::Edit
         || step.state != StepState::Dispatched
         || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
         || step.has_result
@@ -9762,39 +9765,48 @@ mod tests {
     }
 
     #[test]
-    fn a_granted_restore_is_recorded_by_the_single_write_path() {
+    fn a_restore_is_not_recorded_by_the_single_write_path() {
+        // The reviewer's case: a read with no Runtime revision binds no
+        // request, and the single-write recorder must not turn that refused
+        // request into a recorded result.
         let mut journal = empty_journal();
-        assert!(observe_read(
-            &mut journal,
-            STYLE,
-            1,
-            "rev-1",
-            None,
-            false,
-            "h1{}\n"
-        ));
-        let id = propose_restore(&mut journal, STYLE, 1).unwrap();
+        assert!(observe(&mut journal, NOTES, 1, "one\n"));
+        let id = propose_restore(&mut journal, NOTES, 1).unwrap();
         granted(&mut journal, &[id]);
-        assert!(provider_write_may_be_asked(&journal, id, 1));
-        let before = journal.events.len();
-        assert!(note_provider_wrote(&mut journal, id));
-        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
-        assert!(step.has_result);
-        assert_eq!(step.state, StepState::Dispatched);
-        assert_eq!(journal.events.len(), before + 2);
-        assert!(read_observation(&journal.events[before]).is_some());
-        assert_eq!(journal.events[before].text, "h1{}\n");
-        assert_eq!(journal.events[before + 1].role, Role::ToolResult);
-        assert_eq!(journal.events[before + 1].text, "h1{}\n");
-        assert_eq!(
-            current_observed_text(&journal.events, STYLE).as_deref(),
-            Some("h1{}\n")
-        );
-        assert_eq!(
-            current_observation(&journal.events, STYLE).unwrap().version,
-            2
-        );
+        assert_eq!(edit_request(&mut journal, id), Err("no revision"));
+        let before = without_refusal_records(&journal.events);
+        let refusals = refusal_records(&journal).len();
+        assert_eq!(refusals, 1);
         assert!(!note_provider_wrote(&mut journal, id));
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert!(!step.has_result);
+        assert_eq!(step.state, StepState::Dispatched);
+        assert_eq!(without_refusal_records(&journal.events), before);
+        assert_eq!(refusal_records(&journal).len(), refusals);
+        assert_eq!(
+            current_observation(&journal.events, NOTES).unwrap().version,
+            1
+        );
+        // Even a request that does bind is recorded only by the shared path;
+        // this entry would add a read with no provider revision.
+        let mut bound = empty_journal();
+        assert!(observe_read(
+            &mut bound, STYLE, 1, "rev-1", None, false, "h1{}\n"
+        ));
+        let restore = propose_restore(&mut bound, STYLE, 1).unwrap();
+        granted(&mut bound, &[restore]);
+        assert!(provider_write_may_be_asked(&bound, restore, 1));
+        assert!(edit_request(&mut bound, restore).is_ok());
+        let recorded = without_refusal_records(&bound.events);
+        assert!(!note_provider_wrote(&mut bound, restore));
+        let step = bound.steps.iter().find(|step| step.id == restore).unwrap();
+        assert!(!step.has_result);
+        assert_eq!(step.state, StepState::Dispatched);
+        assert_eq!(without_refusal_records(&bound.events), recorded);
+        assert_eq!(
+            current_observation(&bound.events, STYLE).unwrap().version,
+            1
+        );
     }
 
     #[test]
@@ -9846,11 +9858,24 @@ mod tests {
             "two\n"
         ));
         let before = without_refusal_records(&journal.events);
+        // The single-write recorder does not take a restore, so it cannot
+        // make the refused request succeed, and it does not deny silently.
+        assert!(!note_provider_wrote(&mut journal, id));
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.state, StepState::Dispatched);
+        assert!(!step.has_result);
+        assert_eq!(without_refusal_records(&journal.events), before);
+        let refusals = refusal_records(&journal).len();
         assert_eq!(edit_request(&mut journal, id), Err("stale"));
         assert_eq!(
             note_change_wrote(&mut journal, id, &[(NOTES, "rev-3")]),
             Err("stale")
         );
+        let records = refusal_records(&journal);
+        assert_eq!(records.len(), refusals + 2);
+        assert!(records
+            .iter()
+            .all(|record| record.starts_with("refused: stale (change ")));
         let step = journal.steps.iter().find(|step| step.id == id).unwrap();
         assert_eq!(step.state, StepState::Denied);
         assert!(!step.has_result);
