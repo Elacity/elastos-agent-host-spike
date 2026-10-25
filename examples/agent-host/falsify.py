@@ -6,13 +6,19 @@ Usage (from anywhere):
   python3 -I examples/agent-host/falsify.py FS           # one prefix
   python3 -I examples/agent-host/falsify.py FS01 FS03    # some ids
   python3 -I examples/agent-host/falsify.py --list       # ids, commands, expectations
+  python3 -I examples/agent-host/falsify.py --list FILE  # run the entries in FILE
   python3 -I examples/agent-host/falsify.py --self-test  # the runner checks itself
   python3 -I examples/agent-host/falsify.py --self-test --with-repo  # and one real falsifier
   python3 -I examples/agent-host/falsify.py --self-test-case NAME  # one named case
 
-The falsifiers are data, in falsifiers.json next to this file. Each one
-replaces exact text (found exactly once) in a file and requires every named
-test to FAIL. The verdict comes from exit codes: the mutated code is built
+The falsifiers are data, in falsifiers.json next to this file, or in a file
+named by `--list FILE` with the same {"falsifiers": [...]} document shape. Each
+one replaces exact text (found exactly once) in a file, with paths relative to
+examples/agent-host, and requires every named test to FAIL. A command is
+`host` (cargo test of the agent-host crate), `provider` (cargo test of the
+model-provider crate, locked to its own manifest), `e2e` (run-e2e.sh: the
+guest in a test Runtime) or `selftest` (this runner's own named self-test
+case). The verdict comes from exit codes: the mutated code is built
 first (a build that fails is its own result); then each named test is listed
 with `--exact` (exactly one test must match) and run alone with `--exact`.
 A non-zero exit alone is not a catch: the harness evidence must be error-free
@@ -35,8 +41,10 @@ command reports a full disk.
 Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
 usage or data error, 3 when it stopped for a full disk.
 """
-import json
+import contextlib
 import inspect
+import io
+import json
 import os
 import pathlib
 import re
@@ -52,7 +60,11 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
-COMMANDS = ("host", "e2e", "selftest")
+COMMANDS = ("host", "provider", "e2e", "selftest")
+PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
+# A provider edit leaves its backup beside the provider source, so the
+# recovery scan must look there as well as in this folder.
+BACKUP_DIRS = (HERE, PROVIDER_MANIFEST.parent)
 SELF_TEST_DIR = HERE / ".falsify-selftest"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
@@ -100,31 +112,55 @@ class DiskFull(Exception):
     pass
 
 
+def refuse(reason):
+    """A usage or data error: say why and exit 2. It is never zero
+    falsifiers run."""
+    print(reason)
+    raise SystemExit(2)
+
+
 def load(path=DATA):
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        refuse(f"list file not found: {path}")
+    except OSError as error:
+        refuse(f"list file cannot be read: {path}: {error}")
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as error:
+        refuse(f"list file is not valid JSON: {path}: {error}")
+    if not isinstance(doc, dict) or not isinstance(doc.get("falsifiers"), list):
+        refuse(f"list file has no falsifiers list: {path}")
     entries = doc["falsifiers"]
+    for entry in entries:
+        if not isinstance(entry, dict) or not all(
+                key in entry for key in ("id", "command", "expect", "tests")):
+            refuse(f"list entry refused: {path}: an entry needs id, command, expect and tests")
     ids = [entry["id"] for entry in entries]
     if len(ids) != len(set(ids)):
-        sys.exit("falsifiers.json: an id is used twice")
+        refuse(f"{path}: an id is used twice")
     for entry in entries:
         if entry["command"] not in COMMANDS or entry["expect"] not in (
             "caught",
             "compile_error",
             "survives",
         ):
-            sys.exit(f"falsifiers.json: {entry['id']}: unknown command or expect")
+            refuse(f"{path}: {entry['id']}: unknown command or expect")
         if entry["expect"] in ("caught", "survives") and not entry["tests"]:
-            sys.exit(f"falsifiers.json: {entry['id']}: no named tests")
+            refuse(f"{path}: {entry['id']}: no named tests")
     return entries
 
 
-def recover_backups():
-    """Put back any original left by a run that was killed mid-falsifier."""
-    for backup in HERE.rglob("*" + BACKUP_SUFFIX):
-        target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
-        os.replace(backup, target)
-        os.utime(target)
-        print(f"recovered {target.relative_to(REPO)} from a killed run")
+def recover_backups(folders=BACKUP_DIRS):
+    """Put back any original left by a run that was killed mid-falsifier.
+    Each folder covers the edits whose paths live under it."""
+    for folder in folders:
+        for backup in folder.rglob("*" + BACKUP_SUFFIX):
+            target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
+            os.replace(backup, target)
+            os.utime(target)
+            print(f"recovered {target.relative_to(REPO)} from a killed run")
 
 
 def check_disk():
@@ -235,6 +271,15 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
         # named case runs in its own process, as each named test does.
         base = ["python3", "-I", str(HERE / "falsify.py"), "--keep-backups"]
         return {"build": [], "one": (base, REPO, [])}
+    if command == "provider":
+        # The provider crate is its own workspace with its own lockfile, so
+        # the locked flag reads capsules/model-provider/Cargo.lock.
+        cargo = ["cargo", "test", *cargo_flags, "--manifest-path",
+                 str(manifest or PROVIDER_MANIFEST)]
+        return {
+            "build": [(cargo + ["--no-run"], REPO)],
+            "one": (cargo + ["--"], REPO, []),
+        }
     cargo = ["cargo", "test", "-p", "elastos-server", "--lib"]
     return {
         "build": [(["bash", str(HERE / "build.sh")], REPO), (cargo + ["--no-run"], REPO / "elastos")],
@@ -810,10 +855,12 @@ def a_survivor_needs_its_named_test_to_run():
             {"id": "ST", "title": "no test", "command": "host",
              "expect": "survives", "edits": [], "tests": []}]}), encoding="utf-8")
         refused = False
+        said = io.StringIO()
         try:
-            load(data)
+            with contextlib.redirect_stdout(said):
+                load(data)
         except SystemExit as error:
-            refused = "no named tests" in str(error)
+            refused = error.code == 2 and "no named tests" in said.getvalue()
         print(f"self-test: a survives entry with no named test: refused={refused}")
         if not refused:
             ok = False
@@ -853,6 +900,139 @@ def a_survivor_is_proved_by_its_named_tests():
     return ok
 
 
+def provider_uses_locked_manifest():
+    """`spec("provider")` builds and runs the provider crate through its own
+    locked manifest, not the host crate's."""
+    name = "config::tests::journal_root_requires_absolute_operator_path"
+    cargo = ["cargo", "test", "--locked", "--manifest-path", str(PROVIDER_MANIFEST)]
+    how = spec("provider")
+    argv, cwd, extra = how["one"]
+    shaped = (argv == cargo + ["--"] and cwd == REPO and extra == []
+              and how["build"] == [(cargo + ["--no-run"], REPO)])
+    code, listed = run(argv + ["--exact", name, "--list"], cwd)
+    listed_one = ([line for line in listed.splitlines() if line == f"{name}: test"]
+                  == [f"{name}: test"])
+    print(f"self-test: provider dispatch: shaped={shaped}, listed={listed_one} (exit {code})")
+    return shaped and code == 0 and listed_one
+
+
+def selected_list_is_executed():
+    """`--list FILE` runs the entries in FILE; the default list is not
+    consulted for the ids."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        data = SELF_TEST_DIR / "only.json"
+        data.write_text(json.dumps({"falsifiers": [{
+            "id": "LISTONLY01", "title": "the only entry", "command": "selftest",
+            "expect": "caught", "edits": [], "tests": ["a case that does not exist"]}]}),
+            encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["--list", str(data), "LISTONLY01"])
+        printed = out.getvalue()
+        ran = "LISTONLY01" in printed and "NOT RUN" in printed
+        print(f"self-test: selected list executed: exit={code}, ran={ran}")
+        return code == 1 and ran and "no falsifier matches" not in printed
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def refused_with(path, phrase):
+    """True only when load(path) refuses with exit 2 and that reason. Any
+    other exception is a bypassed check, not a refusal."""
+    out = io.StringIO()
+    code = None
+    try:
+        with contextlib.redirect_stdout(out):
+            load(path)
+    except SystemExit as error:
+        code = error.code
+    except Exception as error:
+        print(f"self-test: unexpected {type(error).__name__} instead of a refusal: {error}")
+        return False
+    return code == 2 and phrase in out.getvalue()
+
+
+def a_missing_list_is_refused():
+    """A list path that does not exist exits 2 with its own reason."""
+    path = SELF_TEST_DIR / "absent.json"
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    refused = refused_with(path, "list file not found")
+    print(f"self-test: missing list refused: {refused}")
+    return refused
+
+
+def malformed_list_json_is_refused():
+    """A list file that is not JSON exits 2 with its own reason."""
+    ok = False
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "malformed.json"
+        path.write_text("{ not json", encoding="utf-8")
+        ok = refused_with(path, "list file is not valid JSON")
+        print(f"self-test: malformed list JSON refused: {ok}")
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_list_without_the_document_is_refused():
+    """A JSON list where the {"falsifiers": [...]} document belongs exits 2
+    with its own reason."""
+    ok = False
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "wrong-structure.json"
+        path.write_text(json.dumps([]), encoding="utf-8")
+        ok = refused_with(path, "list file has no falsifiers list")
+        print(f"self-test: list without the document refused: {ok}")
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_invalid_list_entry_is_refused():
+    """An entry with an unknown command exits 2 with its own reason."""
+    ok = False
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "bad-entry.json"
+        path.write_text(json.dumps({"falsifiers": [{
+            "id": "BAD01", "title": "unknown command", "command": "nope",
+            "expect": "caught", "edits": [], "tests": ["anything"]}]}), encoding="utf-8")
+        ok = refused_with(path, "unknown command or expect")
+        print(f"self-test: invalid list entry refused: {ok}")
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def provider_backup_is_recovered():
+    """A backup left beside provider source is put back, and the provider
+    folder is in the default recovery scan."""
+    folder = PROVIDER_MANIFEST.parent
+    target = folder / "src" / "falsify-selftest-recovered.txt"
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    try:
+        target.write_text("mutated bytes\n", encoding="utf-8")
+        backup.write_text("original bytes\n", encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            recover_backups((folder,))
+        restored = (target.read_text(encoding="utf-8") == "original bytes\n"
+                    and not backup.exists())
+        scanned = folder in BACKUP_DIRS
+        print(f"self-test: provider backup recovered: restored={restored}, scanned={scanned}")
+        return restored and scanned
+    finally:
+        for path in (target, backup):
+            path.unlink(missing_ok=True)
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -866,6 +1046,13 @@ SELF_TEST_CASES = {
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
     "a survivor needs its named test to run": a_survivor_needs_its_named_test_to_run,
     "a survivor is proved by its named tests": a_survivor_is_proved_by_its_named_tests,
+    "provider_uses_locked_manifest": provider_uses_locked_manifest,
+    "selected_list_is_executed": selected_list_is_executed,
+    "a missing list is refused": a_missing_list_is_refused,
+    "malformed list JSON is refused": malformed_list_json_is_refused,
+    "a list without the document is refused": a_list_without_the_document_is_refused,
+    "an invalid list entry is refused": an_invalid_list_entry_is_refused,
+    "provider backup is recovered": provider_backup_is_recovered,
 }
 
 
@@ -910,11 +1097,20 @@ def main(argv):
     # file: the backup belongs to the caller's mutation, not to a killed run.
     if "--keep-backups" not in argv:
         recover_backups()
-    entries = load()
-    if "--list" in argv:
-        for entry in entries:
-            print(f"{entry['id']:6} {entry['command']:8} {entry['expect']:13} {entry['title']}")
-        return 0
+    # `--list FILE` runs the entries in FILE; a bare `--list` still prints the
+    # default list, as before.
+    data = DATA
+    rest = list(argv)
+    if "--list" in rest:
+        at = rest.index("--list")
+        if at + 1 < len(rest) and not rest[at + 1].startswith("-"):
+            data = pathlib.Path(rest[at + 1])
+            del rest[at:at + 2]
+        else:
+            for entry in load(data):
+                print(f"{entry['id']:6} {entry['command']:8} {entry['expect']:13} {entry['title']}")
+            return 0
+    entries = load(data)
     if "--self-test-cases" in argv:
         for name in SELF_TEST_CASES:
             print(name)
@@ -937,10 +1133,10 @@ def main(argv):
         return CASE_PASSED if ok else CASE_FAILED
     if "--self-test" in argv:
         return 0 if self_test(entries, "--with-repo" in argv) else 1
-    chosen = [entry for entry in entries if not argv or any(
-        entry["id"] == arg or entry["id"].startswith(arg) for arg in argv)]
+    chosen = [entry for entry in entries if not rest or any(
+        entry["id"] == arg or entry["id"].startswith(arg) for arg in rest)]
     if not chosen:
-        print("no falsifier matches", " ".join(argv))
+        print("no falsifier matches", " ".join(rest))
         return 2
     counts = {}
     bad = []

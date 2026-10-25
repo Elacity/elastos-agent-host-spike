@@ -1,0 +1,118 @@
+{
+ "about": "Runner-rule falsifiers for examples/agent-host/falsify.py's list and provider support. Kept under handoff/reports/ because the host list next to the runner is outside this task's edit paths; run with examples/agent-host/falsify.py --list examples/agent-host/handoff/reports/falsifiers-runner.json. Each entry mutates the runner and requires the named self-test case to FAIL. command: selftest.",
+ "retired": {},
+ "falsifiers": [
+  {
+   "id": "RL01",
+   "title": "provider dispatch selects the host crate's manifest",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "                 str(manifest or PROVIDER_MANIFEST)]",
+     "new": "                 str(manifest or HERE / \"Cargo.toml\")]"
+    }
+   ],
+   "tests": [
+    "provider_uses_locked_manifest"
+   ]
+  },
+  {
+   "id": "RL02",
+   "title": "the supplied list file is ignored",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            data = pathlib.Path(rest[at + 1])",
+     "new": "            data = DATA"
+    }
+   ],
+   "tests": [
+    "selected_list_is_executed"
+   ]
+  },
+  {
+   "id": "RL03",
+   "title": "a missing list file is not refused, so it crashes",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    except FileNotFoundError:\n        refuse(f\"list file not found: {path}\")",
+     "new": "    except FileNotFoundError:\n        raise"
+    }
+   ],
+   "tests": [
+    "a missing list is refused"
+   ]
+  },
+  {
+   "id": "RL04",
+   "title": "malformed JSON is not refused",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    except json.JSONDecodeError as error:\n        refuse(f\"list file is not valid JSON: {path}: {error}\")",
+     "new": "    except json.JSONDecodeError as error:\n        raise"
+    }
+   ],
+   "tests": [
+    "malformed list JSON is refused"
+   ]
+  },
+  {
+   "id": "RL05",
+   "title": "a JSON list without the falsifiers document is accepted",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if not isinstance(doc, dict) or not isinstance(doc.get(\"falsifiers\"), list):",
+     "new": "    if False:"
+    }
+   ],
+   "tests": [
+    "a list without the document is refused"
+   ]
+  },
+  {
+   "id": "RL06",
+   "title": "an entry with an unknown command is accepted",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if entry[\"command\"] not in COMMANDS or entry[\"expect\"] not in (\n            \"caught\",\n            \"compile_error\",\n            \"survives\",\n        ):",
+     "new": "        if False:"
+    }
+   ],
+   "tests": [
+    "an invalid list entry is refused"
+   ]
+  },
+  {
+   "id": "RL07",
+   "title": "the recovery scan covers only this folder again",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "BACKUP_DIRS = (HERE, PROVIDER_MANIFEST.parent)",
+     "new": "BACKUP_DIRS = (HERE,)"
+    }
+   ],
+   "tests": [
+    "provider backup is recovered"
+   ]
+  }
+ ]
+}

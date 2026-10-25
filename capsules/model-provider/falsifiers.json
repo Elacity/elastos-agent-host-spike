@@ -1,0 +1,22 @@
+{
+ "about": "Model provider falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with examples/agent-host/falsify.py --list capsules/model-provider/falsifiers.json. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Edit paths are relative to examples/agent-host, as in the host list. command: provider (cargo test --locked of this crate, through its own manifest and Cargo.lock).",
+ "retired": {},
+ "falsifiers": [
+  {
+   "id": "MP01",
+   "title": "a derived journal root names the wrong folder",
+   "command": "provider",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../capsules/model-provider/src/config.rs",
+     "old": "    Ok(Path::new(base_path)\n        .join(\"providers\")\n        .join(\"model-provider\"))",
+     "new": "    Ok(Path::new(base_path)\n        .join(\"provider\")\n        .join(\"model-provider\"))"
+    }
+   ],
+   "tests": [
+    "config::tests::journal_root_requires_absolute_operator_path"
+   ]
+  }
+ ]
+}
