@@ -740,8 +740,296 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
+
+    /// The committed list records these falsifiers.
+    const EXPECTED_FALSIFIER_IDS: [&str; 6] =
+        ["DID01", "DID02", "DID03", "DID04", "DID05", "DID06"];
+
+    /// The repository root; `falsifiers.json` paths are relative to it.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("did-provider must sit two levels below the repository root")
+            .to_path_buf()
+    }
+
+    /// Whether `source` declares `name` under a `#[test]` attribute.
+    fn declares_test(source: &str, name: &str) -> bool {
+        let declaration = format!("fn {name}(");
+        let mut is_test = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed == "#[test]" {
+                is_test = true;
+            } else if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//") {
+                // Attributes and comments can sit between `#[test]` and the item.
+            } else if is_test && trimmed.starts_with(&declaration) {
+                return true;
+            } else {
+                is_test = false;
+            }
+        }
+        false
+    }
+
+    /// The tests the compiled target registers, by full selector.
+    fn harness_tests(executable: &Path) -> HashSet<String> {
+        let output = Command::new(executable)
+            .args(["--list", "--format", "terse"])
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "test executable {} must list its tests: {err}",
+                    executable.display()
+                )
+            });
+        assert!(
+            output.status.success(),
+            "test executable {} --list must succeed: {}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("test executable --list output must be UTF-8")
+            .lines()
+            .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
+            .collect()
+    }
+
+    /// The compiled `tests/confine.rs` target sits beside the unit test target.
+    ///
+    /// The shared build directory also holds other crates' `confine` targets, so
+    /// a candidate counts only when cargo's dep-info names this crate's manifest.
+    fn integration_harness() -> HashSet<String> {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let unit =
+            std::env::current_exe().expect("the unit test executable path must be available");
+        let deps = unit
+            .parent()
+            .expect("the unit test executable sits in the deps directory");
+        let mut candidates: Vec<PathBuf> = fs::read_dir(deps)
+            .expect("the deps directory must be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                if !name.starts_with("confine-") || name.contains('.') {
+                    return false;
+                }
+                let dep_info = path.with_extension("d");
+                fs::read_to_string(dep_info)
+                    .map(|info| info.contains(&format!("CARGO_MANIFEST_DIR={manifest}")))
+                    .unwrap_or(false)
+            })
+            .collect();
+        candidates.sort_by_key(|path| path.metadata().and_then(|meta| meta.modified()).ok());
+        let newest = candidates.pop().unwrap_or_else(|| {
+            panic!(
+                "the compiled confine integration test target for {manifest} must sit beside {}",
+                unit.display()
+            )
+        });
+        harness_tests(&newest)
+    }
+
+    fn read_falsifiers_list() -> serde_json::Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("falsifiers.json");
+        let text = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("falsifier list {} must be readable: {err}", path.display())
+        });
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("falsifier list {} must be JSON: {err}", path.display()))
+    }
+
+    fn assert_falsifiers_list_is_honest(doc: &serde_json::Value) {
+        assert!(
+            doc["about"]
+                .as_str()
+                .is_some_and(|about| !about.trim().is_empty()),
+            "the falsifier list must carry a nonempty about string"
+        );
+        let entries = doc["falsifiers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the falsifier list must carry a falsifiers array"));
+
+        let unit = harness_tests(
+            &std::env::current_exe().expect("the unit test executable path must be available"),
+        );
+        let integration = integration_harness();
+        let root = repo_root();
+        assert!(
+            root.join("capsules/did-provider/src/main.rs").is_file(),
+            "the repository root must own capsules/did-provider"
+        );
+
+        let mut ids: Vec<&str> = Vec::new();
+        for entry in entries {
+            let id = entry["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every falsifier needs an id"));
+            assert!(!id.trim().is_empty(), "every falsifier needs an id");
+            assert!(!ids.contains(&id), "falsifier id {id} is used twice");
+            ids.push(id);
+            for field in ["title", "command"] {
+                let value = entry[field]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: {field} must be a string"));
+                assert!(!value.trim().is_empty(), "{id}: {field} must not be empty");
+            }
+            assert_eq!(
+                entry["command"].as_str(),
+                Some("did"),
+                "{id}: command must be did"
+            );
+            assert_eq!(
+                entry["expect"].as_str(),
+                Some("caught"),
+                "{id}: expect must be caught"
+            );
+
+            let edits = entry["edits"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: edits must be a list"));
+            assert!(!edits.is_empty(), "{id}: edits must not be empty");
+            for edit in edits {
+                let file = edit["file"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
+                let old = edit["old"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs an old snippet"));
+                let new = edit["new"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a new snippet"));
+                assert!(!old.is_empty(), "{id}: old must not be empty");
+                assert!(!new.is_empty(), "{id}: new must not be empty");
+                assert_ne!(old, new, "{id}: new must differ from old");
+                assert!(
+                    !Path::new(file).is_absolute(),
+                    "{id}: {file} must be repository-relative"
+                );
+                let source_path = root.join(file);
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{id}: edit file {} must exist and be readable: {err}",
+                        source_path.display()
+                    )
+                });
+                let occurrences = source.matches(old).count();
+                assert_eq!(
+                    occurrences, 1,
+                    "{id}: old snippet must occur verbatim exactly once in {file}, found {occurrences}"
+                );
+            }
+
+            let tests = entry["tests"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: tests must be a list"));
+            assert!(!tests.is_empty(), "{id}: tests must not be empty");
+            for test in tests {
+                let name = test
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every test name must be a string"));
+                assert!(!name.is_empty(), "{id}: test names must not be empty");
+                let (source_path, registered) = if name.starts_with("tests::") {
+                    (
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+                        &unit,
+                    )
+                } else if name.contains("::") {
+                    panic!("{id}: {name} must be a unit test under tests:: or a bare integration test name");
+                } else {
+                    (
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs"),
+                        &integration,
+                    )
+                };
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{id}: test source {} must be readable: {err}",
+                        source_path.display()
+                    )
+                });
+                let function = name
+                    .rsplit_once("::")
+                    .map_or(name, |(_, function)| function);
+                assert!(
+                    declares_test(&source, function),
+                    "{id}: {name} must be a #[test] function in {}",
+                    source_path.display()
+                );
+                assert!(
+                    registered.contains(name),
+                    "{id}: {name} must be registered in the test executable"
+                );
+            }
+        }
+
+        for expected in EXPECTED_FALSIFIER_IDS {
+            assert!(ids.contains(&expected), "the list must record {expected}");
+        }
+        let recovery = entries
+            .iter()
+            .find(|entry| entry["id"] == "DID06")
+            .expect("the list must record DID06");
+        assert!(
+            recovery["tests"]
+                .as_array()
+                .expect("DID06 tests must be a list")
+                .iter()
+                .any(|test| test == "verify_did_recovery_under_profile"),
+            "DID06 must name verify_did_recovery_under_profile"
+        );
+    }
+
+    /// The committed falsifier list describes the current source and test harness.
+    ///
+    /// Falsifier: replace one `old` snippet with text that is not in the source,
+    /// delete the DID06 record, empty an `edits`/`tests` array, change a test
+    /// name's prefix, or remove its `#[test]`; this test fails on each.
+    #[test]
+    fn falsifiers_list_is_honest() {
+        assert_falsifiers_list_is_honest(&read_falsifiers_list());
+    }
+
+    // Keep the test declaration in source while removing it from the harness.
+    #[cfg(any())]
+    #[test]
+    fn excluded_from_harness() {
+        panic!("this fixture must remain excluded from the test harness");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "DID01: tests::excluded_from_harness must be registered in the test executable"
+    )]
+    fn falsifiers_list_rejects_a_test_removed_from_harness() {
+        let mut doc = read_falsifiers_list();
+        doc["falsifiers"][0]["tests"][0] =
+            serde_json::Value::String("tests::excluded_from_harness".into());
+        assert_falsifiers_list_is_honest(&doc);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "DID01: tests::missing::init_requires_storage_without_key must be registered in the test executable"
+    )]
+    fn falsifiers_list_rejects_a_wrong_prefix() {
+        let mut doc = read_falsifiers_list();
+        doc["falsifiers"][0]["tests"][0] =
+            serde_json::Value::String("tests::missing::init_requires_storage_without_key".into());
+        assert_falsifiers_list_is_honest(&doc);
+    }
 
     fn make_device_key() -> [u8; 32] {
         [42u8; 32]
