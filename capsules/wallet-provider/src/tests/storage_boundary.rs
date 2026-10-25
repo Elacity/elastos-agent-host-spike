@@ -270,6 +270,89 @@ fn wallet_bootstrap_rejects_symlinked_ancestor() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn wallet_storage_rejects_hard_linked_key() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("home");
+    let wallet = wallet_root(&base);
+    fs::create_dir_all(&wallet).unwrap();
+    let outside = dir.path().join("outside-key.hex");
+    let outside_bytes = b"not-hex\n";
+    fs::write(&outside, outside_bytes).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::hard_link(&outside, wallet.join(WALLET_KEY_FILE)).unwrap();
+
+    let mut provider = WalletProvider::new();
+    match decode_and_handle_outer(
+        &mut provider,
+        json!({
+            "op": "init",
+            "config": { "base_path": base.display().to_string() }
+        }),
+    ) {
+        Response::Error {
+            ref code,
+            ref message,
+        } => {
+            assert_eq!(code, "storage_error");
+            assert_eq!(
+                message,
+                "wallet storage key must be owned by the wallet directory; it has 2 hard links"
+            );
+        }
+        other => panic!("expected hard-linked key refusal, got {other:?}"),
+    }
+    assert!(provider.store_path.is_none());
+    assert!(provider.storage_root.is_none());
+    assert!(provider.storage_key.is_none());
+    assert_eq!(fs::read(&outside).unwrap(), outside_bytes);
+    assert_eq!(
+        fs::metadata(&outside).unwrap().permissions().mode() & 0o7777,
+        0o644,
+        "the outside inode mode changed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wallet_storage_rejects_hard_linked_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("home");
+    let wallet = wallet_root(&base);
+    fs::create_dir_all(&wallet).unwrap();
+    let outside = dir.path().join("outside-state.json");
+    let outside_bytes = serde_json::to_vec_pretty(&WalletStore::default()).unwrap();
+    fs::write(&outside, &outside_bytes).unwrap();
+    fs::hard_link(&outside, wallet.join("wallet-state.json")).unwrap();
+
+    let mut provider = WalletProvider::new();
+    match decode_and_handle_outer(
+        &mut provider,
+        json!({
+            "op": "init",
+            "config": { "base_path": base.display().to_string() }
+        }),
+    ) {
+        Response::Error {
+            ref code,
+            ref message,
+        } => {
+            assert_eq!(code, "storage_error");
+            assert_eq!(
+                message,
+                "wallet store must be owned by the wallet directory; it has 2 hard links"
+            );
+        }
+        other => panic!("expected hard-linked store refusal, got {other:?}"),
+    }
+    assert!(provider.store_path.is_none());
+    assert!(provider.storage_root.is_none());
+    assert_eq!(fs::read(&outside).unwrap(), outside_bytes);
+}
+
 #[test]
 fn init_rejects_invalid_base_path() {
     let missing_name = "wallet-relative-root-must-not-exist";

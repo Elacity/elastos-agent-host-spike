@@ -15,6 +15,12 @@ pub(super) const BASE_PATH_EMPTY_REASON: &str = "wallet-provider base_path must 
 pub(super) const BASE_PATH_RELATIVE_REASON: &str =
     "wallet-provider base_path must be an absolute path";
 
+// Key installation publishes the key with a hard link and then removes the
+// staging link. The process-local lock keeps that staging link invisible to
+// sibling bootstrap calls so the exclusive-link check never refuses it. A
+// second process that observes the staging window fails closed instead.
+static KEY_BOOTSTRAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 thread_local! {
     static ACCESSED_PATHS: std::cell::RefCell<Vec<PathBuf>> =
@@ -176,6 +182,20 @@ fn same_file(left: &Stat, right: &Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
+/// Wallet storage files must be owned by the wallet directory alone. A second
+/// hard link can point at a file the provider does not own, so any link count
+/// above one is refused before the file is opened, read, or have its mode
+/// changed.
+fn ensure_exclusive_wallet_link(metadata: &Stat, label: &str) -> Result<(), String> {
+    if metadata.st_nlink == 1 {
+        return Ok(());
+    }
+    Err(format!(
+        "{label} must be owned by the wallet directory; it has {} hard links",
+        metadata.st_nlink
+    ))
+}
+
 fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<File>, String> {
     let before = match path.stat() {
         Ok(metadata) => metadata,
@@ -185,6 +205,7 @@ fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<F
     if !metadata_is_regular_leaf(&before) {
         return Err(format!("{label} must be a regular non-symlink file"));
     }
+    ensure_exclusive_wallet_link(&before, label)?;
     let file = path
         .open(OFlags::RDONLY)
         .map_err(|err| format!("failed to open {label}: {err}"))?;
@@ -200,6 +221,7 @@ fn open_regular_file_if_present(path: &Leaf<'_>, label: &str) -> Result<Option<F
     {
         return Err(format!("{label} changed while it was being opened"));
     }
+    ensure_exclusive_wallet_link(&opened, label)?;
     Ok(Some(file))
 }
 
@@ -258,7 +280,9 @@ fn read_regular_file_if_present(
 
 fn ensure_regular_file_or_absent(path: &Leaf<'_>, label: &str) -> Result<(), String> {
     match path.stat() {
-        Ok(metadata) if metadata_is_regular_leaf(&metadata) => Ok(()),
+        Ok(metadata) if metadata_is_regular_leaf(&metadata) => {
+            ensure_exclusive_wallet_link(&metadata, label)
+        }
         Ok(_) => Err(format!("{label} must be a regular non-symlink file")),
         Err(Errno::NOENT) => Ok(()),
         Err(err) => Err(format!("failed to inspect {label}: {err}")),
@@ -511,6 +535,9 @@ fn save_store(path: &Leaf<'_>, store: &WalletStore) -> Result<(), String> {
 }
 
 pub(super) fn load_or_create_storage_key(root: &WalletStorage) -> Result<[u8; 32], String> {
+    let _bootstrap = KEY_BOOTSTRAP_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let key_path = root.path.join(WALLET_KEY_FILE);
     let key_path = root.bind(&key_path, "wallet storage key")?;
     if let Some(key) = read_storage_key_if_present(&key_path)? {
