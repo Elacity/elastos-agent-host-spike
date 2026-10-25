@@ -63,6 +63,9 @@ MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
 COMMANDS = ("host", "provider", "e2e", "selftest")
 EXPECTATIONS = ("caught", "compile_error", "survives")
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
+# The host and provider commands are one cargo operation; only the manifest,
+# and so the lockfile it pins, differs.
+CARGO_MANIFESTS = {"host": HERE / "Cargo.toml", "provider": PROVIDER_MANIFEST}
 # A provider edit leaves its backup beside the provider source, so the
 # recovery scan must look there as well as in this folder.
 BACKUP_DIRS = (HERE, PROVIDER_MANIFEST.parent)
@@ -288,14 +291,23 @@ class Mutation:
         return False
 
 
+def cargo_spec(manifest, cargo_flags=("--locked",)):
+    """How to build and run one named test of one cargo manifest."""
+    cargo = ["cargo", "test", *cargo_flags, "--manifest-path", str(manifest)]
+    return {
+        "build": [(cargo + ["--no-run"], REPO)],
+        "one": (cargo + ["--"], REPO, []),
+    }
+
+
 def spec(command, manifest=None, cargo_flags=("--locked",)):
-    """How to build and run one named test, for a command."""
-    if command == "host":
-        cargo = ["cargo", "test", *cargo_flags, "--manifest-path", str(manifest or HERE / "Cargo.toml")]
-        return {
-            "build": [(cargo + ["--no-run"], REPO)],
-            "one": (cargo + ["--"], REPO, []),
-        }
+    """How to build and run one named test, for a command. The host and
+    provider commands pick their manifest here and share one cargo
+    specification."""
+    if command in CARGO_MANIFESTS:
+        # Each crate is its own workspace with its own lockfile, so the
+        # locked flag reads that crate's Cargo.lock.
+        return cargo_spec(manifest or CARGO_MANIFESTS[command], cargo_flags)
     if command == "selftest":
         # A change to this runner is checked by its own self-test. A fresh
         # process reads the mutated file; --keep-backups stops it from taking
@@ -303,15 +315,6 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
         # named case runs in its own process, as each named test does.
         base = ["python3", "-I", str(HERE / "falsify.py"), "--keep-backups"]
         return {"build": [], "one": (base, REPO, [])}
-    if command == "provider":
-        # The provider crate is its own workspace with its own lockfile, so
-        # the locked flag reads capsules/model-provider/Cargo.lock.
-        cargo = ["cargo", "test", *cargo_flags, "--manifest-path",
-                 str(manifest or PROVIDER_MANIFEST)]
-        return {
-            "build": [(cargo + ["--no-run"], REPO)],
-            "one": (cargo + ["--"], REPO, []),
-        }
     cargo = ["cargo", "test", "-p", "elastos-server", "--lib"]
     return {
         "build": [(["bash", str(HERE / "build.sh")], REPO), (cargo + ["--no-run"], REPO / "elastos")],
@@ -933,19 +936,20 @@ def a_survivor_is_proved_by_its_named_tests():
 
 
 def provider_uses_locked_manifest():
-    """`spec("provider")` builds and runs the provider crate through its own
-    locked manifest, not the host crate's."""
+    """Host and provider pick their manifest once and share one cargo
+    specification; `spec("provider")` then lists the provider crate's test."""
     name = "config::tests::journal_root_requires_absolute_operator_path"
-    cargo = ["cargo", "test", "--locked", "--manifest-path", str(PROVIDER_MANIFEST)]
-    how = spec("provider")
-    argv, cwd, extra = how["one"]
-    shaped = (argv == cargo + ["--"] and cwd == REPO and extra == []
-              and how["build"] == [(cargo + ["--no-run"], REPO)])
+    host = cargo_spec(HERE / "Cargo.toml")
+    provider = cargo_spec(PROVIDER_MANIFEST)
+    shared = (spec("host") == host and spec("provider") == provider
+              and spec("host", PROVIDER_MANIFEST) == spec("provider", PROVIDER_MANIFEST)
+              and spec("provider", HERE / "Cargo.toml") == spec("host", HERE / "Cargo.toml"))
+    argv, cwd, extra = spec("provider")["one"]
     code, listed = run(argv + ["--exact", name, "--list"], cwd)
     listed_one = ([line for line in listed.splitlines() if line == f"{name}: test"]
                   == [f"{name}: test"])
-    print(f"self-test: provider dispatch: shaped={shaped}, listed={listed_one} (exit {code})")
-    return shaped and code == 0 and listed_one
+    print(f"self-test: provider dispatch: shared={shared}, listed={listed_one} (exit {code})")
+    return shared and code == 0 and listed_one
 
 
 def selected_list_is_executed():
@@ -1054,6 +1058,21 @@ def a_list_without_the_document_is_refused():
     return ok
 
 
+def an_unreadable_list_is_refused():
+    """A list path that cannot be read, a directory here, exits 2 with its
+    own reason."""
+    ok = False
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    path = SELF_TEST_DIR
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        ok = refused_line(path, f"list file cannot be read: {path}")
+        print(f"self-test: unreadable list refused: {ok}")
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def an_invalid_list_entry_is_refused():
     """Every entry-shape and dispatch refusal exits 2 with its own reason,
     before any mutation runs."""
@@ -1113,8 +1132,8 @@ def an_undecodable_list_file_is_refused():
 
 
 def provider_backup_is_recovered():
-    """A backup left beside provider source is put back, and the provider
-    folder is in the default recovery scan."""
+    """The default recovery scan puts back a backup left beside provider
+    source, not only one in this folder."""
     folder = PROVIDER_MANIFEST.parent
     target = folder / "src" / "falsify-selftest-recovered.txt"
     backup = target.with_name(target.name + BACKUP_SUFFIX)
@@ -1123,12 +1142,11 @@ def provider_backup_is_recovered():
         backup.write_text("original bytes\n", encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            recover_backups((folder,))
+            recover_backups()
         restored = (target.read_text(encoding="utf-8") == "original bytes\n"
                     and not backup.exists())
-        scanned = folder in BACKUP_DIRS
-        print(f"self-test: provider backup recovered: restored={restored}, scanned={scanned}")
-        return restored and scanned
+        print(f"self-test: provider backup recovered by the default scan: {restored}")
+        return restored
     finally:
         for path in (target, backup):
             path.unlink(missing_ok=True)
@@ -1152,6 +1170,7 @@ SELF_TEST_CASES = {
     "a missing list is refused": a_missing_list_is_refused,
     "malformed list JSON is refused": malformed_list_json_is_refused,
     "a list without the document is refused": a_list_without_the_document_is_refused,
+    "an unreadable list is refused": an_unreadable_list_is_refused,
     "an invalid list entry is refused": an_invalid_list_entry_is_refused,
     "entry edits and tests are validated": entry_edits_and_tests_are_validated,
     "an undecodable list file is refused": an_undecodable_list_file_is_refused,

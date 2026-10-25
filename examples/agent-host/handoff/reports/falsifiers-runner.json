@@ -10,8 +10,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "                 str(manifest or PROVIDER_MANIFEST)]",
-     "new": "                 str(manifest or HERE / \"Cargo.toml\")]"
+     "old": "CARGO_MANIFESTS = {\"host\": HERE / \"Cargo.toml\", \"provider\": PROVIDER_MANIFEST}",
+     "new": "CARGO_MANIFESTS = {\"host\": HERE / \"Cargo.toml\", \"provider\": HERE / \"Cargo.toml\"}"
     }
    ],
    "tests": [
@@ -160,6 +160,38 @@
    ],
    "tests": [
     "entry edits and tests are validated"
+   ]
+  },
+  {
+   "id": "RL11",
+   "title": "an unreadable list file is not refused, so it crashes",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    except OSError:\n        refuse(f\"list file cannot be read: {path}\")",
+     "new": "    except OSError:\n        raise"
+    }
+   ],
+   "tests": [
+    "an unreadable list is refused"
+   ]
+  },
+  {
+   "id": "RL12",
+   "title": "the default recovery scan covers only this folder",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "def recover_backups(folders=BACKUP_DIRS):",
+     "new": "def recover_backups(folders=(HERE,)):"
+    }
+   ],
+   "tests": [
+    "provider backup is recovered"
    ]
   }
  ]
