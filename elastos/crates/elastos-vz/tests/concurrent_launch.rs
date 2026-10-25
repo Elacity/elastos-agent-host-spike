@@ -958,7 +958,7 @@ async fn exec_smoke_image_prints_hello() {
     );
     assert_eq!(
         elastos_compute::exec_vm::admit_exec_argv(&["cargo", "build"]),
-        Err("program missing")
+        Err("cargo operation refused")
     );
     assert_eq!(
         elastos_compute::exec_vm::admit_exec_argv(&["nope"]),

@@ -303,8 +303,11 @@ class BuildExecInitrd(unittest.TestCase):
             self.assertIn(") run ", line, token)
         self.assertIn("init: command refused", cases["*"])
         self.assertIn("exit 1", cases["*"])
-        self.assertIn("/bin/cargo", cases["cargo-test"])
-        self.assertIn("init: cargo is not in the image", cases["cargo-test"])
+        cargo = cases["cargo-test"]
+        self.assertIn("if [ -x /bin/cargo ]; then exec /bin/cargo test; fi", cargo)
+        self.assertIn('echo "init: cargo is not in the image"; exit 1', cargo)
+        self.assertNotIn("/bin/cargo build", cargo)
+        self.assertNotIn("exit 0", cargo)
         self.assertIn("/sbin/exec-supervisor run --", init)
         self.assertIn("$(cat /etc/exec-modules)", init)
         # The only exit-looking line is the fixture's forged one.

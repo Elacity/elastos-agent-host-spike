@@ -178,8 +178,10 @@ pub fn admit_listed_file(name: &str) -> Result<(), &'static str> {
 }
 
 /// Name a program the image can run. Exactly `cargo test` is admitted; the
-/// image may not carry `/bin/cargo` yet, and init then says so. Every other
-/// cargo form and every other program is refused. This does not boot.
+/// image may not carry `/bin/cargo` yet, and init then says so. Each refusal
+/// names its own cause: no command, no cargo subcommand, an unsupported cargo
+/// operation, forbidden cargo test arguments, or an unknown command. This does
+/// not boot.
 pub fn admit_exec_argv(argv: &[&str]) -> Result<ExecCommand, &'static str> {
     match argv {
         ["files"] => Ok(ExecCommand::Files),
@@ -190,7 +192,10 @@ pub fn admit_exec_argv(argv: &[&str]) -> Result<ExecCommand, &'static str> {
         ["vm-smoke", "tests::a_missing_piece_fails"] => Ok(ExecCommand::TestFail),
         ["vm-smoke", "tests::project_was_edited"] => Ok(ExecCommand::TestEdited),
         ["cargo", "test"] => Ok(ExecCommand::CargoTest),
-        ["cargo"] | ["cargo", _] => Err("program missing"),
+        [] => Err("command missing"),
+        ["cargo"] => Err("cargo subcommand missing"),
+        ["cargo", "test", _, ..] => Err("cargo test arguments refused"),
+        ["cargo", _, ..] => Err("cargo operation refused"),
         _ => Err("command refused"),
     }
 }
@@ -764,11 +769,22 @@ mod tests {
             Ok(ExecCommand::CargoTest)
         );
         assert_eq!(ExecCommand::CargoTest.token(), "cargo-test");
+        let missing: &[&str] = &[];
         for (argv, reason) in [
-            (&["cargo"][..], "program missing"),
-            (&["cargo", "build"][..], "program missing"),
-            (&["cargo", "test", "--offline"][..], "command refused"),
+            (missing, "command missing"),
+            (&["cargo"][..], "cargo subcommand missing"),
+            (&["cargo", "build"][..], "cargo operation refused"),
+            (&["cargo", "check"][..], "cargo operation refused"),
+            (
+                &["cargo", "build", "--release"][..],
+                "cargo operation refused",
+            ),
+            (
+                &["cargo", "test", "--offline"][..],
+                "cargo test arguments refused",
+            ),
             (&["nope"][..], "command refused"),
+            (&["true", "extra"][..], "command refused"),
         ] {
             assert_eq!(admit_exec_argv(argv), Err(reason), "{argv:?}");
         }
@@ -823,9 +839,12 @@ mod tests {
         assert!(launcher.called);
         launcher.called = false;
         for (argv, reason) in [
-            (&["cargo"][..], "program missing"),
-            (&["cargo", "build"][..], "program missing"),
-            (&["cargo", "test", "--offline"][..], "command refused"),
+            (&["cargo"][..], "cargo subcommand missing"),
+            (&["cargo", "build"][..], "cargo operation refused"),
+            (
+                &["cargo", "test", "--offline"][..],
+                "cargo test arguments refused",
+            ),
             (&["nope"][..], "command refused"),
         ] {
             ask.argv = argv;
