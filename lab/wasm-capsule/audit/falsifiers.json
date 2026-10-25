@@ -342,6 +342,136 @@
       "tests": [
         "custom_section_carrying_code_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA4a",
+      "title": "Refusal loses its Eq derive",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "#[derive(Debug, Clone, PartialEq, Eq)]\n#[non_exhaustive]\npub enum Refusal {",
+          "new": "#[derive(Debug, Clone, PartialEq)]\n#[non_exhaustive]\npub enum Refusal {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA4b",
+      "title": "Refusal becomes exhaustive in the source",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "#[non_exhaustive]\npub enum Refusal {",
+          "new": "pub enum Refusal {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA4c",
+      "title": "Refusal becomes exhaustive in the API document",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/INTERFACE.md",
+          "old": "#[non_exhaustive]\npub enum Refusal {",
+          "new": "pub enum Refusal {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA4d",
+      "title": "Both entry points name the last undeclared entry",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    for import in &imports {",
+          "new": "    for import in imports.iter().rev() {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    for name in &interfaces {",
+          "new": "    for name in interfaces.iter().rev() {"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA4e",
+      "title": "Refuse undeclared entries during parsing before later custom sections",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                imports.push(DeclaredImport {\n                    module: import.module.to_owned(),\n                    name: import.name.to_owned(),\n                });",
+          "new": "                let import = DeclaredImport {\n                    module: import.module.to_owned(),\n                    name: import.name.to_owned(),\n                };\n                if !declared.contains(&import) {\n                    return Err(Refusal::Undeclared {\n                        module: import.module,\n                        name: import.name,\n                    });\n                }\n                imports.push(import);"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                interfaces.push(import.name.name.to_owned());",
+          "new": "                let name = import.name.name.to_owned();\n                if !declared_interfaces.contains(&name.as_str()) {\n                    return Err(Refusal::UndeclaredInterface { name });\n                }\n                interfaces.push(name);"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA4f",
+      "title": "Run full validation after parsing and custom-section checks",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
+          "new": "    if !right_encoding {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    }\n    Ok(())\n}",
+          "new": "    }\n    if Validator::new().validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA4g",
+      "title": "Skip the core header check and accept a Component as a module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Encoding::Module => (wasm.starts_with(b\"\\0asm\\x01\\0\\0\\0\"), Refusal::Malformed),",
+          "new": "Encoding::Module => (true, Refusal::Malformed),"
+        }
+      ],
+      "tests": [
+        "malformed_module_is_refused"
+      ]
     }
   ]
 }
