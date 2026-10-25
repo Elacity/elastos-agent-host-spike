@@ -33,7 +33,8 @@ The nine `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
 refusal order and API v1. The two retained `skeleton` tests pin the manifest
 and workspace boundary. The eight `component_imports` tests cover exact names
-and versions, section order, unused declarations, core-module refusal, full Component validation,
+and versions (including same-major versions), more than one import section,
+section order, unused declarations, core-module refusal, full Component validation,
 internal imports, and custom-section content in Components and embedded modules.
 Custom-section cases cover code in the name and data, runs across their boundary,
 and a run that starts in the name's length byte. Component cases cover a module
@@ -84,6 +85,8 @@ apply and verify each entry by hand in this workspace.
 | F-CWA4e | Refuse undeclared entries during parsing, before later custom sections | `audit_refusals_follow_the_documented_order`, `component_refusals_follow_the_documented_order` |
 | F-CWA4f | Run full validation after parsing and custom-section checks | `audit_refusals_follow_the_documented_order`, `component_refusals_follow_the_documented_order` |
 | F-CWA4g | Skip the core header check | `malformed_module_is_refused` |
+| F-CWA5a | Match the interface name and major version only | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA5b | Read only the first nonempty top-level import section | `component_importing_wasi_filesystem_is_refused_by_name`, `component_importing_only_a_declared_interface_passes` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -96,7 +99,7 @@ cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
 
 Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
-the Component tests of F-CWA3a and F-CWA4d through F-CWA4f:
+the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, and F-CWA5a/F-CWA5b:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -149,3 +152,13 @@ byte-identical, checked by SHA-256. The clean format and locked-test checks
 passed all 19 tests offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
 The implementation, API document, audit manifest, workspace manifest and
 workspace lockfile stayed unchanged.
+
+The cwa-005 in-tree run caught all 29 `caught` entries: all 36 named test runs
+built and failed at assertions. F-CWA5a accepted the newer minor version;
+F-CWA5b missed the later filesystem import in both the refusal and result
+checks. F-CWA0c failed before tests because `--locked` refused the nested
+workspace's missing lockfile. Every edited file restored byte-identical,
+checked by SHA-256. The clean format and locked-test checks passed all 19 tests
+offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation,
+API document, audit manifest, workspace manifest and workspace lockfile stayed
+unchanged.

@@ -18,6 +18,19 @@ fn component_importing_only_a_declared_interface_passes() {
         Ok(vec![declared[1].into()])
     );
 
+    let sections = wat::parse_str(
+        r#"(component
+            (import "elastos:bus/runtime@1.0.0" (instance))
+            (core module)
+            (import "wasi:filesystem/types@0.2.0" (instance)))"#,
+    )
+    .unwrap();
+    let both = ["wasi:filesystem/types@0.2.0", "elastos:bus/runtime@1.0.0"];
+    assert_eq!(
+        audit_component(&sections, &both),
+        Ok(vec![both[1].into(), both[0].into()])
+    );
+
     let two = wat::parse_str(
         r#"(component
             (import "elastos:bus/runtime@1.0.0" (instance))
@@ -39,6 +52,19 @@ fn component_importing_wasi_filesystem_is_refused_by_name() {
     )
     .unwrap();
     assert_undeclared(&wasm, &[], "wasi:filesystem/types@0.2.0");
+
+    let sections = wat::parse_str(
+        r#"(component
+            (import "elastos:bus/runtime@1.0.0" (instance))
+            (core module)
+            (import "wasi:filesystem/types@0.2.0" (instance)))"#,
+    )
+    .unwrap();
+    assert_undeclared(
+        &sections,
+        &["elastos:bus/runtime@1.0.0"],
+        "wasi:filesystem/types@0.2.0",
+    );
 }
 
 #[test]
@@ -53,6 +79,15 @@ fn a_different_version_of_a_declared_interface_is_refused() {
         "elastos:bus/runtime@>=1.0.0",
         "elastos:bus/log@2.0.0",
     ] {
+        assert_undeclared(&wasm, &[declared], name);
+    }
+
+    for (declared, name) in [
+        ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.1.0"),
+        ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.0.1"),
+        ("elastos:bus/runtime@1.1.0", "elastos:bus/runtime@1.0.0"),
+    ] {
+        let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
         assert_undeclared(&wasm, &[declared], name);
     }
 }
