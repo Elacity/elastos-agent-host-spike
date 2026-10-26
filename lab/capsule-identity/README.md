@@ -433,12 +433,18 @@ that pattern.
 | The walk's refusal precedes a bad signature from a canonical accepted signer | `signature_walk_refusal_precedes_bad_signature` | F-CI4s |
 | Two faults at once: the earlier check answers | `signature_refusal_order_is_stable` | F-CI4t, F-CI4u, F-CI4v |
 | One message, one verification, and the path form holds no check of its own | `signature_paths_share_one_implementation` | F-CI4w, F-CI4x |
-| Test keys come from the operating system's generator | `test_keys_use_fresh_os_randomness` | F-CI4y |
+| Test keys come from the operating system's generator, never from fixed or raw key bytes | `test_keys_use_fresh_os_randomness` | F-CI4y, F-CI14c |
 | No key material is in what git would stage | `no_key_material_is_tracked` | F-CI4i |
 | Private-key header lines are found even when a file has invalid UTF-8 | `key_material_scan_finds_headers_in_non_utf8_files` | F-CI4z |
 | `*.key` and `*.seed` are ignored | `key_and_seed_files_are_ignored_by_git` | F-CI4h |
 
-The tests are in `tests/name_signature.rs`. F-CI4h drops `*.seed` from this
+The tests are in `tests/name_signature.rs`. The key-material scan they call
+(`key_material_findings`) is in `tests/common/mod.rs`, a file the runner
+restores after a killed run, so F-CI4z's edit cannot outlive its run.
+`test_keys_use_fresh_os_randomness` bans, in every `.rs` file of the lane,
+`SigningKey::from_bytes`, `from_seed`, `from_keypair_bytes`,
+`StdRng::from_seed`, `SigningKey::from(` and `SecretKey`, so a key made from
+fixed bytes (such as a constant array) fails it. F-CI4h drops `*.seed` from this
 lane's `.gitignore`. F-CI4i appends a private-key header line to this file.
 Neither file is in the runner's recovery list
 (`examples/agent-host/falsify.py`, `PROVIDER_TARGETS`). The runner still runs
@@ -477,19 +483,41 @@ signs it:
   `verify_checked_signature` and `verify_name_signature`. Each answers "do
   these bytes match this name" or "did this key sign this name". None takes
   or returns a grant, an admission or a launch value. A test keeps the list:
-  a new public function fails it until someone lists it on purpose.
+  a new public function fails it until someone lists it on purpose. The test
+  reads the declaration after every `pub` word token by token, across line
+  breaks, so it also reads a function declared with any of `async`, `const`,
+  `unsafe` or `extern` (with or without an ABI string) before `fn`, in any
+  order and split over any lines. A `pub(crate)` or `pub(super)` function is
+  not exported, so it is not counted. A `pub` declaration the test cannot read
+  fails it with its own reason; it is never skipped.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | A valid signature verifies, and signing and verifying change no covered byte, add no entry next to the bundle, and leave no lab signature in `capsule.json`; a success approves nothing for the next check | `valid_signature_grants_nothing_by_itself` | F-CI7a, F-CI7b, F-CI7c |
-| The library exports only identity checks | `the_harness_exports_only_identity_checks` | F-CI7d |
+| The library exports only identity checks | `the_harness_exports_only_identity_checks` | F-CI7d, F-CI14a, F-CI14b, F-CI14d, F-CI14e |
+| The export check reads `async`, `const`, `unsafe` and `extern` functions split over any lines, and not `pub(crate)` or `pub(super)` ones | `every_exported_function_form_is_read` | by hand (see below) |
+| The export check refuses a `pub` declaration it cannot read, each with its own reason | `an_unreadable_pub_declaration_is_refused_with_its_reason` | by hand (see below) |
 
 The tests are in `tests/not_admission.rs`. F-CI7a makes `sign_bundle` write
 the signature's hex into `capsule.json`'s `signature` field, the way the
 Runtime's own signer fills that field (`verifier.rs:139-150`). F-CI7b makes a
 successful verify write `<bundle>.admitted`. F-CI7c makes verify remember each
 name and signer it passed, and pass them again with no accepted-list check.
-F-CI7d adds a public `admit` step.
+F-CI7d adds a public `admit` step. F-CI14a adds `pub async fn admit() {}` and
+F-CI14b adds `pub const fn grant() {}`; before task 014 the export check read
+only lines that start with `pub fn `, so both passed it. F-CI14d adds
+`pub async` and `fn admit() {}` on two lines (under `#[rustfmt::skip]`, so
+rustfmt keeps them split); a check that read one line at a time passed it.
+F-CI14e adds `pub struct Opaque(pub u8);`, whose `pub u8` the check cannot
+read, so the test fails with "`pub u8` is not a declaration this check
+reads" instead of skipping it. The reader (`token`, `declared_after_pub`,
+`exported_functions`) sits in `tests/not_admission.rs`, which the runner does
+not restore, so its falsifiers are proved by hand only. With `"unsafe"`
+dropped from its qualifiers, `every_exported_function_form_is_read` fails on
+`pub unsafe fn launch()`. With `token` skipping only spaces, not line breaks,
+it fails on `pub async` and `fn admit() {}` split over two lines. With the end
+of the code read as no item, `an_unreadable_pub_declaration_is_refused_with_its_reason`
+fails on `pub`.
 
 What the tests cannot show. Admission and grants are the Runtime's, not this
 lab's. PRINCIPLES.md 13 (lines 134-135): "admission is a separate decision
@@ -557,7 +585,8 @@ src/lib.rs               checked_bundle, lab_cid, check_name and its checked for
                          the encoder, the walk, and the test-key signature
 fixtures/                content-sample, web-app, wc001-core, agent-host
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
-                         the library's code for tests that read it, fresh test keys
+                         the library's code for tests that read it, fresh test keys,
+                         the key-material scan
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
@@ -574,7 +603,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 89 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 94 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -582,15 +611,21 @@ to F-CI9j (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-co
 task 004's F-CI4a to F-CI4z (see
 [the test-key signature](#test-key-publisher-signature-lab-proposal)),
 task 007's F-CI7a to F-CI7d (see
-[verify is not admit](#verify-is-not-admit-m1-check-b1)), and task 013's
-F-CI13a to F-CI13c (see [reading a printed lab CID](#reading-a-printed-lab-cid)).
+[verify is not admit](#verify-is-not-admit-m1-check-b1)), task 013's
+F-CI13a to F-CI13c (see [reading a printed lab CID](#reading-a-printed-lab-cid)),
+and task 014's F-CI14a to F-CI14e (see
+[the test-key signature](#test-key-publisher-signature-lab-proposal) and
+[verify is not admit](#verify-is-not-admit-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
-error. Every entry except F-CI4h, F-CI4i and F-CI4z edits a file the runner
+error. Every entry except F-CI4h and F-CI4i edits a file the runner
 restores after a killed run: `src/lib.rs`, `tests/common/mod.rs` or
 `fixtures/wc001-core/capsule.json`. F-CI4h edits this lane's `.gitignore`,
-F-CI4i edits this file, and F-CI4z edits `tests/name_signature.rs`. Those
-three are not in the runner's recovery list. The runner still runs them.
+and F-CI4i edits this file. Those two are not in the runner's recovery list.
+The runner still runs them. Task 014 moved the key-material scan, byte for
+byte except for `pub(super)`, from `tests/name_signature.rs` into
+`tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
+`new` and tests unchanged.
 
 Task 009 moved code without changing an older entry. The root manifest check
 and the encoder call moved from `lab_cid_observed` into
@@ -610,10 +645,12 @@ python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers
 ```
 
 At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
-46 of 46). At task 004 it reported `summary: 81 CAUGHT of 81`. At task 007
+46 of 46). At task 004's round 1 it reported `summary: 81 CAUGHT of 81`; the repair
+that followed added F-CI4z, so 004 merged 82 entries. At task 007
 it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
-At task 013 it reported `summary: 89 CAUGHT of 89`.
-The runner does not print why a test failed. Tasks 003, 009, 004, 007 and 013
-prove each of their falsifiers by break, named test fails, revert.
+At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
+`summary: 94 CAUGHT of 94`.
+The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013
+and 014 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

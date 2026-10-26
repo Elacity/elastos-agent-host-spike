@@ -511,6 +511,9 @@ fn test_keys_use_fresh_os_randomness() {
         format!("SigningKey::from_{}", "seed"),
         format!("SigningKey::from_{}", "keypair_bytes"),
         format!("{}::from_seed", "StdRng"),
+        // Raw key bytes, such as a constant array, through `From`.
+        format!("SigningKey::from{}", "("),
+        format!("Secret{}", "Key"),
     ];
     let mut rust_files = Vec::new();
     collect_rust(&lane_dir(), &mut rust_files);
@@ -584,42 +587,6 @@ fn lane_files_git_would_stage() -> Vec<(String, Vec<u8>)> {
     }
     assert!(!files.is_empty(), "git listed no files");
     files
-}
-
-/// The two ends of a PEM private-key header, built here so this source has
-/// no header line of its own.
-fn pem_private_ends() -> (String, String) {
-    (
-        format!("-----{} ", "BEGIN"),
-        format!("{}-----", "PRIVATE KEY"),
-    )
-}
-
-struct Filed<'a> {
-    name: &'a str,
-    bytes: &'a [u8],
-}
-
-fn key_material_findings(files: &[Filed<'_>]) -> Vec<String> {
-    let (header_start, header_end) = pem_private_ends();
-    let mut found = Vec::new();
-    for file in files {
-        if file.name.ends_with(".key") || file.name.ends_with(".seed") {
-            found.push(format!("name:{}", file.name));
-        }
-        if file.bytes.len() == 32 && std::str::from_utf8(file.bytes).is_err() {
-            found.push(format!("raw-seed:{}", file.name));
-        }
-        // Invalid bytes elsewhere in a file must not hide its ASCII header markers.
-        let text = String::from_utf8_lossy(file.bytes);
-        for (index, line) in text.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with(&header_start) && trimmed.ends_with(&header_end) {
-                found.push(format!("header:{}:{index}", file.name));
-            }
-        }
-    }
-    found
 }
 
 #[test]
