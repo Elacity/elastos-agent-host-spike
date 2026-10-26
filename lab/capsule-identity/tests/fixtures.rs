@@ -43,6 +43,7 @@ fn lab_cid_matches_the_pinned_value_for_each_fixture() {
     for (fixture, pinned) in [
         (&CONTENT_SAMPLE, CONTENT_SAMPLE_LAB_CID),
         (&WEB_APP, WEB_APP_LAB_CID),
+        (&AGENT_HOST, AGENT_HOST_LAB_CID),
     ] {
         // Two copies in two temp folders, each named twice: the folder's
         // path and the moment of naming never enter the value.
