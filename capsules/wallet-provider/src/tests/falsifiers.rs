@@ -22,10 +22,11 @@ use std::process::Command;
 /// `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns
 /// and `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails,
 /// and task 054's WP31, which restores the plain cut at every `;` and the
-/// parenthesis count inside strings, and WP32 to WP37, which disable escaping,
+/// parenthesis count inside strings, WP32 to WP37, which disable escaping,
 /// whitespace inside a string, whitespace collapse outside strings, a
-/// comment's end at its newline, and the two parser refusals.
-const EXPECTED_FALSIFIERS: usize = 35;
+/// comment's end at its newline, and the two parser refusals, and WP38, which
+/// drops the newline that ends a comment and glues the tokens around it.
+const EXPECTED_FALSIFIERS: usize = 36;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

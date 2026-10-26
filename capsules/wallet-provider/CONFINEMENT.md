@@ -182,6 +182,13 @@ oracles and supplies contract evidence, not Linux execution evidence.
   whitespace inside a string is kept and outside it collapses, and that a form
   after a comment's newline still loads. The test reads no file and starts no
   process.
+- `a_comment_inside_a_form_keeps_its_tokens_apart` reads a form whose tokens
+  a comment splits and expects both tokens back: `(allow;x`, a newline, then
+  `default)` gives `(allow default)`, and the network form gives
+  `(allow network*)`. The one check refuses the passing fixture with either
+  form appended, with the exact `must reject (allow default)` and
+  `network allow is refused` reasons. The test reads no file and starts no
+  process.
 - `the_string_fixture_loads_under_sandbox_exec` writes `(version 1)`,
   `(deny default)` and those two lines to a temporary file and runs
   `/usr/bin/sandbox-exec -f <file> /usr/bin/true`, which exits 0. Under
@@ -270,6 +277,25 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   fails because the hidden `(allow default)` then passes the check, and
   `profile_forms_rejects_unclosed_string` fails because the cut reads no
   string to refuse.
+- Let an escaped character end its string (WP32):
+  `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  fails because the escaped quote closes the string and the profile ends
+  early.
+- Drop whitespace that sits inside a string (WP33): the same test fails
+  because the spaced in-string form loses its two spaces.
+- Keep whitespace outside strings instead of collapsing it (WP34): the same
+  test fails because the passing fixture no longer parses into the contract's
+  forms.
+- Run a comment to the end of the profile instead of its line (WP35): the
+  same test fails because the form after the comment's newline is lost.
+- Drop the unclosed-string refusal (WP36):
+  `profile_forms_rejects_unclosed_string` fails because the profile then ends
+  as an unclosed form.
+- Drop the unclosed-form refusal (WP37): `profile_forms_rejects_unclosed_form`
+  fails because the incomplete profile returns no refusal.
+- Drop the newline that ends a comment (WP38):
+  `a_comment_inside_a_form_keeps_its_tokens_apart` fails because
+  `(allow;x\ndefault)` reads as `(allowdefault)` and passes the check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

@@ -1183,6 +1183,51 @@ fn file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does() {
     );
 }
 
+/// A comment inside a form ends at its newline, and that newline still
+/// separates the form's tokens, as `sandbox-exec` reads it. Without the
+/// separator `(allow;x\ndefault)` reads as `(allowdefault)`, which matches
+/// neither `is_default_allow` nor `is_network_allow`; both forms would then
+/// pass the one check while `sandbox-exec` applies them. The fixtures are
+/// built in the test; no file is read and no process starts.
+///
+/// Falsifier: WP38 drops the newline that ends a comment; this test fails
+/// because the glued form passes the check and the parser returns
+/// `(allowdefault)`.
+#[test]
+fn a_comment_inside_a_form_keeps_its_tokens_apart() {
+    assert_eq!(
+        profile_forms("(allow;x\ndefault)"),
+        vec!["(allow default)"],
+        "the newline that ends a comment must separate the tokens"
+    );
+    assert_eq!(
+        profile_forms("(allow;x\nnetwork*)"),
+        vec!["(allow network*)"],
+        "the newline that ends a comment must separate the tokens"
+    );
+
+    let complete = contract_fixture_profile(true);
+    for (line, refusal) in [
+        (
+            "(allow;x\ndefault)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "(allow;x\nnetwork*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+    ] {
+        let profile = format!("{complete}{line}");
+        let reason = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a form split by a comment must fail the one check");
+        assert_eq!(
+            reason, refusal,
+            "the refusal must be the exact reason for the hidden form"
+        );
+    }
+}
+
 /// `sandbox-exec` itself reads the two string lines as `profile_forms` does:
 /// it parses their `;`, `(` and `)` as text and applies the `(allow default)`
 /// they hold. The fixture writes `(version 1)`, `(deny default)` and those two
@@ -1223,13 +1268,10 @@ fn profile_forms_rejects_unclosed_string() {
     let message = refusal
         .downcast_ref::<String>()
         .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
-    assert!(
-        message.contains("the profile must not end early"),
-        "the refusal must use the existing reason: {message}"
-    );
-    assert!(
-        message.contains("unclosed string"),
-        "the refusal must name the unclosed string: {message}"
+    assert_eq!(
+        message.as_str(),
+        "the profile must not end early: unclosed string in (literal \"/unclosed)",
+        "the refusal must be the exact reason for the unclosed string"
     );
 }
 
@@ -1245,13 +1287,10 @@ fn profile_forms_rejects_unclosed_form() {
     let message = refusal
         .downcast_ref::<String>()
         .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
-    assert!(
-        message.contains("the profile must not end early"),
-        "the refusal must use the existing reason: {message}"
-    );
-    assert!(
-        message.contains("unclosed form"),
-        "the refusal must name the unclosed form: {message}"
+    assert_eq!(
+        message.as_str(),
+        "the profile must not end early: unclosed form (deny default",
+        "the refusal must be the exact reason for the unclosed form"
     );
     assert_eq!(
         profile_forms("(deny default)"),
@@ -1372,11 +1411,12 @@ fn profile_forms(profile: &str) -> Vec<String> {
 
 /// The characters the profile reader consumes, each marked with whether it
 /// sits inside a double-quoted string. A `;` outside a string starts a comment
-/// that runs to the end of its line. Inside a string a backslash escapes the
-/// next character, so a `;`, `(` and `)` there stay text and a quote does not
-/// end the string. The reader reads no block comment and no `#` literal,
-/// because no profile holds either. An unclosed string is a refusal with its
-/// own reason.
+/// that runs to the end of its line; the newline that ends the comment stays
+/// as a separator, so a comment inside a form keeps its two tokens apart.
+/// Inside a string a backslash escapes the next character, so a `;`, `(` and
+/// `)` there stay text and a quote does not end the string. The reader reads
+/// no block comment and no `#` literal, because no profile holds either. An
+/// unclosed string is a refusal with its own reason.
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
     let mut characters = Vec::new();
     let mut in_string = false;
@@ -1385,6 +1425,9 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
     for ch in profile.chars() {
         if in_comment {
             in_comment = ch != '\n';
+            if !in_comment {
+                characters.push((ch, false));
+            }
             continue;
         }
         if escaped {
