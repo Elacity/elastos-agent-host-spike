@@ -1537,6 +1537,40 @@
   ]
  },
  {
+  "id": "F-AH3f",
+  "title": "the stored rule is deleted from the one checked decoder, so every stored read skips it",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "    stored_paths_ok(&journal).map_err(DecodeMiss::StoredRule)?;\n",
+    "new": ""
+   }
+  ],
+  "tests": [
+   "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+   "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused"
+  ]
+ },
+ {
+  "id": "F-AH3l",
+  "title": "the stored read turns a bytes miss into a refusal instead of unknown",
+  "command": "host",
+  "expect": "caught",
+  "edits": [
+   {
+    "file": "src/lib.rs",
+    "old": "        DecodeMiss::Bytes(_) => None,",
+    "new": "        DecodeMiss::Bytes(reason) => Some(reason),"
+   }
+  ],
+  "tests": [
+   "tests::resume_on_another_head_stays_unknown_and_holds_appends",
+   "tests::a_stored_journal_that_does_not_decode_stays_unknown"
+  ]
+ },
+ {
   "id": "F-AH3g",
   "title": "the journal ask widens to every agent's journal",
   "command": "host",
