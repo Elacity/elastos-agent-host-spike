@@ -64,6 +64,7 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_model-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
+const DECLARED_RIGHTS_FIXTURE: &str = "tests/fixtures/confine/declared-rights.json";
 const HOSTED_OFFER: &str = "confine-hosted-text";
 
 /// Whether a sandbox test runs on this host.
@@ -2176,4 +2177,142 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
         &storage,
         "invalid data type of path filter",
     );
+}
+
+/// Every allow rule in `confine.sb` traces to exactly one approved declared
+/// right or one platform-baseline rule in the declared-rights fixture.
+///
+/// Approved rights are the objects in `rights`. Platform-baseline entries are
+/// the objects in `platform_baseline.rules`. The test reads the profile and
+/// the fixture from disk. It starts no process and needs no sandbox.
+///
+/// Falsifier: F-cc30a appends one allow rule that no declared right and no
+/// platform baseline names. F-cc30b points the trace at a fixture that drops
+/// the bound-executable right. F-cc30c points it at a fixture whose storage
+/// right has no rule. F-cc30d points it at a fixture where two rights claim
+/// the exec rule. F-cc30e points it at a fixture rule that is not an allow
+/// line. F-cc30f repeats the STORAGE_ROOT allow.
+#[test]
+fn allow_rules_trace_to_declared_rights() {
+    fn entry_id(entry: &Value) -> &str {
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("a declared entry has no id"))
+    }
+    fn rule_strings(entry: &Value) -> Vec<&str> {
+        let Some(rules) = entry.get("rules") else {
+            return Vec::new();
+        };
+        let rules = rules
+            .as_array()
+            .unwrap_or_else(|| panic!("declared rules must be an array"));
+        rules
+            .iter()
+            .map(|rule| {
+                rule.as_str()
+                    .unwrap_or_else(|| panic!("a declared rule is not a string"))
+            })
+            .collect()
+    }
+
+    let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
+    let allow_lines: Vec<&str> = profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| line.starts_with("(allow "))
+        .collect();
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let rights = fixture
+        .get("rights")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("declared rights must be an array"));
+    let baseline = fixture
+        .get("platform_baseline")
+        .and_then(|base| base.get("rules"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("platform baseline rules must be an array"));
+
+    // The three trace checks come before the identity asserts, so a fixture
+    // that drops bound-executable fails on the exec allow.
+    for entry in rights {
+        if rule_strings(entry).is_empty() {
+            panic!("declared right has no rule: {}", entry_id(entry));
+        }
+    }
+    for entry in baseline {
+        if rule_strings(entry).is_empty() {
+            panic!("platform baseline has no rule: {}", entry_id(entry));
+        }
+    }
+
+    for line in allow_lines.iter().copied() {
+        let mut claimants = Vec::new();
+        for entry in rights.iter().chain(baseline.iter()) {
+            if rule_strings(entry).iter().any(|rule| *rule == line) {
+                claimants.push(entry_id(entry));
+            }
+        }
+        match claimants.len() {
+            0 => panic!("allow rule has no declared right and no platform baseline: {line}"),
+            1 => {}
+            _ => panic!(
+                "allow rule is claimed more than once: {line}: {}",
+                claimants.join(", ")
+            ),
+        }
+    }
+
+    for entry in rights.iter().chain(baseline.iter()) {
+        for rule in rule_strings(entry) {
+            let matches = allow_lines.iter().filter(|line| **line == rule).count();
+            match matches {
+                0 => panic!("declared rule is not an allow line: {rule}"),
+                1 => {}
+                _ => panic!("declared rule matches more than one allow line: {rule}"),
+            }
+        }
+    }
+
+    assert_eq!(
+        fixture.get("role").and_then(Value::as_str),
+        Some("lab stand-in for the Runtime generator's input, not a manifest field")
+    );
+    assert_eq!(
+        fixture.get("provider").and_then(Value::as_str),
+        Some("model-provider")
+    );
+    assert_eq!(
+        fixture
+            .get("platform_baseline")
+            .and_then(|base| base.get("status"))
+            .and_then(Value::as_str),
+        Some(
+            "Runtime platform baseline for the model-provider executable on macOS, not approved rights"
+        )
+    );
+    let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
+    assert_eq!(right_ids, ["storage", "bound-executable"]);
+    let baseline_ids: Vec<&str> = baseline.iter().map(entry_id).collect();
+    assert_eq!(baseline_ids, ["startup-root-directory", "startup-sysctl"]);
+    let justifications = [
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: file-read-data of literal / is the startup root-directory read.",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: sysctl-read is the startup page-size read, with no write and no added sysctl name.",
+    ];
+    assert_eq!(baseline.len(), justifications.len());
+    for (entry, expected) in baseline.iter().zip(justifications) {
+        assert_eq!(
+            entry.get("justification").and_then(Value::as_str),
+            Some(expected)
+        );
+    }
 }
