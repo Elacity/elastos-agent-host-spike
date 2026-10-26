@@ -112,19 +112,29 @@ itself is granted and expected.
 
 ### Pin (guard a)
 
-- profile: `capsules/wallet-provider/confine.sb`
-- commit: `09ad101c24cde4375befd98be3bb6d69ef1e0a06`, PR #86 (confine/016),
-  the last change to the bytes. The profile came in PR #63 (confine/004).
-  `(deny network*)` came in PR #70 (confine/005, `c22b99956`); PR #83
-  (confine/017) added the contract check that refuses a network allow and did
-  not change the profile.
-- sha256 of the tested bytes:
-  `5a0140c6b02b60508e6fcd3ff8896504406430e14eaa87749ee10ab419cf319a`
-- re-checked on base `dde918148591edb64a676bddd65c857430867921` (2026-10-26).
+`DidConfineProbe` and `ModelConfineProbe` reuse this probe.
+
+- wallet: `capsules/wallet-provider/confine.sb`
+  - commit: `959b104022bd0e8ae55636f69f6f06b8eb028e2b`, merge PR #157
+    (confine 037)
+  - sha256: `fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b`
+- did: `capsules/did-provider/confine.sb`
+  - commit: `959b104022bd0e8ae55636f69f6f06b8eb028e2b`, merge PR #157
+    (confine 037)
+  - sha256: `79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950`
+- model: `capsules/model-provider/confine.sb`
+  - commit: `58ab45897e666f4315b33212e2d7140367db4290`, merge PR #196
+    (cc-model-confine 020)
+  - sha256: `bc9c821dcbf30adafb63e0374ce8b71d395a37318d0da14a2ae1171cb6bcb6b5`
+
+Measured with `git log -1 --format='%H %s' HEAD -- <file>` and
+`shasum -a 256 <file>` on HEAD `b67ae9509a52936089ad0bfb3d6a4055f951a80c`.
 
 A clean run says only: these probes did not break the wallet profile on
-`09ad101c2`. If the bytes change, pin the new commit and re-run. Never carry a
-stale pin.
+`959b104022bd0e8ae55636f69f6f06b8eb028e2b`, the did profile on
+`959b104022bd0e8ae55636f69f6f06b8eb028e2b`, or the model profile on
+`58ab45897e666f4315b33212e2d7140367db4290`. If the bytes change, pin the new
+commit and re-run. Never carry a stale pin.
 
 ### How the probe tells a deny from a harness error
 
