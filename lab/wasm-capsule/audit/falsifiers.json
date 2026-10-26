@@ -593,6 +593,54 @@
       "tests": [
         "public_api_is_v1"
       ]
+    },
+    {
+      "id": "F-CWA9a",
+      "title": "Match interface versions while ignoring build metadata",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('+').next() == name.split('+').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA9b",
+      "title": "Match interface versions while ignoring the pre-release",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| match (declared.split_once('@'), name.split_once('@')) { (Some((declared_interface, declared_version)), Some((interface, version))) => declared_interface == interface && declared_version.split('-').next() == version.split('-').next(), _ => *declared == name.as_str(), }) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA10a",
+      "title": "Validation adds cm-implements to the default features",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::default() | wasmparser::WasmFeatures::CM_IMPLEMENTS)"
+        }
+      ],
+      "tests": [
+        "component_import_names_with_options_are_refused"
+      ]
     }
   ]
 }
