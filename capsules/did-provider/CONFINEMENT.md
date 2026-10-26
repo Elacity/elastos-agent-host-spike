@@ -17,8 +17,12 @@ to the same paths. The test that compares them is the Runtime's half, outside
 this lane. The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
-no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
-`STORAGE_PARENT` parameter tokens, and the three shared rules verbatim.
+no network allow, exactly one `process-exec` allow, the shared exec rule, only
+the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and `STORAGE_PARENT` parameter
+tokens, and the three shared rules verbatim. An exec added later, such as a
+model engine's, is its own named rule with its own falsifier and removal
+condition, agreed with Sasha and Rong like the network grant, and never widens
+what `PROVIDER_EXECUTABLE` binds.
 If the profile cannot be applied, because the file is missing, does not parse
 or names a parameter the launch does not bind, `sandbox-exec` exits before the
 provider starts and gives its reason on standard error; the Runtime then
@@ -213,9 +217,10 @@ property that must hold.
 `both_file_profiles_bind_one_storage_parameter_contract` lives in
 `../wallet-provider/tests/confine.rs`. One check function holds the
 contract: `(version 1)` first, `(deny default)` second, an explicit
-`(deny network*)`, no network allow, the same `PROVIDER_EXECUTABLE` /
-`STORAGE_ROOT` / `STORAGE_PARENT` parameter tokens, no `(allow default)` rule,
-and the three shared rules verbatim. One list function runs that check over
+`(deny network*)`, no network allow, exactly one `process-exec` allow, the
+shared exec rule, the same `PROVIDER_EXECUTABLE` / `STORAGE_ROOT` /
+`STORAGE_PARENT` parameter tokens, no `(allow default)` rule, and the three
+shared rules verbatim. One list function runs that check over
 `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
 and `capsules/model-provider/confine.sb`. All three profiles are required,
 and a missing or unreadable profile fails the check with a reason that names
