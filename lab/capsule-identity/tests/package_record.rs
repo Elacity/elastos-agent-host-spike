@@ -345,25 +345,54 @@ fn record_paths_preserve_walk_refusals() {
 #[test]
 fn record_paths_share_one_implementation() {
     let code = library_code();
-    // One payload builder, one record message, one digest.
+    // One payload builder, one record message, one digest. Task 015's
+    // variant binding has its own payload builder, which also writes the
+    // keys `cid`, `schema` and `signer_did` once, and it calls the shared
+    // digest, DID encoder and Ed25519 check once each: so each key is written
+    // once per builder, and each shared function has one more call.
     for (text, count) in [
-        ("\\\"cid\\\":", 1),
-        ("\\\"schema\\\":", 1),
-        ("\\\"signer_did\\\":", 1),
+        ("\\\"cid\\\":", 2),
+        ("\\\"schema\\\":", 2),
+        ("\\\"signer_did\\\":", 2),
         ("PACKAGE_RECORD_SCHEMA", 2),
         ("PACKAGE_RECORD_DOMAIN", 2),
         ("package_record_payload(", 2),
         ("package_record_message(", 3),
-        ("domain_separated_digest(", 3),
+        ("domain_separated_digest(", 4),
         ("fn require_record_cid(", 1),
         ("require_record_cid(", 2),
-        ("signer_did_of(", 3),
-        ("verify_ed25519(", 3),
+        ("signer_did_of(", 4),
+        ("verify_ed25519(", 4),
     ] {
         assert_eq!(code.matches(text).count(), count, "{text}");
     }
     let payload = library_item(&code, "pub fn package_record_payload(&self");
     assert!(payload.contains("PACKAGE_RECORD_SCHEMA"), "{payload}");
+    for (item, key) in [
+        ("pub fn package_record_payload(&self", "\\\"cid\\\":"),
+        ("pub fn package_record_payload(&self", "\\\"schema\\\":"),
+        ("pub fn package_record_payload(&self", "\\\"signer_did\\\":"),
+        ("pub fn variant_binding_payload(&self", "\\\"cid\\\":"),
+        ("pub fn variant_binding_payload(&self", "\\\"schema\\\":"),
+        (
+            "pub fn variant_binding_payload(&self",
+            "\\\"signer_did\\\":",
+        ),
+    ] {
+        let builder = library_item(&code, item);
+        assert_eq!(builder.matches(key).count(), 1, "{key}:\n{builder}");
+    }
+    for (item, call) in [
+        ("fn package_record_message(", "domain_separated_digest("),
+        ("fn variant_binding_message(", "domain_separated_digest("),
+        ("pub fn sign_package_record(", "signer_did_of("),
+        ("pub fn sign_variant_binding(", "signer_did_of("),
+        ("pub fn verify_checked_package_record(", "verify_ed25519("),
+        ("pub fn verify_checked_variant_binding(", "verify_ed25519("),
+    ] {
+        let body = library_item(&code, item);
+        assert_eq!(body.matches(call).count(), 1, "{call}:\n{body}");
+    }
     let message = library_item(&code, "fn package_record_message(");
     for call in [
         "domain_separated_digest(PACKAGE_RECORD_DOMAIN",

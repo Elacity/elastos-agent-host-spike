@@ -79,8 +79,14 @@ local file (such as `.DS_Store`) never reaches a pin. The pins are in
 | `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `lab-cid:sha256:43a918a50818e6f6ec81543a6dd423c796b03db028d0c7a4222f354c2afdc054` |
 | `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `lab-cid:sha256:274c6cf5685ec5dd638e91d8ac5e2634ebbeb523e756684587b61c1cb52fd6b8` |
 | `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `lab-cid:sha256:c28893c87d43643092656fd4382bb8611659f12365a4533050639b909cc6a26f` |
+| `provider-variant-a` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture aarch64-darwin` and a newline, a lab stand-in | `lab-cid:sha256:cadd66f6496712053be0b5d994c6f9bee0961d4c76645d49e8cb68b5e7706979` |
+| `provider-variant-b` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture x86_64-linux` and a newline, a lab stand-in | `lab-cid:sha256:753cf8894d4c47386dabf4efcb040337c7654bac885e37828d70ec791cf40b27` |
+| recipe (not a fixture) | `recipes/provider-variant.recipe` | written for this lab: four lines of ASCII, a lab stand-in; named as one entry, `provider-variant.recipe` | `lab-cid:sha256:22de169e0c4ca22fff6b414664de8d8bc2c5fc375b9834369807ef828ed1050f` |
 
 `provider` and `model` are task 012's (see [three kinds](#three-kinds-share-the-package-rules)).
+The two provider variants and the recipe are task 015's (see
+[the variant binding](#lab-variant-binding-outside-the-bundles)); the recipe
+lives in `recipes/`, outside `fixtures/`, so it is no bundle.
 Their manifests are re-indented copies of the Runtime's test JSON, with the same
 fields and values; the Runtime's own `CapsuleManifest` parses and validates
 both. No provider binary, rootfs, Kubo, GGUF, model URL or model hash is
@@ -701,7 +707,8 @@ web-projection app: role `app`, type `web-projection`), a provider
   `name`.
 - **Not defined here.** This task does not define a shared capsule identity
   across kinds or across platform variants; that phrase is still undefined.
-  Variant bindings are a later task.
+  Variant bindings are task 015's (see
+  [the variant binding](#lab-variant-binding-outside-the-bundles)).
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -724,6 +731,164 @@ on the manifest list.
 
 Claim scope: one Mac, these three fixtures. It is not a claim for every
 capsule kind.
+
+## Lab variant binding (outside the bundles)
+
+Anders's Q4 asks for one closure per platform variant, and an authenticated
+binding that groups the variant CIDs, with a pinned build recipe (issue 285,
+https://github.com/Elacity/elastos-runtime/issues/285). Task 015 builds that
+binding in the lab. It is the lab's own proposal, not the Runtime's format.
+
+**The variants.** `provider-variant-a` and `provider-variant-b` are two
+bundles, each its own closure with its own lab CID. Both hold `provider`'s
+`capsule.json`, byte for byte, and one stand-in `ipfs-provider` whose bytes
+differ (`lab fixture aarch64-darwin` and `lab fixture x86_64-linux`, each
+with a newline), so their CIDs differ. Each variant is still signed as its
+own closure, with its own package record (see
+[the lab package record](#lab-package-record-outside-the-bundle); issue 465,
+https://github.com/Elacity/elastos-runtime/issues/465). The binding adds to
+those records and replaces none.
+
+**The platform label lives only in the binding.** `CapsuleManifest` has no
+platform field, and the lab adds none. No manifest, folder name or path holds
+a platform label, so 012's `a_wasm_app_has_one_closure` still passes as it
+was. (The stand-ins' bytes hold the words, only so the two CIDs differ: that
+is payload content, not platform metadata.) The labels are the three the
+Runtime's release script uses, `aarch64-darwin`, `aarch64-linux` and
+`x86_64-linux` (`scripts/publish-release.sh:1629-1631`); the Runtime's own
+record keeps one `platform` per archive
+(`elastos/crates/elastos-server/src/capsule_record.rs:27`). The lab reads
+both, edits neither, and does not use the Runtime's schema name. A label is
+not identity: each variant is named by its complete bundle CID (PRINCIPLES 13).
+
+**The recipe.** `recipes/provider-variant.recipe` is a few lines of ASCII
+that say which fixture files make each variant. It is a lab stand-in, not a
+build recipe: the lab never runs it, and it holds no build command, URL or
+hash. It sits outside `fixtures/`, so it is no bundle. Its lab CID is the one
+encoder, `encode_entries`, over one entry with the path
+`provider-variant.recipe` (`VARIANT_RECIPE_ENTRY`) and the file's bytes,
+printed by `LabCid`'s `Display`: the same encoder, not a second naming rule.
+The library never reads the recipe from disk; the caller gives its bytes.
+
+**The binding.** `VariantBinding` has four fields: `recipe` (the recipe's
+printed lab CID), `variants` (the `(platform, cid)` pairs, in the order
+signing was given them), `signer_did` (a canonical Ed25519 `did:key`) and a
+64-byte `signature`. Like `PackageRecord`, it has no serde derive and no file
+form. Nothing writes it. It has no name and no group identity field.
+
+**The payload.** `variant_binding_payload` is the only builder of the signed
+bytes, and the one place the pairs are sorted. They are compact JSON, keys in
+this order, no spaces and no trailing newline, the variants sorted by
+platform label in byte order:
+
+```
+{"recipe":"<printed CID>","schema":"lab.capsule-identity.variant-binding/v1","signer_did":"<did:key>","variants":[{"cid":"<printed CID>","platform":"<label>"},...]}
+```
+
+The schema is `lab.capsule-identity.variant-binding/v1`
+(`VARIANT_BINDING_SCHEMA`). The signature is not a field. So the order the
+pairs are given in never changes the bytes. For the test's binding (a under
+`aarch64-darwin`, b under `x86_64-linux`), with the signer's DID written in:
+
+```
+{"recipe":"lab-cid:sha256:22de169e0c4ca22fff6b414664de8d8bc2c5fc375b9834369807ef828ed1050f","schema":"lab.capsule-identity.variant-binding/v1","signer_did":"<the signer's did:key>","variants":[{"cid":"lab-cid:sha256:cadd66f6496712053be0b5d994c6f9bee0961d4c76645d49e8cb68b5e7706979","platform":"aarch64-darwin"},{"cid":"lab-cid:sha256:753cf8894d4c47386dabf4efcb040337c7654bac885e37828d70ec791cf40b27","platform":"x86_64-linux"}]}
+```
+
+**The digest.** The signature is Ed25519 over
+`domain_separated_digest("lab.capsule-identity.variant-binding/v1", payload)`
+(`VARIANT_BINDING_DOMAIN`), the same one digest function the name signature
+and the record use, under its own domain. So a record or a name signature
+never passes as a binding.
+
+**Sign.** `sign_variant_binding(key, variants, recipe)` takes the bundles as
+`(platform, path)` pairs and the recipe's bytes. It first refuses the shapes
+verification refuses (check (c) below, for the `given` list). Then it names
+each bundle with `lab_cid`; a refusal from that walk passes through
+unchanged, and a refused bundle gets no binding. It names the recipe as
+above, sets `signer_did` with the one DID encoder and signs the digest. It
+writes no file and changes no bundle byte.
+
+**Verify.** `verify_checked_variant_binding(binding, variants, recipe,
+accepted)` takes `(platform, &CheckedBundle)` pairs. It checks in this order;
+the first refusal is the answer, and it reads nothing from disk:
+
+1. (a) Decode `binding.signer_did` with the one DID decoder. On error: `signer DID <did> is not a canonical Ed25519 did:key: <the decoder's own text>`.
+2. (b) The DID is an exact member of `accepted`, the explicit list. An empty
+   list refuses every signer: `signer <did> is not in the accepted list`.
+3. (c) The shape of the binding's own pairs (`binding`), then of the pairs
+   given (`given`). Each list holds at least one variant: `the <list>
+   variant list is empty: a binding holds at least one variant`. Every label
+   is one of the three: `the <list> variant list holds the platform
+   "<label>", which is not one of aarch64-darwin, aarch64-linux,
+   x86_64-linux`. No label is there twice: `the <list> variant list holds
+   the platform <label> twice: one CID per platform`.
+4. (d) The given platforms are the binding's: `the binding holds the
+   platforms [<sorted labels>]; the given variants are [<sorted labels>]`.
+5. (e) Each given bundle, taken in label byte order, has the printed CID the
+   binding names for its label: `the binding names <binding cid> for
+   <label>; the bundle given for <label> names <bundle cid>`.
+6. (f) The recipe bytes' lab CID is the binding's: `the binding names the
+   recipe <binding cid>; the recipe bytes name <recipe cid>`.
+7. (g) Ed25519 over the digest of the binding domain and the payload, with
+   the key from step 1: `signature by <did> does not verify over <payload>`.
+   The signed name in this shared reason is the whole payload, as text.
+
+Steps (a), (b) and (g) are the name signature's own checks and reasons, from
+the same functions (`decode_signer`, `require_accepted` and the one shared
+Ed25519 check). Steps (c) to (f) run before (g), so when the payload is
+hashed, every label is a known one, every CID equals a printed lab CID and
+the DID is canonical: none holds a character JSON would escape.
+`verify_variant_binding(binding, variants, recipe, accepted)` takes
+`(platform, path)` pairs. It is `checked_bundle` for each path, in the order
+given, and then the checked form. It holds no check of its own, so a bundle
+the walk refuses is refused first, with the walk's reason. `Ok(())` grants
+nothing: it is no trust, admission or launch value.
+
+**What it does not do.** The binding groups CIDs. It defines no shared
+capsule identity: Rong's 26 Oct note says that phrase is still undefined, so
+the lab does not define it. It holds no group name, and no grant, token,
+admission, launch, rotation or delegation. It runs no build. The rule that
+a WASM app has one variant is task 016's.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| a under `aarch64-darwin` and b under `x86_64-linux`: the payload is the JSON the test formats from the pins, both verifiers pass, the two CIDs differ, and each variant's own record verifies on its own bundle only | `variant_binding_binds_each_variant_cid_and_verifies` | F-CI15g, F-CI15i, F-CI15ae |
+| The pairs in either order give the same payload | `variant_binding_payload_ignores_input_order` | F-CI15d |
+| b's bundle given as `aarch64-darwin` is refused naming the label and both CIDs | `variant_swapped_between_platforms_is_refused` | F-CI15a |
+| Only a given, or a third label added, is refused naming both lists | `variant_missing_or_extra_is_refused` | F-CI15b |
+| No variant, `darwin-arm64`, and one label twice: each its own reason, at signing, in the given list and in the binding's list | `variant_binding_shape_is_refused` | F-CI15e, F-CI15f, F-CI15k, F-CI15l, F-CI15m |
+| One changed recipe byte is refused naming both CIDs | `variant_binding_recipe_is_pinned` | F-CI15c |
+| A binding signed under the record domain is refused with the signature reason | `variant_binding_signed_under_another_domain_is_refused` | F-CI15g |
+| The signer signs the literal domain's digest of the test's own payload | `variant_binding_signature_uses_its_domain` | F-CI15ad |
+| Key B's signature with A's DID, B's DID with only A accepted, and an empty list are refused | `variant_binding_by_another_signer_is_refused` | F-CI15h, F-CI15o |
+| A malformed DID is refused with the decoder's text, even when listed | `variant_binding_malformed_signer_did_is_refused` | F-CI15n |
+| Two faults at once, at each pair of adjacent checks: the earlier check answers | `variant_binding_refusal_order_is_stable` | F-CI15p to F-CI15u |
+| Signing and the path verifier keep the walk's refusal, whatever the binding, the list or the recipe | `variant_binding_paths_preserve_walk_refusals` | F-CI15v, F-CI15w, F-CI15x |
+| Signing and both verifiers leave each bundle's lab CID, `capsule.json`, its listing and the parent folder as they were | `variant_binding_stays_outside_the_bundles` | F-CI15j |
+| The payload's keys are `recipe`, `schema`, `signer_did` and `variants`, each variant's `cid` and `platform`, and nothing names a group | `variant_binding_has_no_group_name` | F-CI15i |
+| One payload builder, one sort, one shape rule, one recipe naming call, the shared digest, DID encoder and decoder and Ed25519 check; the path form holds no check of its own | `variant_binding_paths_share_one_implementation` | F-CI15y, F-CI15z, F-CI15aa, F-CI15ab, F-CI15ac, F-CI15af |
+
+The tests are in `tests/variant_binding.rs`. Every refusal test runs both
+verifiers and checks the refusal's value and its exact text. Every expected
+CID comes from the pins in `tests/common/mod.rs`, never from a literal, so
+the later UnixFS swap (BACKLOG ci-10b) changes pins in one place. The domains
+and the expected payload are written out in the test, not read from the
+library. Test keys come only from `fresh_signing_key()`.
+
+Three older shape tests count calls across the whole library, so they now
+count the binding's too, and still refuse a second copy: 003's
+`check_name_uses_the_single_naming_path` allows a third `encode_entries(`
+call, the one in `recipe_cid`, and checks that it is there; 011's
+`record_paths_share_one_implementation` counts each JSON key once in each of
+the two payload builders, and one more call each of the shared digest, DID
+encoder and Ed25519 check, each in its one place; 007's export list gains the
+binding's payload, signer and two verifiers (24 identity functions).
+F-CI15y, F-CI15z, F-CI15aa, F-CI15ab and F-CI15af also fail those older
+tests.
+
+Claim scope: one Mac, these two variant fixtures and this recipe, test keys
+only. It is not a claim about real binaries, real builds or the Runtime's
+release records.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -775,9 +940,10 @@ cache. `wc001_capsule_bundle_gets_a_stable_lab_cid` runs
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
 src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
                          the encoder, the walk, the test-key signature, the shared
-                         digest and the lab package record
+                         digest, the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
-                         model
+                         model, provider-variant-a, provider-variant-b
+recipes/                 provider-variant.recipe, the variants' lab stand-in recipe
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
                          the refusal asserts both signature checks share, the
@@ -794,13 +960,14 @@ tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
+tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
 ```
 
 ## Falsifiers
 
-`falsifiers.json` holds 120 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 152 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -815,7 +982,9 @@ and task 014's F-CI14a to F-CI14e (see
 [verify is not admit](#verify-is-not-admit-m1-check-b1)), and task 011's
 F-CI11a to F-CI11x (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task 012's
-F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)).
+F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)), and task 015's
+F-CI15a to F-CI15z and F-CI15aa to F-CI15af (see
+[the variant binding](#lab-variant-binding-outside-the-bundles)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h and F-CI4i edits a file the runner
@@ -859,8 +1028,9 @@ it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
 At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
 `summary: 94 CAUGHT of 94`. At task 011 it reported
 `summary: 118 CAUGHT of 118` (with the id prefix `F-CI11`: 24 of 24).
-At task 012 it reported `summary: 120 CAUGHT of 120`.
+At task 012 it reported `summary: 120 CAUGHT of 120`. At task 015 it reported
+`summary: 152 CAUGHT of 152` (with the id prefix `F-CI15`: 32 of 32).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011 and 012 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012 and 015 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
