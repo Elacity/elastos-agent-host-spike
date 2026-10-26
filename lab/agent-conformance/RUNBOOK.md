@@ -478,10 +478,8 @@ failed Home for review. Remove its data by hand only after its owner approves
 cleanup. Keep Runtime-owned credentials inside the Home out of reports.
 
 The pre-test root selection takes at most two seconds. The shared root census
-uses at most two five-second lsof calls: an occupied first sample gets one
-confirmation sample. A complete empty sample is required to accept cleanup;
-every holder in the final sample fails the check. A timeout, warning or
-unreadable listing stops the run with a reason.
+uses one lsof call with a five-second limit. Every observed holder fails the
+check. A timeout, warning or unreadable listing stops the run with a reason.
 The scanner stays within Home roots and does not walk native or probe builds.
 The report-build step runs before this bounded check.
 

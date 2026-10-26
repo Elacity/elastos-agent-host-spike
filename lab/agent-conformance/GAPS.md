@@ -715,11 +715,9 @@ the journey and identifies the retained Home by its lane-relative name.
 The physical check covers handles on named files, directories, current
 directories under this throwaway root, the operator's loopback API
 port, and entries in this root's `tmp/`. The shared root scan takes one lsof
-snapshot. If it sees holders, it takes one confirmation snapshot, so a process
-that releases a capture during the scan can settle. Acceptance requires a
-complete empty snapshot. Every holder in the final sample remains a failure,
-including a new holder; either sample's error fails the check. Each tool runs
-through the existing spawn site in a separate scratch Home;
+snapshot. Every observed holder fails the check, even if it releases its
+handle after that snapshot. The tool runs through the existing spawn site in
+a separate scratch Home;
 after exit, its captures move into the journey's existing capture inventory.
 Task 026 plants a bound Unix socket in a bounded child through the one spawn
 site. On this Mac, `lsof +D` sees its cwd and capture handles but omits the
@@ -733,7 +731,7 @@ Only the test PID is excluded. On macOS, lsof exit 1 means that some selected
 result is parsed; warnings, other exit codes and malformed records fail.
 The live socket samples retain their existing success requirement.
 
-This is a point-in-time census, with at most two five-second lsof calls and
+This is a point-in-time census, with one five-second lsof call and
 a 200 ms API connection limit. Pending requests must be empty for the granted
 and denied fixture journeys. The earlier absent-policy journey keeps its refusal scope
 and reports its pending/grant checks as unmeasured. Task 026 below adds pending-request cancellation and settlement. Worker kill

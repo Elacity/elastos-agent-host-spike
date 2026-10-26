@@ -4785,6 +4785,10 @@ supervisor because this task permits offline work only.
 
 ## 028 — round 2: confirm a root census that saw a capture holder
 
+Review rejected this change. Round 3 removes the confirmation sample, its two
+tests and its two falsifiers. The checks below record the rejected candidate
+only; they give zero acceptance credit to the restored census.
+
 The shared root census now takes one confirmation sample after an occupied
 sample. Cleanup passes only when a complete sample is empty. Every final
 holder, including a new holder, still fails the check; either sample's error
@@ -4872,3 +4876,91 @@ above. This round grants zero new live agent-host acceptance credit.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/agent_host.rs:86` keeps the unchanged real capsule and existing guarded launch. |
 | 7. Named tests and caught falsifiers prove every new rule? | No for the full task | The two census tests and mutations above pass their proof cycle; the real-capsule baseline and F-agent-host-grant remain blocked. |
 | 8. Identity, admission and allowance remain separate? | Yes | `src/report.rs:202` requires launched identity separately from `tests/agent_host.rs:148`'s grant tally. |
+
+## 028 — round 3: restore the first census result; task remains blocked
+
+Reverted the rejected census retry in `src/census.rs`: `root_holders` again
+returns its first snapshot, shared by `cleanup` and `earlier_runs`. Every
+observed holder remains a failure. Removed `confirm_holders`, the extracted
+`root_snapshot`, their two retry tests, and `F-root-census-no-confirm` and
+`F-root-census-forget-holders`. `RUNBOOK.md` and `GAPS.md` again describe one
+five-second lsof call. The round-2 record above is marked rejected.
+
+This round adds zero rules, tests or falsifiers. The existing tests and refusal
+assertions retain their requirements. In particular,
+`cleanup_census_refuses_each_leftover` and
+`earlier_run_check_refuses_live_owner` passed. The full default gate failed in
+`cleanup_root_selection_finds_other_groups` at `tests/runtime.rs:422`:
+
+```text
+assertion failed: root_holders(&first, &roots).unwrap().is_empty()
+```
+
+That check follows both test children being stopped. The assertion provides
+zero holder-identity evidence; this round gives the result its original FAIL
+and adds zero retries or exemptions. The later existing
+`report --check-earlier-runs` exited 0 and found zero current holders. That later
+observation changes neither the gate result nor the acceptance record. The two
+failed fixture roots remain local for supervisor review.
+
+### Checks
+
+Both lane commands ran with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`; Cargo output stayed under the lane target, and the
+shared heavy-build lease covered the gate. The volume had more than the
+estimated 2 GiB of warm build output plus the required 2 GiB reserve.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  PASS, exit 0, 0.157 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`:
+  FAIL, exit 101, 250.137 seconds; 66 passed, one failed, ten ignored before
+  Cargo stopped. Later test targets receive zero passing credit.
+- `node scripts/check-product-data.mjs`: PASS (42 capsules, two profiles,
+  28 method contracts); `node --test scripts/check-product-data.test.mjs`:
+  PASS (99 tests).
+- `(cd elastos && cargo fmt --all -- --check)` and
+  `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`:
+  PASS. `bash -n lab/agent-conformance/run.sh`: PASS.
+- Remaining census falsifier anchors and `F-agent-host-grant` match exactly
+  once. Falsifier IDs remain unique. This is anchor validation only.
+
+The results and lifecycle inventory are local, uncommitted files under
+`target/task-028-round-3/`, retained until supervisor review. The shared lease
+is released. Cargo.lock retains SHA-256
+`0142356a31cb18c2564341ba687192c16eb37c4a7ff810c75c379c15052d42c6`.
+Direct source/document edits stay inside `lab/agent-conformance/`. This round
+issued zero direct Git commands or external network requests. The required
+suite retained its existing read-only Git identity checks. The supervisor owns
+the Git diff inventory and current remote-divergence check under the builder's
+Git-command and network restrictions.
+
+### Remaining task gate and owner
+
+Task 028 still needs a principal-scoped launch or a revised task from the
+planner. `run_cmd.rs:265` calls `Runtime::run_local`, `runtime.rs:232` supplies
+`None`, and `resource_bridge.rs:812` requires a principal for `Users/self`
+before a shell request. These are read-only Runtime paths under
+`elastos/crates/elastos-server/src/`. The prior live baseline therefore remains
+FAIL at `request sequence: exact request count required`.
+
+The real-capsule test retains its two-request assertion and zero-grant tally;
+this round adds zero ignored rows. Acceptance 3(a-c), 5 and 6 remains open.
+`F-agent-host-grant` awaits a passing baseline, and the full opt-in table awaits
+the revised launch/task contract. Re-running the same known-blocked activation
+would supply zero new evidence, so this round ran the default gates only.
+The supervisor owns the failed cleanup-gate follow-up; the planner owns the
+028 task revision. Runtime and principal-contract decisions remain with their
+owners outside this lane.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative unless stated) |
+| --- | --- | --- |
+| 1. New name or URL where code/content needs a hash? | No | `src/identity.rs:79` retains `checked_bundle`; `src/report.rs:202` requires the launched agent-host identity. |
+| 2. New ambient capsule or UI authority? | No | `tests/agent_host.rs:148` retains zero grants and two denials. |
+| 3. Second path or copy of an operation rule? | No | `src/census.rs:32` owns the single snapshot used by cleanup and earlier-run checks. |
+| 4. Does the Runtime core grow? | No | `src/census.rs:32` is the only Rust implementation changed this round; Runtime source remains read-only. |
+| 5. Refusals deny by default with clear reasons? | Yes | `src/census.rs:79` retains cleanup refusal reasons; `tests/runtime.rs:324` still checks each leftover category. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `src/build.rs:18` keeps the checked source copy; this round changes only census handling and its documents. |
+| 7. Named tests and caught falsifiers prove every new rule? | No for task 028 | `tests/agent_host.rs:118` still needs the two real requests; `falsifiers.json:1314` awaits a passing baseline. The default gate also failed as recorded above. |
+| 8. Identity, admission and allowance remain separate? | Yes | `src/report.rs:202` requires identity separately from `tests/agent_host.rs:148`'s decision tally. |

@@ -1325,38 +1325,6 @@
       "tests": [
         "real_agent_host_gets_no_ungranted_authority"
       ]
-    },
-    {
-      "id": "F-root-census-no-confirm",
-      "title": "keep the first holder snapshot after its handles have been released",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "src/census.rs",
-          "old": "    sample()\n}",
-          "new": "    Ok(holders)\n}"
-        }
-      ],
-      "tests": [
-        "census::tests::root_census_requires_an_empty_snapshot_after_a_transient_holder"
-      ]
-    },
-    {
-      "id": "F-root-census-forget-holders",
-      "title": "discard holders from the confirmation census",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "src/census.rs",
-          "old": "    sample()\n}",
-          "new": "    sample().map(|_| Vec::new())\n}"
-        }
-      ],
-      "tests": [
-        "census::tests::root_census_keeps_persistent_and_new_holders_and_sample_errors"
-      ]
     }
   ]
 }
