@@ -259,10 +259,7 @@ mod tests {
         let err = a12::check_tmp_root(&link).expect_err("symlink to live Home");
         let _ = fs::remove_file(&link);
         let _ = fs::remove_dir_all(&fake_live);
-        assert!(
-            err.contains("symlink") || err.contains("live Home"),
-            "{err}"
-        );
+        assert!(err.contains("refuses symlink"), "{err}");
         println!("A12 ELASTOS_TMP_ROOT symlink to live Home refused: {err}");
     }
 

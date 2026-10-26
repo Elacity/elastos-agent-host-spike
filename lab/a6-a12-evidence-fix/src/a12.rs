@@ -214,9 +214,6 @@ pub fn check_tmp_root(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err("ELASTOS_TMP_ROOT is empty".into());
     }
-    if path == Path::new("/") {
-        return Err("ELASTOS_TMP_ROOT refuses /".into());
-    }
     if !path.is_absolute() {
         return Err("ELASTOS_TMP_ROOT must be an absolute path under the pack mktemp".into());
     }
