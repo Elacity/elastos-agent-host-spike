@@ -19,3 +19,9 @@
   is launched for did, wallet, and model. Absent rights stamp `ABSENT`.
   A lying ABI 5 launches under per_right because #307 trusts the ABI
   number. Jetson rows stay NOT RUN.
+- 26 Oct 2026, cloud: harden the live-board safety gaps from #345.
+  TMPDIR, CARGO_HOME, and src stay under `~/flint-elastos-test`. The
+  script refuses uid 0 and a `SUDO_*` environment. A memory stop kills
+  the process group. `prep-offline.sh` vendors C0 so the board can build
+  with `--offline`. Host-surface tokens stay unnamed. Jetson rows stay
+  NOT RUN.

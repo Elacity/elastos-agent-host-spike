@@ -74,10 +74,36 @@ launches under `per_right`; the kit also records the measured rights.
 
 ## Bounds
 
-The script runs as the calling user. It keeps every write, clone, cargo
-home, and build directory under `~/flint-elastos-test`. Cargo and gcc use
-four jobs. A `MemAvailable` reading below 1 GiB stops the run. The script
-leaves the rest of the board alone.
+The script runs as the calling user. It refuses uid 0 and a `SUDO_*`
+environment. It keeps every write, clone, cargo home, TMPDIR, and build
+directory under `~/flint-elastos-test`. Cargo and gcc use four jobs. A
+`MemAvailable` reading below 1 GiB stops the whole process group, not
+only cargo. The script leaves the rest of the board alone. It does not
+name or touch the shared host surfaces the review listed.
+
+## Online and offline
+
+**Online (default).** The board fetches C0 and C9 from `JPK_REMOTE`
+(GitHub unless you point it at a local clone) into
+`~/flint-elastos-test/src`. Cargo may download crates into
+`~/flint-elastos-test/cargo-home`. Compiler temps go to
+`~/flint-elastos-test/tmp`.
+
+**Offline.** On a machine with git and cargo, build a bundle:
+
+```bash
+./prep-offline.sh /path/to/bundle
+```
+
+That vendors C0 crates (`cargo vendor`) and copies the pinned C0 and C9
+trees into `bundle/src`. Copy `bundle/src` to `~/flint-elastos-test/src`
+on the board, then:
+
+```bash
+cd ~/flint-elastos-test && JPK_OFFLINE=1 ./run-on-jetson.sh
+```
+
+The board then skips git fetch and runs `cargo build --locked --offline`.
 
 ## Checks that run off the board
 
@@ -88,7 +114,9 @@ bash lab/jetson-proof-kit/falsify.sh
 ```
 
 The first command covers the path guard, a planted path outside the
-folder, the memory floor, the C0 source selector, launch classification,
-and the committed Jetson rows. The second command feeds simulated kernel
-answers into the oracle and checks #307's reason text. The third command
-plants bugs on copies. The working tree stays unchanged.
+folder, the memory floor, the process-group kill, uid 0 / `SUDO_*`,
+TMPDIR and CARGO_HOME containment, the offline fetch, the C0 source
+selector, launch classification, and the committed Jetson rows. The
+second command feeds simulated kernel answers into the oracle and checks
+#307's reason text. The third command plants bugs on copies. The working
+tree stays unchanged.

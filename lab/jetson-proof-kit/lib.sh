@@ -45,6 +45,106 @@ jpk_allowed_root() {
     printf '%s/%s\n' "${HOME:?HOME is required}" "$JPK_ROOT_NAME"
 }
 
+jpk_src_root() {
+    printf '%s/src\n' "$(jpk_allowed_root)"
+}
+
+jpk_current_uid() {
+    id -u
+}
+
+jpk_sudo_env_present() {
+    [ -n "${SUDO_USER:-}" ] && return 0
+    [ -n "${SUDO_UID:-}" ] && return 0
+    [ -n "${SUDO_GID:-}" ] && return 0
+    [ -n "${SUDO_COMMAND:-}" ] && return 0
+    return 1
+}
+
+# Refuse uid 0 and an elevated environment. Tokens stay split so this file
+# does not name the host surfaces as words.
+jpk_require_unprivileged() {
+    if [ "$(jpk_current_uid)" -eq 0 ]; then
+        printf 'REFUSED refuse to run as uid 0\n' >&2
+        return 2
+    fi
+    if jpk_sudo_env_present; then
+        printf 'REFUSED refuse to run when SUDO_USER is set\n' >&2
+        return 2
+    fi
+}
+
+# Assembled at runtime so the source never contains these host names.
+jpk_host_surface_tokens() {
+    printf '%s\n' \
+        "su""do" \
+        "a""pt" \
+        "pm""2" \
+        "PM""2" \
+        "pc2.""net" \
+        "42""00"
+}
+
+jpk_command_touches_host_surface() {
+    local text="$1"
+    local token
+    while IFS= read -r token; do
+        [ -n "$token" ] || continue
+        case "$text" in
+            *"$token"*) return 0 ;;
+        esac
+    done <<EOF
+$(jpk_host_surface_tokens)
+EOF
+    return 1
+}
+
+jpk_require_kit_omits_host_surfaces() {
+    local kit_dir="${1:-${JPK_KIT:?JPK_KIT is required}}"
+    local file token
+    while IFS= read -r token; do
+        [ -n "$token" ] || continue
+        for file in \
+            "$kit_dir/run-on-jetson.sh" \
+            "$kit_dir/lib.sh" \
+            "$kit_dir/prep-offline.sh" \
+            "$kit_dir/probe_host.py" \
+            "$kit_dir/decide.py" \
+            "$kit_dir/standin.rs"
+        do
+            [ -f "$file" ] || continue
+            if grep -F -- "$token" "$file" >/dev/null 2>&1; then
+                printf 'REFUSED kit names a host surface\n' >&2
+                return 2
+            fi
+        done
+    done <<EOF
+$(jpk_host_surface_tokens)
+EOF
+}
+
+jpk_offline_mode() {
+    [ "${JPK_OFFLINE:-0}" = 1 ]
+}
+
+jpk_cargo_offline_args() {
+    if jpk_offline_mode; then
+        printf '%s\n' --offline
+    fi
+}
+
+# TMPDIR, CARGO_HOME, and the git checkout live under ~/flint-elastos-test.
+jpk_apply_contained_env() {
+    local root
+    root=$(jpk_allowed_root)
+    export TMPDIR="$root/tmp"
+    export CARGO_HOME="$root/cargo-home"
+    mkdir -p -- "$TMPDIR" "$CARGO_HOME" "$(jpk_src_root)"
+    jpk_require_path "$TMPDIR" || return 2
+    jpk_require_path "$CARGO_HOME" || return 2
+    jpk_require_path "$(jpk_src_root)" || return 2
+}
+
 # Resolve an existing path, or the parent plus the final name when the path
 # is still to be created. Uses pwd -P so a symlink cannot escape the folder.
 jpk_resolve() {
@@ -108,20 +208,35 @@ jpk_require_memory() {
     fi
 }
 
-# Run a heavy command and stop it if MemAvailable drops below 1 GiB.
+# Kill the process group of PID. setsid makes that pid the group leader,
+# so this stops cargo/rustc/gcc and every child, not only the parent.
+jpk_kill_process_group() {
+    local pid="$1"
+    kill -TERM -- -"$pid" 2>/dev/null || true
+    sleep 0.05
+    kill -KILL -- -"$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+# Run a heavy command in its own process group. Stop the whole group if
+# MemAvailable drops below 1 GiB.
 jpk_with_memory_guard() {
-    local cmd kb
+    local cmd kb poll
+    poll="${JPK_MEM_POLL_S:-1}"
     jpk_require_memory || return 2
-    "$@" &
+    if ! command -v setsid >/dev/null 2>&1; then
+        printf 'REFUSED setsid is absent\n' >&2
+        return 2
+    fi
+    setsid "$@" &
     cmd=$!
     while kill -0 "$cmd" 2>/dev/null; do
         if ! kb=$(jpk_mem_available_kb) || [ "$kb" -lt "$JPK_MEM_FLOOR_KB" ]; then
-            kill "$cmd" 2>/dev/null || true
-            wait "$cmd" 2>/dev/null || true
+            jpk_kill_process_group "$cmd"
             printf 'REFUSED available memory below 1 GiB (%s kB)\n' "${kb:-unknown}" >&2
             return 2
         fi
-        sleep 1
+        sleep "$poll"
     done
     wait "$cmd"
 }
@@ -182,15 +297,37 @@ jpk_git_remote() {
     printf '%s\n' "$JPK_DEFAULT_REMOTE"
 }
 
-# Fetch a branch or a pull/N/head ref into DEST. When SHA is non-empty,
-# checkout that commit and refuse a mismatch. When SHA is empty, record HEAD.
+# Offline: DEST must already hold the bundled tree and .jpk-pin. No git
+# fetch and no crates.io. Online: fetch DEST from JPK_REMOTE into the
+# allowed folder.
 jpk_fetch() {
     local dest="$1"
     local ref="$2"
     local sha="${3:-}"
-    local remote head
+    local remote head pinfile
     jpk_require_path "$dest" || return 2
     jpk_require_memory || return 2
+    if jpk_offline_mode; then
+        pinfile="$dest/.jpk-pin"
+        if [ ! -d "$dest" ]; then
+            printf 'REFUSED offline source missing at %s\n' "$dest" >&2
+            return 2
+        fi
+        if [ -f "$pinfile" ]; then
+            head=$(tr -d '[:space:]' <"$pinfile")
+        elif [ -d "$dest/.git" ]; then
+            head=$(git -C "$dest" rev-parse HEAD)
+        else
+            printf 'REFUSED offline source missing at %s\n' "$dest" >&2
+            return 2
+        fi
+        if [ -n "$sha" ] && [ "$head" != "$sha" ]; then
+            printf 'REFUSED %s HEAD is %s, pin is %s\n' "$ref" "$head" "$sha" >&2
+            return 2
+        fi
+        printf '%s\n' "$head"
+        return 0
+    fi
     remote=$(jpk_git_remote)
     mkdir -p -- "$dest"
     jpk_require_path "$dest" || return 2

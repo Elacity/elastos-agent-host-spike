@@ -7,6 +7,11 @@
 # F-JPK-REASON: print the old kit reason instead of #307's text.
 # F-JPK-LIE: decide per_right from measured rights, so a lying ABI 5 refuses.
 # F-JPK-ABSENT: stamp an absent right as PASS.
+# F-JPK-TMPDIR: set TMPDIR to /tmp.
+# F-JPK-UID0: drop the uid 0 refusal.
+# F-JPK-PGKILL: kill only the parent, not the process group.
+# F-JPK-OFFLINE: ignore offline mode so cargo never gets --offline.
+# F-JPK-SURFACES: name pc2.net in the operator script.
 # Each plant is applied to a copy. The named tests must fail on that copy.
 # The working tree is left unchanged.
 set -eu
@@ -18,9 +23,10 @@ trap 'rm -rf "$scratch"' EXIT
 copy_kit() {
     local dest="$1"
     mkdir -p -- "$dest"
-    cp -a -- "$kit/lib.sh" "$kit/run-on-jetson.sh" "$kit/probe_landlock.py" \
-        "$kit/probe_host.py" "$kit/decide.py" "$kit/standin.rs" \
-        "$kit/evidence.txt" "$kit/tests" "$kit/fixtures" "$dest/"
+    cp -a -- "$kit/lib.sh" "$kit/run-on-jetson.sh" "$kit/prep-offline.sh" \
+        "$kit/probe_landlock.py" "$kit/probe_host.py" "$kit/decide.py" \
+        "$kit/standin.rs" "$kit/evidence.txt" "$kit/tests" "$kit/fixtures" \
+        "$dest/"
 }
 
 run_guard_tests() {
@@ -32,7 +38,7 @@ run_decision_tests() {
 }
 
 caught=0
-expected=7
+expected=12
 
 # F-JPK-OUTSIDE: jpk_path_inside accepts every path, including one outside
 # the folder.
@@ -235,6 +241,136 @@ if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL recorded_truncate_abs
     caught=$((caught + 1))
 else
     printf 'F-JPK-ABSENT SURVIVED rc=%s\n' "$rc"
+    exit 1
+fi
+
+# F-JPK-TMPDIR: TMPDIR is /tmp, so compiler temps leave the folder.
+copy_kit "$scratch/tmpdir"
+python3 - "$scratch/tmpdir/lib.sh" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "jpk_apply_contained_env() {\n"
+new = 'jpk_apply_contained_env() { export TMPDIR=/tmp; export CARGO_HOME="$(jpk_allowed_root)/cargo-home"; return 0; }\njpk_apply_contained_env_planted() {\n'
+if old not in text:
+    raise SystemExit("F-JPK-TMPDIR: anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+set +e
+out=$(run_guard_tests "$scratch/tmpdir" 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL tmpdir_is_inside_root'; then
+    printf 'F-JPK-TMPDIR CAUGHT\n'
+    caught=$((caught + 1))
+else
+    printf 'F-JPK-TMPDIR SURVIVED rc=%s\n' "$rc"
+    exit 1
+fi
+
+# F-JPK-UID0: the uid 0 check always succeeds.
+copy_kit "$scratch/uid0"
+python3 - "$scratch/uid0/lib.sh" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "jpk_require_unprivileged() {\n"
+new = "jpk_require_unprivileged() { return 0; }\njpk_require_unprivileged_planted() {\n"
+if old not in text:
+    raise SystemExit("F-JPK-UID0: anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+set +e
+out=$(run_guard_tests "$scratch/uid0" 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL uid0_is_refused'; then
+    printf 'F-JPK-UID0 CAUGHT\n'
+    caught=$((caught + 1))
+else
+    printf 'F-JPK-UID0 SURVIVED rc=%s\n' "$rc"
+    exit 1
+fi
+
+# F-JPK-PGKILL: kill only the parent pid, leave children running.
+copy_kit "$scratch/pgkill"
+python3 - "$scratch/pgkill/lib.sh" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "jpk_kill_process_group() {\n"
+new = 'jpk_kill_process_group() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }\njpk_kill_process_group_planted() {\n'
+if old not in text:
+    raise SystemExit("F-JPK-PGKILL: anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+set +e
+out=$(run_guard_tests "$scratch/pgkill" 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL memory_kill_stops_child'; then
+    printf 'F-JPK-PGKILL CAUGHT\n'
+    caught=$((caught + 1))
+else
+    printf 'F-JPK-PGKILL SURVIVED rc=%s\n' "$rc"
+    exit 1
+fi
+
+# F-JPK-OFFLINE: offline mode is never on, so cargo stays online.
+copy_kit "$scratch/offline"
+python3 - "$scratch/offline/lib.sh" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "jpk_offline_mode() {\n"
+new = "jpk_offline_mode() { return 1; }\njpk_offline_mode_planted() {\n"
+if old not in text:
+    raise SystemExit("F-JPK-OFFLINE: anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+set +e
+out=$(run_guard_tests "$scratch/offline" 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL offline_cargo_flag'; then
+    printf 'F-JPK-OFFLINE CAUGHT\n'
+    caught=$((caught + 1))
+else
+    printf 'F-JPK-OFFLINE SURVIVED rc=%s\n' "$rc"
+    exit 1
+fi
+
+# F-JPK-SURFACES: the operator script names a host surface.
+copy_kit "$scratch/surfaces"
+python3 - "$scratch/surfaces/run-on-jetson.sh" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "#!/bin/bash\n"
+new = "#!/bin/bash\n# pc2.net\n"
+if old not in text:
+    raise SystemExit("F-JPK-SURFACES: anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+set +e
+out=$(run_guard_tests "$scratch/surfaces" 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL scripts_leave_pc2_unnamed'; then
+    printf 'F-JPK-SURFACES CAUGHT\n'
+    caught=$((caught + 1))
+else
+    printf 'F-JPK-SURFACES SURVIVED rc=%s\n' "$rc"
     exit 1
 fi
 

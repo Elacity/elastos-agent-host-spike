@@ -1,21 +1,21 @@
 #!/bin/bash
 # One operator script for the Jetson Orin Nano. Run as an unprivileged user
 # from ~/flint-elastos-test after this folder has been copied there.
-# Records kernel, Landlock ABI and rights, seccomp, namespaces, and CapBnd,
-# then prints a launch/refuse table for did, wallet, and model under both
-# floor options. Fetches the C0 guard (PR ref selectable) and the C9
-# launcher, builds with four jobs, and writes evidence.txt.
+# Refuses uid 0 and a SUDO_* environment. TMPDIR, CARGO_HOME, and every git
+# checkout stay under that folder. Online mode fetches C0/C9; offline mode
+# (JPK_OFFLINE=1 after prep-offline.sh) builds with cargo --offline.
 
 set -eu
 
 kit=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)
+JPK_KIT=$kit
 # shellcheck source=lib.sh
 . "$kit/lib.sh"
 
 root=$(jpk_allowed_root)
 evidence="${JPK_EVIDENCE:-$root/evidence.txt}"
 work="$root/work"
-src="$root/src"
+src=$(jpk_src_root)
 
 jpk_seed_evidence() {
     if [ ! -f "$evidence" ]; then
@@ -30,16 +30,21 @@ jpk_stop() {
 }
 
 jpk_prepare() {
+    jpk_require_unprivileged || jpk_stop "unprivileged guard refused the start"
+    jpk_require_kit_omits_host_surfaces "$kit" || jpk_stop "host surface guard refused the start"
     jpk_require_path "$kit" || jpk_stop "kit folder is outside $(jpk_allowed_root)"
     jpk_require_path "$PWD" || jpk_stop "current directory is outside $(jpk_allowed_root)"
     jpk_require_memory || jpk_stop "memory guard refused the start"
     mkdir -p -- "$root" "$work" "$src"
     jpk_require_path "$work"
     jpk_require_path "$src"
+    jpk_apply_contained_env || jpk_stop "contained env refused the start"
+    jpk_require_path "$TMPDIR"
+    jpk_require_path "$CARGO_HOME"
     jpk_require_path "$evidence"
     jpk_seed_evidence
     if [ "${JPK_DRY_RUN:-0}" = 1 ]; then
-        printf 'dry run: guards accepted\n'
+        printf 'dry run: guards accepted TMPDIR=%s CARGO_HOME=%s\n' "$TMPDIR" "$CARGO_HOME"
         exit 0
     fi
 }
@@ -151,7 +156,7 @@ jpk_run_c0() {
     mkdir -p -- "$CARGO_HOME" "$CARGO_TARGET_DIR" "$CARGO_BUILD_BUILD_DIR"
     jpk_require_path "$CARGO_HOME"
     jpk_require_path "$CARGO_TARGET_DIR"
-    if ! jpk_with_memory_guard cargo build --locked --manifest-path "$crate/Cargo.toml" --bin fcl-launch -j "$JPK_BUILD_JOBS"; then
+    if ! jpk_with_memory_guard cargo build --locked $(jpk_cargo_offline_args) --manifest-path "$crate/Cargo.toml" --bin fcl-launch -j "$JPK_BUILD_JOBS"; then
         jpk_set_row "$evidence" C0.build REFUSED "cargo build -j $JPK_BUILD_JOBS failed"
         jpk_set_row "$evidence" C0.guard NOT RUN "C0.build was refused"
         return 0
