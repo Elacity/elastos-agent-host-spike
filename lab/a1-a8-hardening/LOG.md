@@ -76,3 +76,79 @@ its staged capsules and captures) were checked and removed by hand. No
 `elastos` or `localhost-provider` process was left. `/tmp/elastos/storage`
 exists as an empty directory from `elastos run` (AC-006-STORAGE); it was left
 in place.
+
+## 26 Oct 2026: #316 A8 findings
+
+Machine: Linux x86_64 cloud VM, rustc 1.91.0 (f8297e351 2025-10-28), no KVM.
+Head after the grant-path fix: `bf52805734d14ec98190fea44d29597a9e723bd3`.
+Elacity `develop` was not merged. Only this folder changed.
+
+#316 on `32abea67` found two A8 holes. Both were reproduced here, then
+closed in this folder.
+
+1. A guest that returns `capsule manifest does not declare authority for …`
+   and mentions the bus only under `core::hint::black_box(0) == 1` kept all
+   five imports. On the old test that run would pass. After the origin
+   assert, `F-A8-forge` is CAUGHT
+   (`guest_has_refusal_sentence:true`, injected sha256 `45e4b8fb…`).
+2. The old injection returned at the start of `run()`. Compaction,
+   `host_path`, and `request_journal_grants` never ran. The copy now fails
+   `host_path` only for the fake key, drops the `JOURNAL_ROOT` early return,
+   points `journal_resource` at the key, asks through `WasmBus`, and `?`s
+   the same `capabilities::request`. `F-A8-early` restores the old
+   injection. CAUGHT (`guest_has_early_injection:true`). That planted
+   guest is byte-identical to the old row
+   (`9cff3664618f2ad65cd2ff4e0b3349568ee1f5b8ab159e78f8548e112eed8a96`).
+
+A first grant-path attempt set `host_path` to always false. `run()` then
+failed at `compaction did not shrink the journal` before any grant. The
+next commit fails `host_path` only for the fake key. Other `..` and `/`
+checks stay.
+
+### Rows
+
+Command: `lab/a1-a8-hardening/run.sh` after the falsifiers, with Runtime
+source restored. cargo exit 0.
+
+```text
+a1 runtime: elastos sha256 97c4cc2e31d6fe3b72413022cfc640829bd4f6d57ac6efd4cc40304eddfb7931
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; allowed imports: elastos:bus/types@1.0.0, elastos:bus/runtime@1.0.0, elastos:bus/identity@1.0.0, elastos:bus/capabilities@1.0.0, elastos:bus/providers@1.0.0")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+a8 runtime: elastos sha256 97c4cc2e31d6fe3b72413022cfc640829bd4f6d57ac6efd4cc40304eddfb7931
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 f7a41ffdbe7cf6bd041108599079a64ec4f6bc2aa635a97d7455c7b423f9b8e5 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 host key read: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Compute error: Component capsule denied: BusError::Internal(\"capsule manifest does not declare authority for localhost://Public/../../../../.ssh/id_ed25519\")") marker_absent:true unchanged:true
+
+row | test | result
+A1 | wasi_import_is_refused_at_admission | PASS
+A8 | agent_host_host_key_read_is_refused | PASS
+A8 | shipped_agent_host_bytes_read_host_key | BLOCKED (AC-002-ARGS; the shipped agent-host names only its own journal)
+```
+
+### Falsifiers
+
+Command: `python3 lab/a1-a8-hardening/falsify.py <ID>`, one at a time.
+
+| ID | Observed | Verdict |
+| --- | --- | --- |
+| F-A1a | Control bytes in the refused slot were admitted: `exit:Some(0) refusal_line:None`. | CAUGHT |
+| F-A1-runtime | Allowlist off (elastos sha256 `15f2aa61…`). Core-module check refused the WASI build. Exact-reason assertion failed. | CAUGHT |
+| F-A8a | Manifest declared the fake key. Client waited out the 60s bound: `exit:None refusal_line:None`. Marker absent, key unchanged. Origin asserts still held. | CAUGHT |
+| F-A8-runtime | Manifest refusal off (elastos sha256 `02099ce8…`). Same timeout as F-A8a. | CAUGHT |
+| F-A8-forge | Forged guest: `guest_has_refusal_sentence:true`, five bus imports kept. Failed at the origin assert before `serve`. | CAUGHT |
+| F-A8-early | Old early-return guest, hash `9cff3664…`. `guest_has_early_injection:true`. Failed at that origin assert before `serve`. | CAUGHT |
+
+Restored SHA-256 after each entry:
+
+- `tests/a1_wasi_import.rs`: `ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a`
+- `tests/a8_agent_host_host_key.rs`: `3c03fdc79e8ac2d4f2f7bbeda81f77dae265d60f1f8e0c6f1e50577520722859`
+- `elastos/crates/elastos-server/src/component.rs`: `7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992`
+- `elastos/crates/elastos-server/src/resource_bridge.rs`: `b8edb86cf709a23c1634e420691cf9916e07014f648009e19878285a3da076be`
+
+`git status` showed no Runtime change. The final `run.sh` rebuilt `elastos`
+to the original hash `97c4cc2e…`.
+
+macOS was not run.
