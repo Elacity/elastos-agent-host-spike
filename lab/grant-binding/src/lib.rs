@@ -538,6 +538,24 @@ fn model_host_path_root_is_refused() {
 }
 
 #[test]
+fn model_empty_segment_in_the_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "UsersAI/agent-1//notes", rights())
+        .expect_err("empty segment");
+    assert_eq!(refusal, Refuse::HostPath);
+    assert_eq!(refusal.to_string(), "owned root is a host path");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("a plain root still binds");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("grant");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_dotdot_in_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
