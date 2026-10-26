@@ -940,3 +940,38 @@
   No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/`, `tools/build`, engine argv, receipt
   text, lab CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 040 (M1 A12 lab half, step 2 of 2: cleanup census after normal, trapped and killed runs). Base
+  `ad885d9d2`. `tests/run.rs` only, plus docs and `falsifiers.json`; no `tools/src/` change. New helpers: `real_wasmer`
+  and `real_engines` beside `real_wasmtime` (SKIPPED, never PASS, when an engine is missing); one census,
+  `census(work_root) -> Vec<String>` (P10), with `census_tool` (absolute path; a tool that does not start fails the
+  test with its path), `live_processes` (`/usr/bin/pgrep -f <work root>`) and `live_argv` (`/bin/ps -o args= -p
+  <pid>`); `digest_module` (hand-written bytes in `grow_module`'s style, no memory, no import; the root package has
+  no `wat` dev-dependency, and none was added) with `TRAP_BODY` (`unreachable`) and `LOOP_BODY` (`loop br 0 end`);
+  `argv_faults` for the live argv. Measured on this Mac: `/usr/sbin/lsof +D` exits 1 even when it lists an open file
+  (the first self-test run read the test's own open handle as `census failed: ... (exit status: 1): stdout "COMMAND
+  ... left.txt"`), so a listing with exit 0 or 1 is read as open files; exit 1 with nothing printed is still the only
+  "none", and any stderr or other exit is a census failure. `/bin/sleep` refuses a path argument (`sleep: invalid
+  time interval`), so the self-test's sleeper carries the work-root path as its `argv[0]`. Results (engines
+  `/opt/homebrew/bin` wasmtime 45.0.1, wasmer 7.5.0): `census_reports_each_kind_of_leftover` PASS (one `entry:
+  left.txt`, one `process: <pid> <work>/sleeper 30`, one `open file:` line naming the test process and the file;
+  empty after cleanup); `normal_run_leaves_nothing_under_the_scratch_root` PASS (both print `FIXED_OUTPUT`, census
+  empty); `trapped_run_leaves_nothing_under_the_scratch_root` PASS (wasmtime `exit status: 134`, ``wasm trap: wasm
+  `unreachable` instruction executed``; wasmer `exit status: 1`, `error: RuntimeError: unreachable`; census empty on
+  each); `killed_run_leaves_nothing_under_the_scratch_root` PASS (one engine process each, SIGKILL, signal 9, census
+  empty on each; live argv `/opt/homebrew/bin/wasmtime run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work>/wasmtime/module.wasm 1592590337` and
+  `/opt/homebrew/bin/wasmer run --invoke digest <work>/wasmer/module.wasm 1592590337`, no preopen, env or network
+  flag). The census found no real leftover. New falsifier F-WC-A12-TEMP-LEAK (`run_engine` makes `<work
+  root>/<engine>.scratch` before its run folder, never removed; anchor `let run_dir = make_run_dir(work_root,
+  engine)?;`, found once, on a line no other entry anchors; every existing anchor unchanged); F-WC-README-COUNT
+  re-anchored to 174. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-A12-TEMP-LEAK F-WC-README-COUNT`: "baseline: 4 named tests pass without an
+  edit, 0 do not", "summary: 2 CAUGHT of 2", exit 0, no `*.falsify-original` left. With the same mutation applied
+  through `falsify.Mutation`, all three run tests failed at `assert_census_empty` ("the census found leftovers",
+  `entry: wasmtime.scratch`, and for the normal run `entry: wasmer.scratch` too). README: new section "Cleanup census
+  (M1 A12)", the four tests in "Named tests", totals 174 (one task 040) and 110 runner-caught, a task 040 section;
+  ADOPTION one line. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test
+  --locked` (110 passed, 2 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check`
+  exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `tools/src/`, `capsule/`, `tools/build`, lab
+  CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

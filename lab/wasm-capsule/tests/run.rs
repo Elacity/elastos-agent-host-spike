@@ -3179,3 +3179,421 @@ fn run_refuses_a_rejected_memory_cap_without_retrying_it() {
         }
     }
 }
+
+/// The real `wasmer` on PATH, by an absolute path, or `None` after a SKIPPED
+/// line: an engine not found gives no result, never a PASS.
+fn real_wasmer(test: &str) -> Option<PathBuf> {
+    let program = find_engine(Engine::Wasmer.name());
+    if program.is_none() {
+        eprintln!("SKIPPED: wasmer not found on PATH; {test} needs it (no result, not a PASS)");
+    }
+    program
+}
+
+/// Both real engines, in [`ENGINES`] order, or `None` after a SKIPPED line for
+/// each one not found.
+fn real_engines(test: &str) -> Option<[PathBuf; 2]> {
+    match (real_wasmtime(test), real_wasmer(test)) {
+        (Some(wasmtime), Some(wasmer)) => Some([wasmtime, wasmer]),
+        _ => None,
+    }
+}
+
+/// Task 040: the census tools, each started by its absolute path. A tool that
+/// does not start fails the test with its path; the census never skips.
+const PGREP: &str = "/usr/bin/pgrep";
+const LSOF: &str = "/usr/sbin/lsof";
+const PS: &str = "/bin/ps";
+const KILL: &str = "/bin/kill";
+const SLEEP: &str = "/bin/sleep";
+
+/// Run a census `tool` with `args`. Exit 1 with nothing on stdout or stderr is
+/// "found nothing", an empty list. An exit in `found` with stdout and nothing
+/// on stderr is "found something": its stdout lines. Any other exit or any
+/// stderr is an `Err` with that text, never "found nothing".
+fn census_tool(
+    tool: &str,
+    args: &[&std::ffi::OsStr],
+    found: &[i32],
+) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new(tool)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("the census tool {tool} did not start: {error}"));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    match output.status.code() {
+        Some(1) if stdout.is_empty() && stderr.is_empty() => Ok(Vec::new()),
+        Some(code) if found.contains(&code) && stderr.is_empty() && !stdout.is_empty() => {
+            Ok(stdout.lines().map(str::to_owned).collect())
+        }
+        _ => Err(format!(
+            "{tool} {args:?} ({}): stdout {stdout:?}, stderr {stderr:?}",
+            output.status
+        )),
+    }
+}
+
+/// The pids of the live processes with `work_root` in their argv:
+/// `pgrep -f <work_root>`, which exits 0 when it lists one.
+fn live_processes(work_root: &Path) -> Result<Vec<String>, String> {
+    census_tool(PGREP, &["-f".as_ref(), work_root.as_os_str()], &[0])
+}
+
+/// The argv of the live process `pid`, as one line: `ps -o args= -p <pid>`.
+fn live_argv(pid: &str) -> Result<String, String> {
+    let lines = census_tool(
+        PS,
+        &["-o".as_ref(), "args=".as_ref(), "-p".as_ref(), pid.as_ref()],
+        &[0],
+    )?;
+    match lines.as_slice() {
+        [line] => Ok(line.trim_end().to_owned()),
+        _ => Err(format!("{PS}: pid {pid} gave {lines:?}, not one line")),
+    }
+}
+
+/// Task 040 (M1 A12 lab half): every leftover under `work_root`, each with its
+/// kind, or an empty list only when all three hold: `work_root` has no entry
+/// (`entry: <name>`); no live process has `work_root` in its argv (`process:
+/// <pid> <argv>`, from `pgrep -f`); and no process holds a file open under it
+/// (`open file: <lsof line>`, from `lsof +D`). A census tool that answers in
+/// any other way is a leftover too (`census failed: ...`), never a pass. The
+/// one census; every cleanup test asserts its result empty.
+fn census(work_root: &Path) -> Vec<String> {
+    let mut leftovers: Vec<String> = names(work_root)
+        .into_iter()
+        .map(|name| format!("entry: {name}"))
+        .collect();
+    match live_processes(work_root) {
+        Ok(pids) => leftovers.extend(pids.iter().map(|pid| match live_argv(pid) {
+            Ok(argv) => format!("process: {pid} {argv}"),
+            Err(error) => format!("process: {pid} (argv not read: {error})"),
+        })),
+        Err(error) => leftovers.push(format!("census failed: {error}")),
+    }
+    // This Mac's lsof exits 1 even when it lists an open file under `+D`
+    // (measured, LOG task 040), so a listing with exit 0 or 1 is read; exit 1
+    // with nothing printed is still the only "none".
+    match census_tool(LSOF, &["+D".as_ref(), work_root.as_os_str()], &[0, 1]) {
+        // lsof's first line is its column header.
+        Ok(lines) => leftovers.extend(
+            lines
+                .iter()
+                .skip(1)
+                .map(|line| format!("open file: {line}")),
+        ),
+        Err(error) => leftovers.push(format!("census failed: {error}")),
+    }
+    leftovers
+}
+
+/// Assert `census(work_root)` is empty, printing every leftover.
+fn assert_census_empty(work_root: &Path, case: &str) {
+    let leftovers = census(work_root);
+    assert!(
+        leftovers.is_empty(),
+        "{case}: the census found leftovers under {}:\n{}",
+        work_root.display(),
+        leftovers.join("\n")
+    );
+    eprintln!("PASS: {case}: the census found nothing under the scratch root");
+}
+
+/// A core module whose one export, `digest (i32) -> i32`, the runner's
+/// [`DIGEST_EXPORT`], runs the hand-written `body` (no locals), in
+/// [`grow_module`]'s style: no import and no memory.
+fn digest_module(body: &[u8]) -> Vec<u8> {
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    // Type section: one type, (i32) -> (i32).
+    module.extend_from_slice(&[0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    // Function section: one function, of type 0.
+    module.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);
+    // Export section: "digest", function 0.
+    module.extend_from_slice(&[0x07, 0x0a, 0x01, 0x06]);
+    module.extend_from_slice(b"digest");
+    module.extend_from_slice(&[0x00, 0x00]);
+    // Code section: one body, its size, no locals, then `body`.
+    let size = u8::try_from(body.len() + 1).expect("a short body");
+    module.extend_from_slice(&[0x0a, size + 2, 0x01, size, 0x00]);
+    module.extend_from_slice(body);
+    module
+}
+
+/// `unreachable; end`: `digest` traps.
+const TRAP_BODY: &[u8] = &[0x00, 0x0b];
+
+/// `loop br 0 end; unreachable; end`: `digest` loops forever.
+const LOOP_BODY: &[u8] = &[0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00, 0x0b];
+
+/// The engine flags that would give the guest a host folder, environment or
+/// network; none may be in a live engine's argv (task 014's fixed argv).
+const PREOPEN_FLAGS: [&str; 5] = ["--dir", "--mapdir", "--env", "--net", "-S"];
+
+/// What is wrong with a live engine's `argv` (one `ps` line): a preopen, env
+/// or network flag, or a path under `work_root` other than `module`; or
+/// `module` not there exactly once.
+fn argv_faults(argv: &str, work_root: &Path, module: &Path) -> Vec<String> {
+    let root = work_root.to_string_lossy();
+    let module = module.to_string_lossy();
+    let words: Vec<&str> = argv.split(' ').collect();
+    let mut faults = Vec::new();
+    for word in &words {
+        // A prefix match: `--dir=x`, `--env=K=V` and `-Sinherit-network` too.
+        if PREOPEN_FLAGS.iter().any(|flag| word.starts_with(flag)) {
+            faults.push(format!("a preopen, env or network flag: {word}"));
+        }
+        if word.contains(root.as_ref()) && *word != module.as_ref() {
+            faults.push(format!(
+                "a scratch-root path that is not the module: {word}"
+            ));
+        }
+    }
+    let module_words = words
+        .iter()
+        .filter(|word| **word == module.as_ref())
+        .count();
+    if module_words != 1 {
+        faults.push(format!(
+            "the module path is there {module_words} times, not once"
+        ));
+    }
+    faults
+}
+
+/// Task 040, census self-test, no engine: a file left in a work root, a live
+/// `/bin/sleep` whose argv holds a path under it (its `argv[0]`: `sleep` takes
+/// only time intervals) and a file handle open under it are each reported by
+/// kind; once the file is removed, the process stopped and the handle closed,
+/// the census is empty.
+#[test]
+fn census_reports_each_kind_of_leftover() {
+    use std::os::unix::process::CommandExt;
+    let tmp = TempDir::new("run40-census");
+    let work = work_root(&canonical(&tmp), "work");
+    assert_census_empty(&work, "an empty work root");
+
+    let left = work.join("left.txt");
+    fs::write(&left, b"left").expect("leave a file");
+    let open = fs::File::open(&left).expect("open the left file");
+    let mut sleeper = std::process::Command::new(SLEEP)
+        .arg0(work.join("sleeper"))
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("{SLEEP} did not start: {error}"));
+
+    let leftovers = census(&work);
+    sleeper.kill().expect("stop the sleeper");
+    sleeper.wait().expect("reap the sleeper");
+    let count = |kind: &str| {
+        leftovers
+            .iter()
+            .filter(|line| line.starts_with(kind))
+            .count()
+    };
+    let all = leftovers.join("\n");
+    assert_eq!(count("entry: "), 1, "the left file:\n{all}");
+    assert!(
+        leftovers.contains(&"entry: left.txt".to_owned()),
+        "the left file by name:\n{all}"
+    );
+    assert_eq!(count("process: "), 1, "the live sleeper:\n{all}");
+    assert!(
+        leftovers.contains(&format!(
+            "process: {} {} 30",
+            sleeper.id(),
+            work.join("sleeper").display()
+        )),
+        "the sleeper by pid and argv:\n{all}"
+    );
+    assert_eq!(count("open file: "), 1, "the open handle:\n{all}");
+    let open_line = leftovers
+        .iter()
+        .find(|line| line.starts_with("open file: "))
+        .expect("an open file line");
+    assert!(
+        open_line.contains(&format!(" {} ", std::process::id()))
+            && open_line.ends_with(&left.display().to_string()),
+        "the open handle by this process and path: {open_line}"
+    );
+    assert_eq!(count("census failed: "), 0, "a census tool failed:\n{all}");
+    assert_eq!(leftovers.len(), 3, "only the three leftovers:\n{all}");
+
+    drop(open);
+    fs::remove_file(&left).expect("remove the left file");
+    assert_census_empty(&work, "after the file, the process and the handle are gone");
+}
+
+/// Task 040, normal run: one two-engine `run` of the signed capsule
+/// `tools/build` makes, on both real engines; both print `FIXED_OUTPUT`, and
+/// then the census finds nothing under the work root.
+#[test]
+fn normal_run_leaves_nothing_under_the_scratch_root() {
+    let Some([wasmtime, wasmer]) = real_engines("the normal-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run40-normal");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(&root, "bundle", &built, &key);
+    let accepted = [did(&key)];
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &[],
+        wasmtime: &wasmtime,
+        wasmer: &wasmer,
+        work_root: &work,
+    }));
+    let expected = format!("{FIXED_OUTPUT}\n");
+    assert_eq!(passed.wasmtime(), passed.wasmer(), "the outputs differ");
+    assert_eq!(passed.wasmtime(), expected.as_bytes(), "not FIXED_OUTPUT");
+    assert_census_empty(&work, "normal run on wasmtime and wasmer");
+}
+
+/// Task 040, trapped run: on each real engine, `run_engine` on a module whose
+/// `digest` runs `unreachable` is refused as `EngineFailed` with a nonzero
+/// exit status and the trap on stderr; then the census finds nothing under
+/// that run's work root.
+#[test]
+fn trapped_run_leaves_nothing_under_the_scratch_root() {
+    let Some(programs) = real_engines("the trapped-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run40-trapped");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &digest_module(TRAP_BODY));
+
+    for (engine_kind, program) in ENGINES.into_iter().zip(&programs) {
+        let work = work_root(&root, &format!("work-{engine_kind}"));
+        let refusal = refused(run_engine(&value, engine_kind, program, &work));
+        match &refusal.reason {
+            Reason::EngineFailed {
+                engine,
+                status,
+                stderr,
+            } => {
+                assert_eq!(*engine, engine_kind);
+                assert!(
+                    status.code().is_some_and(|code| code != 0),
+                    "{engine_kind}: not a nonzero exit status: {status}"
+                );
+                assert!(
+                    stderr.to_lowercase().contains("unreachable"),
+                    "{engine_kind}: no trap on stderr: {stderr:?}"
+                );
+                eprintln!(
+                    "PASS: {engine_kind} trapped ({status}): {}",
+                    stderr
+                        .lines()
+                        .find(|line| line.to_lowercase().contains("unreachable"))
+                        .unwrap_or("")
+                );
+            }
+            _ => panic!("{engine_kind}: not EngineFailed: {refusal}"),
+        }
+        assert_eq!(refusal.path, *program, "{engine_kind}");
+        assert_census_empty(&work, &format!("trapped run on {engine_kind}"));
+    }
+}
+
+/// Task 040, killed run: on each real engine, `run_engine` runs on a thread on
+/// a module whose `digest` loops forever. The test waits (at most 10 s,
+/// polling `pgrep -f <work root>`) for the one engine process, reads its argv,
+/// kills it with `SIGKILL`, and joins the thread: the run is refused as
+/// `EngineFailed`, stopped by signal 9. The live argv held no preopen, env or
+/// network flag and no scratch-root path but the module file; then the census
+/// finds nothing under that run's work root. Every check waits until the
+/// engine is killed, so a failed check never leaves an engine looping.
+#[test]
+fn killed_run_leaves_nothing_under_the_scratch_root() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    let Some(programs) = real_engines("the killed-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run40-killed");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &digest_module(LOOP_BODY));
+
+    for (engine_kind, program) in ENGINES.into_iter().zip(programs) {
+        let work = work_root(&root, &format!("work-{engine_kind}"));
+        let module = work.join(engine_kind.name()).join("module.wasm");
+        let runner = {
+            let (value, program, work) = (value.clone(), program.clone(), work.clone());
+            std::thread::spawn(move || run_engine(&value, engine_kind, &program, &work))
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pids = loop {
+            match live_processes(&work) {
+                Ok(pids) if !pids.is_empty() => break Ok(pids),
+                Ok(_) if Instant::now() < deadline && !runner.is_finished() => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Ok(_) => {
+                    break Err(
+                        "no engine process showed up within 10 s, or the run ended first"
+                            .to_owned(),
+                    )
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let pids = pids.unwrap_or_else(|error| panic!("{engine_kind}: {error}"));
+        let argv: Vec<Result<String, String>> = pids.iter().map(|pid| live_argv(pid)).collect();
+        let killed = std::process::Command::new(KILL)
+            .args(["-KILL"])
+            .args(&pids)
+            .status()
+            .unwrap_or_else(|error| panic!("{KILL} did not start: {error}"));
+        let result = runner.join().expect("the runner thread panicked");
+
+        assert!(
+            killed.success(),
+            "{engine_kind}: {KILL} -KILL {pids:?}: {killed}"
+        );
+        assert_eq!(
+            pids.len(),
+            1,
+            "{engine_kind}: not one engine process: {argv:?}"
+        );
+        let argv = argv[0]
+            .clone()
+            .unwrap_or_else(|error| panic!("{engine_kind}: {error}"));
+        assert!(
+            argv.starts_with(&format!(
+                "{} run --invoke {DIGEST_EXPORT} ",
+                program.display()
+            )),
+            "{engine_kind}: not the engine's module run: {argv}"
+        );
+        let faults = argv_faults(&argv, &work, &module);
+        assert!(
+            faults.is_empty(),
+            "{engine_kind}: the live argv {argv:?}:\n{}",
+            faults.join("\n")
+        );
+        eprintln!("PASS: {engine_kind}'s live argv held no preopen, env or network flag: {argv}");
+
+        let refusal = refused(result);
+        match &refusal.reason {
+            Reason::EngineFailed { engine, status, .. } => {
+                assert_eq!(*engine, engine_kind);
+                assert_eq!(
+                    status.signal(),
+                    Some(9),
+                    "{engine_kind}: not stopped by SIGKILL: {status}"
+                );
+            }
+            _ => panic!("{engine_kind}: not EngineFailed: {refusal}"),
+        }
+        assert_census_empty(&work, &format!("killed run on {engine_kind}"));
+    }
+}
