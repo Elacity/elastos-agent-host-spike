@@ -222,3 +222,29 @@
   says falsifiers.json holds 121 planted bugs, but it holds 122"; reverted, `git hash-object` unchanged. Both
   retired-label merge-gate greps (`git grep -n` on the lane, `grep -rn --exclude-dir=target` on the lane): empty,
   exit 1.
+- Task 020 (wc-009a, granted imports only, checked before any engine starts): `read_grants(path)` in
+  `tools/src/verify.rs` is the one lab grants reader (JSON `wc-009.lab-grants/v1`, label exactly "lab stand-in, not
+  admission"; one `fs::read`, one `serde_json::from_slice` into `Value`, checked by hand; ten refusals with their own
+  text). `VerifiedBundle` gains `unused_grants()`, worked out once from the audit's list; `RunInput` gains `granted`,
+  which `run` passes unchanged to its one `verify_bundle` call; `TwoEngineRun` gains `linked()` and
+  `unused_grants()`. `IMPORTING_MODULE` and `env_f()` moved from `tests/verify.rs` into `tests/common/grants.rs`
+  with the grants-file writer, so both test files share one copy. New tests: `grants_file_refusals_keep_their_reason`,
+  `unused_grants_excludes_linked_and_preserves_file_order` (`tests/verify.rs`); `zero_grants_zero_imports_runs`,
+  `zero_grants_zero_imports_runs_on_both_real_engines`, `declared_not_granted_import_refuses_instantiation_by_name`,
+  `valid_signature_with_empty_grants_file_links_nothing`,
+  `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`, `granted_import_is_linked`
+  (`tests/run.rs`; one `--version` and one module start per engine on success, zero of both on refusal). Guards
+  updated: `verifier_reads_no_bundle_file_by_path`, `verifier_has_one_check_path`, `verified_bundle_is_sealed`,
+  `runner_uses_only_explicit_inputs`. 17 new falsifiers (F-WC9-*), all anchored in `tools/src/verify.rs`; F-WC5a,
+  F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY and F-WC4-SEALED-NEW re-anchored; README total 139. Canonical runner,
+  `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC9 F-WC4 F-WC5
+  F-WC-README-COUNT`: "baseline: 44 named tests pass without an edit, 0 do not", "summary: 1 BUILD FAILED, 93 CAUGHT
+  of 94" (F-WC5a's mutant no longer built: it removes the verified value that the new `linked` line reads). F-WC5a
+  got a fourth edit (fill both lists empty), then `... --from lab/wasm-capsule/falsifiers.json F-WC5a`: "summary: 1
+  CAUGHT of 1" (runner-caught). Hand-proven, pending R1 (not in `falsifiers.json`, since `tools/src/run.rs` is not a
+  recovery target, R2; outside every count): `input.granted` → `&[]` in `run`'s verify call made
+  `runner_uses_only_explicit_inputs` fail ("the runner does not verify its own inputs with the caller's grants",
+  left 0) and `granted_import_is_linked` fail ("the two-engine runner refused: undeclared import env.f"); reverted,
+  `git hash-object tools/src/run.rs` `4a381399d05c4fcb070c7815e666d1dc995a8f4d` before and after. No change to
+  `tools/Cargo.toml` or `Cargo.lock`. Both retired-label merge-gate greps (`git grep -n` on the lane, `grep -rn
+  --exclude-dir=target` on the lane): empty, exit 1.

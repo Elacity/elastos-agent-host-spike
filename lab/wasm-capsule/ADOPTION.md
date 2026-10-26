@@ -45,19 +45,24 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   `CapsuleManifest`), and runs `wasm_capsule_audit::audit` on those checked
   bytes with the granted imports, unchanged. `verify_bundle(bundle, ...)` is
   `checked_bundle` and then `verify_checked`. It returns a sealed
-  `VerifiedBundle` (`cid()`, `entries()`, `imports()`) for wc-005 to stage.
-  It is a lab check of name, signer and imports; it is no admission or launch
-  decision (README.md, "Verify (wc-004)").
+  `VerifiedBundle` (`cid()`, `entries()`, `imports()`, `unused_grants()`) for
+  wc-005 to stage. It is a lab check of name, signer and imports; it is no
+  admission or launch decision (README.md, "Verify (wc-004)").
+  wc-009a (task 020): `read_grants(path)` is the one reader of the lab grants
+  file (`wc-009.lab-grants/v1`, labelled "lab stand-in, not admission"), and its
+  list is the `granted` input (README.md, "Granted imports only (wc-009a)").
 - `wasm_capsule_tools::run` — the lab's engine runner, as library calls.
   `run_engine` (wc-005a, task 014) runs one test-only host engine on
   `entrypoint()`'s verified bytes, written from memory into a new `0o700`
   folder, with a fixed argv, stdin null and an empty environment. `run`
   (wc-005b, task 015) takes a `RunInput` (bundle path, in-memory signature,
-  accepted signer DIDs, both engine program paths, work root), calls
-  `verify_bundle` once with no grants, then `run_engine` for `wasmtime` and
+  accepted signer DIDs, the granted imports from the lab grants file (task
+  020), both engine program paths, work root), calls `verify_bundle` once with
+  those grants unchanged, then `run_engine` for `wasmtime` and
   then for `wasmer`, one after the other, and requires both to succeed with
-  byte-identical stdout. It returns the verified `cid()` and both outputs
-  (README.md, "Same output on two engines (wc-005b)").
+  byte-identical stdout. It returns the verified `cid()`, both outputs, and
+  (task 020) `linked()` and `unused_grants()` (README.md, "Same output on two
+  engines (wc-005b)").
   `wasm_capsule_tools::receipt` (wc-005c, task 016) renders that run as
   `schema: wc-005.run-receipt/v1` lines (the lab CID, `digest`, `1592590337`,
   each engine's version, exit status and stdout), and writes it only with
@@ -248,7 +253,12 @@ kept outside the package.
 check, on this one Mac with test keys only, that the bytes match a signed lab
 CID, that an accepted test key signed it, and that every import is granted. It
 makes no admission, launch or publisher-trust decision, and the granted list
-(empty for ordinary callers until wc-009) is a lab stand-in, not admission.
+(from the lab grants file since wc-009a, task 020) is a lab stand-in, not
+admission.
+
+**The grants file (wc-009a, task 020).** The lab grants file is a lab stand-in
+for the Runtime's grant decision
+(https://github.com/Elacity/elastos-runtime/issues/464), not admission.
 
 ## Runtime ABI for a bare capsule (wc-008)
 
