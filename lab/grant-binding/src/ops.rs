@@ -64,6 +64,22 @@ impl Verifier {
             _ => Ok(()),
         }
     }
+
+    /// Creates a child journal when the grant carries its right and the path
+    /// is the owned root or a child under it.
+    pub fn create_child_journal(
+        &mut self,
+        call: &Call,
+        request: &GuestRequest,
+        path: &str,
+    ) -> Result<(), OperateRefuse> {
+        self.operate(call, request, Operation::ChildJournal)?;
+        #[rustfmt::skip]
+        let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
+        super::resource_name(&grant.identity, path, Some(&grant.owned_root))
+            .map_err(OperateRefuse::Binding)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +296,94 @@ fn model_child_journal_on_a_sibling_instance_is_refused() {
     let call = verifier.open_call(sibling);
     let refusal = verifier
         .operate(&call, &guest(handle), Operation::ChildJournal)
+        .expect_err("sibling instance");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::Instance));
+    assert_eq!(refusal.to_string(), "instance does not match the grant");
+}
+
+#[test]
+fn model_child_journal_under_the_owned_root_is_allowed() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    for path in ["UsersAI/agent-1/journal", "UsersAI/agent-1/journal/page.md"] {
+        verifier
+            .create_child_journal(&call, &guest(handle), path)
+            .expect("child journal under the owned root");
+    }
+}
+
+#[test]
+fn model_child_journal_outside_the_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    for path in ["UsersAI/agent-1/other", "UsersAI/agent-1/journal-extra"] {
+        let refusal = verifier
+            .create_child_journal(&call, &guest(handle), path)
+            .expect_err("path outside the owned root");
+        assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+        assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    }
+    let refusal = verifier
+        .create_child_journal(&call, &guest(handle), "UsersAI/agent-1/journal/../other")
+        .expect_err("a prefix of the owned root does not allow a dotdot path");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::HostPath));
+    assert_eq!(refusal.to_string(), "owned root is a host path");
+}
+
+#[test]
+fn model_child_journal_create_without_the_right_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .create_child_journal(&call, &guest(handle), "UsersAI/agent-1/journal/page.md")
+        .expect_err("child journal is its own right");
+    assert_eq!(refusal, OperateRefuse::ChildJournalNotGranted);
+    assert_eq!(refusal.to_string(), "child journal is its own right");
+}
+
+#[test]
+fn model_child_journal_create_on_a_sibling_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(
+            first,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: false,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("bind");
+    let call = verifier.open_call(sibling);
+    let refusal = verifier
+        .create_child_journal(&call, &guest(handle), "UsersAI/agent-1/journal/page.md")
         .expect_err("sibling instance");
     assert_eq!(refusal, OperateRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
