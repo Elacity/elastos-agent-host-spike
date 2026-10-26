@@ -63,6 +63,9 @@ RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 \
 cargo test --locked --offline --manifest-path lab/a6-a12-evidence-fix/Cargo.toml --lib -- --nocapture
 ```
 
+Result: `test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.46s`.
+`planted_bugs_are_caught` printed **9 CAUGHT lines** from **8 plants** (F-A12-DROP-ROOTS is two named tests). After the suite, `ls /tmp/elastos` was `No such file or directory`. Runtime `manager.rs:409` is unchanged.
+
 | Check | Verdict | Notes |
 | --- | --- | --- |
 | A6 owner token accepted | **PASS** | real `grant` + `validate` as instance-1 |
