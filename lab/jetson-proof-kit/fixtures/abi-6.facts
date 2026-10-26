@@ -1,0 +1,22 @@
+# Simulated kernel: ABI 6, including scope bits.
+uname_r 6.12.0
+uname_m aarch64
+landlock_abi 6
+right.truncate available
+right.ioctl_dev available
+right.net_bind_tcp available
+right.net_connect_tcp available
+right.scope_signal available
+right.scope_abstract_unix available
+seccomp available
+seccomp_arch AUDIT_ARCH_AARCH64
+seccomp_arch_id 0xc00000b7
+userns available
+pidns available
+mntns available
+sysctl.user.max_user_namespaces 31867
+sysctl.user.max_pid_namespaces 31867
+sysctl.user.max_mnt_namespaces 31867
+sysctl.kernel.unprivileged_userns_clone 1
+cap_bnd 000001ffffffffff
+cap_setpcap available

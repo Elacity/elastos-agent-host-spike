@@ -1,0 +1,34 @@
+# lab/jetson-proof-kit evidence
+# Each data row: id<TAB>status<TAB>detail
+# status is PASS, REFUSED, or NOT RUN.
+# Jetson rows stay NOT RUN until a human runs run-on-jetson.sh on the board.
+host.uname_r	NOT RUN	-
+host.uname_m	NOT RUN	-
+host.landlock_abi	NOT RUN	-
+host.right.truncate	NOT RUN	-
+host.right.ioctl_dev	NOT RUN	-
+host.right.net_bind_tcp	NOT RUN	-
+host.right.net_connect_tcp	NOT RUN	-
+host.right.scope_signal	NOT RUN	-
+host.right.scope_abstract_unix	NOT RUN	-
+host.seccomp	NOT RUN	-
+host.seccomp_arch	NOT RUN	-
+host.userns	NOT RUN	-
+host.pidns	NOT RUN	-
+host.mntns	NOT RUN	-
+host.sysctl.max_user_namespaces	NOT RUN	-
+host.sysctl.max_pid_namespaces	NOT RUN	-
+host.sysctl.max_mnt_namespaces	NOT RUN	-
+host.sysctl.unprivileged_userns_clone	NOT RUN	-
+host.cap_bnd	NOT RUN	-
+decision.did.abi5	NOT RUN	-
+decision.did.per_right	NOT RUN	-
+decision.wallet.abi5	NOT RUN	-
+decision.wallet.per_right	NOT RUN	-
+decision.model.abi5	NOT RUN	-
+decision.model.per_right	NOT RUN	-
+C0.source	NOT RUN	-
+C0.build	NOT RUN	-
+C0.guard	NOT RUN	-
+C9.build	NOT RUN	-
+C9.launcher	NOT RUN	-
