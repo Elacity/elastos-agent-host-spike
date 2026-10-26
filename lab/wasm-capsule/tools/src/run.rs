@@ -34,6 +34,15 @@
 //! with the engine, the exit status and its stderr. Every refusal has its own reason and the
 //! path it stopped at; nothing is started after a refusal.
 //!
+//! Task 038: a start that was given a memory cap argument and exits with the
+//! status and first stderr line task 038 measured for a `-W` argument the
+//! pinned wasmtime rejects (exit 2, a line that starts `error: ` and holds
+//! ` -W `; LOG) is refused as a rejected cap, naming the argument; the module
+//! is never run again without its cap. Any other nonzero exit stays a failed
+//! run. `run_engine` makes no `--version` query and does not check the
+//! version: [`run`], the entry that starts both engines, checks the pins. The
+//! runner promises no fuel or time limit, and none other than the memory cap.
+//!
 //! The runner reads no environment variable and no file, and parses no
 //! manifest or module: the verified value already holds the bytes its lab CID
 //! names, and the entrypoint the verifier's one manifest read found. Nothing
@@ -63,7 +72,13 @@
 //!    no-ambient rules (one process each, an empty environment, stdin null).
 //!    The first line of its stdout is kept as printed. A version query that
 //!    does not start, exits nonzero or prints an empty first line is refused
-//!    with its own reason, engine and cause, and no module run starts;
+//!    with its own reason, engine and cause, and no module run starts.
+//!    Task 038: that first line, split on single spaces, must name the engine
+//!    as its first word and the pinned version ([`WASMTIME_VERSION`],
+//!    [`WASMER_VERSION`]) as its second, exactly; anything after them is
+//!    allowed. Another line is refused as soon as it is read, so an unpinned
+//!    `wasmtime` is refused before `wasmer` is asked, and no module run
+//!    starts on an engine the runner's facts were not measured on;
 //! 3. [`run_engine`] runs `wasmtime` on the verified value, and returns;
 //! 4. only then [`run_engine`] runs `wasmer` on the same value. The two are
 //!    separate processes, one after the other, never nested or overlapping;
@@ -76,8 +91,9 @@
 //! outputs. Success returns the verified lab CID, both observed versions, both
 //! exit statuses and both stdouts, plus the verifier's linked imports and
 //! unused grants; [`crate::receipt`] renders the first five. The
-//! versions are what the engines printed, never configured, so an engine
-//! upgrade shows in the receipt, and none of them is part of the lab CID.
+//! versions are what the engines printed, never configured, and none of them
+//! is part of the lab CID. Since task 038 an engine upgrade is refused before
+//! any module run; changing a pin is a deliberate edit after a fresh probe.
 //! wc-010c: success also returns the declared `memory_mb` the module runs were
 //! given and, per engine, the memory cap argument it was started with, read
 //! back from that process's own argv (the argument after `-W`), never from the
@@ -118,6 +134,31 @@ const RUN_DIR_MODE: u32 = 0o700;
 /// bytes, as wc-010a's probes read it.
 const BYTES_PER_MB: u64 = 1 << 20;
 
+/// The one `wasmtime` version [`run`] starts (task 038). Task 021 (wc-010a)
+/// measured `-W max-memory-size=...` on wasmtime 45.0.1, and task 030 measured
+/// that it applies a module's own memory maximum; both facts hold for this
+/// version only. Change it only by a deliberate edit after a fresh probe like
+/// 021 and 030.
+pub const WASMTIME_VERSION: &str = "45.0.1";
+
+/// The one `wasmer` version [`run`] starts (task 038). Task 021 (wc-010a) found
+/// no memory cap flag in wasmer 7.5.0, and task 030 measured that it applies a
+/// module's own memory maximum; both facts hold for this version only. Change
+/// it only by a deliberate edit after a fresh probe like 021 and 030.
+pub const WASMER_VERSION: &str = "7.5.0";
+
+/// The exit status wasmtime 45.0.1 gave for a `-W` argument it rejected, an
+/// unknown key and a bad value alike (LOG, task 038's two probes).
+const CAP_REJECTED_STATUS: i32 = 2;
+
+/// How the first stderr line of that refusal starts (LOG, task 038's two
+/// probes); a module that fails to load starts `Error: ` instead.
+const CAP_REJECTED_PREFIX: &str = "error: ";
+
+/// The text in that line that names the `-W` option (LOG, task 038's two
+/// probes).
+const CAP_REJECTED_OPTION: &str = " -W ";
+
 /// A host engine: test-only, not endorsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -131,6 +172,15 @@ impl Engine {
         match self {
             Engine::Wasmtime => "wasmtime",
             Engine::Wasmer => "wasmer",
+        }
+    }
+
+    /// The one version of the engine [`run`] starts: [`WASMTIME_VERSION`] or
+    /// [`WASMER_VERSION`].
+    pub fn pinned_version(self) -> &'static str {
+        match self {
+            Engine::Wasmtime => WASMTIME_VERSION,
+            Engine::Wasmer => WASMER_VERSION,
         }
     }
 }
@@ -187,6 +237,21 @@ pub enum Reason {
     /// The engine's `--version` query exited 0 with an empty first stdout
     /// line.
     VersionEmpty { engine: Engine },
+    /// The first line the engine's `--version` query printed does not name
+    /// the engine's pinned version; no module run starts.
+    VersionNotPinned {
+        engine: Engine,
+        printed: Vec<u8>,
+        pinned: &'static str,
+    },
+    /// The engine was started with a memory cap argument and rejected it; the
+    /// module is not run without its cap.
+    CapRejected {
+        engine: Engine,
+        argument: String,
+        status: ExitStatus,
+        stderr: String,
+    },
 }
 
 impl fmt::Display for Reason {
@@ -246,6 +311,25 @@ impl fmt::Display for Reason {
             Reason::VersionEmpty { engine } => write!(
                 f,
                 "{engine} --version printed no version: its first stdout line is empty"
+            ),
+            Reason::VersionNotPinned {
+                engine,
+                printed,
+                pinned,
+            } => write!(
+                f,
+                "{engine} --version printed {:?}, not the pinned version {engine} {pinned}: no module run starts",
+                String::from_utf8_lossy(printed)
+            ),
+            Reason::CapRejected {
+                engine,
+                argument,
+                status,
+                stderr,
+            } => write!(
+                f,
+                "{engine} rejected the memory cap argument -W {argument} ({status}): {}; the module is not run without its cap",
+                stderr.trim_end()
             ),
         }
     }
@@ -411,8 +495,11 @@ fn engine_command(program: &Path) -> Command {
 
 /// Start `program` once with the fixed argv and the memory cap for
 /// `memory_mb`, stdin null and an empty environment, and wait for it. A
-/// nonzero exit is refused with its stderr. The cap argument it returns is
-/// read back from the argv the process was started with.
+/// nonzero exit is refused with its stderr: as a rejected cap when
+/// [`cap_rejected`] says the engine rejected the cap argument it was given
+/// (task 038), else as a failed run. The engine is never started again
+/// without its cap. The cap argument it returns is read back from the argv
+/// the process was started with.
 fn start_engine(
     engine: Engine,
     program: &Path,
@@ -428,15 +515,22 @@ fn start_engine(
         .output()
         .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;
     if !output.status.success() {
+        let status = output.status;
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(Refusal::new(
-            program,
-            Reason::EngineFailed {
+        let reason = match memory_cap_given(&command) {
+            Some(argument) if cap_rejected(status, &stderr) => Reason::CapRejected {
                 engine,
-                status: output.status,
+                argument,
+                status,
                 stderr,
             },
-        ));
+            _ => Reason::EngineFailed {
+                engine,
+                status,
+                stderr,
+            },
+        };
+        return Err(Refusal::new(program, reason));
     }
     Ok(EngineRun {
         status: output.status,
@@ -455,11 +549,24 @@ fn memory_cap_given(command: &Command) -> Option<String> {
     args.next().map(|arg| arg.to_string_lossy().into_owned())
 }
 
+/// Whether a start given a memory cap argument failed because the engine
+/// rejected that argument: it exited with [`CAP_REJECTED_STATUS`] and its
+/// first stderr line starts with [`CAP_REJECTED_PREFIX`] and holds
+/// [`CAP_REJECTED_OPTION`], the values task 038 measured on the pinned
+/// wasmtime (LOG).
+fn cap_rejected(status: ExitStatus, stderr: &str) -> bool {
+    let first_line = stderr.lines().next().unwrap_or("");
+    status.code() == Some(CAP_REJECTED_STATUS)
+        && first_line.starts_with(CAP_REJECTED_PREFIX)
+        && first_line.contains(CAP_REJECTED_OPTION)
+}
+
 /// Ask `engine`, the program at the absolute path `program`, for its version:
 /// one `--version` process through [`engine_command`], the path and rules a
 /// module run uses. Its first stdout line is kept as printed, without the
 /// newline. A query that does not start, exits nonzero or prints an empty
-/// first line is refused with its own reason.
+/// first line is refused with its own reason; so is a first line that
+/// [`check_pinned`] refuses, as soon as it is read.
 fn query_version(engine: Engine, program: &Path) -> Result<Vec<u8>, Refusal> {
     check_program(program)?;
     let answer = engine_command(program)
@@ -478,10 +585,34 @@ fn query_version(engine: Engine, program: &Path) -> Result<Vec<u8>, Refusal> {
         ));
     }
     let first_line = answer.stdout.split(|&byte| byte == b'\n').next();
-    match first_line {
+    let line = match first_line {
         Some(line) if !line.is_empty() => Ok(line.to_vec()),
         _ => Err(Refusal::new(program, Reason::VersionEmpty { engine })),
+    }?;
+    check_pinned(engine, program, &line)?;
+    Ok(line)
+}
+
+/// The pin rule (task 038): `line`, the first line `engine --version`
+/// printed, split on single spaces, must have the engine's name as its first
+/// word and [`Engine::pinned_version`] as its second, exactly; anything after
+/// those two words is allowed. Any other line is refused, so an engine of
+/// another version never starts a module run on facts measured on the pinned
+/// one.
+fn check_pinned(engine: Engine, program: &Path, line: &[u8]) -> Result<(), Refusal> {
+    let pinned = engine.pinned_version();
+    let mut words = line.split(|&byte| byte == b' ');
+    if words.next() == Some(engine.name().as_bytes()) && words.next() == Some(pinned.as_bytes()) {
+        return Ok(());
     }
+    Err(Refusal::new(
+        program,
+        Reason::VersionNotPinned {
+            engine,
+            printed: line.to_vec(),
+            pinned,
+        },
+    ))
 }
 
 /// The two-engine runner's inputs, all explicit: nothing is read from the

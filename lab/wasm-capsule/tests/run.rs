@@ -46,7 +46,8 @@ use wasm_capsule_tools::bundle::{
 use wasm_capsule_tools::receipt::{render, write_receipt, RECEIPT_SCHEMA};
 use wasm_capsule_tools::run::{
     module_refusal, run, run_engine, work_root_folder, Engine, EngineRun, Reason, Refusal,
-    RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
+    RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT, WASMER_VERSION,
+    WASMTIME_VERSION,
 };
 use wasm_capsule_tools::verify::{read_grants, verify_bundle, VerifiedBundle, VerifyRefusal};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
@@ -837,9 +838,18 @@ fn engine(folder: &Path, name: &str, version: &str, body: &str) -> PathBuf {
     stand_in(folder, name, &script)
 }
 
-/// The version a stand-in made by [`marked`] prints.
+/// The version a stand-in made by [`marked`], [`recording`] or [`counting`]
+/// prints: its engine's pinned version, from the tools crate's constants, with
+/// a ` (stand-in)` tail, so it passes the pin check (task 038) and is never a
+/// real engine's line. `name` is the engine's name, or `<engine>-<case>`.
 fn stand_in_version(name: &str) -> String {
-    format!("{name} 0.0.0-stand-in")
+    let engine_name = name.split('-').next().unwrap_or(name);
+    let pinned = match engine_name {
+        "wasmtime" => WASMTIME_VERSION,
+        "wasmer" => WASMER_VERSION,
+        _ => panic!("the stand-in {name} names no engine"),
+    };
+    format!("{engine_name} {pinned} (stand-in)")
 }
 
 /// A stand-in engine `name` that, asked `--version`, leaves `<name>.version`
@@ -886,8 +896,9 @@ const FAILING_BODY: &str = "printf 'boom: bad module\\n' >&2\nexit 3\n";
 /// their lines interleaved in `log`.
 fn recording(folder: &Path, name: &str, log: &Path, output: &str) -> PathBuf {
     let version = format!(
-        "printf 'version {name}\\n' >> '{log}'\nprintf '{name} 0.0.0-stand-in\\n'\n",
-        log = log.display()
+        "printf 'version {name}\\n' >> '{log}'\nprintf '%s\\n' '{version}'\n",
+        log = log.display(),
+        version = stand_in_version(name)
     );
     let body = format!(
         "printf '%s\\n' \"$@\" > '{argv}'\n{MODULE_ARGUMENT}printf 'start {name} %s\\n' \"$module\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
@@ -1294,7 +1305,10 @@ fn counting(folder: &Path, name: &str) -> PathBuf {
     engine(
         folder,
         name,
-        &format!("printf 'version\\n' >> \"$0.starts\"\nprintf '{name} 0.0.0-stand-in\\n'\n"),
+        &format!(
+            "printf 'version\\n' >> \"$0.starts\"\nprintf '%s\\n' '{}'\n",
+            stand_in_version(name)
+        ),
         &format!("{MODULE_ARGUMENT}printf 'module %s\\n' \"$module\" >> \"$0.starts\"\nprintf 'same\\n'\n"),
     )
 }
@@ -1387,16 +1401,17 @@ fn receipt_records_observed_engine_versions() {
     let root = canonical(&tmp);
     assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v2");
 
-    // Two runs of the same bundle, by stand-ins that print made-up versions,
-    // each followed by a second line that is not kept.
+    // Two runs of the same bundle, by stand-ins that print the pinned versions
+    // with made-up tails (task 038: only the pinned versions run), each
+    // followed by a second line that is not kept. No tail is a real engine's.
     let mut runs = Vec::new();
     for (case, wasmtime_version, wasmer_version) in [
         (
             "first",
-            "wasmtime 99.0.0-made-up (abc1234 2099-01-01)",
-            "wasmer 0.0.1-made-up",
+            "wasmtime 45.0.1 (abc1234 2099-01-01)",
+            "wasmer 7.5.0 (made-up)",
         ),
-        ("second", "wasmtime 1.2.3-other", "wasmer 4.5.6-other"),
+        ("second", "wasmtime 45.0.1 other", "wasmer 7.5.0 other"),
     ] {
         let engines = work_root(&root, &format!("engines-{case}"));
         let wasmtime = engine(
@@ -1450,7 +1465,13 @@ fn receipt_records_observed_engine_versions() {
             ),
             "{case}: the receipt"
         );
-        for installed in ["45.0.1", "7.5.0", "second line"] {
+        // This Mac's installed engines' lines, each as the receipt would quote
+        // it, and the second line: no stand-in printed any as its version.
+        for installed in [
+            "\"wasmtime 45.0.1 (83166ba31 2026-06-05)\"",
+            "\"wasmer 7.5.0\"",
+            "second line",
+        ] {
             assert!(
                 !receipt.contains(installed),
                 "{case}: the receipt holds {installed:?}, which no stand-in printed as its version"
@@ -1581,19 +1602,34 @@ fn version_queries_use_explicit_inputs() {
         "the test process has no HOME, so this test proves nothing"
     );
 
-    // Each version answer is the program path the stand-in was started by,
-    // HOME as it saw it, and whether its stdin is /dev/null.
-    let report = "if [ /dev/stdin -ef /dev/null ]; then stdin=null; else stdin=other; fi\n\
-                  printf '%s %s %s\\n' \"$0\" \"${HOME-unset}\" \"$stdin\"\n";
+    // Each version answer is the stand-in's pinned version (task 038), then
+    // the program path it was started by, HOME as it saw it, and whether its
+    // stdin is /dev/null.
+    let report = |engine_kind: Engine| {
+        format!(
+            "if [ /dev/stdin -ef /dev/null ]; then stdin=null; else stdin=other; fi\n\
+             printf '{} %s %s %s\\n' \"$0\" \"${{HOME-unset}}\" \"$stdin\"\n",
+            stand_in_version(engine_kind.name())
+        )
+    };
     let engines = work_root(&root, "engines");
-    let wasmtime = engine(&engines, "wasmtime", report, "printf same\n");
-    let wasmer = engine(&engines, "wasmer", report, "printf same\n");
+    let wasmtime = engine(
+        &engines,
+        "wasmtime",
+        &report(Engine::Wasmtime),
+        "printf same\n",
+    );
+    let wasmer = engine(&engines, "wasmer", &report(Engine::Wasmer), "printf same\n");
     let work = work_root(&root, "work");
     let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
     for (engine_kind, program) in [(Engine::Wasmtime, &wasmtime), (Engine::Wasmer, &wasmer)] {
         assert_eq!(
             String::from_utf8_lossy(passed.version(engine_kind)),
-            format!("{} unset null", program.display()),
+            format!(
+                "{} {} unset null",
+                stand_in_version(engine_kind.name()),
+                program.display()
+            ),
             "{engine_kind}: the version query was not started by its absolute path with an empty environment and stdin null"
         );
     }
@@ -2596,4 +2632,293 @@ fn receipt_cap_line_matches_the_argv_the_engine_got() {
         "the receipt's wasmer cap line"
     );
     assert_eq!(passed.memory_cap(Engine::Wasmer), None);
+}
+
+/// Task 038: `run` refuses an engine whose `--version` first line does not
+/// name its pinned version, before any module run: through `run`, each line
+/// below, printed by one engine's stand-in while the other prints its pinned
+/// line, is refused with the pin reason for that engine. No module run
+/// starts, no run folder is made, and after an unpinned `wasmtime` the
+/// `wasmer` stand-in is not asked `--version`.
+#[test]
+fn run_refuses_an_unpinned_engine_version_before_any_module_run() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run038-unpinned");
+    let root = canonical(&tmp);
+    let cases = [
+        ("newer", Engine::Wasmtime, "wasmtime 46.0.0 (x)"),
+        ("longer-patch", Engine::Wasmtime, "wasmtime 45.0.10"),
+        ("no-space", Engine::Wasmtime, "wasmtime-45.0.1"),
+        ("newer", Engine::Wasmer, "wasmer 7.6.0"),
+        ("name-only", Engine::Wasmer, "wasmer"),
+        ("two-spaces", Engine::Wasmer, "wasmer  7.5.0"),
+    ];
+    for (kind, unpinned, line) in cases {
+        let case = format!("{unpinned}-{kind}");
+        let engines = work_root(&root, &format!("engines-{case}"));
+        let mut programs = Vec::new();
+        for engine_kind in ENGINES {
+            programs.push(if engine_kind == unpinned {
+                marked_with(
+                    &engines,
+                    engine_kind.name(),
+                    &format!("printf '%s\\n' '{line}'\n"),
+                    "printf same\n",
+                )
+            } else {
+                marked(&engines, engine_kind.name(), "printf same\n")
+            });
+        }
+        let program = &programs[if unpinned == Engine::Wasmtime { 0 } else { 1 }];
+        let work = work_root(&root, &format!("work-{case}"));
+
+        let refusal = version_refused(run(&input(&signed, &programs[0], &programs[1], &work)));
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "{}: {unpinned} --version printed {line:?}, not the pinned version {unpinned} {}: no module run starts",
+                program.display(),
+                unpinned.pinned_version()
+            ),
+            "{case}"
+        );
+        assert_eq!(&refusal.path, program, "{case}");
+        match refusal.reason {
+            Reason::VersionNotPinned {
+                engine,
+                printed,
+                pinned,
+            } => {
+                assert_eq!(engine, unpinned, "{case}");
+                assert_eq!(printed, line.as_bytes(), "{case}");
+                assert_eq!(pinned, unpinned.pinned_version(), "{case}");
+            }
+            other => panic!("{case}: not the pin reason: {other}"),
+        }
+        for engine_kind in ENGINES {
+            assert!(
+                !started(&engines, engine_kind.name()),
+                "{case}: {engine_kind}'s module run started"
+            );
+        }
+        assert!(names(&work).is_empty(), "{case}: a run folder was made");
+        if unpinned == Engine::Wasmtime {
+            assert!(
+                !queried(&engines, "wasmer"),
+                "{case}: wasmer was asked --version after an unpinned wasmtime"
+            );
+        }
+    }
+}
+
+/// Task 038: a first line whose first two words are the engine's name and its
+/// pinned version passes the pin check whatever follows them, and the receipt
+/// still records the line as printed.
+#[test]
+fn run_accepts_the_pinned_version_with_any_tail() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run038-tail");
+    let root = canonical(&tmp);
+    assert_eq!((WASMTIME_VERSION, WASMER_VERSION), ("45.0.1", "7.5.0"));
+    for (case, wasmtime_line, wasmer_line) in [
+        (
+            "real-lines",
+            "wasmtime 45.0.1 (83166ba31 2026-06-05)",
+            "wasmer 7.5.0",
+        ),
+        (
+            "stand-in-tail",
+            "wasmtime 45.0.1 (stand-in)",
+            "wasmer 7.5.0",
+        ),
+    ] {
+        let engines = work_root(&root, &format!("engines-{case}"));
+        let wasmtime = marked_with(
+            &engines,
+            "wasmtime",
+            &format!("printf '%s\\n' '{wasmtime_line}'\n"),
+            "printf same\n",
+        );
+        let wasmer = marked_with(
+            &engines,
+            "wasmer",
+            &format!("printf '%s\\n' '{wasmer_line}'\n"),
+            "printf same\n",
+        );
+        let work = work_root(&root, &format!("work-{case}"));
+
+        let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
+        assert_eq!(
+            passed.version(Engine::Wasmtime),
+            wasmtime_line.as_bytes(),
+            "{case}"
+        );
+        assert_eq!(
+            passed.version(Engine::Wasmer),
+            wasmer_line.as_bytes(),
+            "{case}"
+        );
+        let receipt = render(&passed);
+        for (key, line) in [
+            ("wasmtime_version", wasmtime_line),
+            ("wasmer_version", wasmer_line),
+        ] {
+            let expected = format!("{key}: \"{line}\"");
+            assert_eq!(
+                receipt_line(&receipt, key),
+                Some(expected.as_str()),
+                "{case}: the receipt does not record the line as printed"
+            );
+        }
+        for engine_kind in ENGINES {
+            assert!(
+                started(&engines, engine_kind.name()),
+                "{case}: {engine_kind} did not run"
+            );
+        }
+    }
+}
+
+/// The first stderr line wasmtime 45.0.1 printed for an unknown `-W` key,
+/// with exit status 2 (LOG, task 038's first probe).
+const REJECTED_CAP_LINE: &str = "error: unknown -W / --wasm option: max-memory-sizeX";
+
+/// Task 038: a capped start the engine rejects is refused with the cap reason,
+/// naming the `-W` argument `run` passed, and the module is never run again
+/// without it: `wasmtime` was started for a module run exactly once, with
+/// `-W`, and `wasmer` never. Any other nonzero exit stays `EngineFailed`.
+#[test]
+fn run_refuses_a_rejected_memory_cap_without_retrying_it() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run038-cap-rejected");
+    let root = canonical(&tmp);
+
+    // A pinned wasmtime that rejects any start whose argv holds -W, as the
+    // probe did, and otherwise prints the digest output. Each module start
+    // is counted in its `.starts` file and its argv appended to `.argv`.
+    let rejecting = format!(
+        "printf 'module\\n' >> \"$0.starts\"\nprintf '%s\\n' \"$@\" >> \"$0.argv\"\n\
+         for arg in \"$@\"; do\n\
+         if [ \"$arg\" = -W ]; then printf '%s\\n' '{REJECTED_CAP_LINE}' >&2; exit 2; fi\n\
+         done\nprintf same\n"
+    );
+    let engines = work_root(&root, "engines");
+    let wasmtime = marked(&engines, "wasmtime", &rejecting);
+    let wasmer = marked(&engines, "wasmer", "printf same\n");
+    let work = work_root(&root, "work");
+
+    let refusal = two_refused(run(&input(&signed, &wasmtime, &wasmer, &work)));
+    let module_runs = starts(&wasmtime, "module");
+    assert_eq!(
+        module_runs, 1,
+        "wasmtime was started for {module_runs} module runs, not once"
+    );
+    let argv_path = PathBuf::from(format!("{}.argv", wasmtime.display()));
+    let argv: Vec<String> = fs::read_to_string(&argv_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", argv_path.display()))
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let passed_cap: Vec<&String> = argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-W")
+        .map(|pair| &pair[1])
+        .collect();
+    assert_eq!(
+        passed_cap.len(),
+        1,
+        "wasmtime's argv {argv:?} has no single -W argument"
+    );
+    let argument = passed_cap[0];
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: wasmtime rejected the memory cap argument -W {argument} (exit status: 2): {REJECTED_CAP_LINE}; the module is not run without its cap",
+            wasmtime.display()
+        )
+    );
+    match refusal {
+        TwoEngineRefusal::Engine(Refusal {
+            path,
+            reason:
+                Reason::CapRejected {
+                    engine,
+                    argument: rejected,
+                    status,
+                    stderr,
+                },
+        }) => {
+            assert_eq!(path, wasmtime);
+            assert_eq!(engine, Engine::Wasmtime);
+            assert_eq!(&rejected, argument);
+            assert_eq!(status.code(), Some(2));
+            assert_eq!(stderr, format!("{REJECTED_CAP_LINE}\n"));
+        }
+        other => panic!("not the cap reason: {other}"),
+    }
+    assert!(
+        !started(&engines, "wasmer"),
+        "wasmer was started after wasmtime rejected its cap"
+    );
+    assert_eq!(names(&work), ["wasmtime"]);
+
+    // Other failures stay EngineFailed: other stderr with the measured
+    // status, the measured line with another status, an `error: ` line that
+    // does not name -W, and the measured failure from wasmer, which is given
+    // no cap argument.
+    let cases = [
+        ("other-stderr", Engine::Wasmtime, "boom: bad module", 2),
+        ("other-status", Engine::Wasmtime, REJECTED_CAP_LINE, 3),
+        (
+            "no-option",
+            Engine::Wasmtime,
+            "error: failed to open wasm module",
+            2,
+        ),
+        ("uncapped", Engine::Wasmer, REJECTED_CAP_LINE, 2),
+    ];
+    for (kind, failing_engine, line, code) in cases {
+        let case = format!("{failing_engine}-{kind}");
+        let engines = work_root(&root, &format!("engines-{case}"));
+        let failing_body = format!("printf '%s\\n' '{line}' >&2\nexit {code}\n");
+        let mut programs = Vec::new();
+        for engine_kind in ENGINES {
+            programs.push(if engine_kind == failing_engine {
+                marked(&engines, engine_kind.name(), &failing_body)
+            } else {
+                marked(&engines, engine_kind.name(), "printf same\n")
+            });
+        }
+        let failing = &programs[if failing_engine == Engine::Wasmtime {
+            0
+        } else {
+            1
+        }];
+        let work = work_root(&root, &format!("work-{case}"));
+        let refusal = two_refused(run(&input(&signed, &programs[0], &programs[1], &work)));
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "{}: {failing_engine} failed (exit status: {code}): {line}",
+                failing.display()
+            ),
+            "{case}"
+        );
+        match refusal {
+            TwoEngineRefusal::Engine(Refusal {
+                reason:
+                    Reason::EngineFailed {
+                        engine,
+                        status,
+                        stderr,
+                    },
+                ..
+            }) => {
+                assert_eq!(engine, failing_engine, "{case}");
+                assert_eq!(status.code(), Some(code), "{case}");
+                assert_eq!(stderr, format!("{line}\n"), "{case}");
+            }
+            other => panic!("{case}: not EngineFailed: {other}"),
+        }
+    }
 }
