@@ -1,7 +1,7 @@
 
 running 1 test
 test did_profile_permits_its_operations_and_refuses_the_rest ... 
-thread 'did_profile_permits_its_operations_and_refuses_the_rest' (929) panicked at tests/confine.rs:134:5:
+thread 'did_profile_permits_its_operations_and_refuses_the_rest' (942) panicked at tests/confine.rs:134:5:
 assertion `left == right` failed: outside-read
 enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
 op=in-memory result=ok reason=no file and no socket
@@ -53,13 +53,13 @@ stack backtrace:
    3: core::panicking::assert_failed
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:394:5
    4: confine::expect
-             at ./workspace/lab/linux-confine/tests/confine.rs:134:5
+             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:134:5
    5: confine::prove
-             at ./workspace/lab/linux-confine/tests/confine.rs:217:5
+             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:217:5
    6: confine::did_profile_permits_its_operations_and_refuses_the_rest
-             at ./workspace/lab/linux-confine/tests/confine.rs:372:5
+             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:372:5
    7: confine::did_profile_permits_its_operations_and_refuses_the_rest::{{closure}}
-             at ./workspace/lab/linux-confine/tests/confine.rs:371:61
+             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:371:61
    8: core::ops::function::FnOnce::call_once
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
    9: core::ops::function::FnOnce::call_once
@@ -72,5 +72,5 @@ failures:
 failures:
     did_profile_permits_its_operations_and_refuses_the_rest
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.54s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.62s
 

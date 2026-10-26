@@ -1,15 +1,39 @@
-# /tmp worktree rerun. Same counts as the /workspace run, or this file would say FAIL.
-# repo=/tmp/lc-wt-296
-# head=0ab7b013fdc4f1d564a8982b4c5b42456f1ca2a0 plus the /tmp bind-mount fix in init.sh
-# helper_dir=/tmp/lc-wt-296/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+# /tmp worktree rerun after C9 r2 host-checker hardening.
+# repo=/tmp/lc-wt-c9-r2
+# head=e4003ae0d552030dad13a57834419b44ecf793fe
+# helper_dir=/tmp/lc-wt-c9-r2/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
 # worktree_under_tmp=1
 # tmp_mount=tmpfs+baked
-# nonce=2e9a0cb2cee18ab47a66a065ee80a14f
+# guest_nics=dummy0 eth0 lo
+# nonce_file_mode=400
+# env_has_nonce=0
+# evidence_nonce_during_run=0
+# tester_nonce_readable=0
+# qemu_timeout_sec=600
+# qemu_exit=0
+# nonce=eacadb6e483a5b755c3fa8fa2394b96c
 # host_exit=0
+# checker_unit_tests=28 passed
+# fail_closed_exit=1 (required)
 
-# GENERATED from that guest run. Not a hand write-up.
+# Live rust last lines:
+# elf 6 passed; 0 failed; 0 ignored in 0.61s
+# aarch64 2 passed; 0 failed; 1 ignored in 0.05s
+# confine 25 passed; 0 failed; 0 ignored in 3.38s
+# providers 4 passed; 0 failed; 0 ignored in 13.91s
+
+# GENERATED RESULTS from that guest run follow.
+
+# GENERATED from this guest run. Not a hand write-up.
+# nonce=eacadb6e483a5b755c3fa8fa2394b96c
+# source=/tmp/lc-wt-c9-r2/lab/linux-confine/evidence/aarch64-qemu-system-6.18
+# mode=full
 
 C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+
+Never native aarch64. Never Jetson.
+
+## Standing suites (live rust output)
 
 | suite | status | exit | passed | failed | ignored | expected passed |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -17,6 +41,8 @@ C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CP
 | aarch64 | PASS | 0 | 2 | 0 | 1 | 2 |
 | confine | PASS | 0 | 25 | 0 | 0 | 25 |
 | providers | PASS | 0 | 4 | 0 | 0 | 4 |
+
+## In-guest plants (live status files)
 
 | id | result |
 | --- | --- |
@@ -32,5 +58,22 @@ C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CP
 | F-LC-WRONG-ARCH-CC | NOT_RUN |
 | F-LC-QEMU-USER-LANDLOCK | NOT_RUN |
 
+## Guest markers
+
+nonce=eacadb6e483a5b755c3fa8fa2394b96c
 guest_exit=0
-Host check PASSED
+qemu_exit=0
+
+Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
+make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
+socketpair(AF_UNIX) stays the named C9 departure.
+
+This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
+It is not a Jetson and not any other aarch64 board.
+
+## Host check PASSED
+
+Every standing suite matched its expected counts.
+Every suite had an LC_MARK serial line that matched the 9p files.
+Every official in-guest plant was CAUGHT.
+qemu exited 0 without a timeout.

@@ -1,6 +1,6 @@
 # GENERATED from this guest run. Not a hand write-up.
-# nonce=4d90322703ac1e4d605d4e074b67cc73
-# source=/workspace/lab/linux-confine/evidence/aarch64-qemu-system-6.18
+# nonce=eacadb6e483a5b755c3fa8fa2394b96c
+# source=/tmp/lc-wt-c9-r2/lab/linux-confine/evidence/aarch64-qemu-system-6.18
 # mode=full
 
 C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
@@ -34,8 +34,9 @@ Never native aarch64. Never Jetson.
 
 ## Guest markers
 
-nonce=4d90322703ac1e4d605d4e074b67cc73
+nonce=eacadb6e483a5b755c3fa8fa2394b96c
 guest_exit=0
+qemu_exit=0
 
 Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
 make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
@@ -47,4 +48,6 @@ It is not a Jetson and not any other aarch64 board.
 ## Host check PASSED
 
 Every standing suite matched its expected counts.
+Every suite had an LC_MARK serial line that matched the 9p files.
 Every official in-guest plant was CAUGHT.
+qemu exited 0 without a timeout.

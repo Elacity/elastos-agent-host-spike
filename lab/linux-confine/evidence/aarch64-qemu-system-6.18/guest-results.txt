@@ -1,4 +1,3 @@
-nonce=4d90322703ac1e4d605d4e074b67cc73
 suite=elf exit=0 passed=6 failed=0 ignored=0 status=PASS
 suite=aarch64 exit=0 passed=2 failed=0 ignored=1 status=PASS
 suite=confine exit=0 passed=25 failed=0 ignored=0 status=PASS
