@@ -713,3 +713,203 @@ The model service is a separate Runtime path. `elastos/crates/elastos-server/src
     ];
 
 "The caller opens the model URL" is the `direct_url` bearer path, and that path is request construction. "The Runtime grants the call and carries it" is the hosted-effect URL, the Runtime socket, the grant check and `forward`. The Runtime hosted transport is the production path. A4 stays open.
+
+## 5. Budgets
+
+This section is design input for A7. A7 stays open.
+
+Identity is who the agent runs as. Admission is the Runtime's permission to execute. Allowance is the usage account. Identity, admission, and allowance stay separate decisions.
+
+The guest keeps no usage total. `examples/agent-host/src/lib.rs::step_payload` writes the step budget fields as zeros. `examples/agent-host/src/lib.rs:471-476` is that write. The comment at the start of the range says "Room for OMP idea 2, empty until it is built". The four zero writes are `out.push(0)`, the slice `[0; 1 + 4 + 8]`, `&0_u32.to_le_bytes()`, and `out.push(0)`. Line 474 is the slice write. Line 476 contains `out.push(0)`.
+
+    fn step_payload(step: &Step) -> Option<Vec<u8>> {
+        let mut out = step.id.to_le_bytes().to_vec();
+        out.push(state_tag(step.state));
+        out.push(kind_tag(step.kind));
+        put_str(&mut out, &step.resource)?;
+        out.extend_from_slice(&step.effect_id.to_le_bytes());
+        out.push(u8::from(step.has_result));
+        put_str(&mut out, &step.old)?;
+        put_str(&mut out, &step.new)?;
+        out.extend_from_slice(&u32::try_from(step.argv.len()).ok()?.to_le_bytes());
+        for arg in &step.argv {
+            put_str(&mut out, arg)?;
+        }
+        put_opt(&mut out, step.parent_id);
+        put_str(&mut out, &step.seat)?;
+        put_opt(&mut out, step.seen_version);
+        put_str(&mut out, &step.inbox)?;
+        // Room for OMP idea 2, empty until it is built: depth, budget (flag,
+        // requests, seconds), requests_used, stop.
+        out.push(0);
+        out.extend_from_slice(&[0; 1 + 4 + 8]);
+        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.push(0);
+        Some(out)
+    }
+
+`examples/agent-host/src/lib.rs::encode_journal` writes the header fields after the cited comment as zeros. `examples/agent-host/src/lib.rs:532` contains `task_budget (flag, requests, seconds)`. The comment says "Room for OMP idea 2, empty until it is built". After that comment the body writes `out.extend_from_slice(&[0; 1 + 8])`, `out.extend_from_slice(&[0; 1 + 4 + 8])`, and `out.push(0)`.
+
+        // Room for OMP idea 2, empty until it is built: cancelled_from (flag and
+        // step id), task_budget (flag, requests, seconds), depth.
+        out.extend_from_slice(&[0; 1 + 8]);
+        out.extend_from_slice(&[0; 1 + 4 + 8]);
+        out.push(0);
+
+`examples/agent-host/src/lib.rs::decode_step` returns `Err("record")` when depth, any budget byte, `requests_used`, or stop is non-zero. `examples/agent-host/src/lib.rs:754` contains `requests_used != 0`.
+
+        // OMP idea 2's fields must be empty until it is built.
+        let depth = reader.byte().map_err(fail)?;
+        let budget = reader.take(1 + 4 + 8).map_err(fail)?;
+        let requests_used = reader.u32().map_err(fail)?;
+        let stop = reader.byte().map_err(fail)?;
+        if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {
+            return Err("record");
+        }
+
+Journal admission is room for run history. On a new run, `capsules/model-provider/src/journal.rs::store_run` refuses when census entries are at `MAX_NEW_JOURNAL_ENTRIES` or charged bytes would pass `MAX_JOURNAL_GROWTH_BYTES`. `capsules/model-provider/src/journal.rs:391-397` holds both comparisons, `usage.entries >= MAX_NEW_JOURNAL_ENTRIES` and `total > MAX_JOURNAL_GROWTH_BYTES`. The cited comment says this check precedes the durable Prepared record and dispatch. The refusal is `capsules/model-provider/src/journal.rs::journal_budget_fault`. `capsules/model-provider/src/journal.rs:921` contains `Model run history is full`. This ceiling is journal room. The else arm is the new run.
+
+            } else {
+                let usage = self.visit_census(&census, |_, _, _| Ok(()))?;
+                if usage.entries >= MAX_NEW_JOURNAL_ENTRIES
+                    || usage
+                        .charged_bytes
+                        .checked_add(charge)
+                        .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)
+                {
+                    // This check precedes the durable Prepared record and dispatch.
+                    return Err(journal_budget_fault());
+                }
+            }
+
+    fn journal_budget_fault() -> ProviderFault {
+        ProviderFault::policy_limit(
+            "Model run history is full. Retained outcomes expire after their history window; then try again.",
+            "model run journal admission or growth limit exceeded",
+        )
+    }
+
+When a run for the request is already stored and the fingerprint matches, `capsules/model-provider/src/state.rs::handle_runs_create` returns that run's view at the cited return. `capsules/model-provider/src/state.rs:530` is `return serialize_run_view(&existing);`. The fingerprint check above that return compares the stored run with the request fingerprint. This return is before `self.adapters.dispatch`.
+
+            // A retained request owns its original result, including legacy IDs and
+            // results whose offer has since changed or retired.
+            if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {
+                if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint
+                {
+                    return Err(ProviderFault::invalid_request(
+                        "request_id conflicts with an existing model run",
+                    ));
+                }
+                self.project_archived_run(&mut existing)?;
+                if !existing.status.is_terminal() {
+                    let current_offer = self.current_execution_offer_for_run(&existing)?;
+                    self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;
+                }
+                return serialize_run_view(&existing);
+            }
+
+For a new run, the same function stores the run, then compares `active_run_count` with `concurrency_limit`, then calls `dispatch`. Those sites, in order, are `self.journal.store_run`, `capsules/model-provider/src/state.rs:609`, and `self.adapters.dispatch`. When the count is above the limit, the body returns the busy view before `dispatch`.
+
+            self.journal.store_run(&run)?;
+
+            let active_runs = self.journal.active_run_count(&offer.id)?;
+            if active_runs > offer.policy.concurrency_limit as usize {
+                transition_error(
+                    &offer,
+                    &mut run,
+                    RunError {
+                        class: ErrorClass::RateLimited,
+                        code: "model_busy".to_string(),
+                        message: "Model is busy.".to_string(),
+                    },
+                )?;
+                self.journal.store_run(&run)?;
+                return serialize_run_view(&run);
+            }
+
+            match self.adapters.dispatch(
+                &offer.adapter,
+                &offer,
+                &request.runtime_binding,
+                &request.input,
+                run.deadline_ms,
+            ) {
+
+`capsules/model-provider/src/journal.rs::active_run_count` adds one when the offer matches and `is_terminal` is false. The condition is `run.offer.id == offer_id && !run.status.is_terminal()`.
+
+        pub fn active_run_count(&self, offer_id: &str) -> Result<usize, ProviderFault> {
+            let mut total = 0usize;
+            self.visit_runs(|_, run, _| {
+                if run.offer.id == offer_id && !run.status.is_terminal() {
+                    total = total.saturating_add(1);
+                }
+                Ok(())
+            })?;
+            Ok(total)
+        }
+
+`capsules/model-provider/src/contract.rs::is_terminal` is true for Completed, Failed, Cancelled, and SettlementUnknown. `capsules/model-provider/src/contract.rs:134` is the match line. A cancelled run and an uncertain outcome are terminal, so they leave that count.
+
+        pub fn is_terminal(&self) -> bool {
+            matches!(
+                self,
+                Self::Completed | Self::Failed | Self::Cancelled | Self::SettlementUnknown
+            )
+        }
+
+`elastos/crates/elastos-server/src/api/gateway_model_service.rs::reserve_run_slot` holds one pending key. The doc says the check and the hold happen under the same lock and land in the same index write. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:355` is the pending insert. The inserted value is the time.
+
+    /// Hold one slot for a create, or recognise that the request already has a
+    /// record. The check and the hold happen under the same lock and land in the
+    /// same index write, so two creates cannot both take the last slot.
+    fn reserve_run_slot(
+        data_dir: &Path,
+        now: u64,
+        key: &str,
+        grant_id: &str,
+        remote_principal_id: &str,
+        capsule_id: &str,
+        request_id: &str,
+    ) -> anyhow::Result<RunSlot> {
+        update_run_index(data_dir, now, |index| {
+            if let Some((run_id, record)) = index.runs.iter().find(|(_, record)| {
+                record.grant_id == grant_id
+                    && record.remote_principal_id == remote_principal_id
+                    && record_capsule_id(record) == capsule_id
+                    && record.request_id == request_id
+            }) {
+                return Ok(RunSlot::Existing {
+                    run_id: run_id.clone(),
+                    record: Box::new(record.clone()),
+                });
+            }
+            if index.pending.contains_key(key) {
+                anyhow::bail!("model run reservation is already held");
+            }
+            anyhow::ensure!(
+                index.runs.len() + index.pending.len() < MODEL_RUN_INDEX_MAX,
+                "model run index is full"
+            );
+            index.pending.insert(key.to_string(), now);
+            Ok(RunSlot::Reserved)
+        })
+
+`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446` says a create holds its record slot before any model work starts, a retry of an already recorded request is answered from that record, and a full index refuses there.
+
+        // A create holds its record slot before any model work starts. A retry of
+        // an already recorded request is answered from that record before another
+        // create. A full index refuses here.
+
+A reported figure is not a hold, and the required account stays open. `capsules/model-provider/src/journal.rs::validate_backend_usage` returns an error when input tokens, output tokens, and total tokens are all absent. The function body has no ceiling and no subtraction.
+
+    fn validate_backend_usage(usage: &BackendTokenUsage) -> anyhow::Result<()> {
+        if usage.input_tokens.is_none() && usage.output_tokens.is_none() && usage.total_tokens.is_none()
+        {
+            anyhow::bail!("reported backend usage is empty");
+        }
+        Ok(())
+    }
+
+The account A7 asks for is this account. Admission sets the ceiling. The Runtime reserves a bounded usage amount before each dispatch. That account covers concurrent calls, a retry, a cancellation, and an uncertain outcome. A reported figure does not lower the hold. The guest writes zeros. The journal check is room for history. The concurrency check counts non-terminal runs. The slot stores a time under one lock. The usage function refuses an empty report. A7 stays open.
+
+This section cites no lab/grant-binding test.
