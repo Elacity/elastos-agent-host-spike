@@ -1,0 +1,4 @@
+cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a  /tmp/pr343-r3/elastos/crates/elastos-runtime/src/capability/manager.rs
+58df3cf14758182746997359542ef80e34ac661dac9f2b82824e5afa804c060f  /tmp/pr343-r3/lab/a6-a12-evidence-fix/src/a12.rs
+18806ae0a02296a4b7cb049e4fca757418a265365af8d98de058429b55933db0  /tmp/pr343-r3/lab/a6-a12-evidence-fix/src/a6.rs
+2d29be13d1be89adf532649aee641606e514458781abce687e45cbc1e8f067f9  /tmp/pr343-r3/lab/a6-a12-evidence-fix/src/lib.rs
