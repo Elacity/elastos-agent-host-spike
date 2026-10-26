@@ -109,6 +109,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA11a | Read the custom-section size's last byte only at depth 1 | `component_custom_section_carrying_code_is_refused` |
 | F-CWA13a | Drop build metadata only from the declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA13b | Drop the pre-release only from the declared interface | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA14a | Match the module and name against separate declared entries | `declared_import_passes_and_only_that_one` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -292,3 +293,19 @@ locked-test checks passed before the mutations and after the sweep, with all
 20 tests passing offline under `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
 The implementation, API document, audit manifest, workspace manifest and
 workspace lockfile stayed unchanged.
+
+The cwa-014 in-tree run first applied F-CWA14a to the base; all 20 tests
+passed. With the crossed case added, `declared_import_passes_and_only_that_one`
+built and failed at `assert_undeclared`'s `expect_err`, after the earlier cases
+and the two-pair pass control passed. For the crossed import, `audit` returned
+`Ok([DeclaredImport { module: "wasi_snapshot_preview1", name: "fd_write" }])`.
+F-CWA1b built and failed the same test at the existing equal-count,
+different-name case, returning
+`Ok([DeclaredImport { module: "env", name: "second" }])` with only `env.first`
+declared. Each temporary edit restored `src/lib.rs` byte-identical, checked
+by SHA-256. All 47 edit anchors in the 42 entries occurred exactly once.
+The clean format and locked-test checks passed before the first mutation
+and after both catches, with all 20 tests passing offline under
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation, API document,
+other tests, audit manifest, workspace manifest and workspace lockfile stayed
+unchanged, and `audit/Cargo.lock` stayed absent.

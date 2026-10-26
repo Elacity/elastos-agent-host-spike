@@ -689,6 +689,22 @@
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA14a",
+      "title": "Match the module and name against separate declared entries",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !(declared.iter().any(|entry| entry.module == import.module) && declared.iter().any(|entry| entry.name == import.name)) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
     }
   ]
 }
