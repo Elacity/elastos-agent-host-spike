@@ -708,6 +708,133 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
     provider.shutdown();
 }
 
+/// The wallet account edits answer under the profile and persist under
+/// `STORAGE_ROOT`.
+///
+/// One provider `init`s the root, creates a managed account, then renames it,
+/// sets it as the default for `publish_envelope`, reads that default back and
+/// revokes the account; each answer passes through `ok_data`. A second
+/// provider on the same root `init`s it and reloads the new label and the
+/// revoked marker from `list_accounts` with `include_revoked` and from
+/// `wallet-state.json` under the wallet directory.
+///
+/// Falsifier: WP18 removes the `STORAGE_ROOT` subpath grant. One grant covers
+/// every `storage` call, so no profile edit can fail one of these calls and
+/// leave `init` working; WP18 is the only removal this side can use, and this
+/// test fails on its first call.
+#[test]
+fn account_edits_persist_under_storage_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    let mut provider = ConfinedProvider::start(&root);
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Editable".to_string()),
+            create_new: false,
+        }),
+    );
+    let account_id = data["account"]["account_id"]
+        .as_str()
+        .expect("managed account must name its id")
+        .to_string();
+
+    let renamed = "Renamed";
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::RenameAccount {
+        account_id: account_id.clone(),
+        label: renamed.to_string(),
+    }));
+    assert_eq!(
+        data["account"]["label"], renamed,
+        "rename_account must answer the new label"
+    );
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::SetDefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+            account_id: account_id.clone(),
+        }),
+    );
+    assert_eq!(
+        data["default_account"]["account_id"], account_id,
+        "set_default_account must answer the account just set"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::DefaultAccount {
+        chain_namespace: "eip155:20".to_string(),
+        intent: "publish_envelope".to_string(),
+    }));
+    assert_eq!(
+        data["default_account"]["account_id"], account_id,
+        "default_account must answer the account just set"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::RevokeAccount {
+        account_id: account_id.clone(),
+    }));
+    assert!(
+        data["account"]["revoked_at"].is_number(),
+        "revoke_account must answer the revoked account"
+    );
+
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined re-Init must succeed: {init}"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListAccounts {
+        include_revoked: true,
+    }));
+    let listed = data["accounts"]
+        .as_array()
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account["account_id"] == account_id.as_str())
+        })
+        .expect("the reloaded listing must hold the created account");
+    assert_eq!(
+        listed["label"], renamed,
+        "the renamed label must reload from the store"
+    );
+    assert!(
+        listed["revoked_at"].is_number(),
+        "the revoked marker must reload from the store"
+    );
+
+    let store = read_store(&root);
+    let stored = store["accounts"]
+        .as_array()
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account["account_id"] == account_id.as_str())
+        })
+        .expect("the store under the wallet directory must hold the account");
+    assert_eq!(
+        stored["label"], renamed,
+        "the store under the wallet directory must hold the new label"
+    );
+    assert!(
+        stored["revoked_at"].is_number(),
+        "the store under the wallet directory must hold the revoked marker"
+    );
+
+    provider.shutdown();
+}
+
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
@@ -927,18 +1054,23 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// directory is precreated empty, so the refusal is neither the `mkdir` of
 /// `<STORAGE_PARENT>/Fresh` nor a read of a planted key. `init` for that
 /// sibling base refuses with `storage_error`, and `init` resets the root
-/// first, so the provider keeps no usable root. The account call that follows
-/// therefore answers through `data.result` with `status` `error`, `code`
+/// first, so the provider keeps no usable root. The account calls that follow
+/// therefore answer through `data.result` with `status` `error`, `code`
 /// `not_initialized` and a reason, and the sibling's wallet directory stays
-/// empty. `list_accounts` is sent only to show that the refused
-/// `create_managed_account` created nothing. After `init` for the granted root
-/// answers ok, the same call answers ok, the listing holds that account, and
-/// the account is in the store under the root.
+/// empty. The array sends `rename_account`, `revoke_account`,
+/// `set_default_account` and `default_account` before the
+/// `create_managed_account` and `list_accounts` calls that 072 named, and the
+/// array runs before the `storage_error` check, so a grant on the parent fails
+/// this test on one of those calls rather than only on `init`. `list_accounts`
+/// is sent only to show that the refused `create_managed_account` created
+/// nothing. After `init` for the granted root answers ok, the same call answers
+/// ok, the listing holds that account, and the account is in the store under
+/// the root.
 ///
 /// Falsifiers: append a read and write grant on `STORAGE_PARENT` (WP88); the
-/// sibling `init` and the account call then succeed, so this test fails on its
-/// refusal. Remove the storage-root grant (WP18); the granted `init` fails, so
-/// this test fails on its ok.
+/// sibling `init` then succeeds, so `rename_account` answers `not_found` and
+/// this test fails on `not_initialized`. Remove the storage-root grant (WP18);
+/// the granted `init` fails, so this test fails on its ok.
 #[test]
 fn account_operations_beneath_storage_parent_are_refused() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -957,16 +1089,26 @@ fn account_operations_beneath_storage_parent_are_refused() {
     let mut provider = ConfinedProvider::start(&root);
 
     let denied = provider.init(&sibling);
-    assert_storage_error(&denied);
-    let message = denied["message"]
-        .as_str()
-        .expect("storage refusal must carry a reason");
-    assert!(
-        message.starts_with("failed to inspect wallet storage directory"),
-        "the refused step must be the inspect beneath STORAGE_PARENT: {message}"
-    );
 
+    // The four account edits this task names come first, so a grant on
+    // `STORAGE_PARENT` fails the first call of the loop.
     let operations = [
+        WalletProviderOperationV2::RenameAccount {
+            account_id: "wallet:eip155:20:0xabc".to_string(),
+            label: "Outside".to_string(),
+        },
+        WalletProviderOperationV2::RevokeAccount {
+            account_id: "wallet:eip155:20:0xabc".to_string(),
+        },
+        WalletProviderOperationV2::SetDefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+            account_id: "wallet:eip155:20:0xabc".to_string(),
+        },
+        WalletProviderOperationV2::DefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+        },
         WalletProviderOperationV2::CreateManagedAccount {
             chain_namespace: "eip155:20".to_string(),
             label: Some("Outside".to_string()),
@@ -1003,6 +1145,16 @@ fn account_operations_beneath_storage_parent_are_refused() {
             "the result error must carry a reason: {answer}"
         );
     }
+
+    // The refused `init` is why every call above answered `not_initialized`.
+    assert_storage_error(&denied);
+    let message = denied["message"]
+        .as_str()
+        .expect("storage refusal must carry a reason");
+    assert!(
+        message.starts_with("failed to inspect wallet storage directory"),
+        "the refused step must be the inspect beneath STORAGE_PARENT: {message}"
+    );
 
     assert!(
         !sibling_wallet.join(WALLET_KEY_FILE).exists(),
