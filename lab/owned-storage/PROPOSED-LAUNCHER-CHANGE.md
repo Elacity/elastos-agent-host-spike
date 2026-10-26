@@ -5,6 +5,9 @@ The real-Runtime rows in this crate are **BLOCKED**. No component was started.
 storage root. Applying this change belongs in the Runtime repo. This file
 does not apply it.
 
+Lab rows and Runtime rows are graded separately. Lab Store refusals do not
+make a Runtime row Ready.
+
 ## What the launcher does now
 
 `elastos run` builds the runtime here, three times, with one literal:
@@ -18,6 +21,10 @@ The sites in `elastos/crates/elastos-server/src/run_cmd.rs` are:
 - the `Data` capsule arm in `run_capsule`
 - the fallback arm in `run_capsule`
 - `run_component_via_operator_runtime`, which is the component path named by AC-006-STORAGE
+
+A fourth site is `elastos/crates/elastos-server/src/share_cmd.rs:183`. The
+Runtime notes count four `/tmp/elastos/storage` constructors. RA-3 as written
+replaces the three `run_cmd.rs` calls and does not touch `share_cmd.rs`.
 
 `create_runtime` is `pub(crate)` in `elastos/crates/elastos-server/src/main.rs`.
 A lab crate cannot call it. `elastos run` has no storage flag and no environment
@@ -76,7 +83,14 @@ No new flag is required. This is the same expression `capsule_cmd.rs` uses.
 That edit stops `elastos run` from creating `/tmp/elastos/storage`. It does
 not by itself make agent A's read of B's file return a reason: object reads
 still use the Home data directory, not the `LocalFSProvider` passed to
-`create_runtime`.
+`create_runtime`. It also leaves the fourth site in `share_cmd.rs`.
+
+## NEEDS CONFINEMENT/RUNTIME
+
+B's process can read, write, list and rename A's files directly on the host.
+Both run as the same uid. Sibling directories are mode 0755. The Store
+refuses those operations through its API. It does not confine the process.
+That hole needs OS confinement (C3/C9 per-instance roots) or the Runtime.
 
 ## What a later proof needs
 
@@ -84,4 +98,5 @@ After the three replacements, a real proof is two component processes. Each
 process has its own `XDG_DATA_HOME`. Each runs through `elastos run` (or
 `elastos capsule` once an operator is up). Agent A asks the bridge to read
 B's object. The captured bridge response carries a non-empty reason, and B's
-bytes are unchanged. Until that run exists, the rows stay BLOCKED.
+bytes are unchanged. Until that run exists, the Runtime rows stay BLOCKED.
+The host same-uid walk stays NEEDS CONFINEMENT/RUNTIME.

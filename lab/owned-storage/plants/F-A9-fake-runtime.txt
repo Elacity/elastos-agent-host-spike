@@ -2,11 +2,11 @@ id: F-A9-fake-runtime
 file: src/launch.rs
 test: launch::tests::real_runtime_rows_match_the_launcher
 --- old
-fn real_runtime_row_state() -> RowState {
+fn real_runtime_read_row_state() -> RowState {
     RowState::Blocked
 }
 --- new
-fn real_runtime_row_state() -> RowState {
+fn real_runtime_read_row_state() -> RowState {
     RowState::Ready
 }
 --- end

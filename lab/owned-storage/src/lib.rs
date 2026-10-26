@@ -9,20 +9,26 @@
 //! This crate is the lab stand-in that gives each agent instance its own
 //! base directory.
 //!
-//! Grant binding stays in `lab/grant-binding` and the cx-agent-conformance
-//! lane. Their `Decision` already carries `identity`, `session`, and
-//! `owned_root`. This store does not register instances or read a forged
-//! handle. It keeps the root that binding named and refuses every path that
-//! leaves it.
+//! `owned_root` uses the A5 shape `UsersAI/<agent>/<rest>`. This store does
+//! not call `lab/grant-binding`; the grant is unbound. Grant binding stays
+//! in that crate and the cx-agent-conformance lane. This store keeps the
+//! host directory it created and refuses every path that leaves it.
 //!
 //! Lab stand-in, not the Runtime. `elastos run` still has no per-instance
 //! root. The real-Runtime rows stay BLOCKED. The exact change is in
 //! `PROPOSED-LAUNCHER-CHANGE.md`.
 
+use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Linux `O_NOFOLLOW`. Open the last component only; do not follow a link.
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400000;
 
 pub mod launch;
 
@@ -34,8 +40,9 @@ pub const SHARED_TEMP: &str = "/tmp/elastos/storage";
 
 /// The grant names this root. The host path stays on the store.
 ///
-/// `identity`, `session`, and `owned_root` match `grant_binding::Decision`.
-/// `instance` matches the instance that decision is bound to.
+/// `owned_root` is the A5 resource `UsersAI/<agent>/<rest>`. This crate does
+/// not call `lab/grant-binding` and does not treat these fields as a
+/// `Decision`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     identity: String,
@@ -77,6 +84,8 @@ pub enum Refuse {
     Traversal,
     /// A symlink resolves outside the caller's root.
     Symlink,
+    /// The file is hard-linked, or its inode is not in the owner's tree.
+    HardLink,
     /// The path leaves the caller's root some other way.
     OutsideRoot,
     /// The name is empty, absolute, or not a plain segment.
@@ -98,6 +107,7 @@ impl std::fmt::Display for Refuse {
             Refuse::CrossAgent => "cross-agent storage is refused",
             Refuse::Traversal => "path traversal is refused",
             Refuse::Symlink => "symlink leaves the owned root",
+            Refuse::HardLink => "hard-linked inode is refused",
             Refuse::OutsideRoot => "path leaves the owned root",
             Refuse::HostPath => "storage name is a host path",
             Refuse::Removed => "storage was removed",
@@ -186,7 +196,7 @@ impl Store {
         if !contained(&yard, &canon) {
             return Err(Refuse::OutsideRoot);
         }
-        let owned_root = format!("UsersAI/{identity}/{session}/{instance}");
+        let owned_root = a5_owned_root(identity, &format!("{session}/{instance}"))?;
         self.agents.push(OpenAgent {
             identity: identity.to_owned(),
             session: session.to_owned(),
@@ -211,9 +221,22 @@ impl Store {
     /// Reads one file inside the grant's root.
     pub fn read(&self, grant: &Grant, path: &str) -> Result<Vec<u8>, Refuse> {
         let full = self.resolve(grant, path)?;
+        let root = self.live_root_for(grant)?;
         match fs::symlink_metadata(&full) {
             Ok(meta) if meta.file_type().is_symlink() => Err(Refuse::Symlink),
-            Ok(meta) if meta.is_file() => fs::read(&full).map_err(|_| Refuse::OutsideRoot),
+            Ok(meta) if meta.is_file() => {
+                refuse_hard_link(&meta)?;
+                inode_in_owner_tree(root, &full)?;
+                let confirmed = confirm_resolved(root, &full)?;
+                refuse_foreign_file(root, &confirmed)?;
+                let mut file = open_nofollow(&confirmed, false)?;
+                confirm_resolved(root, &confirmed)?;
+                refuse_foreign_file(root, &confirmed)?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|_| Refuse::OutsideRoot)?;
+                Ok(bytes)
+            }
             Ok(_) => Err(Refuse::OutsideRoot),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(Refuse::NotFound),
             Err(_) => Err(Refuse::OutsideRoot),
@@ -223,6 +246,7 @@ impl Store {
     /// Writes one file inside the grant's root.
     pub fn write(&self, grant: &Grant, path: &str, bytes: &[u8]) -> Result<(), Refuse> {
         let full = self.resolve(grant, path)?;
+        let root = self.live_root_for(grant)?;
         if let Ok(meta) = fs::symlink_metadata(&full) {
             if meta.file_type().is_symlink() {
                 return Err(Refuse::Symlink);
@@ -230,17 +254,80 @@ impl Store {
             if !meta.is_file() {
                 return Err(Refuse::OutsideRoot);
             }
+            refuse_foreign_file(root, &full)?;
         }
         if let Some(parent) = full.parent() {
-            let root = &self.agent(grant)?.path;
             if !contained(root, parent) && parent != root {
                 return Err(Refuse::OutsideRoot);
             }
             if parent != root {
                 fs::create_dir_all(parent).map_err(|_| Refuse::OutsideRoot)?;
             }
+            confirm_resolved(root, parent)?;
         }
-        fs::write(&full, bytes).map_err(|_| Refuse::OutsideRoot)
+        confirm_resolved(root, &full)?;
+        let mut file = open_nofollow(&full, true)?;
+        confirm_resolved(root, &full)?;
+        refuse_foreign_file(root, &full)?;
+        file.write_all(bytes).map_err(|_| Refuse::OutsideRoot)
+    }
+
+    /// Lists names inside a directory in the grant's root.
+    ///
+    /// An empty path lists the root. A path into another agent is
+    /// [`Refuse::CrossAgent`]. The Store does not confine the host process.
+    pub fn list(&self, grant: &Grant, path: &str) -> Result<Vec<String>, Refuse> {
+        let root = self.live_root_for(grant)?.to_path_buf();
+        let dir = if path.is_empty() {
+            root.clone()
+        } else {
+            self.resolve(grant, path)?
+        };
+        let confirmed = confirm_resolved(&root, &dir)?;
+        let meta = match fs::symlink_metadata(&confirmed) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Refuse::NotFound);
+            }
+            Err(_) => return Err(Refuse::OutsideRoot),
+        };
+        if meta.file_type().is_symlink() {
+            return Err(Refuse::Symlink);
+        }
+        if !meta.is_dir() {
+            return Err(Refuse::OutsideRoot);
+        }
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&confirmed).map_err(|_| Refuse::OutsideRoot)? {
+            let entry = entry.map_err(|_| Refuse::OutsideRoot)?;
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Renames one name to another inside the grant's root.
+    pub fn rename(&self, grant: &Grant, from: &str, to: &str) -> Result<(), Refuse> {
+        let root = self.live_root_for(grant)?.to_path_buf();
+        let src = confirm_resolved(&root, &self.resolve(grant, from)?)?;
+        let dst = self.resolve(grant, to)?;
+        refuse_foreign_file(&root, &src)?;
+        if let Some(parent) = dst.parent() {
+            if parent != root.as_path() && !contained(&root, parent) {
+                return Err(Refuse::OutsideRoot);
+            }
+            if parent != root.as_path() {
+                fs::create_dir_all(parent).map_err(|_| Refuse::OutsideRoot)?;
+            }
+            confirm_resolved(&root, parent)?;
+        }
+        confirm_resolved(&root, &dst)?;
+        if dst.exists() {
+            refuse_foreign_file(&root, &dst)?;
+        }
+        fs::rename(&src, &dst).map_err(|_| Refuse::OutsideRoot)?;
+        assert_root_is_real_dir(&root)?;
+        Ok(())
     }
 
     /// Removes the yard. A later read or write is refused.
@@ -284,8 +371,14 @@ impl Store {
             .ok_or(Refuse::UnknownGrant)
     }
 
+    fn live_root_for(&self, grant: &Grant) -> Result<&Path, Refuse> {
+        let agent = self.agent(grant)?;
+        assert_root_is_real_dir(&agent.path)?;
+        Ok(&agent.path)
+    }
+
     fn resolve(&self, grant: &Grant, path: &str) -> Result<PathBuf, Refuse> {
-        let root = self.agent(grant)?.path.clone();
+        let root = self.live_root_for(grant)?.to_path_buf();
         if path.is_empty() || path.contains('\0') || path.contains('\\') {
             return Err(Refuse::HostPath);
         }
@@ -329,7 +422,7 @@ impl Store {
             return Err(Refuse::SharedTemp);
         }
         if contained(root, &check) {
-            return Ok(check);
+            return confirm_resolved(root, &check);
         }
         if self.agents.iter().any(|agent| {
             agent.path != root && (check == agent.path || contained(&agent.path, &check))
@@ -379,7 +472,7 @@ impl Store {
         if !contained(root, &acc) {
             return Err(Refuse::OutsideRoot);
         }
-        Ok(acc)
+        confirm_resolved(root, &acc)
     }
 }
 
@@ -479,6 +572,137 @@ fn resolve_link(root: &Path, link: &Path) -> Result<PathBuf, Refuse> {
     } else {
         Err(Refuse::Symlink)
     }
+}
+
+fn a5_owned_root(agent: &str, rest: &str) -> Result<String, Refuse> {
+    plain_segment(agent)?;
+    let name = format!("UsersAI/{agent}/{rest}");
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
+        return Err(Refuse::HostPath);
+    }
+    for part in &parts[2..] {
+        plain_segment(part)?;
+    }
+    Ok(name)
+}
+
+fn refuse_swapped_root() -> bool {
+    true
+}
+
+fn assert_root_is_real_dir(root: &Path) -> Result<(), Refuse> {
+    if !refuse_swapped_root() {
+        return Ok(());
+    }
+    let meta = fs::symlink_metadata(root).map_err(|_| Refuse::Symlink)?;
+    if meta.file_type().is_symlink() {
+        return Err(Refuse::Symlink);
+    }
+    if !meta.is_dir() {
+        return Err(Refuse::OutsideRoot);
+    }
+    let canon = root.canonicalize().map_err(|_| Refuse::Symlink)?;
+    if canon != *root {
+        return Err(Refuse::Symlink);
+    }
+    Ok(())
+}
+
+fn confirm_resolved(root: &Path, full: &Path) -> Result<PathBuf, Refuse> {
+    assert_root_is_real_dir(root)?;
+    if !full.exists() {
+        if let Some(parent) = full.parent() {
+            if parent.exists() {
+                let parent_canon = parent.canonicalize().map_err(|_| Refuse::OutsideRoot)?;
+                if refuse_swapped_root() && parent_canon != *root && !contained(root, &parent_canon)
+                {
+                    return Err(Refuse::Symlink);
+                }
+            }
+        }
+        return Ok(full.to_path_buf());
+    }
+    let canon = full.canonicalize().map_err(|_| Refuse::OutsideRoot)?;
+    if contained(root, &canon) || canon == *root {
+        Ok(canon)
+    } else if refuse_swapped_root() {
+        Err(Refuse::Symlink)
+    } else {
+        Ok(full.to_path_buf())
+    }
+}
+
+fn tree_inodes(root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
+    let mut out = HashSet::new();
+    fn walk(path: &Path, out: &mut HashSet<(u64, u64)>) -> Result<(), Refuse> {
+        let meta = fs::symlink_metadata(path).map_err(|_| Refuse::OutsideRoot)?;
+        out.insert((meta.dev(), meta.ino()));
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            for entry in fs::read_dir(path).map_err(|_| Refuse::OutsideRoot)? {
+                walk(&entry.map_err(|_| Refuse::OutsideRoot)?.path(), out)?;
+            }
+        }
+        Ok(())
+    }
+    walk(root, &mut out)?;
+    Ok(out)
+}
+
+fn inode_in_owner_tree(root: &Path, path: &Path) -> Result<(), Refuse> {
+    let meta = fs::symlink_metadata(path).map_err(|_| Refuse::NotFound)?;
+    let owned = tree_inodes(root)?;
+    if !owned.contains(&(meta.dev(), meta.ino())) {
+        return Err(Refuse::HardLink);
+    }
+    Ok(())
+}
+
+fn refuse_hard_link(meta: &fs::Metadata) -> Result<(), Refuse> {
+    if meta.is_file() && meta.nlink() > 1 {
+        return Err(Refuse::HardLink);
+    }
+    Ok(())
+}
+
+fn refuse_foreign_file(root: &Path, path: &Path) -> Result<(), Refuse> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(Refuse::OutsideRoot),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(Refuse::Symlink);
+    }
+    refuse_hard_link(&meta)?;
+    if meta.is_file() {
+        inode_in_owner_tree(root, path)?;
+    }
+    Ok(())
+}
+
+fn map_open_error(path: &Path, error: std::io::Error) -> Refuse {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Refuse::Symlink;
+        }
+    }
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Refuse::NotFound
+    } else {
+        Refuse::OutsideRoot
+    }
+}
+
+fn open_nofollow(path: &Path, write: bool) -> Result<fs::File, Refuse> {
+    let mut opts = fs::OpenOptions::new();
+    if write {
+        opts.write(true).create(true).truncate(true);
+    } else {
+        opts.read(true);
+    }
+    opts.custom_flags(O_NOFOLLOW);
+    opts.open(path).map_err(|error| map_open_error(path, error))
 }
 
 fn seal_tree(path: &Path) {
@@ -662,6 +886,171 @@ mod tests {
             store.host_root(&b).unwrap().canonicalize().unwrap(),
             "agents share a storage root"
         );
+    }
+
+    #[test]
+    fn agent_a_is_denied_b_when_root_is_swapped_for_a_symlink() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&b, "secret.txt", b"b-secret").unwrap();
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let a_root = store.host_root(&a).unwrap().to_path_buf();
+        let b_root = store.host_root(&b).unwrap().to_path_buf();
+        fs::remove_dir_all(&a_root).unwrap();
+        std::os::unix::fs::symlink(&b_root, &a_root).unwrap();
+
+        let denied = store.read(&a, "secret.txt").expect_err("root swap read");
+        assert_eq!(denied, Refuse::Symlink);
+        assert_eq!(denied.to_string(), "symlink leaves the owned root");
+        let denied = store
+            .write(&a, "secret.txt", b"pwned")
+            .expect_err("root swap write");
+        assert_eq!(denied, Refuse::Symlink);
+        assert_eq!(fs::read(b_root.join("secret.txt")).unwrap(), b"b-secret");
+    }
+
+    #[test]
+    fn agent_b_is_denied_a_hard_linked_inode() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let a_file = store.host_root(&a).unwrap().join("note.txt");
+        let b_hard = store.host_root(&b).unwrap().join("hard.txt");
+        fs::hard_link(&a_file, &b_hard).unwrap();
+
+        let denied = store.read(&b, "hard.txt").expect_err("hard link read");
+        assert_eq!(denied, Refuse::HardLink);
+        assert_eq!(denied.to_string(), "hard-linked inode is refused");
+        let denied = store
+            .write(&b, "hard.txt", b"from-b")
+            .expect_err("hard link write");
+        assert_eq!(denied, Refuse::HardLink);
+        assert_eq!(fs::read(&a_file).unwrap(), b"hello-a");
+
+        let outside = parent.path().join("foreign.txt");
+        fs::write(&outside, b"foreign").unwrap();
+        let a_root = store.host_root(&a).unwrap();
+        assert_eq!(
+            inode_in_owner_tree(a_root, &outside).expect_err("foreign inode"),
+            Refuse::HardLink
+        );
+    }
+
+    #[test]
+    fn agent_a_lists_and_renames_its_own_storage() {
+        let parent = Parent::new();
+        let (store, a, _b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        store.write(&a, "keep.txt", b"keep").unwrap();
+        let names = store.list(&a, "").unwrap();
+        assert_eq!(names, vec!["keep.txt".to_string(), "note.txt".to_string()]);
+        store.rename(&a, "note.txt", "renamed.txt").unwrap();
+        assert_eq!(store.read(&a, "renamed.txt").unwrap(), b"hello-a");
+        assert_eq!(
+            store.read(&a, "note.txt").expect_err("old name"),
+            Refuse::NotFound
+        );
+        let names = store.list(&a, "").unwrap();
+        assert_eq!(
+            names,
+            vec!["keep.txt".to_string(), "renamed.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn agent_a_is_denied_b_list_and_rename() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&b, "secret.txt", b"b-secret").unwrap();
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let b_root = store.host_root(&b).unwrap().to_path_buf();
+        let b_file = b_root.join("secret.txt");
+        let b_path = b_file.to_str().unwrap();
+        let b_dir = b_root.to_str().unwrap();
+
+        let denied = store.list(&a, b_dir).expect_err("list b");
+        assert_eq!(denied, Refuse::CrossAgent);
+        assert_eq!(denied.to_string(), "cross-agent storage is refused");
+
+        let denied = store
+            .rename(&a, b_path, "stolen.txt")
+            .expect_err("rename from b");
+        assert_eq!(denied, Refuse::CrossAgent);
+        let denied = store
+            .rename(
+                &b,
+                "secret.txt",
+                store
+                    .host_root(&a)
+                    .unwrap()
+                    .join("from-b.txt")
+                    .to_str()
+                    .unwrap(),
+            )
+            .expect_err("rename into a");
+        assert_eq!(denied, Refuse::CrossAgent);
+        assert_eq!(fs::read(&b_file).unwrap(), b"b-secret");
+        assert_eq!(store.read(&b, "secret.txt").unwrap(), b"b-secret");
+        assert!(!store.host_root(&a).unwrap().join("stolen.txt").exists());
+    }
+
+    #[test]
+    fn owned_root_uses_a5_usersai_agent_rest_shape() {
+        let parent = Parent::new();
+        let mut store = Store::open(parent.path()).unwrap();
+        let a = store.bind("agent-a", "session-a").unwrap();
+        assert_eq!(a.owned_root(), "UsersAI/agent-a/session-a/1");
+        let parts: Vec<&str> = a.owned_root().split('/').collect();
+        assert!(parts.len() >= 3, "A5 needs UsersAI/<agent>/<rest>");
+        assert_eq!(parts[0], "UsersAI");
+        assert_eq!(parts[1], a.identity());
+        assert!(!parts[2].is_empty());
+        assert_eq!(
+            a5_owned_root("agent-1", "notes").unwrap(),
+            "UsersAI/agent-1/notes"
+        );
+        let readme = include_str!("../README.md");
+        assert!(readme.contains("UsersAI/<agent>/<rest>"));
+        assert!(readme.contains("does not call `lab/grant-binding`"));
+        assert!(
+            !readme.contains("match `grant_binding::Decision`"),
+            "drop the Decision field-match claim"
+        );
+    }
+
+    #[test]
+    fn host_same_uid_walk_needs_confinement_or_runtime() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let a_file = store.host_root(&a).unwrap().join("note.txt");
+        let from_b = store
+            .host_root(&b)
+            .unwrap()
+            .join("../../../agent-a/session-a/1/note.txt");
+        assert_eq!(fs::read(&from_b).unwrap(), b"hello-a");
+        fs::write(
+            store.host_root(&a).unwrap().join("planted-by-b.txt"),
+            b"from-b",
+        )
+        .unwrap();
+        assert_eq!(store.read(&a, "planted-by-b.txt").unwrap(), b"from-b");
+        let denied = store
+            .read(&b, a_file.to_str().unwrap())
+            .expect_err("store still refuses");
+        assert_eq!(denied, Refuse::CrossAgent);
+        let readme = include_str!("../README.md");
+        assert!(readme.contains("NEEDS CONFINEMENT/RUNTIME"));
+        let host = crate::launch::host_journey();
+        assert_eq!(host.state, crate::launch::RowState::NeedsConfinement);
+        assert!(host.reason.contains("NEEDS CONFINEMENT/RUNTIME"));
+        assert_eq!(
+            crate::launch::lab_journey().state,
+            crate::launch::RowState::Ready
+        );
+        for row in crate::launch::real_runtime_journey().rows {
+            assert_eq!(row.state, crate::launch::RowState::Blocked, "{}", row.id);
+        }
     }
 
     #[test]

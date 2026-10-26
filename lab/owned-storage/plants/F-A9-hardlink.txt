@@ -1,0 +1,15 @@
+id: F-A9-hardlink
+file: src/lib.rs
+test: tests::agent_b_is_denied_a_hard_linked_inode
+--- old
+fn refuse_hard_link(meta: &fs::Metadata) -> Result<(), Refuse> {
+    if meta.is_file() && meta.nlink() > 1 {
+        return Err(Refuse::HardLink);
+    }
+    Ok(())
+}
+--- new
+fn refuse_hard_link(_meta: &fs::Metadata) -> Result<(), Refuse> {
+    Ok(())
+}
+--- end

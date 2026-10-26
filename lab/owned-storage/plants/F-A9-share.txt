@@ -3,6 +3,7 @@ file: src/lib.rs
 test: tests::agent_a_is_denied_b_directly
 test: tests::agent_a_is_denied_b_through_a_parent_path
 test: tests::agent_a_is_denied_b_through_a_symlink
+test: tests::agent_a_is_denied_b_list_and_rename
 --- old
 fn agent_directory(yard: &Path, identity: &str, session: &str, instance: u64) -> PathBuf {
     yard.join(identity).join(session).join(instance.to_string())
