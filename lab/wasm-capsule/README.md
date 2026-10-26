@@ -539,8 +539,8 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, 21 wc-004
-and four wc-008 planted bugs in the provider format (`command: "lab"`). Each requires
+`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, one task-012,
+21 wc-004 and four wc-008 planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -549,7 +549,8 @@ still name the retired `tools/src/lab_name.rs` and none of `tools/src/lib.rs`,
 `tests/common/build.rs`, `.gitignore` or `README.md`, so a killed run cannot
 restore those files (ask **R1**, pending). So each falsifier is proved by the
 repo's break → named test fails → revert method with `cargo test` in this
-workspace, and is listed as hand-proven, pending R1. Runner-caught: none.
+workspace, and is listed as hand-proven, pending R1. Runner-caught: one,
+task 012's F-WC3-CREATE-NEW (below).
 
 Task 010's seven, each hand-proven, pending R1:
 
@@ -590,6 +591,18 @@ assertion with the bug in, and passed again after the revert):
 - F-WC3-CMD-STDOUT — a run refusal goes to stdout.
 - F-WC3-ARTIFACT-PIN — the capsule source changes, so `tools/build` makes
   another module with a matching receipt; only the pinned sha256 catches it.
+
+Task 012's one, runner-caught (the canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-CREATE-NEW`
+reported `summary: 1 CAUGHT of 1` and restored `tools/src/bundle.rs`; by hand,
+the named test failed at its assertion with the bug in and passed after the
+revert). `tools/src/bundle.rs` is still not a recovery target, so a killed run
+cannot restore it:
+
+- F-WC3-CREATE-NEW — `capsule.json` is opened with `create` and `truncate`
+  instead of `create_new`, so an existing file or a link at its path is written
+  over or through. `bundle_io_refusals_keep_path_and_cause` fails at its
+  `expect_err("an entry is there")`.
 
 wc-004's 21, each hand-proven, pending R1 (every named test failed at its
 assertion with the bug in, and passed again after the revert). Task 010's
