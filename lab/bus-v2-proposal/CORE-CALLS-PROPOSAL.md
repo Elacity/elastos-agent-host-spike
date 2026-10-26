@@ -119,3 +119,105 @@ The journal path sits under the `Users/self` alias. `examples/agent-host/src/lib
         }
         Ok(format!("{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal"))
     }
+
+## 2. Signed declarations
+
+This section is design input for A3 and A5. Both stay open.
+
+The signature covers the printed lab CID and names the signer DID.
+
+`lab/capsule-identity/src/lib.rs::name_signature_message` hashes the printed lab CID. The body calls domain_separated_digest with NAME_SIGNATURE_DOMAIN and the UTF-8 bytes of the name. Signing and verifying both call this, and nothing else builds the message. The whole printed lab CID, its b prefix included, is the signed name.
+
+    /// Signing and verifying both call this, and nothing else builds the message.
+    /// The whole printed lab CID, its `b` prefix included, is the signed name.
+    pub fn name_signature_message(name: &str) -> [u8; 32] {
+        domain_separated_digest(NAME_SIGNATURE_DOMAIN, name.as_bytes())
+    }
+
+`lab/capsule-identity/src/lib.rs::sign_bundle` signs that message and sets signer_did from the signing key. The name comes from lab_cid. That name is the printed lab CID. The body hashes it with name_signature_message and signs the digest. signer_did is signer_did_of of the signing key. The function returns the signature and writes no file.
+
+    pub fn sign_bundle(key: &SigningKey, bundle: &Path) -> Result<NameSignature, Refusal> {
+        let name = lab_cid(bundle)?.to_string();
+        let digest = name_signature_message(&name);
+        let signature = key.sign(&digest).to_bytes();
+        Ok(NameSignature {
+            name,
+            signer_did: signer_did_of(key),
+            signature,
+        })
+    }
+
+A passing signature is the name check and grants nothing. The signature is a separate fact from the Runtime's grant.
+
+`lab/capsule-identity/src/lib.rs::verify_checked_signature` checks the DID, the accepted list, the name, and the signature. The body decodes the signer DID, requires that DID as an exact member of the accepted list, checks the name, and verifies the signature. Ok(()) means all four passed.
+
+    pub fn verify_checked_signature(
+        checked: &CheckedBundle,
+        sig: &NameSignature,
+        accepted: &[String],
+    ) -> Result<(), Refusal> {
+        let key = decode_signer(&sig.signer_did)?;
+        require_accepted(&sig.signer_did, accepted)?;
+        checked.check_name(&sig.name)?;
+        verify_signature(&key, sig)?;
+        Ok(())
+    }
+
+`lab/capsule-identity/src/lib.rs:1248` states that this result is not a trust, admission or launch.
+
+    /// `Ok(())` means all four passed. It is not a trust, admission or launch
+    /// value. A wrong key, a changed signature and a name moved onto other bytes
+    /// all fail step 4 with one reason.
+
+The capsule-identity README states M1 check B1. `lab/capsule-identity/README.md:697` states that a valid signature grants nothing by itself. This section cites that statement.
+
+    The rule: a valid signature grants nothing by itself. A bundle whose test-key
+    signature verifies is still not admitted, and it gets no grant. This library
+    checks identity only, and it sits in no admission or launch path.
+
+The asks file is the declaration and the Runtime enforces each grant.
+
+`examples/agent-host/src/lib.rs:8149` states that the Runtime enforces each grant. The declared per-step asks are compiled in from asks.json. That file is an auditable declaration.
+
+    /// The declared per-step asks, compiled in from `asks.json` in this lane. The
+    /// file is an auditable declaration, not the policy check: the Runtime
+    /// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
+    /// manifest and retires into that one place when the Runtime defines per-step
+    /// asks (P10). It is read by this module's tests only, so the shipped guest
+    /// keeps no new production path.
+    #[cfg(test)]
+    const ASKS_JSON: &str = include_str!("../asks.json");
+
+The guest denies a step with no grant id and does not mint one.
+
+`examples/agent-host/src/lib.rs::authorize` denies the step when the grant id is missing. `examples/agent-host/src/lib.rs:3526` states that a missing grant denies the step. A missing or empty grant sets the step to Denied and stores no grant. A grant id is recorded and does not run the step.
+
+    /// A missing grant denies the step. A grant id is recorded and does not run it.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
+        let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
+            return false;
+        };
+        if step.state != StepState::Prepared {
+            return false;
+        }
+        match grant {
+            None | Some("") => {
+                step.state = StepState::Denied;
+                step.grant = None;
+                false
+            }
+            Some(grant_id) => {
+                step.grant = Some(grant_id.to_string());
+                true
+            }
+        }
+    }
+
+`examples/agent-host/src/lib.rs:3549` states that the guest does not mint one. Allow once, allow for the session, and standing all fail closed when no grant id was sent.
+
+    /// An inbox answer. Allow once, allow for the session, and standing all fail
+    /// closed when no grant id was sent. The guest does not mint one. Deny stores
+    /// no grant. A second answer does not replace the first, and it does not
+    /// authorize another step. A child cannot be answered with the parent's
+    /// grant. The answer name is kept in the log. The grant string is not.
