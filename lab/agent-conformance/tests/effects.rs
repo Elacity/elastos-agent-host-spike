@@ -139,6 +139,7 @@ enum ReadOutcome {
     Granted,
     Denied,
     NoPolicy,
+    Instances,
 }
 
 fn exercise_fixture_read(effect: Effect, granted: bool) {
@@ -156,15 +157,55 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
 fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool) {
     use agent_conformance::harness::{Launch, RunningInstances};
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
-    let bytes = build_probe(effect, 1);
+    let effects = if outcome == ReadOutcome::Instances {
+        vec![Effect::Instance1, Effect::Instance2]
+    } else {
+        vec![effect]
+    };
+    let builds: Vec<_> = effects
+        .iter()
+        .map(|effect| build_probe(*effect, 1))
+        .collect();
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
-    let capsule = stage_probe(&home, &bytes, effect);
+    // As in the existing parallel journey, each client owns its local Home
+    // state and borrows only the operator's coordinates through the spawn site.
+    let client_homes: Vec<_> = if outcome == ReadOutcome::Instances {
+        (0..2)
+            .map(|_| {
+                let client = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
+                client.guard(client.home(), client.data()).unwrap();
+                std::fs::write(
+                    client.data().join("config.toml"),
+                    include_bytes!("../fixtures/operator-config.toml"),
+                )
+                .unwrap();
+                client
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let launch_homes: Vec<_> = if client_homes.is_empty() {
+        vec![&home]
+    } else {
+        client_homes.iter().collect()
+    };
+    let capsules: Vec<_> = effects
+        .iter()
+        .zip(&builds)
+        .zip(&launch_homes)
+        .map(|((effect, bytes), home)| stage_probe(home, bytes, *effect))
+        .collect();
     let (fixture, apply_policy) = if outcome == ReadOutcome::NoPolicy {
         grants::Fixture::no_policy().expect("valid optional fixture policy")
     } else {
         (
-            grants::Fixture::committed().expect("valid committed grant fixture"),
+            if outcome == ReadOutcome::Instances {
+                grants::Fixture::instances().expect("valid instance grant fixture")
+            } else {
+                grants::Fixture::committed().expect("valid committed grant fixture")
+            },
             true,
         )
     };
@@ -179,27 +220,38 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     controller
         .seed_read_files()
         .expect("seed fixture files through Runtime");
-    let running = RunningInstances::start(
-        &[Launch {
-            home: &home,
+    if outcome == ReadOutcome::Instances {
+        controller.require_overlap();
+    }
+    let launches: Vec<_> = capsules
+        .iter()
+        .zip(&launch_homes)
+        .map(|(capsule, home)| Launch {
+            home,
             program: &runtime.binary,
             args: vec!["run", capsule.path.to_str().unwrap()],
-        }],
-        Some(&home),
-    )
-    .unwrap_or_else(|reason| probe::skipped(reason));
-    Observation::Launched {
-        probe: capsule.identity.clone(),
+        })
+        .collect();
+    let running = RunningInstances::start(&launches, Some(&home))
+        .unwrap_or_else(|reason| probe::skipped(reason));
+    for capsule in &capsules {
+        controller
+            .print_checked(
+                &Observation::Launched {
+                    probe: capsule.identity.clone(),
+                }
+                .line(),
+            )
+            .expect("printed identity excludes fixture credentials");
     }
-    .emit();
-    let bound = if outcome == ReadOutcome::NoPolicy {
-        40
-    } else {
-        10
+    let bound = match outcome {
+        ReadOutcome::NoPolicy => 40,
+        ReadOutcome::Instances => 25,
+        _ => 10,
     };
-    let collected = running.collect_with(Duration::from_secs(bound), || {
+    let collected = running.collect_with(Duration::from_secs(bound), |running| {
         if apply_policy {
-            controller.poll()
+            controller.poll(running)
         } else {
             // Seeding uses the shell fixture. This client receives no approval
             // or denial from it; only Runtime can settle the pending request.
@@ -228,6 +280,81 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     controller
         .check_captures(&home)
         .expect("captures exclude fixture credentials");
+    for client in &client_homes {
+        controller
+            .check_captures(client)
+            .expect("client captures exclude fixture credentials");
+    }
+    let observations: Vec<_> = [
+        Observation::Native {
+            role: "elastos".into(),
+            sha256: runtime.sha256.clone(),
+        },
+        Observation::Native {
+            role: "localhost-provider".into(),
+            sha256: agent_conformance::runtime::localhost_provider_under_test()
+                .unwrap()
+                .sha256
+                .clone(),
+        },
+    ]
+    .into_iter()
+    .chain(capsules.iter().map(|capsule| Observation::Launched {
+        probe: capsule.identity.clone(),
+    }))
+    .collect();
+    if outcome == ReadOutcome::Instances {
+        let overlap = controller.check_overlap();
+        // Real output lines and captures are checked even when a barrier fails.
+        for index in 0..2 {
+            let completion = collected.as_ref().ok().and_then(|items| items.get(index));
+            controller
+                .print_checked(&format!(
+                    "fixture read: instance-{} captured:{} exit:{:?}",
+                    index + 1,
+                    completion.is_some(),
+                    completion.and_then(|item| item.output.status.code())
+                ))
+                .expect("printed instance result excludes fixture credentials");
+        }
+        controller
+            .check_sources()
+            .expect("lane sources exclude fixture credentials");
+        if collected.is_err() {
+            controller
+                .print_checked("fixture controller: overlap failed before completion")
+                .unwrap();
+        }
+        let reads = collected
+            .as_ref()
+            .map_err(|_| "overlap collection failed")
+            .and_then(|completions| instance_read_result(completions, &controller));
+        let passed = reads.is_ok() && overlap.is_ok() && finished.is_ok() && cleanup_state.is_ok();
+        for name in [
+            "two_instances_overlap_with_separate_grants",
+            "instance_grant_does_not_authorise_sibling",
+        ] {
+            controller
+                .check_journey(name, &observations, passed)
+                .expect("instance report and receipt exclude fixture credentials");
+        }
+        collected.expect("overlap journey failed");
+        overlap.expect("overlap requires both barriers");
+        reads.expect("instance read acceptance failed");
+        assert!(
+            finished.is_ok(),
+            "cleanup census refused leftovers; see checked reason"
+        );
+        assert!(
+            cleanup_state.is_ok(),
+            "cleanup grant census failed; see checked reason"
+        );
+        for client in client_homes {
+            client.finish().unwrap();
+        }
+        home.finish().unwrap();
+        return;
+    }
     assert!(
         finished.is_ok(),
         "cleanup census refused leftovers; see checked reason"
@@ -310,28 +437,13 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     controller
         .check_sources()
         .expect("lane sources exclude fixture credentials");
-    let observations = [
-        Observation::Native {
-            role: "elastos".into(),
-            sha256: runtime.sha256.clone(),
-        },
-        Observation::Native {
-            role: "localhost-provider".into(),
-            sha256: agent_conformance::runtime::localhost_provider_under_test()
-                .unwrap()
-                .sha256
-                .clone(),
-        },
-        Observation::Launched {
-            probe: capsule.identity,
-        },
-    ];
     controller
         .check_report(
             match outcome {
                 ReadOutcome::Granted => "granted_read_succeeds",
                 ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
                 ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
+                ReadOutcome::Instances => unreachable!("instances checked above"),
             },
             &observations,
         )
@@ -346,12 +458,57 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     home.finish().unwrap();
 }
 
+fn instance_read_result(
+    completions: &[agent_conformance::harness::Completion],
+    controller: &grants::Controller,
+) -> Result<(), &'static str> {
+    if completions.len() != 2 {
+        return Err("both clients must be collected");
+    }
+    for completion in completions {
+        let stderr = std::str::from_utf8(&completion.output.stderr)
+            .map_err(|_| "client stderr requires UTF-8")?;
+        if stderr.contains("fixture provider")
+            || stderr.contains("granted file bytes differ")
+            || stderr.contains("fixture grant scope differs")
+        {
+            return Err("instance own read failed before its sibling request");
+        }
+        let (_, refused) = refusal_evidence(
+            &completion.output,
+            Effect::Instance1,
+            &format!("Denied(\"{}\")", controller.deny_reason()),
+        );
+        if !refused {
+            return Err("each instance must receive its sibling denial with the fixture reason");
+        }
+    }
+    if controller.decisions.matched != 2
+        || controller.decisions.granted != 2
+        || controller.decisions.denied != 2
+    {
+        return Err("two own session grants and two sibling denials are required");
+    }
+    Ok(())
+}
+
+#[test]
+fn two_instances_overlap_with_separate_grants() {
+    exercise_read(Effect::Instance1, ReadOutcome::Instances, false);
+}
+
+#[test]
+fn instance_grant_does_not_authorise_sibling() {
+    exercise_read(Effect::Instance1, ReadOutcome::Instances, false);
+}
+
 #[test]
 fn attach_secret_stays_in_memory() {
     grants::assert_memory_surfaces();
     exercise_fixture_read(Effect::GrantedRead, true);
     exercise_fixture_read(Effect::SiblingRead, false);
     host_key::exercise();
+    exercise_read(Effect::Instance1, ReadOutcome::Instances, false);
 }
 
 #[test]

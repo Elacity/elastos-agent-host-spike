@@ -85,7 +85,8 @@ pub fn exercise() {
         probe: capsule.identity,
     };
     controller.print_checked(&launched.line()).unwrap();
-    let collected = running.collect_with(Duration::from_secs(10), || controller.poll());
+    let collected =
+        running.collect_with(Duration::from_secs(10), |running| controller.poll(running));
     let census = operator
         .finish_check(sampled)
         .expect("final census and operator group stop");

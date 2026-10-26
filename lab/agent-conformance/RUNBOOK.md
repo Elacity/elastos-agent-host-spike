@@ -490,3 +490,39 @@ from that run. The census proves the root, API port and TMPDIR checks only.
 The known `/tmp/elastos/storage` leftover stays under AC-006-STORAGE; this
 command leaves its contents untouched. The earlier absent-policy refusal row
 keeps its existing grade and labels pending/grant cleanup as unmeasured.
+
+## Two seeded instances (023)
+
+The rows `two_instances_overlap_with_separate_grants` and
+`instance_grant_does_not_authorise_sibling` prove the
+**process-isolation lab half of A3, A6 and A9**. Run `run.sh` under the shared
+build lease. Read the checked `instance overlap:`, `fixture controller:` and
+`fixture read:` lines beside the operator census and that run's VERSIONS.json.
+The receipt requires both launched component hashes and bundle lab CIDs.
+
+One operator serves two `elastos run` clients. The controller seeds each own
+file through the Runtime provider route with distinct bytes. Both clients
+request their own read, check every byte in the guest, then request the other
+file. Each barrier waits for one pending snapshot with two distinct sessions
+and two live children. Its monotonic bound is ten seconds, below the Runtime's
+30-second decision wait. The controller grants each own read for its session,
+then denies each sibling read with the fixture reason. Both stderr captures
+must contain that delivered refusal. The existing collector drains both client
+groups; the operator's existing stop and census run before capture checks.
+
+A serial schedule, zero overlap, an early exit, or a failed barrier is FAIL.
+Pre-launch prerequisites use the existing SKIPPED path. The output contains
+local instance labels and measured times; session IDs and credentials stay in
+memory. The shared credential checker covers every capture, the actual printed
+lines, rendered table, serialized receipt, committed source and candidate source.
+
+The two builds use `granted-read` with compiler feature subselectors
+`instance-1` or `instance-2`, through the existing build helper. Cargo manifests
+and lockfiles stay fixed. The probe keeps one read path and imports only the
+Bus. Its manifest bound covers both fixture directories, so the Runtime's
+session grants decide each read. Artifact identity gives zero grant credit.
+
+F-ac3b grants instance 2 the sibling read; F-ac3c moves its own file into
+instance 1's directory; F-ac3d starts the second client after the first exits.
+Run each entry's named tests at baseline, with its exact edits, and after byte
+restoration. LOG.md records the commands and libtest results.

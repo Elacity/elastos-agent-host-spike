@@ -107,6 +107,13 @@ impl Evidence {
             ) {
                 text.push_str(" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included");
             }
+            if matches!(
+                name.as_str(),
+                "two_instances_overlap_with_separate_grants"
+                    | "instance_grant_does_not_authorise_sibling"
+            ) {
+                text.push_str(" | process-isolation lab half of A3, A6 and A9");
+            }
             text.push('\n');
         }
         (text, passed)
@@ -167,7 +174,15 @@ fn required_effects(test: &str) -> &'static [&'static str] {
         "default_activation_refuses_without_selector" => &["default"],
         "granted_read_succeeds" | "run_leaves_no_live_grant" => &["granted-read"],
         "ungranted_sibling_read_is_refused" => &["sibling-read"],
-        "attach_secret_stays_in_memory" => &["granted-read", "sibling-read", "host-key-read"],
+        "attach_secret_stays_in_memory" => &[
+            "granted-read",
+            "sibling-read",
+            "host-key-read",
+            "instance-1",
+            "instance-2",
+        ],
+        "two_instances_overlap_with_separate_grants"
+        | "instance_grant_does_not_authorise_sibling" => &["instance-1", "instance-2"],
         "host_key_read_is_refused" => &["host-key-read"],
         "ungranted_effect_is_refused" => &["read"],
         "ungranted_network_is_refused" => &["network"],
@@ -383,6 +398,7 @@ pub fn render_run(
         "suite_outcome": outcome,
         "command_success": suite_ok && complete,
         "scope": "process isolation; diagnostic results; capsule isolation remains blocked",
+        "instance_grants_scope": "process-isolation lab half of A3, A6 and A9",
         "report": { "table": table, "sha256": sha256(table.as_bytes()) },
     });
     let receipt_bytes = serde_json::to_vec_pretty(&document)

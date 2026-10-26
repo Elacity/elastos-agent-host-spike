@@ -670,3 +670,22 @@ Before tests, `run.sh` uses the existing report executable to check earlier
 and uses the same five-second lsof path. A live holder prints its PID and root
 name, fails the command, and stays owned by the operator who started it. The
 check reads metadata only and leaves the build tree outside its selection.
+
+## 023 — two granted Home directories
+
+`two_instances_overlap_with_separate_grants` and
+`instance_grant_does_not_authorise_sibling` exercise the
+**process-isolation lab half of A3, A6 and A9**. Two hash-named builds use the
+same probe, operator, seed route and collector. The controller seeds distinct
+bytes in separate granted Home directories. Both first reads receive separate
+`session` grants; both sibling reads reach new pending requests in their
+original sessions while the clients remain alive, then receive the fixture
+denial. Two timed barriers require measured overlap.
+
+AC-006-STORAGE above covers both clients' shared `/tmp/elastos/storage`. This
+journey proves separation of granted Home directories; the client-storage
+half stays BLOCKED under that existing row. RT4 still owns resident instances
+inside one operator. The task's scope label appears in the table and receipt.
+The controller seeds the files to keep this journey to two read requests per
+instance. A guest-write variant needs an additional action grant, which the
+Runtime supports; it is outside this task's small scope.

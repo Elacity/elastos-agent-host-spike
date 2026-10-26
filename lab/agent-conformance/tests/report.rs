@@ -649,3 +649,50 @@ fn cleanup_report_keeps_scope_and_grant_blocker() {
     assert!(text
         .contains("granted_read_succeeds | SKIPPED (prerequisite unavailable) | cleanup census"));
 }
+
+#[test]
+fn instance_receipt_requires_both_launches_and_scope() {
+    use agent_conformance::report::render_run;
+    let (mut observations, git) = synthetic(1, true);
+    for effect in ["instance-1", "instance-2"] {
+        observations.push(Observation::Launched {
+            probe: ProbeIdentity {
+                effect: effect.into(),
+                component_sha256: sha256(effect.as_bytes()),
+                bundle_lab_cid: format!("lab-cid:sha256:{}", sha256(effect.as_bytes())),
+            },
+        });
+    }
+    for name in [
+        "two_instances_overlap_with_separate_grants",
+        "instance_grant_does_not_authorise_sibling",
+    ] {
+        let render = |observations: &[Observation]| {
+            render_run(
+                &format!("{name}: test\n"),
+                &output(observations).replace(LIVE, name),
+                true,
+                Ok(git.clone()),
+            )
+        };
+        let complete = render(&observations);
+        assert!(complete.passed);
+        let scope = "process-isolation lab half of A3, A6 and A9";
+        assert!(complete.table.contains(&format!("{name} | PASS | {scope}")));
+        let receipt: Value = serde_json::from_slice(&complete.receipt_bytes).unwrap();
+        assert_eq!(receipt["instance_grants_scope"], scope);
+        for missing in ["instance-1", "instance-2"] {
+            let changed: Vec<_> = observations.iter().filter(|observation| {
+                !matches!(observation, Observation::Launched { probe } if probe.effect == missing)
+            }).cloned().collect();
+            let report = render(&changed);
+            assert!(
+                !report.passed,
+                "each launched instance identity is required"
+            );
+            assert!(report
+                .failures
+                .contains(&format!("missing launched probe identity: {missing}")));
+        }
+    }
+}
