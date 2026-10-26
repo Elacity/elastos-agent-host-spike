@@ -142,7 +142,7 @@ def plant_absent_old_bypass(lines: list[str]) -> None:
     }
     stale = source_has(DRIVER_SRC, "stale_write(&host, &plain, &revision)")
     bridge = source_has(DRIVER_SRC, "bridge_write(host, &next,")
-    hook = source_has(DRIVER_SRC, "handle_component_resource_request")
+    hook = source_has(DRIVER_SRC, "handle_component_resource_request(")
     # The driver still grants the guest's two pending journal asks. That is
     # Home's role. The #368 bypass was a minted token on the public hook.
     grant_pending = "pending.session_id" in DRIVER_SRC.read_text(encoding="utf-8")
@@ -591,7 +591,7 @@ def hunt_process_isolation(lines: list[str]) -> None:
     record_hunt(
         lines,
         "F-R2-PROCESS-ISOLATION",
-        first.returncode == 0,
+        first.returncode == 0
         and second.returncode == 0
         and not alive_after_first
         and not same_pid
@@ -762,7 +762,8 @@ def main() -> int:
     hunt_stale_runtime_refusal(lines)
     hunt_process_isolation(lines)
     hunt_driver_opens(lines)
-    hunt_release_artifacts(lines)
+    if os.environ.get("A2_SKIP_RELEASE") != "1":
+        hunt_release_artifacts(lines)
 
     EVIDENCE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"WROTE {EVIDENCE}")
