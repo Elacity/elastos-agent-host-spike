@@ -86,5 +86,25 @@ class WasmMemoryCap(unittest.TestCase):
         self.assertEqual(self.results[C0_TEST], "ok")
 
 
+class WasmRunnerReplay(unittest.TestCase):
+    """#269 adds runner entries for two falsifiers; replay exactly those ids."""
+
+    IDS = ["F-WC3-LANE-FILES-QUOTED", "F-WC9-RUN-DROPS-GRANTS"]
+
+    @classmethod
+    def setUpClass(cls):
+        root = rt.scratch_clone("wasm-replay")
+        cls.code, cls.output = rt.run(
+            ["python3", "-I", "examples/agent-host/falsify.py", "--from",
+             LANE + "/falsifiers.json", *cls.IDS],
+            cwd=root, env={"RUST_TEST_THREADS": "2", "CARGO_INCREMENTAL": "0"}, timeout=3600)
+
+    def test_replay_reads_both_caught(self):
+        summary = [line for line in self.output.splitlines() if line.startswith("summary:")]
+        print("#269 replay on Linux: %s" % summary)
+        self.assertEqual(self.code, 0, self.output[-3000:])
+        self.assertEqual(summary, ["summary: 2 CAUGHT of 2"])
+
+
 if __name__ == "__main__":
     unittest.main()
