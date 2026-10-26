@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 pub struct Operator<'a> {
     pub child: RunningChild<'a>,
     home: &'a ThrowawayHome,
-    port: u16,
+    pub port: u16,
 }
 
 impl<'a> Operator<'a> {
@@ -60,6 +60,23 @@ impl<'a> Operator<'a> {
             std::thread::sleep(Duration::from_millis(50));
         }
         Err("operator readiness exceeded 60 seconds: coordinates and HTTP 200 required")
+    }
+
+    pub fn begin_check(&mut self) -> Result<(usize, Instant), String> {
+        self.ready()?;
+        Ok((self.census()?, Instant::now()))
+    }
+
+    /// All effect journeys share the same two samples and group-drain stop.
+    pub fn finish_check(mut self, (first, sampled): (usize, Instant)) -> Result<(), String> {
+        while sampled.elapsed() < Duration::from_secs(3) {
+            self.require_alive()?;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let second = self.census()?;
+        self.child.stop()?;
+        println!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped");
+        Ok(())
     }
 
     pub fn require_alive(&mut self) -> Result<(), &'static str> {

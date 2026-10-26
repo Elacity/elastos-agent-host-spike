@@ -24,7 +24,8 @@ the pinned Rust toolchain, its `wasm32-unknown-unknown` target and cached Cargo
 dependencies. The shared `build::offline_build` setup keeps Cargo targets,
 intermediates and temporary files under this lane's `target/`. Probe builds
 treat warnings as errors; the Runtime build uses its normal warning policy.
-A missing build tool, target or dependency fails the check with its output.
+A missing build tool, target or dependency fails the check with a setup reason.
+Pre-probe setup failures grade SKIPPED and keep a nonzero command status.
 
 `runtime::runtime_under_test` builds the checkout's `elastos` binary once per
 test process with `cargo build --locked --offline --manifest-path
@@ -38,11 +39,14 @@ the Runtime tested on this machine; it is separate from capsule bundle identity.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
 imports against the five-interface Bus v1 subset. `probe_hash_is_stable` makes two
-fresh builds for each selector, compares their SHA-256 values and requires
-distinct bytes across selectors. These checks share the builds within one test
-process through `tests/common/probe.rs`. Each build directory and the shared
-entrypoint are removed after the artifact bytes have been copied into memory; after an interrupted run, the next test
-recreates those directories. Host build outputs are rebuildable files under this lane. Live effect tests
+independent probe compilations for each selector, compares their SHA-256 values
+and requires distinct bytes across all ten selectors. These checks share the
+builds within one test process through `tests/common/probe.rs`. Each call removes
+only the probe package from its selector's Cargo target, then invokes the existing
+repository build script and requires a probe compilation. Dependencies and the
+componentizer are reused. The shared entrypoint is removed after the artifact
+bytes reach memory. Selector caches are rebuildable files under this lane's
+ignored target; remove them after task review. Live effect tests
 copy component bytes into a hash-named directory inside their fresh Home.
 The shared staging path names the complete manifest and payload with
 `capsule_identity::checked_bundle`. Build-only and launched identities use one
