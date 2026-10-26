@@ -488,6 +488,22 @@
       ]
     },
     {
+      "id": "F-versions-lab-cid",
+      "title": "accept any nonempty string as a bundle lab CID",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_ok()",
+          "new": "(!probe.bundle_lab_cid.is_empty())"
+        }
+      ],
+      "tests": [
+        "versions_receipt_rejects_incomplete_identity"
+      ]
+    },
+    {
       "id": "F-versions-bundle",
       "title": "serialize the component hash as the complete bundle identity",
       "command": "lab",

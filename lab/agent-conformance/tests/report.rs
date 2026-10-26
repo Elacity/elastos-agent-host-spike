@@ -151,7 +151,7 @@ fn synthetic(seed: u8, dirty: bool) -> (Vec<Observation>, GitIdentity) {
                 probe: ProbeIdentity {
                     effect: "default".into(),
                     component_sha256: sha256(&[seed, 3]),
-                    bundle_lab_cid: format!("lab-cid:sha256:{}", sha256(&[seed, 4])),
+                    bundle_lab_cid: synthetic_bundle_cid(&[seed, 4]),
                 },
             },
         ],
@@ -160,6 +160,15 @@ fn synthetic(seed: u8, dirty: bool) -> (Vec<Observation>, GitIdentity) {
             dirty,
         },
     )
+}
+
+fn synthetic_bundle_cid(content: &[u8]) -> String {
+    capsule_identity::encode_entries(&[capsule_identity::BundleEntry {
+        path: "synthetic.bin".into(),
+        content: content.to_vec(),
+    }])
+    .unwrap()
+    .to_string()
 }
 
 fn output(observations: &[Observation]) -> String {
@@ -207,7 +216,7 @@ fn versions_receipt_binds_current_run() {
         );
         assert_eq!(
             document["probes"][0]["bundle_lab_cid"],
-            format!("lab-cid:sha256:{}", sha256(&[seed, 4]))
+            synthetic_bundle_cid(&[seed, 4])
         );
         assert_eq!(document["probes"][0]["effect"], "default");
         assert_eq!(document["probes"].as_array().unwrap().len(), 1);
@@ -324,6 +333,9 @@ fn versions_receipt_rejects_incomplete_identity() {
         Ok(git.clone()),
         "missing launched probe identity: read",
     );
+    let mut malformed_cid = synthetic_bundle_cid(&[1, 4]);
+    malformed_cid.pop().unwrap();
+    malformed_cid.push('X');
     for (field, value, reason) in [
         ("effect", "", "malformed probe effect"),
         (
@@ -334,6 +346,11 @@ fn versions_receipt_rejects_incomplete_identity() {
         (
             "bundle_lab_cid",
             "sha256:wrong",
+            "malformed bundle lab CID: default",
+        ),
+        (
+            "bundle_lab_cid",
+            malformed_cid.as_str(),
             "malformed bundle lab CID: default",
         ),
     ] {
@@ -390,8 +407,7 @@ fn versions_receipt_rejects_incomplete_identity() {
         );
     }
     let mut changed_manifest = probe.clone();
-    changed_manifest.bundle_lab_cid =
-        format!("lab-cid:sha256:{}", sha256(b"changed synthetic manifest"));
+    changed_manifest.bundle_lab_cid = synthetic_bundle_cid(b"changed synthetic manifest");
     refusal(
         &listed,
         &format!(
@@ -605,7 +621,7 @@ fn host_key_receipt_requires_this_launched_bundle() {
     let probe = ProbeIdentity {
         effect: "host-key-read".into(),
         component_sha256: sha256(b"host-key component"),
-        bundle_lab_cid: format!("lab-cid:sha256:{}", sha256(b"host-key bundle")),
+        bundle_lab_cid: synthetic_bundle_cid(b"host-key bundle"),
     };
     observations.push(Observation::BuildOnly {
         probe: probe.clone(),
@@ -659,7 +675,7 @@ fn instance_receipt_requires_both_launches_and_scope() {
             probe: ProbeIdentity {
                 effect: effect.into(),
                 component_sha256: sha256(effect.as_bytes()),
-                bundle_lab_cid: format!("lab-cid:sha256:{}", sha256(effect.as_bytes())),
+                bundle_lab_cid: synthetic_bundle_cid(effect.as_bytes()),
             },
         });
     }
