@@ -785,3 +785,36 @@ fn model_release_on_another_handle_is_refused() {
     assert_eq!(after_release.held, 0);
     assert!(!after_release.open.contains_key(&reservation.id));
 }
+
+#[test]
+fn model_forged_ceiling_does_not_raise_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(5);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 100,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 5);
+    let refusal = verifier
+        .reserve(&call, &request, 6)
+        .expect_err("forged ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 5,
+            held: 0,
+            asked: 6,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 0);
+    assert_eq!(after_refusal.charged, 0);
+    assert!(after_refusal.open.is_empty());
+    verifier
+        .reserve(&call, &request, 5)
+        .expect("at the stored ceiling");
+    assert_eq!(books(&verifier).held, 5);
+}
