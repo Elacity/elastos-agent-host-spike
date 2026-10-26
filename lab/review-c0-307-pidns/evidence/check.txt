@@ -1,0 +1,10 @@
+PASS  order.unshare-before-caps  unshare_pid is inside confine, before cap drop
+PASS  order.detach-after-confine  reaper forks run after confine returns
+PASS  pipe.empty-is-start  spawn_confined treats an empty fault pipe as a start
+PASS  pipe.close-then-reap  helper closes the fault write end before it waits
+PASS  policy.abi5-launches  file-profile policy launches on reported ABI 5
+PASS  rerun.counts  lib 6 / simulated 14 / real_kernel 13, 0 ignored
+PASS  rerun.falsify  19/19 caught, control survived
+PASS  pidns.helper-in-host-ns  helper stays in the host PID namespace
+PASS  pidns.sigkill-helper  SIGKILL of launch pid left the provider alive
+summary  9 passed 0 failed

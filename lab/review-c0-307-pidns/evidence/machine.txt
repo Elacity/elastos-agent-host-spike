@@ -1,0 +1,4 @@
+cwd=/tmp/fcl-637345ac/lab/fail-closed-linux
+commit=637345ac97c9fe2064ddb81b703ee4b69a719df6
+Linux cursor 6.12.94+ #1 SMP PREEMPT_DYNAMIC Mon Oct 26 16:24:23 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+rustc 1.91.0 (f8297e351 2025-10-28)

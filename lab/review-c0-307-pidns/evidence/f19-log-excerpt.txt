@@ -1,0 +1,5 @@
+3:test real_confined_provider_has_every_layer ... FAILED
+4:test real_confined_child_cannot_signal_host ... FAILED
+11:did-provider: confined nspid must be 1 (provider as init) or 2 (provider under the reaper), got 6657
+17:did-provider: confined nspid must be 1 or 2, got 6658
+24:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s

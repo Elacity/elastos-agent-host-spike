@@ -1,0 +1,219 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -99,6 +99,8 @@
+     pub name: &'static str,
+     pub minimum_abi: u32,
+     pub mask: i32,
++    /// Landlock filesystem bit to try-create. Used by the rights probe.
++    pub access: u64,
+ }
+ 
+ /// Rights whose absence leaves the sandbox wider than `(deny default)`.
+@@ -107,11 +109,13 @@
+         name: "truncate",
+         minimum_abi: TRUNCATE_ABI,
+         mask: MISSING_TRUNCATE,
++        access: landlock::ACCESS_FS_TRUNCATE,
+     },
+     NeededRight {
+         name: "ioctl_dev",
+         minimum_abi: IOCTL_DEV_ABI,
+         mask: MISSING_IOCTL_DEV,
++        access: landlock::ACCESS_FS_IOCTL_DEV,
+     },
+ ];
+ 
+@@ -252,11 +256,12 @@
+     Fork,
+     PidFork,
+     Report,
++    RightProbe,
+ }
+ 
+ impl Step {
+     /// The steps that run in the provider's process, in guard order.
+-    pub const GUARD: [Step; 18] = [
++    pub const GUARD: [Step; 19] = [
+         Step::Unshare,
+         Step::UidMap,
+         Step::Setgroups,
+@@ -270,6 +275,7 @@
+         Step::InstallFilter,
+         Step::AbiProbe,
+         Step::AbiFloor,
++        Step::RightProbe,
+         Step::CreateRuleset,
+         Step::StorageRootRule,
+         Step::ExecutableRule,
+@@ -295,6 +301,7 @@
+             Step::InstallFilter => Layer::Seccomp,
+             Step::AbiProbe
+             | Step::AbiFloor
++            | Step::RightProbe
+             | Step::CreateRuleset
+             | Step::StorageRootRule
+             | Step::ExecutableRule
+@@ -319,6 +326,7 @@
+             Step::InstallFilter => "install_filter",
+             Step::AbiProbe => "abi_probe",
+             Step::AbiFloor => "abi_floor",
++            Step::RightProbe => "right_probe",
+             Step::CreateRuleset => "create_ruleset",
+             Step::StorageRootRule => "storage_root_rule",
+             Step::ExecutableRule => "executable_rule",
+@@ -385,6 +393,14 @@
+         }
+     }
+ 
++    pub const fn right_probe(found: u32, mask: i32) -> Fault {
++        Fault {
++            step: Step::RightProbe,
++            errno: mask,
++            found,
++        }
++    }
++
+     pub fn encode(self) -> [u8; Fault::ENCODED_LEN] {
+         let mut bytes = [0u8; Fault::ENCODED_LEN];
+         bytes[0..4].copy_from_slice(&(self.step as u32).to_le_bytes());
+@@ -422,6 +438,11 @@
+                 fault.found, landlock_abi_floor
+             ),
+             Step::AbiFloor => missing_rights_reason(fault.found, fault.errno),
++            Step::RightProbe if fault.found != 0 => format!(
++                "{}: landlock_create_ruleset returned EINVAL (reported ABI {})",
++                missing_rights_reason(fault.found, fault.errno),
++                fault.found
++            ),
+             Step::AbiProbe => format!(
+                 "Landlock is not available: {}",
+                 io::Error::from_raw_os_error(fault.errno)
+@@ -607,6 +628,15 @@
+         access: u64,
+     ) -> Result<(), Errno>;
+     fn landlock_restrict_self(&mut self, ruleset: RawFd) -> Result<(), Errno>;
++    /// Try-create a ruleset that handles only `access`. Ok(false) means
++    /// the kernel returned EINVAL: it does not have that right.
++    fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
++        match self.landlock_create_ruleset(access, 0, 0) {
++            Ok(_) => Ok(true),
++            Err(errno) if errno == libc::EINVAL => Ok(false),
++            Err(errno) => Err(errno),
++        }
++    }
+     /// Replaces the process image with the provider. On a real kernel this
+     /// returns only on failure.
+     fn exec(&mut self, plan: &Plan) -> Result<(), Errno>;
+@@ -659,6 +689,17 @@
+     if let Some(mask) = missing_required_mask(abi) {
+         return Err(Fault::missing_rights(abi, mask));
+     }
++    let mut probed = 0;
++    for right in FILE_PROFILE_NEEDED_RIGHTS {
++        match kernel.landlock_can_handle_fs(right.access) {
++            Ok(true) => {}
++            Ok(false) => probed |= right.mask,
++            Err(errno) => return Err(Fault::os(Step::RightProbe, errno)),
++        }
++    }
++    if probed != 0 {
++        return Err(Fault::right_probe(abi, probed));
++    }
+     let ruleset = kernel
+         .landlock_create_ruleset(
+             handled_fs_for_abi(abi),
+--- a/src/real.rs
++++ b/src/real.rs
+@@ -387,6 +387,18 @@
+         check(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) }).map(drop)
+     }
+ 
++    fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
++        match self.landlock_create_ruleset(access, 0, 0) {
++            Ok(fd) => {
++                // SAFETY: fd came from create_ruleset above.
++                unsafe { libc::close(fd) };
++                Ok(true)
++            }
++            Err(errno) if errno == libc::EINVAL => Ok(false),
++            Err(errno) => Err(errno),
++        }
++    }
++
+     fn exec(&mut self, plan: &Plan) -> Result<(), Errno> {
+         // SAFETY: the path, argv and envp come from `plan`, which keeps every
+         // pointed-to string alive and NULL-terminates both vectors.
+--- a/src/sim.rs
++++ b/src/sim.rs
+@@ -20,6 +20,9 @@
+     pub handled_fs: u64,
+     pub handled_net: u64,
+     pub scoped: u64,
++    /// When set, `landlock_can_handle_fs` uses this mask instead of the
++    /// reported ABI. A liar reports ABI 5 and accepts only ABI 1 bits.
++    pub accepted_fs: Option<u64>,
+ }
+ 
+ impl Default for SimKernel {
+@@ -33,6 +36,7 @@
+             handled_fs: 0,
+             handled_net: 0,
+             scoped: 0,
++            accepted_fs: None,
+         }
+     }
+ }
+@@ -147,6 +151,17 @@
+         self.run(Step::RestrictSelf)
+     }
+ 
++    fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
++        self.steps.push(Step::RightProbe);
++        if let Some((Step::RightProbe, errno)) = self.fail {
++            return Err(errno);
++        }
++        let accepted = self
++            .accepted_fs
++            .unwrap_or_else(|| crate::handled_fs_for_abi(self.landlock_abi));
++        Ok(accepted & access == access)
++    }
++
+     fn exec(&mut self, plan: &Plan) -> Result<(), Errno> {
+         self.run(Step::Execve)?;
+         self.execs.push(plan.executable().to_owned());
+--- a/tests/simulated.rs
++++ b/tests/simulated.rs
+@@ -363,3 +363,33 @@
+         }
+     }
+ }
++
++
++#[test]
++fn sim_lying_abi_5_with_abi_1_rights_refuses() {
++    for provider in PROVIDERS {
++        let mut kernel = SimKernel::with_landlock_abi(5);
++        kernel.accepted_fs = Some(handled_fs_for_abi(1));
++        let refusal = refused(&mut kernel, &spec(provider));
++        assert_eq!(refusal.layer, Layer::Landlock, "{refusal}");
++        assert_eq!(refusal.step, Step::RightProbe, "{refusal}");
++        let text = refusal.to_string();
++        assert!(
++            text.contains("landlock_create_ruleset returned EINVAL"),
++            "{refusal}"
++        );
++        assert!(text.contains("reported ABI 5"), "{refusal}");
++        assert!(text.contains("truncate"), "{refusal}");
++        assert!(text.contains("ioctl_dev"), "{refusal}");
++        assert!(
++            kernel.execs.is_empty(),
++            "{provider} started on a lying ABI: {:?}",
++            kernel.execs
++        );
++        assert!(
++            !kernel.steps.contains(&Step::Execve),
++            "{:?}",
++            kernel.steps
++        );
++    }
++}

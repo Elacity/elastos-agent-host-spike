@@ -1,0 +1,4 @@
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/fcl-1894f432/lab/fail-closed-linux)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.09s
+CLIPPY_EXIT:0
