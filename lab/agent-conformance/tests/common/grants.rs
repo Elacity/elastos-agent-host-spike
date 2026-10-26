@@ -1587,12 +1587,25 @@ fn require_seeded_bytes(body: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Only `check_wrong_capsule` constructs checked refusal data.
+#[derive(Debug, PartialEq)]
+pub struct CheckedWrongCapsule<'a> {
+    expected: &'a str,
+    got: &'a str,
+}
+
+impl CheckedWrongCapsule<'_> {
+    pub fn expected(&self) -> &str {
+        self.expected
+    }
+}
+
 /// The Runtime's wrong-capsule refusal. Each mismatch keeps its own reason.
 pub fn check_wrong_capsule<'a>(
     text: &'a str,
     expected_session: &str,
     got_session: &str,
-) -> Result<(&'a str, &'a str)> {
+) -> Result<CheckedWrongCapsule<'a>> {
     let (expected, got) = parse_wrong_capsule(text)?;
     if expected != expected_session {
         return Err("grant refusal expected session is not the granting session");
@@ -1600,7 +1613,7 @@ pub fn check_wrong_capsule<'a>(
     if got != got_session {
         return Err("grant refusal got session is not the presenting session");
     }
-    Ok((expected, got))
+    Ok(CheckedWrongCapsule { expected, got })
 }
 
 fn parse_wrong_capsule(text: &str) -> Result<(&str, &str)> {
@@ -1621,11 +1634,7 @@ fn parse_wrong_capsule(text: &str) -> Result<(&str, &str)> {
     Ok((expected, got))
 }
 
-pub fn redact_refusal(text: &str, expected: &str, got: &str, got_label: &str) -> Result<String> {
-    let (parsed_expected, parsed_got) = parse_wrong_capsule(text)?;
-    if parsed_expected != expected || parsed_got != got {
-        return Err("redaction requires the checked session ids");
-    }
+pub fn redact_refusal(_checked: &CheckedWrongCapsule<'_>, got_label: &str) -> Result<String> {
     if !matches!(got_label, "<session-B>" | "<session-A2>") {
         return Err("redaction label must hide the session id");
     }
@@ -1634,16 +1643,36 @@ pub fn redact_refusal(text: &str, expected: &str, got: &str, got_label: &str) ->
     ))
 }
 
-/// A verified agent principal on the grant record, distinct from the session.
+/// Caller evidence established independently of the grant audit record.
+/// Runtime supplies no such evidence on this journey yet. Keep construction
+/// private; only unit tests construct synthetic evidence until that seam exists.
+pub struct VerifiedCaller {
+    principal: String,
+    session_id: String,
+    capsule_id: String,
+}
+
+/// Match the grant record to the principal, session and capsule Runtime verified.
 pub fn grant_names_verified_agent(
-    _capsule_id: &str,
+    capsule_id: &str,
     principal: Option<&str>,
     session_id: &str,
+    verified: Option<&VerifiedCaller>,
 ) -> Result<()> {
-    match principal {
-        Some(principal) if !principal.is_empty() && principal != session_id => Ok(()),
-        _ => Err("grant record names only the requesting session"),
+    let principal = principal
+        .filter(|principal| !principal.is_empty() && *principal != session_id)
+        .ok_or("grant record names only the requesting session")?;
+    let verified = verified.ok_or("verified caller principal evidence is unavailable")?;
+    if session_id != verified.session_id {
+        return Err("verified caller evidence belongs to another session");
     }
+    if capsule_id != verified.capsule_id {
+        return Err("grant record capsule differs from the verified caller capsule");
+    }
+    if principal != verified.principal {
+        return Err("grant record principal differs from the verified caller principal");
+    }
+    Ok(())
 }
 
 /// Only a port is accepted; neither coordinates nor HTTP responses can select
@@ -2196,32 +2225,130 @@ mod tests {
 
     #[test]
     fn grant_record_requires_a_verified_principal() {
+        let verified = verified_caller();
         assert_eq!(
-            grant_names_verified_agent("session-a", None, "session-a"),
+            grant_names_verified_agent("session-a", None, "session-a", Some(&verified)),
             Err("grant record names only the requesting session")
         );
         assert_eq!(
-            grant_names_verified_agent("session-a", Some("session-a"), "session-a"),
+            grant_names_verified_agent(
+                "session-a",
+                Some("session-a"),
+                "session-a",
+                Some(&verified)
+            ),
             Err("grant record names only the requesting session")
         );
         assert_eq!(
-            grant_names_verified_agent("session-a", Some(""), "session-a"),
+            grant_names_verified_agent("session-a", Some(""), "session-a", Some(&verified)),
             Err("grant record names only the requesting session")
         );
         assert_eq!(
-            grant_names_verified_agent("session-a", Some("agent-principal"), "session-a"),
+            grant_names_verified_agent(
+                "capsule-a",
+                Some("agent-principal"),
+                "session-a",
+                Some(&verified)
+            ),
             Ok(())
         );
         let text = "Capability denied: wrong capsule: expected session-a, got session-b";
-        let line = redact_refusal(text, "session-a", "session-b", "<session-B>").unwrap();
+        let checked = check_wrong_capsule(text, "session-a", "session-b").unwrap();
+        let line = redact_refusal(&checked, "<session-B>").unwrap();
         assert_eq!(
             line,
             "session grant refusal: Capability denied: wrong capsule: expected <session-A>, got <session-B>"
         );
         assert!(!line.contains("session-a") && !line.contains("session-b"));
         assert_eq!(
-            redact_refusal(text, "session-a", "session-b", "<session-A2>").unwrap(),
+            redact_refusal(&checked, "<session-A2>").unwrap(),
             "session grant refusal: Capability denied: wrong capsule: expected <session-A>, got <session-A2>"
+        );
+    }
+
+    fn verified_caller() -> VerifiedCaller {
+        // Independent synthetic caller evidence, never taken from the grant.
+        VerifiedCaller {
+            principal: "agent-principal".into(),
+            session_id: "session-a".into(),
+            capsule_id: "capsule-a".into(),
+        }
+    }
+
+    #[test]
+    fn grant_record_refuses_unavailable_verified_caller() {
+        for principal in ["agent-principal", "unrelated-agent"] {
+            assert_eq!(
+                grant_names_verified_agent("session-a", Some(principal), "session-a", None),
+                Err("verified caller principal evidence is unavailable"),
+                "a principal string supplies no verified caller evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn grant_record_refuses_wrong_verified_principal() {
+        let verified = verified_caller();
+        assert_eq!(
+            grant_names_verified_agent(
+                "capsule-a",
+                Some("unrelated-agent"),
+                "session-a",
+                Some(&verified)
+            ),
+            Err("grant record principal differs from the verified caller principal"),
+            "the grant must name the independently verified caller principal"
+        );
+    }
+
+    #[test]
+    fn grant_record_requires_verified_session_and_capsule() {
+        let verified = verified_caller();
+        assert_eq!(
+            grant_names_verified_agent(
+                "capsule-a",
+                Some("agent-principal"),
+                "session-b",
+                Some(&verified)
+            ),
+            Err("verified caller evidence belongs to another session")
+        );
+        for capsule_id in ["capsule-b", "session-a", ""] {
+            assert_eq!(
+                grant_names_verified_agent(
+                    capsule_id,
+                    Some("agent-principal"),
+                    "session-a",
+                    Some(&verified)
+                ),
+                Err("grant record capsule differs from the verified caller capsule")
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_uses_checked_refusal() {
+        let text = "Capability denied: wrong capsule: expected session-a, got session-b";
+        assert_eq!(
+            check_wrong_capsule(text, "session-x", "session-b")
+                .and_then(|checked| redact_refusal(&checked, "<session-B>")),
+            Err("grant refusal expected session is not the granting session")
+        );
+        assert_eq!(
+            check_wrong_capsule(text, "session-a", "session-x")
+                .and_then(|checked| redact_refusal(&checked, "<session-B>")),
+            Err("grant refusal got session is not the presenting session")
+        );
+        assert_eq!(
+            check_wrong_capsule("Capability denied: missing token", "session-a", "session-b")
+                .and_then(|checked| redact_refusal(&checked, "<session-B>")),
+            Err("grant refusal text is not the Runtime wrong-capsule reason")
+        );
+        let checked = check_wrong_capsule(text, "session-a", "session-b").unwrap();
+        assert_eq!(checked.expected(), "session-a");
+        assert_eq!(
+            redact_refusal(&checked, "session-b"),
+            Err("redaction label must hide the session id")
         );
     }
 

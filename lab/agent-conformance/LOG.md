@@ -5738,21 +5738,429 @@ grant record names only the requesting session; 403 expected ID equals A's sessi
 
 ### Hand-run falsifiers
 
-Each code falsifier passed unmutated, failed once planted, and passed after the original bytes were restored. Planted assertions:
+The following records reproduce the saved task 038 mutation commands and
+outputs from `target/task-038-falsify.py` and `target/task-038-falsify/`.
+These are the earlier runs, before the repair below. JSON strings specify
+the exact replacement bytes, including indentation and newlines. Each block
+quotes the unmutated, planted and restored libtest output, in that order.
+The earlier F-principal covers the session-only case; the repair below adds
+independent caller comparison and a wrong-principal falsifier.
 
-| Id | Planted bytes | Caught by | Assertion |
-| --- | --- | --- | --- |
-| F-credential-bearer | `remember_client_bearer` returns `Ok(2)` and does not call `remember` | `client_session_credentials_are_guarded` | `assertion left == right failed: client bearer must be registered before it can be printed` left `Ok(())` right `Err("fixture credential detected: printed journey")` |
-| F-credential-capability | `remember_capability` returns `Ok(3)` and does not call `remember` | same test | `capability token must be registered before it can be printed` left `Ok(())` right `Err("fixture credential detected: printed journey")` |
-| F-parser-bypass | a 403 returns before the framed length and encoding checks | `controller_refuses_failed_attach_and_http_responses` | `plain-text 403 keeps the framed length check` left `Ok(FixtureResponse { status: 403, text: "{}", json: None })` right `Err("fixture response length mismatch")` |
-| F-expected-id | `if false && expected != expected_session` | `wrong_capsule_refusal_requires_expected_session` only; got and text stayed ok | `expected id mismatch keeps its own reason` |
-| F-got-id | `if false && got != got_session` | `wrong_capsule_refusal_requires_got_session` only | `got id mismatch keeps its own reason` |
-| F-refusal-text | `strip_prefix(...).unwrap_or("session-a, got session-b")` | `wrong_capsule_refusal_requires_runtime_text` only | `refusal text mismatch keeps its own reason` left `Ok(("session-a", "session-b"))` right `Err("grant refusal text is not the Runtime wrong-capsule reason")` |
-| F-principal | `grant_names_verified_agent` returns `Ok(())` | `grant_record_requires_a_verified_principal` | left `Ok(())` right `Err("grant record names only the requesting session")` |
-| F-label | the session-binding `push_str` in `table` is removed | `a5_rows_have_session_binding_label` | `missing session-binding label for grant_refused_from_another_session` |
-| F-no-launch | an empty launch set fails every report | `session_binding_rows_need_no_launched_probe` | `a session-binding row launches no probe: ["missing launched probe identity"]` |
-| F-a5-other-session | `SessionBinding::OtherSession => &owner` | `grant_refused_from_another_session` | `another session cannot present the grant: "presenting session was not refused"` |
-| F-a5-new-session | `SessionBinding::NewSession => &owner` | `grant_refused_from_a_new_session` | `a new session cannot present the grant: "presenting session was not refused"` |
+The saved commands used `CARGO_NET_OFFLINE=true`, lane-owned
+`CARGO_TARGET_DIR=lab/agent-conformance/target/host` and
+`CARGO_BUILD_BUILD_DIR=lab/agent-conformance/target/host-build`,
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=1`. Each command starts at the
+repository root.
+
+#### F-credential-bearer
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::client_session_credentials_are_guarded --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "        self.remember(field(response, \"token\")?)\n    }\n\n    fn remember_capability",
+  "new": "        let _ = field(response, \"token\")?;\n        Ok(2)\n    }\n\n    fn remember_capability"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... FAILED
+assertion `left == right` failed: client bearer must be registered before it can be printed
+  left: Ok(())
+ right: Err("fixture credential detected: printed journey")
+```
+
+Restored:
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... ok
+```
+
+#### F-credential-capability
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::client_session_credentials_are_guarded --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "            return Err(\"fixture client grant is not granted\");\n        }\n        self.remember(field(response, \"token\")?)\n    }",
+  "new": "            return Err(\"fixture client grant is not granted\");\n        }\n        let _ = field(response, \"token\")?;\n        Ok(3)\n    }"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... FAILED
+assertion `left == right` failed: capability token must be registered before it can be printed
+  left: Ok(())
+ right: Err("fixture credential detected: printed journey")
+```
+
+Restored:
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... ok
+```
+
+#### F-parser-bypass
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::controller_refuses_failed_attach_and_http_responses --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if status != 200 && status != 403 {\n        return Err(\"fixture HTTP request was refused\");\n    }\n    let mut length = None;",
+  "new": "    if status != 200 && status != 403 {\n        return Err(\"fixture HTTP request was refused\");\n    }\n    if status == 403 {\n        let text = std::str::from_utf8(&bytes[split + 4..])\n            .unwrap_or(\"\")\n            .to_owned();\n        return Ok(FixtureResponse {\n            status,\n            text,\n            json: None,\n        });\n    }\n    let mut length = None;"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::controller_refuses_failed_attach_and_http_responses ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::controller_refuses_failed_attach_and_http_responses ... FAILED
+assertion `left == right` failed: plain-text 403 keeps the framed length check
+  left: Ok(FixtureResponse { status: 403, text: "{}", json: None })
+ right: Err("fixture response length mismatch")
+```
+
+Restored:
+
+```text
+test grants::tests::controller_refuses_failed_attach_and_http_responses ... ok
+```
+
+#### F-expected-id
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::wrong_capsule_refusal --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if expected != expected_session {",
+  "new": "    if false && expected != expected_session {"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... FAILED
+assertion `left == right` failed: expected id mismatch keeps its own reason
+  left: Ok(("session-a", "session-b"))
+ right: Err("grant refusal expected session is not the granting session")
+```
+
+Restored:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+#### F-got-id
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::wrong_capsule_refusal --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if got != got_session {",
+  "new": "    if false && got != got_session {"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+test grants::tests::wrong_capsule_refusal_requires_got_session ... FAILED
+assertion `left == right` failed: got id mismatch keeps its own reason
+  left: Ok(("session-a", "session-b"))
+ right: Err("grant refusal got session is not the presenting session")
+```
+
+Restored:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+#### F-refusal-text
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::wrong_capsule_refusal --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "        .strip_prefix(\"Capability denied: wrong capsule: expected \")\n        .ok_or(\"grant refusal text is not the Runtime wrong-capsule reason\")?;",
+  "new": "        .strip_prefix(\"Capability denied: wrong capsule: expected \")\n        .unwrap_or(\"session-a, got session-b\");"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... FAILED
+assertion `left == right` failed: refusal text mismatch keeps its own reason
+  left: Ok(("session-a", "session-b"))
+ right: Err("grant refusal text is not the Runtime wrong-capsule reason")
+```
+
+Restored:
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+#### F-principal
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::grant_record_requires_a_verified_principal --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    match principal {\n        Some(principal) if !principal.is_empty() && principal != session_id => Ok(()),\n        _ => Err(\"grant record names only the requesting session\"),\n    }",
+  "new": "    let _ = (principal, session_id);\n    Ok(())"
+}
+```
+
+Unmutated:
+
+```text
+test grants::tests::grant_record_requires_a_verified_principal ... ok
+```
+
+Planted:
+
+```text
+test grants::tests::grant_record_requires_a_verified_principal ... FAILED
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("grant record names only the requesting session")
+```
+
+Restored:
+
+```text
+test grants::tests::grant_record_requires_a_verified_principal ... ok
+```
+
+#### F-label
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report -- a5_rows_have_session_binding_label --exact --test-threads=2
+```
+
+```json
+{
+  "file": "src/report.rs",
+  "old": "            if matches!(\n                name.as_str(),\n                \"grant_refused_from_another_session\" | \"grant_refused_from_a_new_session\"\n            ) {\n                text.push_str(\" | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit\");\n            }\n",
+  "new": ""
+}
+```
+
+Unmutated:
+
+```text
+test a5_rows_have_session_binding_label ... ok
+```
+
+Planted:
+
+```text
+test a5_rows_have_session_binding_label ... FAILED
+missing session-binding label for grant_refused_from_another_session: test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)
+grant_record_names_agent_identity | BLOCKED (AC-038-GRANT-PRINCIPAL)
+grant_refused_from_a_new_session | PASS
+grant_refused_from_another_session | PASS
+```
+
+Restored:
+
+```text
+test a5_rows_have_session_binding_label ... ok
+```
+
+#### F-no-launch
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report -- session_binding_rows_need_no_launched_probe --exact --test-threads=2
+```
+
+```json
+{
+  "file": "src/report.rs",
+  "old": "            .push(\"missing localhost-provider SHA-256\".into());\n        }\n        // A row that launches no probe has an empty required-effect list, so\n",
+  "new": "            .push(\"missing localhost-provider SHA-256\".into());\n        }\n        if self.identities.launched.is_empty() {\n            self.failures.push(\"missing launched probe identity\".into());\n        }\n        // A row that launches no probe has an empty required-effect list, so\n"
+}
+```
+
+Unmutated:
+
+```text
+test session_binding_rows_need_no_launched_probe ... ok
+```
+
+Planted:
+
+```text
+test session_binding_rows_need_no_launched_probe ... FAILED
+a session-binding row launches no probe: ["missing launched probe identity"]
+```
+
+Restored:
+
+```text
+test session_binding_rows_need_no_launched_probe ... ok
+```
+
+#### F-a5-other-session
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_refused_from_another_session --exact --nocapture --test-threads=2
+```
+
+```json
+{
+  "file": "tests/effects.rs",
+  "old": "        SessionBinding::OtherSession => other.as_ref().unwrap(),",
+  "new": "        SessionBinding::OtherSession => &owner,"
+}
+```
+
+Unmutated:
+
+```text
+test grant_refused_from_another_session ... ok
+```
+
+Planted:
+
+```text
+test grant_refused_from_another_session ... FAILED
+another session cannot present the grant: "presenting session was not refused"
+```
+
+Restored:
+
+```text
+test grant_refused_from_another_session ... ok
+```
+
+#### F-a5-new-session
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_refused_from_a_new_session --exact --nocapture --test-threads=2
+```
+
+```json
+{
+  "file": "tests/effects.rs",
+  "old": "        SessionBinding::NewSession => renewed.as_ref().unwrap(),",
+  "new": "        SessionBinding::NewSession => &owner,"
+}
+```
+
+Unmutated:
+
+```text
+test grant_refused_from_a_new_session ... ok
+```
+
+Planted:
+
+```text
+test grant_refused_from_a_new_session ... FAILED
+a new session cannot present the grant: "presenting session was not refused"
+```
+
+Restored:
+
+```text
+test grant_refused_from_a_new_session ... ok
+```
+
+#### F-a5-gap-row
+
+The ID cell replacement is scoped by the row name:
+
+```json
+{
+  "file": "GAPS.md",
+  "old": "| `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPAL |",
+  "new": "| `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPALX |"
+}
+```
 
 F-a5-gap-row changes only the new `GAPS.md` ID cell from `AC-038-GRANT-PRINCIPAL` to `AC-038-GRANT-PRINCIPALX`. The ignored libtest stays ignored, so the catch is the report. `./run.sh` three times from the repo root:
 
@@ -5782,3 +6190,301 @@ The restored `./run.sh` above is the acceptance run: exit 0, rows (a) and (b) PA
 | 6. Self-contained? | Yes | `tests/common/grants.rs:998` calls `/api/provider/localhost/read` with the granted token. |
 | 7. Tests and falsifiers? | Yes | `tests/effects.rs:951` fails under F-a5-other-session; `tests/report.rs:1052` fails under F-label. |
 | 8. Separate decisions? | Yes | `tests/effects.rs:869` keeps the Public read off the A5 credit; `tests/effects.rs:965` keeps the principal check blocked. |
+
+### 038 repair — checked refusals and independent caller evidence
+
+`check_wrong_capsule` now produces `CheckedWrongCapsule`. Redaction accepts
+that checked value and owns only the display label. The journey retains the
+expected ID from the same value for its audit evidence. Both session
+comparisons and the Runtime-text parser have one owner.
+
+`grant_names_verified_agent` compares the grant with separate `VerifiedCaller`
+evidence for the principal, session and capsule. Its fields are private;
+only unit tests construct synthetic caller evidence. The live attach route
+supplies none, so the ignored journey passes `None` and stays blocked even
+if a future audit record adds an arbitrary principal string. Runtime owns
+the verified evidence needed to enable this journey. The assertion reports
+the check's actual reason and retains both session-equality observations.
+
+The focused locked test command passed all eight principal, refusal and
+redaction tests. The six repair mutations below each ran unmutated, planted
+and restored. All edits were restored byte for byte after each mutation.
+Commands use the lane target directories listed above, `CARGO_NET_OFFLINE=true`,
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. Each finished within 600 seconds.
+These runs compile the lab tests and exercise synthetic evidence; the
+supervisor owns the full Runtime rerun and fresh review. The full gate and
+`./run.sh` call Git through source/receipt checks, so this repair leaves those
+commands to the supervisor under the user's instruction to run no Git.
+
+#### F-a5-checked-expected
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::redaction_uses_checked_refusal --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if expected != expected_session {",
+  "new": "    if false && expected != expected_session {"
+}
+```
+
+Unmutated: exit 0, 7.315 seconds.
+
+```text
+test grants::tests::redaction_uses_checked_refusal ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+Planted: exit 101, 1.285 seconds.
+
+```text
+test grants::tests::redaction_uses_checked_refusal ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+assertion `left == right` failed
+  left: Ok("session grant refusal: Capability denied: wrong capsule: expected <session-A>, got <session-B>")
+ right: Err("grant refusal expected session is not the granting session")
+```
+
+Restored: exit 0, 1.025 seconds.
+
+```text
+test grants::tests::redaction_uses_checked_refusal ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+#### F-a5-checked-got
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::redaction_uses_checked_refusal --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if got != got_session {",
+  "new": "    if false && got != got_session {"
+}
+```
+
+Unmutated: exit 0, 0.823 seconds.
+
+```text
+test grants::tests::redaction_uses_checked_refusal ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+Planted: exit 101, 1.714 seconds.
+
+```text
+test grants::tests::redaction_uses_checked_refusal ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+assertion `left == right` failed
+  left: Ok("session grant refusal: Capability denied: wrong capsule: expected <session-A>, got <session-B>")
+ right: Err("grant refusal got session is not the presenting session")
+```
+
+Restored: exit 0, 1.077 seconds.
+
+```text
+test grants::tests::redaction_uses_checked_refusal ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+#### F-a5-wrong-principal
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::grant_record_refuses_wrong_verified_principal --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if principal != verified.principal {",
+  "new": "    if false && principal != verified.principal {"
+}
+```
+
+Unmutated: exit 0, 1.371 seconds.
+
+```text
+test grants::tests::grant_record_refuses_wrong_verified_principal ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+Planted: exit 101, 1.561 seconds.
+
+```text
+test grants::tests::grant_record_refuses_wrong_verified_principal ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+assertion `left == right` failed: the grant must name the independently verified caller principal
+  left: Ok(())
+ right: Err("grant record principal differs from the verified caller principal")
+```
+
+Restored: exit 0, 1.094 seconds.
+
+```text
+test grants::tests::grant_record_refuses_wrong_verified_principal ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+#### F-a5-unavailable-caller
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::grant_record_refuses_unavailable_verified_caller --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    let verified = verified.ok_or(\"verified caller principal evidence is unavailable\")?;",
+  "new": "    let Some(verified) = verified else {\n        return Ok(());\n    };"
+}
+```
+
+Unmutated: exit 0, 1.477 seconds.
+
+```text
+test grants::tests::grant_record_refuses_unavailable_verified_caller ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+Planted: exit 101, 1.217 seconds.
+
+```text
+test grants::tests::grant_record_refuses_unavailable_verified_caller ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+assertion `left == right` failed: a principal string supplies no verified caller evidence
+  left: Ok(())
+ right: Err("verified caller principal evidence is unavailable")
+```
+
+Restored: exit 0, 0.954 seconds.
+
+```text
+test grants::tests::grant_record_refuses_unavailable_verified_caller ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+#### F-a5-verified-session
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::grant_record_requires_verified_session_and_capsule --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if session_id != verified.session_id {",
+  "new": "    if false && session_id != verified.session_id {"
+}
+```
+
+Unmutated: exit 0, 1.011 seconds.
+
+```text
+test grants::tests::grant_record_requires_verified_session_and_capsule ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+Planted: exit 101, 1.282 seconds.
+
+```text
+test grants::tests::grant_record_requires_verified_session_and_capsule ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("verified caller evidence belongs to another session")
+```
+
+Restored: exit 0, 0.926 seconds.
+
+```text
+test grants::tests::grant_record_requires_verified_session_and_capsule ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+#### F-a5-verified-capsule
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::grant_record_requires_verified_session_and_capsule --exact --test-threads=2
+```
+
+```json
+{
+  "file": "tests/common/grants.rs",
+  "old": "    if capsule_id != verified.capsule_id {",
+  "new": "    if false && capsule_id != verified.capsule_id {"
+}
+```
+
+Unmutated: exit 0, 1.458 seconds.
+
+```text
+test grants::tests::grant_record_requires_verified_session_and_capsule ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+Planted: exit 101, 1.465 seconds.
+
+```text
+test grants::tests::grant_record_requires_verified_session_and_capsule ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("grant record capsule differs from the verified caller capsule")
+```
+
+Restored: exit 0, 0.923 seconds.
+
+```text
+test grants::tests::grant_record_requires_verified_session_and_capsule ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+```
+
+#### Restored repair checks
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::grant_record grants::tests::wrong_capsule grants::tests::redaction_uses_checked_refusal grants::tests::client_session_credentials_are_guarded grants::tests::controller_refuses_failed_attach_and_http_responses --test-threads=2
+```
+
+Exit 0, 0.975 seconds.
+
+```text
+test grants::tests::client_session_credentials_are_guarded ... ok
+test grants::tests::controller_refuses_failed_attach_and_http_responses ... ok
+test grants::tests::grant_record_refuses_unavailable_verified_caller ... ok
+test grants::tests::grant_record_refuses_wrong_verified_principal ... ok
+test grants::tests::grant_record_requires_verified_session_and_capsule ... ok
+test grants::tests::grant_record_requires_a_verified_principal ... ok
+test grants::tests::redaction_uses_checked_refusal ... ok
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.00s
+```
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report -- a5_rows_have_session_binding_label session_binding_rows_need_no_launched_probe --test-threads=2
+```
+
+Exit 0, 1.002 seconds.
+
+```text
+test a5_rows_have_session_binding_label ... ok
+test session_binding_rows_need_no_launched_probe ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+```
+
+```bash
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+```
+
+Exit 0, 0.131 seconds.
+
+The restored checks pass 12 focused tests. A direct whitespace check of the
+five edited files passed. Both Cargo file hashes match the values recorded
+above. Edits stay in this lane; the supervisor retains approval after its
+fresh checks and review.

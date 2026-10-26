@@ -923,13 +923,8 @@ fn bind_client_sessions(
         SessionBinding::AgentRecord => other.as_ref().unwrap(),
     };
     let text = controller.present_grant(presenting, grants::GRANTED_READ_RESOURCE, &grant)?;
-    let (expected, _got) = grants::check_wrong_capsule(&text, grant.session_id(), &got_session)?;
-    controller.print_checked(&grants::redact_refusal(
-        &text,
-        grant.session_id(),
-        &got_session,
-        got_label,
-    )?)?;
+    let checked = grants::check_wrong_capsule(&text, grant.session_id(), &got_session)?;
+    controller.print_checked(&grants::redact_refusal(&checked, got_label)?)?;
     controller.read_seeded(&owner, grants::GRANTED_READ_RESOURCE, &grant)?;
     controller.note_seeded_read(
         grants::GRANTED_READ_RESOURCE,
@@ -941,7 +936,7 @@ fn bind_client_sessions(
             session_id: grant.session_id().to_owned(),
             capsule_id,
             principal,
-            refusal_expected: expected.to_owned(),
+            refusal_expected: checked.expected().to_owned(),
         }));
     }
     Ok(None)
@@ -971,10 +966,13 @@ fn grant_record_names_agent_identity() {
         &record.capsule_id,
         record.principal.as_deref(),
         &record.session_id,
+        // This attach route has no independently verified agent evidence yet.
+        None,
     );
     assert!(
         named.is_ok(),
-        "grant record names only the requesting session; 403 expected ID equals A's session ID: {}; audit capsule_id equals A's session ID: {}",
+        "{}; 403 expected ID equals A's session ID: {}; audit capsule_id equals A's session ID: {}",
+        named.unwrap_err(),
         record.refusal_expected == record.session_id,
         record.capsule_id == record.session_id
     );

@@ -915,6 +915,11 @@ mints the token with the requesting session. `elastos/crates/elastos-runtime/src
 refuses a different caller. Anders owns the change. A permitted Public read
 earns no A5 credit. Owned storage is a separate gap.
 
+Acceptance compares the grant's principal and capsule with independently
+established caller evidence for the requesting session. Runtime owns that
+evidence. The journey keeps this row blocked until the attach route supplies
+it; a principal string in the grant record alone cannot satisfy the check.
+
 | Ignored test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
-| `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPAL | Anders: the Runtime binds each minted token to the principal and session it verified (https://github.com/Elacity/elastos-runtime/issues/464). `capability.rs` grant_request mints with the requesting session at lines 339-346, and `manager.rs` validate_recurring checks that session at lines 408-415. |
+| `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPAL | Anders: the Runtime binds each minted token to the principal and session it verified and supplies separate verified caller evidence for the comparison (https://github.com/Elacity/elastos-runtime/issues/464). `capability.rs` grant_request mints with the requesting session at lines 339-346, and `manager.rs` validate_recurring checks that session at lines 408-415. |
