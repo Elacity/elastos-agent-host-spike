@@ -1,8 +1,9 @@
 //! Shared test support: fixture bundles assembled in fresh temp dirs, the
 //! pinned lab CIDs, a bounded call for bundles that hold a FIFO, observers
-//! that change a bundle while it is named, and a driver for wc-001's own
-//! build. Each test file includes this with `mod common;` and uses only part
-//! of it, so dead-code warnings for the rest are silenced.
+//! that change a bundle while it is named, a driver for wc-001's own build,
+//! and the library's code for tests that read it. Each test file includes
+//! this with `mod common;` and uses only part of it, so dead-code warnings
+//! for the rest are silenced.
 #![allow(dead_code)]
 
 use std::fs;
@@ -12,7 +13,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use capsule_identity::{lab_cid_observed, LabCid, Moment, Refusal};
+use capsule_identity::{check_name, lab_cid, lab_cid_observed, LabCid, Moment, Refusal};
 use tempfile::TempDir;
 
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
@@ -21,6 +22,8 @@ pub const CONTENT_SAMPLE_LAB_CID: &str =
     "lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51";
 pub const WEB_APP_LAB_CID: &str =
     "lab-cid:sha256:5559e5e3fe8f8e31006c035af0367d87810e214d987d1e8548d1bac03ca82066";
+pub const AGENT_HOST_LAB_CID: &str =
+    "lab-cid:sha256:43a918a50818e6f6ec81543a6dd423c796b03db028d0c7a4222f354c2afdc054";
 
 /// A committed fixture: its folder under `fixtures/` and the files of its
 /// bundle.
@@ -47,7 +50,15 @@ pub const WC001_CORE: Fixture = Fixture {
     files: &["capsule.json"],
 };
 
-pub const FIXTURES: [&Fixture; 3] = [&CONTENT_SAMPLE, &WEB_APP, &WC001_CORE];
+/// The agent-host capsule's manifest and its declared asks, copied byte for
+/// byte from `examples/agent-host/`. Its entrypoint module is build output
+/// and is never committed, so it is not in the fixture.
+pub const AGENT_HOST: Fixture = Fixture {
+    name: "agent-host",
+    files: &["capsule.json", "asks.json"],
+};
+
+pub const FIXTURES: [&Fixture; 4] = [&CONTENT_SAMPLE, &WEB_APP, &WC001_CORE, &AGENT_HOST];
 
 /// This lane's root: the folder holding `Cargo.toml` and `fixtures/`.
 pub fn lane_dir() -> PathBuf {
@@ -69,10 +80,50 @@ pub fn temp_dir() -> TempDir {
 /// stray local file (such as `.DS_Store`) can reach a pinned value.
 pub fn assemble(fixture: &Fixture) -> TempDir {
     let bundle = temp_dir();
-    for file in fixture.files {
-        write_file(bundle.path(), file, &read_fixture(fixture, file));
-    }
+    assemble_at(fixture, bundle.path());
     bundle
+}
+
+/// Write exactly the fixture's committed files into the bundle folder
+/// `root`, making it, so a test can choose the folder's name and place.
+pub fn assemble_at(fixture: &Fixture, root: &Path) {
+    for file in fixture.files {
+        write_file(root, file, &read_fixture(fixture, file));
+    }
+}
+
+/// The lab CID of the bundle at `bundle`. A refusal fails the test with its
+/// reason.
+pub fn named(bundle: &Path) -> LabCid {
+    lab_cid(bundle).unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.display()))
+}
+
+/// `check_name` refuses `claimed` for the bundle at `bundle`, whose bytes
+/// name `actual`, and the refusal names both values.
+pub fn assert_name_mismatch(bundle: &Path, claimed: &str, actual: LabCid) {
+    let refusal = check_name(bundle, claimed)
+        .expect_err("a lab CID the bundle's bytes do not give must be refused");
+    assert_eq!(
+        refusal,
+        Refusal::NameMismatch {
+            actual,
+            claimed: claimed.to_owned()
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        format!("bundle bytes name {actual}; the claim is {claimed}")
+    );
+}
+
+/// The library's code without its comment lines, so a test that reads the
+/// code is never misled by a comment that names a call.
+pub fn library_code() -> String {
+    include_str!("../../src/lib.rs")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Write `bytes` at the bundle-relative `path` under `root`, making folders.

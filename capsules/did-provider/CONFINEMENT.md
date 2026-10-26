@@ -1,32 +1,50 @@
 # did-provider confinement
 
-`capsules/did-provider/confine.sb` is the single confinement profile for this
-provider. It starts with `(version 1)` and `(deny default)`, and it denies every
-network operation. The process reads line-delimited JSON from stdin and writes
-one JSON response per line to stdout; it opens no listener or socket.
+`capsules/did-provider/confine.sb` is the one oracle for this provider's
+confinement profile (one file, P10): the profile the Runtime generates for this
+provider must match it. It starts with `(version 1)` and `(deny default)`, and
+it denies every network operation. The process reads line-delimited JSON from
+stdin and writes one JSON response per line to stdout; it opens no listener or
+socket.
 
 ## The Runtime bridge change
 
-The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
-confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
-parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
-bridge work, parameterized by the profile path and the storage root, starts
-`did-provider`, `wallet-provider` and `model-provider`, so the Runtime has one
-path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
-the signed provider bundle, checks its hash, refuses any profile with
-`(allow default)` or a network allow, and fails closed with a reason; the
-provider proposes, the Runtime checks (P4, P11).
+The Runtime generates the provider's profile from the provider's approved
+declared rights; it does not load a profile that the provider supplies.
+`confine.sb` in this folder is the test oracle: the profile the Runtime
+generates for this provider must match it, with the same three parameters bound
+to the same paths. The test that compares them is the Runtime's half, outside
+this lane. The one contract check, `check_profile_contract`, holds every oracle
+to these terms, and the generated profile meets them too: `(version 1)` first,
+`(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
+no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
+`STORAGE_PARENT` parameter tokens, and the three shared rules verbatim.
 If the profile cannot be applied, because the file is missing, does not parse
 or names a parameter the launch does not bind, `sandbox-exec` exits before the
 provider starts and gives its reason on standard error; the Runtime then
 refuses the start with that reason and never starts the provider another way
 (P11).
 
-Runtime binds three parameters and creates the base before launch:
+One generator covers `did-provider`, `wallet-provider` and `model-provider`,
+parameterized by the provider's approved declared rights and its storage root,
+so the Runtime has one path for a provider's profile (P10). That bridge change
+is not built: the Runtime half that generates and enforces the profile is
+future work in `elastos/`, outside this lane. The tests launch this provider
+under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
+`startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
+refused when the profile cannot be applied.
+
+## Profile parameters
+
+The generated profile binds three parameters, which the tests pass with
+`sandbox-exec -D`:
 
 - `PROVIDER_EXECUTABLE`: the canonical provider binary path.
 - `STORAGE_ROOT`: `Init.base_path/did`.
 - `STORAGE_PARENT`: `Init.base_path`.
+
+The tests pass a temporary base and bind all three parameters before launch;
+the Runtime half of the bridge change does the same and is not built.
 
 ## The model provider's inline profile
 
@@ -40,8 +58,8 @@ inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
 The model provider's own file profile, `../model-provider/confine.sb`,
-presents this contract and the shared test requires it; moving the Runtime
-from its inline policy to that file is part of the same bridge change.
+presents this contract as an oracle, and the shared test requires it; the
+generated profile for the model provider must match it too.
 
 ## Host-OS status
 
@@ -58,14 +76,14 @@ exists (P10, P11). The status change lands when the Runtime side does.
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the
-  binary the Runtime named.
+  binary the launch named.
 - `(allow file-read* (literal "/"))`: resolve the absolute program path through
   the root directory.
 - `(allow sysctl-read)`: the loader and the allocator read kernel facts at
   startup.
 - `(allow file-read* (literal (param "STORAGE_PARENT")))`: bind the one shared
   file-profile contract. No did confinement test needs this grant; the profile
-  keeps it because the wallet profile and the Runtime bridge bind the same
+  keeps it because the wallet profile and the generated profile bind the same
   parameter (P10).
 - `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`: one grant
   covers encrypted nickname and persona state.
@@ -268,9 +286,10 @@ permitted` from standard error. When the loader runs and a later read is denied
 `signal: 6 (SIGABRT)`. The grant comes back only together with a named test
 that needs it.
 
-The wallet provider keeps its own profile and tests in `../wallet-provider/`.
-did-provider, wallet-provider and model-provider present the same file-based
-contract to the Runtime bridge:
-`(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT` /
-`STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the
-`/usr/bin/sandbox-exec -f confine.sb` launch shape.
+The wallet provider keeps its own oracle and tests in `../wallet-provider/`.
+did-provider, wallet-provider and model-provider present one contract as
+oracles: `(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT`
+/ `STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the three
+shared rules. The tests launch each oracle with
+`/usr/bin/sandbox-exec -f confine.sb`; that launch is the tests', and the
+Runtime half that generates and compares the profile is future work.
