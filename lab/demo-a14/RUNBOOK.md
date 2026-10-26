@@ -11,10 +11,13 @@ Do this list first. The paste below does not add these tools.
   include `git`, `python3` and `ssh-keygen`, which signs the receipts.
 - Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
   Terminal and open it again.
-- The Rust target the demo builds for:
+- The Rust pin and wasm target the demo builds for. These two commands install
+  the pin in `rust-toolchain.toml` and put the wasm target on that pin. The
+  paste does not do this.
 
 ```bash
-rustup target add wasm32-unknown-unknown
+rustup toolchain install 1.91.0
+rustup target add wasm32-unknown-unknown --toolchain 1.91.0
 ```
 
 - A brand-new clone made by the morning block (`git clone --branch`). Do not
