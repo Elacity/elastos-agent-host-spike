@@ -11,7 +11,7 @@ mod common;
 
 use common::{
     assert_refused, host_landlock_abi, launch_command, launcher, output, require_line,
-    wait_with_timeout, with_test_hooks, Fixture, Inherit, PROVIDERS,
+    unconfined_tiocgwinsz, wait_with_timeout, with_test_hooks, Fixture, Inherit, PROVIDERS,
 };
 use fail_closed_linux::{PID_NAMESPACE_UNAVAILABLE, TEST_FUTURE_FS_ABI, TEST_FUTURE_FS_NAME};
 use std::fs;
@@ -59,6 +59,12 @@ fn real_confined_provider_has_every_layer() {
             lines.iter().any(|line| line == "ready"),
             "{provider}: {lines:?}"
         );
+        unconfined_tiocgwinsz(&fixture.tty_path).unwrap_or_else(|err| {
+            panic!(
+                "{provider}: unconfined TIOCGWINSZ on {:?} must succeed: {err}",
+                fixture.tty_path
+            )
+        });
 
         let proc = format!("/proc/{pid}");
         let status = fs::read_to_string(format!("{proc}/status")).unwrap();
@@ -90,9 +96,27 @@ fn real_confined_provider_has_every_layer() {
             .next()
             .and_then(|text| text.parse().ok())
             .unwrap_or_else(|| panic!("NOT RUN: bad {nspid_line}"));
-        assert!(
-            nspid == 1 || nspid == 2,
-            "{provider}: confined nspid must be 1 (provider as init) or 2 (provider under the reaper), got {nspid}"
+        assert_eq!(
+            nspid, 2,
+            "{provider}: provider nspid must be 2 under init, got {nspid}"
+        );
+        let init_nspid = status_field(&status, "NSpid");
+        assert_eq!(
+            init_nspid.split_whitespace().last(),
+            Some("1"),
+            "{provider}: returned pid must be PID-namespace init, NSpid={init_nspid:?}"
+        );
+        let own_pid_ns = fs::read_link("/proc/self/ns/pid").unwrap();
+        let init_pid_ns = fs::read_link(format!("{proc}/ns/pid")).unwrap();
+        assert_ne!(
+            init_pid_ns, own_pid_ns,
+            "{provider} returned pid still shares the host PID namespace"
+        );
+        let launcher_children = children_of(child.id());
+        assert_eq!(
+            launcher_children,
+            [pid],
+            "{provider}: a host-namespace helper still sits beside init: {launcher_children:?}"
         );
 
         for expected in [
@@ -112,7 +136,7 @@ fn real_confined_provider_has_every_layer() {
                 "{provider}: missing {expected:?} in {lines:?}"
             );
         }
-        for denied in ["truncate_outside", "o_trunc_outside", "ioctl_dev"] {
+        for denied in ["truncate_outside", "o_trunc_outside"] {
             assert!(
                 lines
                     .iter()
@@ -125,8 +149,9 @@ fn real_confined_provider_has_every_layer() {
             );
         }
         assert!(
-            fixture.planted_dev.exists(),
-            "{provider}: planted device node missing"
+            lines.contains(&format!("ioctl_dev errno={}", libc::EACCES)),
+            "{provider}: ioctl_dev must be Landlock EACCES ({}), got {lines:?}",
+            libc::EACCES
         );
 
         drop(stdin);
@@ -455,9 +480,9 @@ fn real_confined_child_cannot_signal_host() {
             .next()
             .and_then(|text| text.parse().ok())
             .unwrap_or_else(|| panic!("NOT RUN: bad {nspid_line}"));
-        assert!(
-            nspid == 1 || nspid == 2,
-            "{provider}: confined nspid must be 1 or 2, got {nspid}"
+        assert_eq!(
+            nspid, 2,
+            "{provider}: confined nspid must be 2, got {nspid}"
         );
 
         let host_line = require_line(&lines, "kill_host ", provider);
@@ -701,6 +726,201 @@ fn real_empty_fault_pipe_is_not_a_start() {
             "report",
             "the child ended before it wrote a fault or started",
         );
+    }
+}
+
+#[test]
+fn real_sigkill_returned_pid_tears_down_namespace() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("sigkill-init", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let _stdin = child.stdin.take().unwrap();
+        let (pid, lines) = read_until_ready(&mut child, provider);
+        require_line(&lines, "nspid=", provider);
+        let provider_pid = innermost_child(pid)
+            .unwrap_or_else(|| panic!("NOT RUN: no provider pid under init {pid} ({provider})"));
+
+        let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        assert_eq!(sent, 0, "{provider}: kill({pid}, SIGKILL) failed");
+
+        let status = wait_with_timeout(&mut child, 5).unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{provider}: launcher did not exit after SIGKILL to pid {pid}");
+        });
+        assert_eq!(
+            status
+                .code()
+                .or_else(|| status.signal().map(|sig| 128 + sig)),
+            Some(128 + libc::SIGKILL),
+            "{provider}: expected 128+SIGKILL, got {status:?}"
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "{provider}: init pid {pid} still exists after SIGKILL"
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{provider_pid}")).exists(),
+            "{provider}: provider pid {provider_pid} survived SIGKILL of the returned pid"
+        );
+    }
+}
+
+#[test]
+fn real_daemonize_keeps_namespace_until_init_dies() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("daemonize", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .arg("--daemonize")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let _stdin = child.stdin.take().unwrap();
+        let (pid, lines) = read_until_ready(&mut child, provider);
+        require_line(&lines, "nspid=", provider);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{provider}: launcher exited after the provider daemonized"
+        );
+        let leftover = innermost_child(pid)
+            .unwrap_or_else(|| panic!("{provider}: daemonized grandchild gone under init {pid}"));
+        assert!(
+            std::path::Path::new(&format!("/proc/{leftover}")).exists(),
+            "{provider}: daemonized grandchild {leftover} is gone"
+        );
+
+        let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        assert_eq!(sent, 0, "{provider}: kill({pid}, SIGKILL) failed");
+        let status = wait_with_timeout(&mut child, 5).unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{provider}: launcher did not exit after SIGKILL of init {pid}");
+        });
+        assert!(
+            status.code() == Some(128 + libc::SIGKILL) || status.signal() == Some(libc::SIGKILL),
+            "{provider}: expected SIGKILL of init, got {status:?}"
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{leftover}")).exists(),
+            "{provider}: daemonized grandchild {leftover} survived SIGKILL of init"
+        );
+    }
+}
+
+#[test]
+fn real_init_reaps_orphaned_grandchild() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("orphan-reap", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .arg("--orphan-exit")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (pid, lines) = read_until_ready(&mut child, provider);
+        require_line(&lines, "orphan-forked", provider);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_zombie = false;
+        loop {
+            let kids = children_of(pid);
+            saw_zombie = kids.iter().any(|child_pid| {
+                fs::read_to_string(format!("/proc/{child_pid}/status"))
+                    .ok()
+                    .is_some_and(|text| {
+                        text.lines().any(|line| {
+                            line.starts_with("State:\tZ") || line.starts_with("State: Z")
+                        })
+                    })
+            });
+            if !saw_zombie {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !saw_zombie,
+            "{provider}: init left a grandchild zombie under {pid}"
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{provider}: launcher exited while the provider is still running"
+        );
+
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+#[test]
+fn real_confine_ready_without_exec_is_not_a_start() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("confine-ready", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &["--test-confine-ready"],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "launch",
+            "confine_ready",
+            "ConfineReady without execve is not a start",
+        );
+    }
+}
+
+#[test]
+fn real_lying_rights_probe_refuses() {
+    let host = host_landlock_abi();
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("lie-rights", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &["--test-lie-rights"],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "landlock",
+            "right_probe",
+            &format!("landlock_create_ruleset returned EINVAL (reported ABI {host})"),
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(stderr.contains("truncate"), "{provider}: {stderr}");
+        assert!(stderr.contains("ioctl_dev"), "{provider}: {stderr}");
     }
 }
 

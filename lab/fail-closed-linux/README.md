@@ -20,14 +20,16 @@ step stops it.
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
 | no_new_privs | `set_no_new_privs` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
 | seccomp | `install_filter` | `seccomp(SECCOMP_SET_MODE_FILTER)` with the filter in `src/seccomp.rs` |
-| landlock | `abi_probe`, `abi_floor`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
+| landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
 
 After the six layers, `execve` starts the provider with an empty environment.
 `unshare(CLONE_NEWPID)` does not move the caller. `detach_into_pid_namespace`
-forks a PID-1 init in the new namespace; init forks the provider (PID 2) and
-forwards signals to it. The helper that called `unshare` waits on init and
-returns that exit status. The provider is not PID 1, so a forwarded SIGTERM
-is delivered.
+forks a PID-1 init, writes that host pid to the parent, and the helper
+exits. Init forks the provider (PID 2), sets `PR_SET_PDEATHSIG` on the
+provider, and reaps every child with `waitpid(-1)`. `launch` returns init.
+SIGKILL of that pid kills PID 1 and the namespace. SIGTERM on init kills
+every other process in the namespace and then exits. No host-namespace
+helper stays beside the provider.
 
 The bounding set is dropped before `capset`, because `PR_CAPBSET_DROP` needs
 `CAP_SETPCAP` and `capset` removes it. On this host the opposite order left
@@ -59,9 +61,12 @@ number.
 
 The real kernel (`src/real.rs`) creates a close-on-exec pipe and forks. The
 child runs the guard. On a fault, the child writes a 12-byte record (step,
-errno, found ABI) and calls `_exit(71)`. If `exec` succeeds, the pipe closes
-with no data. The child uses only data that `Plan` built before the fork, and
-it makes only system calls: it does not allocate, lock or panic.
+errno, found ABI) and calls `_exit(71)`. A start is EOF on that pipe after
+`execve` closed the write end. Any bytes, including a `ConfineReady` record
+without `execve`, are a refusal. If the helper dies before `execve` and
+there is no live init, that empty read is also a refusal. The child uses
+only data that `Plan` built before the fork, and it makes only system
+calls: it does not allocate, lock or panic.
 
 `launch` returns the refusal and starts nothing. No API in this crate starts
 an unconfined provider.
@@ -101,9 +106,9 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 
 | Suite | Tests |
 | --- | --- |
-| `lib` (unit) | 8 passed |
-| `simulated` | 17 passed |
-| `real_kernel` | 17 passed |
+| `lib` (unit) | (see Tests this session) |
+| `simulated` | (see Tests this session) |
+| `real_kernel` | (see Tests this session) |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -124,7 +129,9 @@ seccomp gives the errno, and the feature itself is present.
 | Landlock ABI too old | `sim_landlock_abi_too_old_refuses` (ABI 1 to 4 name the missing right; ABI 6 with 7 required) | `real_landlock_abi_below_required_refuses` | kernel rule: `--require-landlock-abi` set to the host ABI plus 1 |
 | Per-right floor on this ABI 6 host | `sim_test_extra_right_refuses_on_abi_6` | `real_per_right_floor_refuses_on_this_kernel` | test hook: `--test-require-right future_fs` (needs ABI 7) with `FCL_TEST_HOOKS=1`. The extra floor is not this row |
 | Extra floor still names the right | `sim_extra_floor_still_names_the_missing_right` | `real_extra_floor_still_names_the_missing_right` | both `--require-landlock-abi host+1` and the test extra right; the refusal names `future_fs` |
-| Empty fault pipe | `empty_fault_pipe_is_a_refusal_not_a_start` | `real_empty_fault_pipe_is_not_a_start` | test hook: `--test-empty-pipe` with `FCL_TEST_HOOKS=1`. The child exits before a record |
+| Empty fault pipe (early death) | `execve_eof_is_a_start_and_confine_ready_is_a_refusal` | `real_empty_fault_pipe_is_not_a_start` | test hook: `--test-empty-pipe` with `FCL_TEST_HOOKS=1`. The helper exits before init or exec; spawn refuses |
+| ConfineReady without exec | same lib row | `real_confine_ready_without_exec_is_not_a_start` | test hook: `--test-confine-ready`. Any bytes, including a ready record, are a fault |
+| Lying ABI rights | `sim_lying_abi_5_with_abi_1_rights_refuses` | `real_lying_rights_probe_refuses` | SimKernel reports ABI 5 but accepts only ABI 1 bits. Real hook: `--test-lie-rights` |
 | Landlock ruleset cannot be applied | `sim_landlock_ruleset_unappliable_refuses` (all four steps) | `real_landlock_ruleset_unappliable_refuses` | kernel rule: 16 inherited Landlock domains make `restrict_self` give E2BIG; inherited filter: `restrict_self` gives EPERM |
 
 The positive tests:
@@ -132,16 +139,17 @@ The positive tests:
 - `sim_confined_provider_starts_after_every_layer` checks the order of the
   six layers, one bounding drop per capability, and one exec.
 - `real_confined_provider_has_every_layer` starts the probe and reads the
-  started helper's `/proc/<pid>` from outside. It sees `NoNewPrivs: 1`,
+  returned pid (PID-namespace init) from outside. It sees `NoNewPrivs: 1`,
   `Seccomp: 2`, `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb` all zero,
-  an identity `uid_map`, and a user namespace that differs from the test's.
-  Inside, the probe sees EPERM on an inet socket and a unix socket, EACCES on
-  a read and a write outside its storage root and on `/etc/passwd`, a working
-  write, read and `truncate` inside its storage root, `truncate` and `O_TRUNC`
-  of the outside file denied, and `ioctl` on a planted `/dev/null` descriptor
-  denied. The fixture plants `outside/planted-dev` as a symlink to `/dev/null`
-  and passes `--device-fd` with the open descriptor. It prints `nspid=2` (it
-  is the init's child in the new PID namespace).
+  an identity `uid_map`, a user namespace that differs from the test's, a
+  PID namespace that differs from the test's, `NSpid` ending in 1, and no
+  extra child of the launcher beside init. Inside, the probe sees EPERM on
+  an inet socket and a unix socket, EACCES on a read and a write outside
+  its storage root and on `/etc/passwd`, a working write, read and
+  `truncate` inside its storage root, `truncate` and `O_TRUNC` of the
+  outside file denied, and `TIOCGWINSZ` on a pty slave opened after
+  confine denied with Landlock `EACCES` (13). The same `TIOCGWINSZ` on
+  that pty succeeds unconfined. It prints `nspid=2`.
 - `real_confined_child_cannot_signal_host` asks the probe to `kill` the test
   process's real pid (`kill(pid, 0)`). The kernel returns ESRCH or EPERM; the
   test records that errno. The same probe forks a child in its namespace and
@@ -151,9 +159,15 @@ The positive tests:
   `the PID namespace cannot be created`.
 - `real_reaper_propagates_exit_status` starts the probe with `--exit 42` and
   requires the launcher to exit 42.
-- `real_reaper_forwards_signal` sends SIGTERM to the started helper pid. The
-  helper forwards it to init, init forwards it to the probe, and the launcher
-  exits 128+SIGTERM. The probe process is gone afterwards.
+- `real_reaper_forwards_signal` sends SIGTERM to the returned init pid.
+  Init takes the namespace down. The launcher exits 128+SIGTERM. The
+  probe is gone afterwards.
+- `real_sigkill_returned_pid_tears_down_namespace` sends SIGKILL to init.
+  Init, the provider and the namespace are gone.
+- `real_daemonize_keeps_namespace_until_init_dies` has the probe fork and
+  exit. The grandchild stays. SIGKILL of init then takes it down.
+- `real_init_reaps_orphaned_grandchild` double-forks an exiting grandchild.
+  Init reaps it. No zombie remains while the provider is still running.
 
 Two more checks: `sim_every_guard_step_failure_stops_before_exec` fails each
 guard step in turn, and `sim_landlock_abi_floor_cannot_be_lowered` shows that
@@ -166,10 +180,12 @@ refusal on ABI 1-4. `sim_add_path_rule_rejects_access_outside_handled_fs`
 makes `SimKernel` return `EINVAL` when a path rule asks for a bit the
 ruleset does not handle, matching the kernel.
 
-`--test-require-right` and `--test-empty-pipe` are linux-confine-style test
-switches. They are accepted only when `FCL_TEST_HOOKS=1`. Without that env
-the production CLI reports `unknown argument` and exits 64. The extra right
-can only add a refusal. It cannot drop truncate or `ioctl_dev`.
+`--test-require-right`, `--test-empty-pipe`, `--test-confine-ready` and
+`--test-lie-rights` are linux-confine-style test switches. They are
+accepted only when `FCL_TEST_HOOKS=1`. Without that env the production CLI
+reports `unknown argument` and exits 64. The extra right can only add a
+refusal. It cannot drop truncate or `ioctl_dev`. `--readable-path` grants
+read on one extra path so the probe can open the pty after confine.
 
 ## Per-right table (did, wallet, model)
 
@@ -203,10 +219,11 @@ The design's carrier for `(deny default)` signals is a PID namespace
 (`capsules/wallet-provider/CONFINEMENT-LINUX.md`). This lab unshares
 `CLONE_NEWUSER`, writes the maps, then unshares `CLONE_NEWPID`. A failed
 PID unshare is a refusal: `the PID namespace cannot be created`. After the
-other layers, the helper forks a PID-1 init; init forks the provider and
-reaps it. The helper's pid is what `launch` returns. The fault pipe stays
-close-on-exec on the provider; the reapers close their copies so a
-successful exec still looks like an empty pipe.
+other layers, the helper forks a PID-1 init, writes that host pid, and
+exits. Init forks the provider and reaps every child (`waitpid(-1)`).
+`launch` returns init. The fault pipe stays close-on-exec on the
+provider; helper and init close their copies so a successful `execve`
+is EOF.
 
 `LANDLOCK_SCOPE_SIGNAL` exists from ABI 6. The guard sets it when the probe
 returns 6 or above, and fails closed if `create_ruleset` then fails. ABI 5
@@ -240,8 +257,13 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F19-pid-unshare-skipped | `unshare(CLONE_NEWPID)` is skipped | `real_confined_provider_has_every_layer`, `real_confined_child_cannot_signal_host` |
 | F23-sim-ignores-access-mask | SimKernel accepts a path rule outside `handled_fs` | `sim_add_path_rule_rejects_access_outside_handled_fs` |
 | F24-extra-floor-hides-missing-right | `--require-landlock-abi` is checked before a missing right | the extra-floor-names-right rows |
-| F25-empty-pipe-reported-as-start | an empty fault pipe is treated as a start | the empty-pipe rows |
+| F25-empty-pipe-reported-as-start | `ConfineReady` without `execve` is treated as a start | the ConfineReady rows |
 | F26-test-extra-right-ignored | the test-only extra right is dropped from the mask | the per-right extra-right rows |
+| F27-helper-survives-as-returned-pid | helper stays in the host PID ns and is the returned pid | SIGKILL + confined-layers rows |
+| F28-first-child-exit-tears-down | init exits when the first child exits | the daemonize row |
+| F29-init-does-not-reap-all | init never `waitpid(-1)` | the orphan-grandchild row |
+| F31-lying-abi-probe-skipped | the rights probe is skipped | the lying-ABI rows |
+| F32-ioctl-dev-dropped-from-handled | `IOCTL_DEV` is dropped from `handled_fs` | `real_confined_provider_has_every_layer` |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -253,7 +275,8 @@ It must survive: the whole suite passes on its copy. Logs go to
 Result: recorded after `python3 falsify.py` on this tree. A skipped
 (`ignored`) test is `NOT RUN`, never a pass. F19 (skip `CLONE_NEWPID`)
 is caught because the probe's `nspid` is a host pid. F23-F26 catch the
-#338 review gaps.
+#338 review gaps. F27-F29, F31 and F32 catch the #355 / #357 review
+gaps.
 
 ## Not covered here
 
@@ -270,11 +293,11 @@ is caught because the probe's `nspid` is a host pid. F23-F26 catch the
   tests above cover it.
 - File descriptor inheritance: NOT RUN. The guard does not close descriptors
   that the provider inherits. Only the fault pipe is close-on-exec.
-- If the child ends before it writes a ready record or a fault, the pipe is
-  empty and `launch` refuses. The refusal names that the child ended before
-  it wrote a fault or started. The provider is not started. After the five
-  layers succeed the child writes a ready record, then `exec`. The parent
-  treats ready-then-EOF as a start.
+- If the helper ends before `execve` and init is not alive, the pipe is
+  empty and `launch` refuses. The refusal names that the child ended
+  before it wrote a fault or started. EOF after a live init is a start:
+  `execve` closed the close-on-exec write end. Any bytes, including
+  `ConfineReady` without `execve`, are a refusal.
 
 ## How `lab/linux-confine` (PR #296) could plug in
 

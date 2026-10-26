@@ -1,14 +1,17 @@
 //! Stand-in provider for the real-kernel tests.
 //!
 //! usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR
-//!        [--device-fd FD] [--kill-host PID] [--exit CODE]
+//!        [--tty-path PATH] [--kill-host PID] [--exit CODE]
+//!        [--daemonize] [--orphan-exit]
 //!
 //! It writes STORAGE_ROOT/probe-ran first, prints one line per check, prints
 //! `nspid=` from `/proc/self/status`, prints `ready`, then waits until stdin
-//! closes so the test can read the running process. `--device-fd` is an
-//! inherited character-device descriptor planted by the fixture. `--kill-host`
-//! tries `kill(PID, 0)` and a kill of its own child. `--exit` ends with that
-//! code instead of waiting.
+//! closes so the test can read the running process. `--tty-path` is a pty
+//! slave the probe opens after confine so Landlock can deny `ioctl`.
+//! `--kill-host` tries `kill(PID, 0)` and a kill of its own child. `--exit`
+//! ends with that code instead of waiting. `--daemonize` forks and the parent
+//! exits. `--orphan-exit` double-forks a grandchild that exits so init must
+//! reap it.
 
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -27,9 +30,14 @@ extern "C" {
     fn _exit(status: i32) -> !;
     fn truncate(path: *const i8, length: i64) -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
+    fn open(path: *const i8, flags: i32, ...) -> i32;
+    fn close(fd: i32) -> i32;
 }
 
 const SIGKILL: i32 = 9;
+const TIOCGWINSZ: u64 = 0x5413;
+const O_RDONLY: i32 = 0;
+const O_NOCTTY: i32 = 0o400;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -90,16 +98,29 @@ fn main() {
             .open(outside_file)
             .map(drop),
     );
-    if let Some(fd) = extra.device_fd {
-        report(&mut out, "ioctl_dev", ioctl_device(fd));
+    if let Some(path) = extra.tty_path.as_deref() {
+        report(&mut out, "ioctl_dev", ioctl_tty(path));
     }
     let _ = writeln!(out, "nspid={}", nspid());
     if let Some(host_pid) = extra.kill_host {
         report_kill(&mut out, host_pid);
     }
+    if extra.orphan_exit {
+        orphan_exiting_grandchild(&mut out);
+    }
     let _ = writeln!(out, "ready");
     let _ = out.flush();
     drop(out);
+
+    if extra.daemonize {
+        let child = unsafe { fork() };
+        if child < 0 {
+            std::process::exit(2);
+        }
+        if child > 0 {
+            unsafe { _exit(0) };
+        }
+    }
 
     if let Some(code) = extra.exit_code {
         std::process::exit(code);
@@ -109,22 +130,26 @@ fn main() {
 }
 
 struct Extra {
-    device_fd: Option<i32>,
+    tty_path: Option<String>,
     kill_host: Option<i32>,
     exit_code: Option<i32>,
+    daemonize: bool,
+    orphan_exit: bool,
 }
 
 fn parse_extra(args: &[String]) -> Extra {
     let mut extra = Extra {
-        device_fd: None,
+        tty_path: None,
         kill_host: None,
         exit_code: None,
+        daemonize: false,
+        orphan_exit: false,
     };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--device-fd" => {
-                extra.device_fd = Some(parse_i32(args.get(i + 1)));
+            "--tty-path" => {
+                extra.tty_path = Some(args.get(i + 1).cloned().unwrap_or_else(|| usage()));
                 i += 2;
             }
             "--kill-host" => {
@@ -134,6 +159,14 @@ fn parse_extra(args: &[String]) -> Extra {
             "--exit" => {
                 extra.exit_code = Some(parse_i32(args.get(i + 1)));
                 i += 2;
+            }
+            "--daemonize" => {
+                extra.daemonize = true;
+                i += 1;
+            }
+            "--orphan-exit" => {
+                extra.orphan_exit = true;
+                i += 1;
             }
             _ => usage(),
         }
@@ -150,7 +183,7 @@ fn parse_i32(arg: Option<&String>) -> i32 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--device-fd FD] [--kill-host PID] [--exit CODE]"
+        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit]"
     );
     std::process::exit(2);
 }
@@ -205,6 +238,30 @@ fn report_kill(out: &mut impl Write, host_pid: i32) {
     }
 }
 
+fn orphan_exiting_grandchild(out: &mut impl Write) {
+    let mid = unsafe { fork() };
+    if mid < 0 {
+        let _ = writeln!(
+            out,
+            "orphan errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        return;
+    }
+    if mid == 0 {
+        let gc = unsafe { fork() };
+        if gc == 0 {
+            unsafe { _exit(0) };
+        }
+        unsafe { _exit(0) };
+    }
+    unsafe {
+        let mut status = 0;
+        waitpid(mid, &mut status, 0);
+    }
+    let _ = writeln!(out, "orphan-forked");
+}
+
 fn truncate_path(path: &Path) -> io::Result<()> {
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
@@ -216,15 +273,34 @@ fn truncate_path(path: &Path) -> io::Result<()> {
     }
 }
 
-fn ioctl_device(fd: i32) -> io::Result<()> {
-    // Linux FIONREAD. Same number on x86_64 and aarch64.
-    const FIONREAD: u64 = 0x541B;
-    let mut avail: i32 = 0;
-    let ret = unsafe { ioctl(fd, FIONREAD, &mut avail as *mut i32) };
+#[repr(C)]
+struct Winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+fn ioctl_tty(path: &str) -> io::Result<()> {
+    let c_path = CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_NOCTTY) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut winsize = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let ret = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut Winsize) };
+    let err = io::Error::last_os_error();
+    unsafe { close(fd) };
     if ret == 0 {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        Err(err)
     }
 }
 

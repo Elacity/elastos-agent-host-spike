@@ -1,0 +1,20 @@
+id: F31-lying-abi-probe-skipped
+file: src/lib.rs
+test: simulated::sim_lying_abi_5_with_abi_1_rights_refuses
+test: real_kernel::real_lying_rights_probe_refuses
+--- old
+    let mut probed = 0;
+    for right in FILE_PROFILE_NEEDED_RIGHTS {
+        match kernel.landlock_can_handle_fs(right.access) {
+            Ok(true) => {}
+            Ok(false) => probed |= right.mask,
+            Err(errno) => return Err(Fault::os(Step::RightProbe, errno)),
+        }
+    }
+    if probed != 0 {
+        return Err(Fault::right_probe(abi, probed));
+    }
+--- new
+    let probed = 0;
+    let _ = probed;
+--- end

@@ -48,6 +48,9 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
     let mut landlock_abi = None;
     let mut extra_test_right = false;
     let mut empty_pipe = false;
+    let mut confine_ready = false;
+    let mut lie_rights = false;
+    let mut readable_paths: Vec<PathBuf> = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -60,6 +63,9 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                 )
             }
             Some("--storage-root") => storage_root = Some(PathBuf::from(value("--storage-root")?)),
+            Some("--readable-path") => {
+                readable_paths.push(PathBuf::from(value("--readable-path")?));
+            }
             Some("--require-landlock-abi") => {
                 let text = value("--require-landlock-abi")?;
                 landlock_abi = Some(
@@ -87,6 +93,18 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                 }
                 empty_pipe = true;
             }
+            Some("--test-confine-ready") => {
+                if !test_hooks_enabled() {
+                    return Err(format!("unknown argument {arg:?}"));
+                }
+                confine_ready = true;
+            }
+            Some("--test-lie-rights") => {
+                if !test_hooks_enabled() {
+                    return Err(format!("unknown argument {arg:?}"));
+                }
+                lie_rights = true;
+            }
             Some("--") => {
                 let executable = PathBuf::from(args.next().ok_or("no EXECUTABLE after --")?);
                 let provider = provider
@@ -100,8 +118,17 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                 if extra_test_right {
                     spec = spec.require_test_right(MISSING_TEST_FUTURE_FS);
                 }
+                for path in readable_paths {
+                    spec = spec.readable_path(path);
+                }
                 if empty_pipe {
                     spec = spec.test_empty_pipe();
+                }
+                if confine_ready {
+                    spec = spec.test_confine_ready();
+                }
+                if lie_rights {
+                    spec = spec.test_lie_rights();
                 }
                 for arg in args {
                     spec = spec.arg(arg);

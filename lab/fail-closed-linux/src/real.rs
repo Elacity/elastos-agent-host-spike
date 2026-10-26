@@ -3,6 +3,11 @@
 //!
 //! Everything after `fork` in the child is a system call on data `Plan`
 //! built before the fork. It does not allocate, lock or panic.
+//!
+//! `launch` returns the PID-namespace init. The helper that unshares the
+//! namespace writes that host pid and exits. Init reaps every child. SIGKILL
+//! of init kills the namespace. A start is EOF on the close-on-exec pipe
+//! after `execve`; any bytes are a fault.
 
 use crate::{
     confine_and_exec, interpret_fault_pipe, landlock, ruleset_attr_size, Errno, Fault, FaultPipe,
@@ -15,14 +20,18 @@ use std::os::raw::{c_int, c_long};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// The real kernel. `fault_write` is the child's end of the close-on-exec
-/// pipe; reapers close it so a successful exec reports an empty pipe.
+/// pipe. Reapers close their copy so a successful `execve` produces EOF.
 pub struct RealKernel {
     fault_write: RawFd,
+    lie_rights: bool,
 }
 
 impl RealKernel {
     pub fn new() -> RealKernel {
-        RealKernel { fault_write: -1 }
+        RealKernel {
+            fault_write: -1,
+            lie_rights: false,
+        }
     }
 }
 
@@ -32,12 +41,8 @@ impl Default for RealKernel {
     }
 }
 
-static REAP_CHILD: AtomicI32 = AtomicI32::new(0);
-
-/// Write end of the child's fault pipe. Set after fork, used to write the
-/// ready record from `exec` before `execve`. -1 means no pipe (should not
-/// happen in the child).
-static FAULT_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+/// Write end of the helper-to-parent handoff pipe for init's host pid.
+static HANDOFF_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -140,16 +145,17 @@ fn read_u32(path: &CStr) -> Result<u32, Errno> {
     Ok(value)
 }
 
-extern "C" fn forward_signal(sig: c_int) {
-    let child = REAP_CHILD.load(Ordering::Relaxed);
-    if child > 0 {
-        // SAFETY: kill is async-signal-safe; `child` is our forked pid.
-        unsafe { libc::kill(child, sig) };
+extern "C" fn init_take_down(sig: c_int) {
+    // SAFETY: kill and _exit are async-signal-safe. PID 1 kill(-1) hits
+    // every other process in the namespace.
+    unsafe {
+        libc::kill(-1, libc::SIGKILL);
+        libc::_exit(128 + sig);
     }
 }
 
-fn install_signal_forwarders() {
-    // SAFETY: the handler only calls kill, which is async-signal-safe.
+fn install_init_signals() {
+    // SAFETY: the handler only calls kill and _exit.
     unsafe {
         for sig in [
             libc::SIGHUP,
@@ -160,7 +166,7 @@ fn install_signal_forwarders() {
             libc::SIGUSR2,
             libc::SIGALRM,
         ] {
-            libc::signal(sig, forward_signal as libc::sighandler_t);
+            libc::signal(sig, init_take_down as libc::sighandler_t);
         }
     }
 }
@@ -178,19 +184,29 @@ fn exit_from_wait_status(status: c_int) -> ! {
     }
 }
 
-fn reap_forever(child: libc::pid_t) -> ! {
-    REAP_CHILD.store(child, Ordering::Relaxed);
-    install_signal_forwarders();
-    let mut status = 0;
+fn reap_namespace() -> ! {
+    let mut first: Option<c_int> = None;
     loop {
-        // SAFETY: `status` is a valid out pointer.
-        let ret = unsafe { libc::waitpid(child, &mut status, 0) };
-        if ret == child {
-            exit_from_wait_status(status);
+        let mut status = 0;
+        // SAFETY: `status` is a valid out pointer. waitpid(-1) reaps every
+        // child in the namespace, including orphans and daemonize leftovers.
+        let ret = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if ret > 0 {
+            if first.is_none() {
+                first = Some(status);
+            }
+            continue;
         }
-        if ret < 0 && errno() != libc::EINTR {
-            unsafe { libc::_exit(70) };
+        if ret < 0 && errno() == libc::EINTR {
+            continue;
         }
+        if ret < 0 && errno() == libc::ECHILD {
+            match first {
+                Some(status) => exit_from_wait_status(status),
+                None => unsafe { libc::_exit(0) },
+            }
+        }
+        unsafe { libc::_exit(70) };
     }
 }
 
@@ -200,6 +216,33 @@ fn close_fault_write(kernel: &mut RealKernel) {
         unsafe { libc::close(kernel.fault_write) };
         kernel.fault_write = -1;
     }
+}
+
+fn process_alive(pid: u32) -> bool {
+    // SAFETY: kill(pid, 0) only probes existence.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+fn read_all(fd: RawFd, buf: &mut [u8]) -> (usize, Option<Errno>) {
+    let mut got = 0usize;
+    let mut read_error = None;
+    while got < buf.len() {
+        // SAFETY: the destination is inside `buf`.
+        let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr().cast(), buf.len() - got) };
+        if n < 0 {
+            let err = errno();
+            if err == libc::EINTR {
+                continue;
+            }
+            read_error = Some(err);
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        got += n as usize;
+    }
+    (got, read_error)
 }
 
 impl Kernel for RealKernel {
@@ -221,20 +264,43 @@ impl Kernel for RealKernel {
             return Err(errno());
         }
         if init > 0 {
+            let fd = HANDOFF_WRITE.load(Ordering::Relaxed);
+            if fd >= 0 {
+                let bytes = (init as u32).to_le_bytes();
+                unsafe {
+                    libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                    libc::close(fd);
+                }
+                HANDOFF_WRITE.store(-1, Ordering::Relaxed);
+            }
             close_fault_write(self);
-            reap_forever(init);
+            unsafe { libc::_exit(0) };
         }
+        // Init is PID 1. Do not set PDEATHSIG here: the helper (creator)
+        // is about to exit. The provider sets PDEATHSIG toward this init.
+        // SAFETY: integer prctl only.
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        install_init_signals();
         // SAFETY: this child (init) forks the provider so the provider is
-        // not PID 1. Signals to PID 1 are ignored unless a handler is set;
-        // the reaper keeps the handlers and the provider can receive them.
+        // not PID 1. PID-1 death still kills the namespace.
         let provider = unsafe { libc::fork() };
         if provider < 0 {
             return Err(errno());
         }
         if provider > 0 {
             close_fault_write(self);
-            reap_forever(provider);
+            reap_namespace();
         }
+        // SAFETY: if init dies, the provider dies with it.
+        unsafe {
+            libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGKILL as libc::c_ulong,
+                0,
+                0,
+                0,
+            )
+        };
         Ok(())
     }
 
@@ -392,56 +458,87 @@ impl Kernel for RealKernel {
         check(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) }).map(drop)
     }
 
-    fn exec(&mut self, plan: &Plan) -> Result<(), Errno> {
-        // Tell the parent confine succeeded before execve replaces us.
-        // A failed write stops exec: an empty pipe is a refusal, not a start.
-        let fd = FAULT_PIPE_WRITE.load(Ordering::Relaxed);
-        if fd >= 0 {
-            let bytes = Fault::confine_ready().encode();
-            // SAFETY: `bytes` is valid for its length; `fd` is the pipe write end.
-            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-            if n as usize != bytes.len() {
-                return Err(if n < 0 { errno() } else { libc::EIO });
-            }
+    fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
+        if self.lie_rights {
+            return Ok(false);
         }
+        match self.landlock_create_ruleset(access, 0, 0) {
+            Ok(fd) => {
+                // SAFETY: fd came from create_ruleset above.
+                unsafe { libc::close(fd) };
+                Ok(true)
+            }
+            Err(errno) if errno == libc::EINVAL => Ok(false),
+            Err(errno) => Err(errno),
+        }
+    }
+
+    fn exec(&mut self, plan: &Plan) -> Result<(), Errno> {
         // SAFETY: the path, argv and envp come from `plan`, which keeps every
-        // pointed-to string alive and NULL-terminates both vectors.
+        // pointed-to string alive and NULL-terminates both vectors. The write
+        // end is O_CLOEXEC, so a successful execve closes it and the parent
+        // sees EOF. Any bytes written before execve are a fault.
         unsafe { libc::execve(plan.executable().as_ptr(), plan.argv(), plan.envp()) };
         Err(errno())
     }
 
     fn spawn_confined(&mut self, plan: &Plan) -> Result<u32, Fault> {
-        let mut fds: [c_int; 2] = [-1, -1];
-        // SAFETY: `fds` has room for the two descriptors.
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        // SAFETY: integer prctl. We adopt init after the helper exits.
+        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+            return Err(Fault::os(Step::Prepare, errno()));
+        }
+
+        let mut fault_fds: [c_int; 2] = [-1, -1];
+        // SAFETY: `fault_fds` has room for the two descriptors.
+        if unsafe { libc::pipe2(fault_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(Fault::os(Step::Pipe, errno()));
         }
-        let [read_end, write_end] = fds;
+        let [fault_read, fault_write] = fault_fds;
+
+        let mut handoff_fds: [c_int; 2] = [-1, -1];
+        // SAFETY: `handoff_fds` has room for the two descriptors.
+        if unsafe { libc::pipe2(handoff_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            unsafe {
+                libc::close(fault_read);
+                libc::close(fault_write);
+            }
+            return Err(Fault::os(Step::Pipe, errno()));
+        }
+        let [handoff_read, handoff_write] = handoff_fds;
 
         // SAFETY: the child runs only system calls on `plan` and then
         // `_exit`s or execs; see the module comment.
-        let pid = unsafe { libc::fork() };
-        if pid < 0 {
+        let helper = unsafe { libc::fork() };
+        if helper < 0 {
             let err = errno();
-            // SAFETY: both descriptors came from pipe2 above.
             unsafe {
-                libc::close(read_end);
-                libc::close(write_end);
+                libc::close(fault_read);
+                libc::close(fault_write);
+                libc::close(handoff_read);
+                libc::close(handoff_write);
             }
             return Err(Fault::os(Step::Fork, err));
         }
-        if pid == 0 {
-            // SAFETY: closing our copy of the read end, then reporting and exiting.
-            unsafe { libc::close(read_end) };
-            FAULT_PIPE_WRITE.store(write_end, Ordering::Relaxed);
-            // Test hook: end before a record. The parent must refuse, not start.
+        if helper == 0 {
+            unsafe {
+                libc::close(fault_read);
+                libc::close(handoff_read);
+            }
+            HANDOFF_WRITE.store(handoff_write, Ordering::Relaxed);
             if plan.test_empty_pipe {
-                // SAFETY: `_exit` does not return.
                 unsafe { libc::_exit(REFUSAL_EXIT_CODE) };
+            }
+            if plan.test_confine_ready {
+                let bytes = Fault::confine_ready().encode();
+                unsafe {
+                    libc::write(fault_write, bytes.as_ptr().cast(), bytes.len());
+                    libc::_exit(REFUSAL_EXIT_CODE);
+                }
             }
             let fault = match confine_and_exec(
                 &mut RealKernel {
-                    fault_write: write_end,
+                    fault_write,
+                    lie_rights: plan.test_lie_rights,
                 },
                 plan,
             ) {
@@ -449,46 +546,43 @@ impl Kernel for RealKernel {
                 Ok(()) => Fault::os(Step::Execve, 0),
             };
             let bytes = fault.encode();
-            // SAFETY: `bytes` is valid for its length; `_exit` does not return.
             unsafe {
-                libc::write(write_end, bytes.as_ptr().cast(), bytes.len());
+                libc::write(fault_write, bytes.as_ptr().cast(), bytes.len());
                 libc::_exit(REFUSAL_EXIT_CODE);
             }
         }
 
-        // SAFETY: the parent closes its copy of the write end.
-        unsafe { libc::close(write_end) };
-        let mut buf = [0u8; Fault::ENCODED_LEN * 2];
-        let mut got = 0usize;
-        let mut read_error = None;
-        while got < buf.len() {
-            // SAFETY: the destination is inside `buf`.
-            let n =
-                unsafe { libc::read(read_end, buf[got..].as_mut_ptr().cast(), buf.len() - got) };
-            if n < 0 {
-                let err = errno();
-                if err == libc::EINTR {
-                    continue;
-                }
-                read_error = Some(err);
-                break;
-            }
-            if n == 0 {
-                break;
-            }
-            got += n as usize;
+        unsafe {
+            libc::close(fault_write);
+            libc::close(handoff_write);
         }
-        // SAFETY: the read end came from pipe2 above.
-        unsafe { libc::close(read_end) };
+
+        let mut pid_buf = [0u8; 4];
+        let (got_pid, _) = read_all(handoff_read, &mut pid_buf);
+        unsafe { libc::close(handoff_read) };
+        reap(helper);
+
+        let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
+
+        let mut buf = [0u8; Fault::ENCODED_LEN * 2];
+        let (got, read_error) = read_all(fault_read, &mut buf);
+        unsafe { libc::close(fault_read) };
 
         match interpret_fault_pipe(&buf[..got], read_error) {
-            FaultPipe::Started => Ok(pid as u32),
-            FaultPipe::Refused(fault) => {
-                if read_error.is_some() {
-                    // SAFETY: `pid` is our child; we do not know its state, so stop it.
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
+            FaultPipe::Started => match init_pid {
+                Some(pid) if pid > 0 && process_alive(pid) => Ok(pid),
+                Some(pid) => {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    reap(pid as libc::pid_t);
+                    Err(Fault::empty_pipe())
                 }
-                reap(pid);
+                None => Err(Fault::empty_pipe()),
+            },
+            FaultPipe::Refused(fault) => {
+                if let Some(pid) = init_pid {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    reap(pid as libc::pid_t);
+                }
                 Err(fault)
             }
         }

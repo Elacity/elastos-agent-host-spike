@@ -1,14 +1,16 @@
 //! Fail-closed provider launch guard for Linux (M1 C0 lab).
 //!
-//! The guard runs in the provider's own process, after fork and before exec.
-//! It applies six layers in this order: user namespace, PID namespace,
-//! capability drop, no_new_privs, seccomp, Landlock. Landlock uses a per-right
-//! floor: the profile's needed rights are checked against the probed ABI, and
-//! a missing right refuses with the right and the ABI that first expresses it.
-//! The first step that fails stops the guard and becomes a refusal that names
-//! the provider, the layer, the step and the OS error. The exec call is
-//! reached only after every step succeeded. `launch` has no unconfined path:
-//! a refusal starts nothing.
+//! The guard runs after fork and before exec. It applies six layers in this
+//! order: user namespace, PID namespace, capability drop, no_new_privs,
+//! seccomp, Landlock. Landlock uses a per-right floor, then try-creates a
+//! ruleset for each needed right so a lying ABI number cannot hide a missing
+//! bit (`EINVAL` is a named refusal). The process `launch` returns is the
+//! PID-namespace init. The helper that unshares the namespace exits as soon
+//! as it hands init's host pid back. Init reaps every child (`waitpid(-1)`),
+//! and SIGKILL or SIGTERM of that pid takes the namespace down. A start is
+//! reported only when the close-on-exec fault pipe reaches EOF because
+//! `execve` ran. Any bytes, including a `ConfineReady` record without
+//! `execve`, are a refusal. `launch` has no unconfined path.
 
 pub mod real;
 pub mod seccomp;
@@ -111,6 +113,8 @@ pub struct NeededRight {
     pub name: &'static str,
     pub minimum_abi: u32,
     pub mask: i32,
+    /// Landlock filesystem bit to try-create. Used by the rights probe.
+    pub access: u64,
 }
 
 /// Rights whose absence leaves the sandbox wider than `(deny default)`.
@@ -119,11 +123,13 @@ pub const FILE_PROFILE_NEEDED_RIGHTS: &[NeededRight] = &[
         name: "truncate",
         minimum_abi: TRUNCATE_ABI,
         mask: MISSING_TRUNCATE,
+        access: landlock::ACCESS_FS_TRUNCATE,
     },
     NeededRight {
         name: "ioctl_dev",
         minimum_abi: IOCTL_DEV_ABI,
         mask: MISSING_IOCTL_DEV,
+        access: landlock::ACCESS_FS_IOCTL_DEV,
     },
 ];
 
@@ -268,6 +274,7 @@ pub enum Step {
     InstallFilter,
     AbiProbe,
     AbiFloor,
+    RightProbe,
     CreateRuleset,
     StorageRootRule,
     ExecutableRule,
@@ -283,7 +290,7 @@ pub enum Step {
 
 impl Step {
     /// The steps that run in the provider's process, in guard order.
-    pub const GUARD: [Step; 18] = [
+    pub const GUARD: [Step; 19] = [
         Step::Unshare,
         Step::UidMap,
         Step::Setgroups,
@@ -297,6 +304,7 @@ impl Step {
         Step::InstallFilter,
         Step::AbiProbe,
         Step::AbiFloor,
+        Step::RightProbe,
         Step::CreateRuleset,
         Step::StorageRootRule,
         Step::ExecutableRule,
@@ -323,6 +331,7 @@ impl Step {
             Step::InstallFilter => Layer::Seccomp,
             Step::AbiProbe
             | Step::AbiFloor
+            | Step::RightProbe
             | Step::CreateRuleset
             | Step::StorageRootRule
             | Step::ExecutableRule
@@ -349,6 +358,7 @@ impl Step {
             Step::InstallFilter => "install_filter",
             Step::AbiProbe => "abi_probe",
             Step::AbiFloor => "abi_floor",
+            Step::RightProbe => "right_probe",
             Step::CreateRuleset => "create_ruleset",
             Step::StorageRootRule => "storage_root_rule",
             Step::ExecutableRule => "executable_rule",
@@ -416,8 +426,16 @@ impl Fault {
         }
     }
 
-    /// Written after the five layers succeed and before `exec`. The parent
-    /// treats this record plus EOF as a start. An empty pipe is not a start.
+    pub const fn right_probe(found: u32, mask: i32) -> Fault {
+        Fault {
+            step: Step::RightProbe,
+            errno: mask,
+            found,
+        }
+    }
+
+    /// A ready record without `execve`. The parent treats any bytes as a
+    /// fault, so this record is a refusal, not a start.
     pub const fn confine_ready() -> Fault {
         Fault {
             step: Step::ConfineReady,
@@ -482,6 +500,12 @@ impl Refusal {
                     rights
                 }
             }
+            Step::RightProbe if fault.found != 0 => format!(
+                "{}: landlock_create_ruleset returned EINVAL (reported ABI {})",
+                missing_rights_reason(fault.found, fault.errno),
+                fault.found
+            ),
+            Step::ConfineReady => "ConfineReady without execve is not a start".to_string(),
             Step::AbiProbe => format!(
                 "Landlock is not available: {}",
                 io::Error::from_raw_os_error(fault.errno)
@@ -527,7 +551,10 @@ pub struct ProviderSpec {
     storage_root: PathBuf,
     landlock_abi_floor: u32,
     extra_needed_mask: i32,
+    extra_read_paths: Vec<PathBuf>,
     test_empty_pipe: bool,
+    test_confine_ready: bool,
+    test_lie_rights: bool,
 }
 
 impl ProviderSpec {
@@ -543,7 +570,10 @@ impl ProviderSpec {
             storage_root: storage_root.into(),
             landlock_abi_floor: 0,
             extra_needed_mask: 0,
+            extra_read_paths: Vec::new(),
             test_empty_pipe: false,
+            test_confine_ready: false,
+            test_lie_rights: false,
         }
     }
 
@@ -567,9 +597,28 @@ impl ProviderSpec {
         self
     }
 
+    /// Extra path the provider may open for read only. Used to plant a
+    /// character device the probe opens after `restrict_self`.
+    pub fn readable_path(mut self, path: impl Into<PathBuf>) -> ProviderSpec {
+        self.extra_read_paths.push(path.into());
+        self
+    }
+
     /// Test-only: the child exits before it writes a fault or starts.
     pub fn test_empty_pipe(mut self) -> ProviderSpec {
         self.test_empty_pipe = true;
+        self
+    }
+
+    /// Test-only: the child writes `ConfineReady` and exits without `execve`.
+    pub fn test_confine_ready(mut self) -> ProviderSpec {
+        self.test_confine_ready = true;
+        self
+    }
+
+    /// Test-only: the rights probe reports every needed right missing.
+    pub fn test_lie_rights(mut self) -> ProviderSpec {
+        self.test_lie_rights = true;
         self
     }
 
@@ -592,7 +641,10 @@ pub struct Plan {
     filter: Vec<libc::sock_filter>,
     abi_floor: u32,
     extra_needed_mask: i32,
+    extra_read: Vec<CString>,
     test_empty_pipe: bool,
+    test_confine_ready: bool,
+    test_lie_rights: bool,
 }
 
 impl Plan {
@@ -610,6 +662,13 @@ impl Plan {
         }
         let executable = c_string(spec.executable.as_os_str()).ok_or_else(invalid)?;
         let storage_root = c_string(spec.storage_root.as_os_str()).ok_or_else(invalid)?;
+        let mut extra_read = Vec::new();
+        for path in &spec.extra_read_paths {
+            if !path.is_absolute() {
+                return Err(invalid());
+            }
+            extra_read.push(c_string(path.as_os_str()).ok_or_else(invalid)?);
+        }
         let mut argv = vec![executable.clone()];
         for arg in &spec.args {
             argv.push(c_string(arg).ok_or_else(invalid)?);
@@ -630,7 +689,10 @@ impl Plan {
             filter: seccomp::filter(),
             abi_floor,
             extra_needed_mask: spec.extra_needed_mask,
+            extra_read,
             test_empty_pipe: spec.test_empty_pipe,
+            test_confine_ready: spec.test_confine_ready,
+            test_lie_rights: spec.test_lie_rights,
         })
     }
 
@@ -663,8 +725,8 @@ fn c_string(value: &OsStr) -> Option<CString> {
 pub trait Kernel {
     fn unshare_user_namespace(&mut self) -> Result<(), Errno>;
     fn unshare_pid_namespace(&mut self) -> Result<(), Errno>;
-    /// After `unshare(CLONE_NEWPID)`, fork so the provider runs inside the new
-    /// namespace. The caller stays as a reaper. A simulated kernel does nothing.
+    /// After `unshare(CLONE_NEWPID)`, fork the PID-namespace init and leave
+    /// immediately. A simulated kernel does nothing.
     fn detach_into_pid_namespace(&mut self) -> Result<(), Errno> {
         let _ = self;
         Ok(())
@@ -692,6 +754,15 @@ pub trait Kernel {
         access: u64,
     ) -> Result<(), Errno>;
     fn landlock_restrict_self(&mut self, ruleset: RawFd) -> Result<(), Errno>;
+    /// Try-create a ruleset that handles only `access`. Ok(false) means
+    /// the kernel returned EINVAL: it does not have that right.
+    fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
+        match self.landlock_create_ruleset(access, 0, 0) {
+            Ok(_) => Ok(true),
+            Err(errno) if errno == libc::EINVAL => Ok(false),
+            Err(errno) => Err(errno),
+        }
+    }
     /// Replaces the process image with the provider. On a real kernel this
     /// returns only on failure.
     fn exec(&mut self, plan: &Plan) -> Result<(), Errno>;
@@ -745,6 +816,17 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
     if abi < plan.abi_floor {
         return Err(Fault::abi_floor(abi));
     }
+    let mut probed = 0;
+    for right in FILE_PROFILE_NEEDED_RIGHTS {
+        match kernel.landlock_can_handle_fs(right.access) {
+            Ok(true) => {}
+            Ok(false) => probed |= right.mask,
+            Err(errno) => return Err(Fault::os(Step::RightProbe, errno)),
+        }
+    }
+    if probed != 0 {
+        return Err(Fault::right_probe(abi, probed));
+    }
     let ruleset = kernel
         .landlock_create_ruleset(
             handled_fs_for_abi(abi),
@@ -758,6 +840,11 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
     kernel
         .landlock_add_path_rule(ruleset, &plan.executable, landlock::EXECUTABLE_ACCESS)
         .map_err(os(Step::ExecutableRule))?;
+    for path in &plan.extra_read {
+        kernel
+            .landlock_add_path_rule(ruleset, path, landlock::ACCESS_FS_READ_FILE)
+            .map_err(os(Step::ExecutableRule))?;
+    }
     kernel
         .landlock_restrict_self(ruleset)
         .map_err(os(Step::RestrictSelf))?;
@@ -785,23 +872,23 @@ pub struct Started {
 /// How the parent reads the close-on-exec fault pipe after fork.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultPipe {
-    /// The child wrote `ConfineReady` and then the write end closed: exec ran.
+    /// EOF on the close-on-exec write end: `execve` ran and closed the pipe.
     Started,
-    /// The child wrote a refusal, the pipe was empty, or the record was bad.
+    /// Any bytes are a fault, including a `ConfineReady` record without exec.
     Refused(Fault),
 }
 
 /// Interprets everything read from the fault pipe.
 ///
-/// An empty read (`bytes` is empty and there is no read error) is a refusal.
-/// It is not a start. A `ConfineReady` record alone is a start. A ready
-/// record followed by a second record is the exec failure after confine.
+/// EOF (`bytes` empty, no read error) is a start: `execve` closed the
+/// close-on-exec write end. Any bytes are a fault. A `ConfineReady` record
+/// without `execve` is a refusal.
 pub fn interpret_fault_pipe(bytes: &[u8], read_error: Option<Errno>) -> FaultPipe {
     if let Some(err) = read_error {
         return FaultPipe::Refused(Fault::os(Step::Report, err));
     }
     if bytes.is_empty() {
-        return FaultPipe::Refused(Fault::empty_pipe());
+        return FaultPipe::Started;
     }
     if bytes.len() < Fault::ENCODED_LEN {
         return FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO));
@@ -810,17 +897,8 @@ pub fn interpret_fault_pipe(bytes: &[u8], read_error: Option<Errno>) -> FaultPip
         Some(fault) => fault,
         None => return FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO)),
     };
-    if first.step == Step::ConfineReady && first.errno == 0 {
-        if bytes.len() == Fault::ENCODED_LEN {
-            return FaultPipe::Started;
-        }
-        if bytes.len() >= Fault::ENCODED_LEN * 2 {
-            return match Fault::decode(&bytes[Fault::ENCODED_LEN..Fault::ENCODED_LEN * 2]) {
-                Some(fault) => FaultPipe::Refused(fault),
-                None => FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO)),
-            };
-        }
-        return FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO));
+    if first.step == Step::ConfineReady {
+        return FaultPipe::Refused(Fault::confine_ready());
     }
     FaultPipe::Refused(first)
 }
@@ -869,6 +947,14 @@ mod tests {
             .map(|right| right.name)
             .collect();
         assert_eq!(names, ["truncate", "ioctl_dev"]);
+        assert_eq!(
+            FILE_PROFILE_NEEDED_RIGHTS[0].access,
+            landlock::ACCESS_FS_TRUNCATE
+        );
+        assert_eq!(
+            FILE_PROFILE_NEEDED_RIGHTS[1].access,
+            landlock::ACCESS_FS_IOCTL_DEV
+        );
         assert_eq!(
             landlock::STORAGE_ROOT_ACCESS.count_ones(),
             8,
@@ -977,34 +1063,35 @@ mod tests {
     }
 
     #[test]
-    fn empty_fault_pipe_is_a_refusal_not_a_start() {
-        assert_eq!(
-            interpret_fault_pipe(&[], None),
-            FaultPipe::Refused(Fault::empty_pipe())
-        );
+    fn execve_eof_is_a_start_and_confine_ready_is_a_refusal() {
+        assert_eq!(interpret_fault_pipe(&[], None), FaultPipe::Started);
         let ready = Fault::confine_ready().encode();
-        assert_eq!(interpret_fault_pipe(&ready, None), FaultPipe::Started);
+        assert_eq!(
+            interpret_fault_pipe(&ready, None),
+            FaultPipe::Refused(Fault::confine_ready())
+        );
         let unshare = Fault::os(Step::Unshare, libc::EPERM).encode();
         assert_eq!(
             interpret_fault_pipe(&unshare, None),
             FaultPipe::Refused(Fault::os(Step::Unshare, libc::EPERM))
         );
-        let mut ready_then_exec = Vec::from(ready);
-        ready_then_exec.extend_from_slice(&Fault::os(Step::Execve, libc::ENOENT).encode());
-        assert_eq!(
-            interpret_fault_pipe(&ready_then_exec, None),
-            FaultPipe::Refused(Fault::os(Step::Execve, libc::ENOENT))
-        );
         assert_eq!(
             interpret_fault_pipe(&ready[..6], None),
             FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO))
         );
-        let refusal = Refusal::new("did-provider", Fault::empty_pipe(), 0);
+        let refusal = Refusal::new("did-provider", Fault::confine_ready(), 0);
         assert!(
             refusal
                 .to_string()
-                .contains("the child ended before it wrote a fault or started"),
+                .contains("ConfineReady without execve is not a start"),
             "{refusal}"
+        );
+        let empty = Refusal::new("did-provider", Fault::empty_pipe(), 0);
+        assert!(
+            empty
+                .to_string()
+                .contains("the child ended before it wrote a fault or started"),
+            "{empty}"
         );
     }
 }

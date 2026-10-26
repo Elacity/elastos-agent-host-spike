@@ -405,6 +405,36 @@ fn sim_extra_floor_still_names_the_missing_right() {
 }
 
 #[test]
+fn sim_lying_abi_5_with_abi_1_rights_refuses() {
+    for provider in PROVIDERS {
+        let mut kernel = SimKernel::with_landlock_abi(5);
+        kernel.accepted_fs = Some(handled_fs_for_abi(1));
+        let refusal = refused(&mut kernel, &spec(provider));
+        assert_eq!(refusal.layer, Layer::Landlock, "{refusal}");
+        assert_eq!(refusal.step, Step::RightProbe, "{refusal}");
+        let text = refusal.to_string();
+        assert!(
+            text.contains("landlock_create_ruleset returned EINVAL"),
+            "{refusal}"
+        );
+        assert!(text.contains("reported ABI 5"), "{refusal}");
+        assert!(text.contains("truncate"), "{refusal}");
+        assert!(text.contains("ioctl_dev"), "{refusal}");
+        assert!(
+            kernel.execs.is_empty(),
+            "{provider} started on a lying ABI: {:?}",
+            kernel.execs
+        );
+        assert!(!kernel.steps.contains(&Step::Execve), "{:?}", kernel.steps);
+        assert!(
+            !kernel.steps.contains(&Step::CreateRuleset),
+            "{:?}",
+            kernel.steps
+        );
+    }
+}
+
+#[test]
 fn sim_test_extra_right_refuses_on_abi_6() {
     for provider in PROVIDERS {
         let mut kernel = SimKernel::with_landlock_abi(6);

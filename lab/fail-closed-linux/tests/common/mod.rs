@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use fail_closed_linux::landlock;
-use std::ffi::OsString;
+use std::ffi::{CStr, OsString};
 use std::fs::{self, File};
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -30,9 +30,11 @@ pub struct Fixture {
     pub storage: PathBuf,
     pub outside_dir: PathBuf,
     pub outside_file: PathBuf,
-    pub planted_dev: PathBuf,
-    /// Open /dev/null, kept so the probe can ioctl the inherited descriptor.
-    pub device: File,
+    /// Master side of a pty. Keeps the slave node alive for the probe.
+    #[allow(dead_code)]
+    pub tty_master: File,
+    /// Slave path (`/dev/pts/N`). Opened after confine so Landlock can deny ioctl.
+    pub tty_path: PathBuf,
 }
 
 impl Fixture {
@@ -46,25 +48,14 @@ impl Fixture {
         fs::create_dir_all(&outside_dir).unwrap();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, b"outside the storage root").unwrap();
-        let planted_dev = outside_dir.join("planted-dev");
-        let _ = fs::remove_file(&planted_dev);
-        std::os::unix::fs::symlink("/dev/null", &planted_dev).unwrap();
-        let device = File::open("/dev/null").expect("plant /dev/null for ioctl");
-        // File::open sets CLOEXEC. Clear it so the probe still has the fd
-        // after fcl-launch and the provider exec.
-        let fd = device.as_raw_fd();
-        // SAFETY: `fd` is open; clearing FD_CLOEXEC is an integer fcntl.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        assert!(flags >= 0, "F_GETFD on planted /dev/null");
-        let set = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
-        assert_eq!(set, 0, "clear FD_CLOEXEC on planted /dev/null");
+        let (tty_master, tty_path) = open_pty();
         Fixture {
             root,
             storage,
             outside_dir,
             outside_file,
-            planted_dev,
-            device,
+            tty_master,
+            tty_path,
         }
     }
 
@@ -78,8 +69,8 @@ impl Fixture {
             self.storage.clone().into(),
             self.outside_file.clone().into(),
             self.outside_dir.clone().into(),
-            "--device-fd".into(),
-            self.device.as_raw_fd().to_string().into(),
+            "--tty-path".into(),
+            self.tty_path.clone().into(),
         ]
     }
 
@@ -123,6 +114,8 @@ pub fn launch_command(
         .arg(provider)
         .arg("--storage-root")
         .arg(&fixture.storage)
+        .arg("--readable-path")
+        .arg(&fixture.tty_path)
         .args(options)
         .arg("--")
         .arg(probe())
@@ -160,9 +153,9 @@ pub fn launch_command(
     command
 }
 
-/// Marks the launcher command so `--test-require-right` and
-/// `--test-empty-pipe` are accepted. Without this env those flags are
-/// unknown arguments, like linux-confine's production `lc-setup`.
+/// Marks the launcher command so `--test-require-right`,
+/// `--test-empty-pipe`, `--test-confine-ready` and `--test-lie-rights`
+/// are accepted. Without this env those flags are unknown arguments.
 pub fn with_test_hooks(command: &mut Command) -> &mut Command {
     command.env("FCL_TEST_HOOKS", "1")
 }
@@ -334,6 +327,47 @@ fn stack_landlock_domains(count: u32) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn unconfined_tiocgwinsz(path: &Path) -> io::Result<()> {
+    let file = File::open(path)?;
+    let mut winsize = [0u16; 4];
+    // Linux TIOCGWINSZ. Same number on x86_64 and aarch64.
+    const TIOCGWINSZ: u64 = 0x5413;
+    let ret = unsafe { libc::ioctl(file.as_raw_fd(), TIOCGWINSZ, winsize.as_mut_ptr()) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn open_pty() -> (File, PathBuf) {
+    // SAFETY: posix_openpt / grantpt / unlockpt / ptsname_r are the usual pty setup.
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(master >= 0, "posix_openpt: {}", io::Error::last_os_error());
+    assert_eq!(
+        unsafe { libc::grantpt(master) },
+        0,
+        "grantpt: {}",
+        io::Error::last_os_error()
+    );
+    assert_eq!(
+        unsafe { libc::unlockpt(master) },
+        0,
+        "unlockpt: {}",
+        io::Error::last_os_error()
+    );
+    let mut buf = [0u8; 64];
+    let ret = unsafe { libc::ptsname_r(master, buf.as_mut_ptr().cast(), buf.len()) };
+    assert_eq!(ret, 0, "ptsname_r: {}", io::Error::last_os_error());
+    let path = unsafe { CStr::from_ptr(buf.as_ptr().cast()) }
+        .to_str()
+        .expect("pts path is UTF-8")
+        .to_string();
+    // SAFETY: `master` is an open fd we now own.
+    let file = unsafe { File::from_raw_fd(master) };
+    (file, PathBuf::from(path))
 }
 
 fn write_proc(path: &std::ffi::CStr, data: &[u8]) -> io::Result<()> {
