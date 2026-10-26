@@ -873,3 +873,21 @@ fn model_known_zero_settle_frees_the_hold() {
     assert_eq!(books(&verifier).held, 10);
     assert_eq!(books(&verifier).charged, 0);
 }
+
+#[test]
+fn model_one_release_returns_only_that_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let first = verifier.reserve(&call, &request, 6).expect("reserve");
+    let second = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(verifier.release(&call, &request, first), Ok(()));
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert!(!after.open.contains_key(&first.id));
+    assert_eq!(after.open.get(&second.id), Some(&4));
+}
