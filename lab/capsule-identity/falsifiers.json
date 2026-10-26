@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018 and 019). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020 and 022). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule and the consumer scan (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -3288,6 +3288,103 @@
       ],
       "tests": [
         "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI22a",
+      "title": "the consumer scan reads only lab/*/Cargo.toml, so a nested manifest such as lab/wasm-capsule/tools is never found",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let manifest = path.starts_with(\"lab/\") && path.ends_with(\"/Cargo.toml\");\n",
+          "new": "        let manifest = path.starts_with(\"lab/\") && path.matches('/').count() == 2 && path.ends_with(\"/Cargo.toml\");\n"
+        }
+      ],
+      "tests": [
+        "every_lab_cid_consumer_is_in_the_adoption_note"
+      ]
+    },
+    {
+      "id": "F-CI22b",
+      "title": "the consumer scan looks for the key capsule_identity, not capsule-identity, so it finds no consumer",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "const CRATE_KEY: &str = \"capsule-identity\";\n",
+          "new": "const CRATE_KEY: &str = \"capsule_identity\";\n"
+        }
+      ],
+      "tests": [
+        "every_lab_cid_consumer_is_in_the_adoption_note"
+      ]
+    },
+    {
+      "id": "F-CI22c",
+      "title": "the adoption note's heading the helpers look for differs by one letter, so neither the list nor the note is found",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "pub const ADOPTION_HEADING: &str = \"## For a lab that uses the lab CID\\n\";\n",
+          "new": "pub const ADOPTION_HEADING: &str = \"## For a lab that uses the Lab CID\\n\";\n"
+        }
+      ],
+      "tests": [
+        "every_lab_cid_consumer_is_in_the_adoption_note",
+        "the_adoption_note_states_the_outside_recomputation"
+      ]
+    },
+    {
+      "id": "F-CI22d",
+      "title": "a manifest line that names the crate in a form the scan does not read counts as no dependency instead of failing the scan",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        } else {\n            return Err(format!(\n                \"{path}:{}: {line:?} names",
+          "new": "        } else if false {\n            return Err(format!(\n                \"{path}:{}: {line:?} names"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI22e",
+      "title": "a manifest that cannot be read is read as empty, so it is skipped as no dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    fs::read_to_string(repo_dir().join(path)).map_err(|error| format!(\"read {path}: {error}\"))\n",
+          "new": "    Ok(fs::read_to_string(repo_dir().join(path)).unwrap_or_default())\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI22f",
+      "title": "a line of the adoption note's list that is not a path and its use is skipped",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            _ => {\n                let what = \"a manifest path and pins, parse or both\";\n                return Err(format!(\"the adoption note's line {line:?} is not {what}\"));\n            }\n",
+          "new": "            _ => continue,\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read"
       ]
     }
   ]

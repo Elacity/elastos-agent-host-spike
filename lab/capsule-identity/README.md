@@ -552,6 +552,77 @@ consumer calls it and never copies the base32 or the CID bytes.
 
 The tests are in `tests/parse.rs`.
 
+## For a lab that uses the lab CID
+
+Three lab crates outside this lane have a path dependency on this crate. Each
+manifest is listed below with what that crate uses: `pins` (its tests pin a
+printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse, or
+makes values with `encode_entries`), or `both`.
+
+```text
+lab/agent-conformance/Cargo.toml  parse
+lab/wasm-capsule/Cargo.toml  both
+lab/wasm-capsule/tools/Cargo.toml  pins
+```
+
+- `lab/agent-conformance` (cx-agent-conformance) reads `bundle_lab_cid` with
+  `parse::<LabCid>()` (`src/report.rs`), makes its synthetic values with
+  `encode_entries`, and names bundles with `checked_bundle`. It pins no lab
+  CID.
+- `lab/wasm-capsule` (wasm-capsule-lab), the `capsule` package: its tests pin
+  two lab CIDs (`tests/common/mod.rs`, `tests/bundle.rs`) and parse a printed
+  one (`tests/run.rs`).
+- `lab/wasm-capsule/tools` (`wasm-capsule-tools`) names every lab bundle with
+  `lab_cid` (re-exported as `bundle_identity`). The two pins above are of what
+  it prints, so a change in what `lab_cid` prints reaches it through them.
+
+Read at `01f6add1f`. `every_lab_cid_consumer_is_in_the_adoption_note`
+(`tests/adoption.rs`) keeps the list true: it reads every git-tracked
+`Cargo.toml` under `lab/` outside this lane and keeps those whose
+`[dependencies]` or `[dev-dependencies]` has a `capsule-identity` key with a
+`path`, written as one inline table. That set must equal the list, both ways,
+and the failure names each path that is missing or extra. A manifest that
+names the crate in any other form (another table, a dotted header, no `path`)
+fails the scan with its line, so it is never skipped. When a lab crate adds a
+path dependency on this crate, this lane's tests fail until the list names it.
+
+**The pin rule.** A consumer's pin comes from its own `python3 -I` script,
+written only from [the encoding](#the-encoding) and Python's standard library,
+or from this README's block run as it is. The script is checked first on
+`fixtures/content-sample/`, where it must print
+`bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi`
+(`CONTENT_SAMPLE_LAB_CID`), and on a one-byte change there, where it must
+print a different value. Only then is it run on the consumer's bundle and
+compared with the code's output for the same folder, and only then is the
+value pinned. A pin is never copied from the code's output. A mismatch is a
+`FINDING: lab CID mismatch` for this lane, cc-capsule-identity; the consumer
+never edits its pin to fit the code.
+
+**The change rule.** A task in this lane that changes what `lab_cid` prints,
+what `LabCid` parses, or what `encode_entries` returns names one follow-up for
+each consumer listed above, in its report and in this lane's BACKLOG, before
+it merges.
+
+**The example.** Task 018 (PR #226) changed what `lab_cid` prints from
+`lab-cid:sha256:<hex>` to the 59-character `bafybei...` root. wasm-capsule-lab
+pinned the old form, and its tests went red on the base until its task 024
+(PR #231) recomputed its pins: one `python3 -I` script written only from this
+README's rules and the standard library, kept under its git-ignored `target/`
+and quoted in its LOG, checked on `content-sample` and on a one-byte change,
+then compared with the code's output, and only then pinned.
+agent-conformance needed no code change, because it parses with `LabCid` and
+makes its values with `encode_entries`.
+
+A pin is a lab CID, a lab package CID (see
+[why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). Adopting it is an
+identity check only: it adds no admission, grant or launch step.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The list is every lab crate with a path dependency on this crate, and only those | `every_lab_cid_consumer_is_in_the_adoption_note` | F-CI22a (only `lab/*/Cargo.toml` is read), F-CI22b (the key `capsule_identity`), F-CI22c (the heading the helper looks for) |
+| The note states the outside recomputation | `the_adoption_note_states_the_outside_recomputation` | F-CI22c |
+| The scan never skips: a missing note, an unread line, an unreadable manifest and a form it does not read each fail with their reason | `the_consumer_scan_refuses_what_it_cannot_read` | F-CI22d (a form it does not read counts as none), F-CI22e (an unreadable manifest reads as empty), F-CI22f (a list line it cannot read is skipped) |
+
 ## Test-key publisher signature (lab proposal)
 
 A test key can sign a bundle's printed lab CID. The check answers only "did
@@ -1249,6 +1320,9 @@ cache. `wc001_capsule_bundle_gets_a_stable_lab_cid` runs
 `readme_python_matches_the_name_signature_digest` and
 `readme_python_matches_the_package_record_bytes` run `python3` from `PATH`;
 with no `python3` they fail, they do not skip.
+`every_lab_cid_consumer_is_in_the_adoption_note` runs `git ls-files` and
+reads the other lab crates' `Cargo.toml` files, read only; with no `git` it
+fails, it does not skip.
 
 ## Layout
 
@@ -1263,7 +1337,10 @@ recipes/                 provider-variant.recipe, the variants' lab stand-in rec
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
                          the refusal asserts both signature checks share, the
-                         key-material scan, the python3 -I run of README's blocks
+                         key-material scan, the python3 -I run of README's blocks,
+                         the scan of the lab crates that use this crate
+tests/adoption.rs        README's consumer list equals the lab's path dependencies;
+                         the note states the outside recomputation
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
@@ -1287,7 +1364,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 197 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 203 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1308,7 +1385,9 @@ F-CI16i, and task 017's F-CI17a (all three: see
 [the variant binding](#lab-variant-binding-outside-the-bundles)), and task
 018's F-CI18a to F-CI18s (see [the encoding](#the-encoding)), and task
 019's F-CI19a to F-CI19j, and task 020's F-CI20a to F-CI20f (both: see
-[the cross-implementation check](#the-cross-implementation-check)).
+[the cross-implementation check](#the-cross-implementation-check)), and task
+022's F-CI22a to F-CI22f (see
+[for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h and F-CI4i edits a file the runner
@@ -1326,6 +1405,10 @@ F-CI20c to F-CI20f edit `tests/common/mod.rs`. F-CI19d now also names
 020's two tests. Task 020 made the block extractor take a section heading
 (`python_block_under`), and moved `CONTENT_SAMPLE_NAME_DIGEST` from
 `tests/name_signature.rs` into `tests/common/mod.rs` with its value unchanged;
+every older edit's text is still found exactly once. Task 022's entries edit
+only `tests/common/mod.rs`, which holds the consumer scan and the reader of
+the adoption note. It made `python_block_under` the `python` case of one block
+reader, `fenced_block_under`, which the note's ```` ```text ```` list also uses;
 every older edit's text is still found exactly once.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
@@ -1402,7 +1485,9 @@ task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 0 do not`; F-CI19a to F-CI19j each CAUGHT). At task 020 it reported
 `summary: 197 CAUGHT of 197` (`baseline: 115 named tests pass without an edit,
 0 do not`; F-CI20a to F-CI20f and the widened F-CI19d each CAUGHT).
+At task 022 it reported `summary: 203 CAUGHT of 203` (`baseline: 118 named
+tests pass without an edit, 0 do not`; F-CI22a to F-CI22f each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019 and 020 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020 and 022 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

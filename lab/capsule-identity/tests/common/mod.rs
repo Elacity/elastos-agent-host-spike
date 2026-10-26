@@ -2,9 +2,9 @@
 //! pinned lab CIDs, a bounded call for bundles that hold a FIFO, observers
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
-//! signature checks share, the one key-material scan, and the run of
-//! README's Python rule (both kept here, a file the falsifier runner restores
-//! after a killed run).
+//! signature checks share, the one key-material scan, the run of README's
+//! Python rule, and the scan of the lab crates that use this crate (all three
+//! kept here, a file the falsifier runner restores after a killed run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
@@ -602,29 +602,183 @@ pub fn readme_python_block() -> Result<String, String> {
 /// one, or an unclosed block is refused with its reason, which names the
 /// section.
 pub fn python_block_under(readme: &str, heading: &str) -> Result<String, String> {
+    fenced_block_under(readme, heading, "python")
+}
+
+/// The text of the section of `readme` under `heading`, up to the next `## `
+/// heading. A missing section is refused with its reason.
+pub fn section_under<'a>(readme: &'a str, heading: &str) -> Result<&'a str, String> {
     let title = heading.trim_end();
     let start = readme
         .find(heading)
         .ok_or_else(|| format!("README.md has no {title:?} section"))?
         + heading.len();
     let section = &readme[start..];
-    let section = &section[..section.find("\n## ").unwrap_or(section.len())];
-    let open = "```python\n";
-    match section.matches(open).count() {
+    Ok(&section[..section.find("\n## ").unwrap_or(section.len())])
+}
+
+/// The one ```` ```lang ```` block of the section of `readme` under `heading`,
+/// as written: the one README block reader. Its refusals are
+/// [`python_block_under`]'s, with `lang` in place of `python`.
+pub fn fenced_block_under(readme: &str, heading: &str, lang: &str) -> Result<String, String> {
+    let title = heading.trim_end();
+    let section = section_under(readme, heading)?;
+    let open = format!("```{lang}\n");
+    match section.matches(&open).count() {
         1 => {}
-        0 => return Err(format!("README.md's {title:?} holds no ```python block")),
+        0 => return Err(format!("README.md's {title:?} holds no ```{lang} block")),
         more => {
             return Err(format!(
-                "README.md's {title:?} holds {more} ```python blocks, not one"
+                "README.md's {title:?} holds {more} ```{lang} blocks, not one"
             ))
         }
     }
-    let body = &section[section.find(open).expect("found once") + open.len()..];
+    let body = &section[section.find(&open).expect("found once") + open.len()..];
     let end = body
         .find("\n```\n")
-        .ok_or_else(|| format!("README.md's ```python block in {title:?} is never closed"))?;
+        .ok_or_else(|| format!("README.md's ```{lang} block in {title:?} is never closed"))?;
     let block = &body[..end + 1];
     Ok(block.to_owned())
+}
+
+/// The heading of README's consumer adoption note.
+pub const ADOPTION_HEADING: &str = "## For a lab that uses the lab CID\n";
+
+/// The text of README's consumer adoption note, as committed.
+pub fn readme_adoption_note() -> Result<&'static str, String> {
+    section_under(README, ADOPTION_HEADING)
+}
+
+/// The consumer manifests README's adoption note lists, sorted.
+pub fn readme_lab_cid_consumers() -> Result<Vec<String>, String> {
+    consumers_listed_in(README)
+}
+
+/// The manifests listed in the ```text block of `readme`'s adoption note,
+/// sorted. Each line is a repo-relative path and what that consumer uses:
+/// `pins`, `parse` or `both`. Any other line is refused with its text.
+pub fn consumers_listed_in(readme: &str) -> Result<Vec<String>, String> {
+    let block = fenced_block_under(readme, ADOPTION_HEADING, "text")?;
+    let mut listed = Vec::new();
+    for line in block.lines() {
+        match line.split_whitespace().collect::<Vec<_>>()[..] {
+            [path, "pins" | "parse" | "both"] => listed.push(path.to_owned()),
+            _ => {
+                let what = "a manifest path and pins, parse or both";
+                return Err(format!("the adoption note's line {line:?} is not {what}"));
+            }
+        }
+    }
+    listed.sort();
+    Ok(listed)
+}
+
+/// The key a consumer's manifest names this crate by.
+const CRATE_KEY: &str = "capsule-identity";
+
+/// This lane's folder, as `git ls-files --full-name` prints it.
+const LANE_PREFIX: &str = "lab/capsule-identity/";
+
+/// The repository's root: the folder that holds `lab/`.
+pub fn repo_dir() -> PathBuf {
+    let lane = lane_dir();
+    lane.parent()
+        .and_then(Path::parent)
+        .expect("the lane is lab/capsule-identity")
+        .to_path_buf()
+}
+
+/// Every git-tracked `Cargo.toml` under `lab/` outside this lane whose
+/// `[dependencies]` or `[dev-dependencies]` has a `capsule-identity` key
+/// with a `path`: repo-relative paths, sorted. It reads only files outside
+/// this lane. A git that cannot run, a path that is not UTF-8, an unreadable
+/// manifest, or a manifest that names the crate in a form
+/// [`depends_on_this_crate`] does not read, is refused with its cause.
+pub fn lab_cid_consumers() -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--full-name",
+            "-z",
+            "--",
+            "*Cargo.toml",
+        ])
+        .current_dir(repo_dir().join("lab"))
+        .output()
+        .map_err(|error| format!("git cannot run: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut consumers = Vec::new();
+    for name in output.stdout.split(|byte| *byte == 0) {
+        let path = String::from_utf8(name.to_vec())
+            .map_err(|_| format!("a tracked path is not UTF-8: {name:?}"))?;
+        let manifest = path.starts_with("lab/") && path.ends_with("/Cargo.toml");
+        if !manifest || path.starts_with(LANE_PREFIX) {
+            continue;
+        }
+        if depends_on_this_crate(&path, &read_manifest(&path)?)? {
+            consumers.push(path);
+        }
+    }
+    consumers.sort();
+    Ok(consumers)
+}
+
+/// The text of the manifest at the repo-relative `path`. A manifest that
+/// cannot be read is refused with its path and cause.
+pub fn read_manifest(path: &str) -> Result<String, String> {
+    fs::read_to_string(repo_dir().join(path)).map_err(|error| format!("read {path}: {error}"))
+}
+
+/// Whether the manifest `text`, at `path`, has a `capsule-identity` key with
+/// a `path` in its `[dependencies]` or `[dev-dependencies]` table, written as
+/// one inline table on its line. A comment does not count. Any other line
+/// that names the crate (another table, a dotted header, no inline `path`)
+/// is refused with its line, so a consumer written in a form this reader
+/// does not take fails the scan instead of being missed.
+pub fn depends_on_this_crate(path: &str, text: &str) -> Result<bool, String> {
+    let mut table = "";
+    let mut found = false;
+    for (index, line) in text.lines().enumerate() {
+        let code = line.split('#').next().unwrap_or_default().trim();
+        if code.starts_with('[') {
+            table = code;
+        }
+        if !code.contains(CRATE_KEY) {
+            continue;
+        }
+        let (key, value) = code.split_once('=').unwrap_or((code, ""));
+        let dependencies = matches!(table, "[dependencies]" | "[dev-dependencies]");
+        if dependencies && key.trim() == CRATE_KEY && has_inline_path(value) {
+            found = true;
+        } else {
+            return Err(format!(
+                "{path}:{}: {line:?} names {CRATE_KEY} in a form the scan does not read",
+                index + 1
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// Whether `value` is one inline table with a `path` key.
+fn has_inline_path(value: &str) -> bool {
+    let value = value.trim();
+    let Some(inner) = value
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return false;
+    };
+    inner.split(',').any(|part| {
+        part.split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "path")
+    })
 }
 
 /// The driver run after README's block. It holds no part of the naming
