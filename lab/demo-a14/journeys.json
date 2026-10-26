@@ -35,6 +35,9 @@
     "agent-conformance": {
       "source": "lab/agent-conformance/tests",
       "label": "real elastos binary through lab/agent-conformance",
+      "runner": "cargo",
+      "runner_reason": "its harness builds elastos with Cargo inside the test; under any other parent than cargo test that build starts again, so the run uses cargo test with the environment run.sh used",
+      "launches": ["elastos", "localhost-provider"],
       "cwd": ".",
       "cargo": ["test", "--locked", "--manifest-path", "lab/agent-conformance/Cargo.toml", "--test", "effects"],
       "libtest": ["--exact", "--show-output"],

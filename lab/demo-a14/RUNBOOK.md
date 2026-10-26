@@ -1,54 +1,54 @@
 # A14 installed demo
 
+## Sash's morning steps
+
+```bash
+cd ~/code/elastos-agent-host-spike                 # 1. go to your copy of the repository
+git checkout spike/agent-host && git pull --ff-only  # 2. get the version to test
+bash lab/demo-a14/install.sh --sign                # 3. install and sign (30 minutes or more the first time)
+bash lab/demo-a14/run.sh                           # 4. run every step against the installed versions
+open "$(ls -dt ~/Library/Application\ Support/elastos-demo-a14/runs/*/ | head -1)"  # 5. send summary.txt; book A14 only on "A14: PASS."
+```
+
+The rest of this file explains each line, and what to do if a line says
+`REFUSED`.
+
+## What this is
+
 M1 check A14 says: Sash runs the installed demo, and its versions are bound.
 
 This folder gives you two commands. `install.sh` installs the demo once. `run.sh`
 runs it. The run shows each agent journey, one step at a time, and says if the
 step passed or was refused, and why. Before it runs anything, it compares every
-installed part with one receipt file, `VERSIONS.json`. If one part is different,
-the demo stops and runs nothing.
+installed part with two receipt files: `VERSIONS.json`, which the conformance
+check writes, and `INSTALL.json`, which the install writes. If one part is
+different, the demo stops and runs nothing.
 
 ## What you need, one time
 
 - A Mac with at least 40 GB of free disk space.
 - The Terminal app (in Applications, then Utilities).
 - Apple's command line tools. In Terminal, type `xcode-select --install` and
-  follow the window. If it says they are already installed, that is fine.
+  follow the window. If it says they are already installed, that is fine. They
+  include `git`, `python3` and `ssh-keygen`, which signs the receipts.
 - Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
   Terminal and open it again.
 - A copy of this repository on your Mac.
 
-## Step 1: open the repository folder
-
-In Terminal, go to the folder where your copy of the repository is. For example:
-
-```bash
-cd ~/code/elastos-agent-host-spike
-```
-
-The first time only, add the Rust target the demo builds for:
+The first time only, in the repository folder, add the Rust target the demo
+builds for:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
 
-## Step 2: get the version to test
+## Lines 1 and 2: the version to test
 
-```bash
-git checkout spike/agent-host
-git pull --ff-only
-git status
-```
-
-The last command must say `nothing to commit, working tree clean`. If it says
-something else, stop and ask an engineer. The demo refuses to install from a
+After line 2, `git status` must say `nothing to commit, working tree clean`. If it
+says something else, stop and ask an engineer. The demo refuses to install from a
 copy with local changes.
 
-## Step 3: install
-
-```bash
-bash lab/demo-a14/install.sh
-```
+## Line 3: install
 
 The install does five things and prints each one:
 
@@ -57,12 +57,15 @@ The install does five things and prints each one:
    That check writes a new `VERSIONS.json`, which records the exact Runtime,
    provider and test capsules it used.
 3. It builds the agent-host guest from the same version of the code.
-4. It builds the journey tests, so that the run does not have to.
+4. It builds the journey tests and records the fingerprint (SHA-256) of every
+   test program and provider program that the run will start.
 5. It copies the Runtime, the provider, the guest and `VERSIONS.json` into
-   `~/Library/Application Support/elastos-demo-a14/current`.
+   `~/Library/Application Support/elastos-demo-a14/current`, and writes
+   `INSTALL.json` with every fingerprint.
 
-The first install can take 30 minutes or more. Keep the Mac awake and plugged
-in, and do not start other builds at the same time.
+With `--sign`, the install also signs both receipt files (see "The signature"
+below). Keep the Mac awake and plugged in, and do not start other builds at the
+same time.
 
 A good install ends like this:
 
@@ -75,14 +78,10 @@ Next: bash lab/demo-a14/run.sh
 If you see `REFUSED:`, read the lines under it. Each line names one problem.
 The last line says what to do next.
 
-## Step 4: run
+## Line 4: run
 
-```bash
-bash lab/demo-a14/run.sh
-```
-
-First the run checks the versions and prints them. Then it runs each step and
-prints a block like this:
+First the run checks the versions and prints them, the program fingerprints and
+the signature. Then it runs each step and prints a block like this:
 
 ```text
   A8         REFUSED  A capsule cannot read a host SSH key
@@ -101,12 +100,15 @@ The second word tells you what happened:
 
 At the end, a summary gives one line for each M1 check, then one final line:
 
-- `A14: PASS.` Every step ran, and every step used the versions in `VERSIONS.json`.
+- `A14: PASS.` Every step ran, and every step used the versions in the receipts.
 - `A14: NOT RUN.` Some steps did not run here. A14 is not done.
 - `A14: FAIL.` A step failed, or the versions changed during the run. A14 is not done.
 
-The `Saved:` line names a folder. It holds `summary.txt` (the same text you see)
-and the full output of each test group.
+## Line 5: what to send
+
+Line 5 opens the newest run folder. Send its `summary.txt` file. It holds the
+same text that the run printed. The folder also holds the full output of each
+test group.
 
 ## When the run says the versions do not match
 
@@ -115,8 +117,26 @@ REFUSED: the installed versions do not match VERSIONS.json. No journey was run.
 ```
 
 This is the version lock. Something changed after the install: new code, a
-rebuilt file or a changed copy. Each line under the message names the part and
-both fingerprints. Run `bash lab/demo-a14/install.sh` again, then run again.
+rebuilt program, a changed copy, or a changed receipt. Each line under the
+message names the part and both fingerprints. Run line 3 again, then line 4.
+
+## The signature
+
+`install.sh --sign` makes one ed25519 key for this Mac with `ssh-keygen` and
+keeps it in `~/Library/Application Support/elastos-demo-a14/signing`. The key
+never goes into the repository. The install signs `VERSIONS.json` and
+`INSTALL.json` with it.
+
+While that key exists, signing is on. Then the run refuses to start if either
+receipt file has no signature, or if a signature does not match the file and this
+Mac's key.
+
+The signature proves that the receipts are unchanged since the install on this
+Mac. It does not prove who published them, because the key was made here and
+nobody else trusts it.
+
+To turn signing off, delete the `signing` folder, then install again without
+`--sign`.
 
 ## See the lock work (optional)
 
@@ -126,22 +146,21 @@ puts the right copy back. Use the receipt path that your install printed.
 ```bash
 printf x >> ~/Library/Application\ Support/elastos-demo-a14/current/bin/elastos
 bash lab/demo-a14/run.sh
-bash lab/demo-a14/install.sh --receipt "<the Receipt path from Step 3>"
+bash lab/demo-a14/install.sh --receipt "<the Receipt path from line 3>"
 ```
 
 The run must print `REFUSED`, name `installed elastos`, and run no step. The
 second install is quick because it reuses the receipt and the builds.
 
-## What to send back
-
-Send the `summary.txt` file from the `Saved:` folder, or copy everything the run
-printed.
+To see the signature work, add one space to the end of the installed
+`VERSIONS.json`, run, and look for `VERSIONS.json signature does not verify`.
+Then install again with `--receipt` as above.
 
 ## Clean up
 
 When the result is reviewed, delete the folder
-`~/Library/Application Support/elastos-demo-a14`. It holds only the demo's
-copies and run outputs.
+`~/Library/Application Support/elastos-demo-a14`. It holds the demo's copies,
+run outputs and, if you used `--sign`, this Mac's demo key.
 
 ## For the reviewer
 
@@ -163,26 +182,48 @@ difference is a refusal with exit code 3, and no step runs.
 - `VERSIONS.json` comes from `lab/agent-conformance` (schema
   `agent-conformance.versions/v1`), is complete, records a passing command, a
   clean commit and its own `versions_receipt (A14) | PASS` row.
-- Its bytes still match the SHA-256 that the install recorded.
+- Its bytes still match the SHA-256 that `INSTALL.json` recorded.
 - The installed `elastos` and `localhost-provider` match its `runtime_sha256` and
   `localhost_provider_sha256`, and so do the copies in
   `lab/agent-conformance/target/runtime/debug` that the A8 journey launches.
-- This checkout is at the receipt's commit and has no local changes.
-- The agent-host guest that A1 and A2 load matches the copy pinned at install.
+- The agent-host guest that A1 and A2 load matches its SHA-256 in `INSTALL.json`.
+- Each suite's test executable, and each provider binary the C tests start,
+  matches its SHA-256 in `INSTALL.json` and lies inside the repository. The
+  install takes these from Cargo's own artifact report, and refuses a suite with
+  no test executable or more than one.
+- The checkout is at the receipt's commit and has no local changes.
+- With signing on, both receipt files carry a valid signature by this Mac's key.
 
-After the steps, every `version identity:` line a journey printed must match
-the receipt. The A8 journey must print the Runtime, the provider and its
-`host-key-read` probe. The run then checks all of the above again.
+**How each step runs.** A1, A2 and the C steps run their recorded test
+executable directly, never through Cargo, so nothing can be rebuilt between the
+check and the run. Each suite's files are checked again immediately before and
+after it runs. A suite whose files changed is refused before it runs.
+
+A8 runs through `cargo test` with the same environment as
+`lab/agent-conformance/run.sh`. Its harness builds `elastos` with Cargo inside
+the test, and that build starts again under any other parent. On Linux, the
+same build under `cargo test`'s environment recompiled from `ring` up in 2m41s,
+although the binary came out byte-identical. Cargo must report that it ran
+exactly the recorded A8 test executable. Immediately before and after A8, the
+`elastos` and `localhost-provider` that A8 launches must be byte-identical to the
+installed copies; otherwise A8 is refused before it runs. The harness launches
+its own build path, so the run proves identity with the installed copy rather
+than starting the installed path itself.
+
+After the steps, every `version identity:` line a journey printed must match the
+receipt. The A8 journey must print the Runtime, the provider and its
+`host-key-read` probe. The run then checks everything above again.
 
 **What this does not prove.**
 
-- `VERSIONS.json` is not signed. The lock proves that the run used the same bytes
-  as the receipt, not who wrote the receipt.
-- The A1, A2 and C steps run Runtime crates and providers that Cargo builds from
-  the receipt's commit. `VERSIONS.json` does not hash those builds; the commit
-  and the clean checkout bind them.
-- The A8 journey launches the byte-identical copy in the lab build folder, not
-  the installed copy itself.
+- The signature proves integrity on this Mac, not publisher identity. Without
+  `--sign`, nothing is signed, and the lock proves only that the bytes match the
+  receipts.
+- `VERSIONS.json` hashes no agent-host guest or test executable. Those hashes are
+  in `INSTALL.json`, which the install writes after the conformance run.
+- The A8 harness starts `elastos` from its own build folder. The run proves that
+  file is byte-identical to the installed copy before and after A8, but it does
+  not start the installed path.
 - The C steps start each provider under its own profile with `sandbox-exec`.
   The Runtime does not generate or apply that profile yet (M1 check B3).
 - Off macOS, every macOS step prints NOT RUN, and the demo never prints
@@ -191,9 +232,11 @@ the receipt. The A8 journey must print the Runtime, the provider and its
 **Checks for this folder.**
 
 ```bash
-python3 -I -m unittest discover -s lab/demo-a14/tests -v
+python3 -B -I -m unittest discover -s lab/demo-a14/tests -v
 ```
 
-`falsifiers.json` lists 15 planted bugs, each with the tests that must fail.
-The shared falsifier runner has no command for this folder, so apply each edit
-by hand, require its tests to fail, restore the bytes, and require them to pass.
+The signing tests need `ssh-keygen`. `falsifiers.json` lists 29 planted bugs,
+each with the tests that must fail. The shared falsifier runner has no command
+for this folder, so apply each edit by hand, require its tests to fail, restore
+the bytes, and require them to pass. Use `-B`: a same-size edit restored in the
+same second can otherwise leave the planted bytecode in use.

@@ -1,5 +1,5 @@
 {
-  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py or journeys.json and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -I -m unittest discover -s lab/demo-a14/tests -k <test>, require FAILED, restore, require OK.",
+  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py or journeys.json and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -B -I -m unittest discover -s lab/demo-a14/tests -k <test> (-B, so no cached bytecode outlives a restore), require FAILED, restore, require OK.",
   "falsifiers": [
     {
       "id": "F-A14a",
@@ -31,7 +31,9 @@
           "new": ""
         }
       ],
-      "tests": ["test_runtime_the_journeys_launch_must_match"]
+      "tests": [
+        "test_runtime_the_journeys_launch_must_match"
+      ]
     },
     {
       "id": "F-A14c",
@@ -45,7 +47,9 @@
           "new": "    if False:\n"
         }
       ],
-      "tests": ["test_swapped_receipt_is_refused"]
+      "tests": [
+        "test_swapped_receipt_is_refused"
+      ]
     },
     {
       "id": "F-A14d",
@@ -59,7 +63,9 @@
           "new": "        if False:\n"
         }
       ],
-      "tests": ["test_receipt_from_another_commit_is_refused"]
+      "tests": [
+        "test_receipt_from_another_commit_is_refused"
+      ]
     },
     {
       "id": "F-A14e",
@@ -73,7 +79,9 @@
           "new": "        if False:\n            problems.append(\n"
         }
       ],
-      "tests": ["test_dirty_checkout_is_refused"]
+      "tests": [
+        "test_dirty_checkout_is_refused"
+      ]
     },
     {
       "id": "F-A14f",
@@ -87,7 +95,9 @@
           "new": "    if False:\n"
         }
       ],
-      "tests": ["test_incomplete_or_failed_receipt_is_refused"]
+      "tests": [
+        "test_incomplete_or_failed_receipt_is_refused"
+      ]
     },
     {
       "id": "F-A14g",
@@ -101,7 +111,9 @@
           "new": ""
         }
       ],
-      "tests": ["test_changed_agent_host_component_is_refused"]
+      "tests": [
+        "test_changed_agent_host_component_is_refused"
+      ]
     },
     {
       "id": "F-A14h",
@@ -111,11 +123,13 @@
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "    problems = version_gate(layout, read(layout.repo))\n    if problems:\n        installed = ",
-          "new": "    problems = version_gate(layout, read(layout.repo))\n    if False:\n        installed = "
+          "old": "    problems = version_gate(layout, read(layout.repo), here)\n    if problems:\n        installed = ",
+          "new": "    problems = version_gate(layout, read(layout.repo), here)\n    if False:\n        installed = "
         }
       ],
-      "tests": ["test_refused_run_starts_no_journey"]
+      "tests": [
+        "test_refused_run_starts_no_journey"
+      ]
     },
     {
       "id": "F-A14i",
@@ -129,7 +143,9 @@
           "new": "            elif False:\n"
         }
       ],
-      "tests": ["test_journey_identity_that_differs_fails_the_run"]
+      "tests": [
+        "test_journey_identity_that_differs_fails_the_run"
+      ]
     },
     {
       "id": "F-A14j",
@@ -139,11 +155,13 @@
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "    binding += version_gate(layout, read(layout.repo))\n",
+          "old": "    binding += version_gate(layout, read(layout.repo), here)\n",
           "new": ""
         }
       ],
-      "tests": ["test_install_changed_during_run_fails"]
+      "tests": [
+        "test_install_changed_during_run_fails"
+      ]
     },
     {
       "id": "F-A14k",
@@ -157,7 +175,9 @@
           "new": "    if False:\n        return Outcome(step, \"NOT RUN\""
         }
       ],
-      "tests": ["test_skip_line_is_not_run"]
+      "tests": [
+        "test_skip_line_is_not_run"
+      ]
     },
     {
       "id": "F-A14l",
@@ -171,7 +191,9 @@
           "new": "    return True\n"
         }
       ],
-      "tests": ["test_macos_steps_do_not_run_off_macos"]
+      "tests": [
+        "test_macos_steps_do_not_run_off_macos"
+      ]
     },
     {
       "id": "F-A14m",
@@ -185,7 +207,9 @@
           "new": "                if False:\n"
         }
       ],
-      "tests": ["test_missing_required_identity_fails_the_run"]
+      "tests": [
+        "test_missing_required_identity_fails_the_run"
+      ]
     },
     {
       "id": "F-A14n",
@@ -199,7 +223,9 @@
           "new": "        for name, field in {}.items():\n            problems += compare(\n                f\"the {name} lab/agent-conformance built\",\n"
         }
       ],
-      "tests": ["test_install_refuses_a_receipt_that_does_not_match_the_build"]
+      "tests": [
+        "test_install_refuses_a_receipt_that_does_not_match_the_build"
+      ]
     },
     {
       "id": "F-A14o",
@@ -213,7 +239,239 @@
           "new": "      \"test\": \"host_key_read_is_refused_by_name\",\n"
         }
       ],
-      "tests": ["test_every_named_test_exists_in_its_suite"]
+      "tests": [
+        "test_every_named_test_exists_in_its_suite"
+      ]
+    },
+    {
+      "id": "F-A14p",
+      "title": "a step executable or provider binary is not hashed against INSTALL.json",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            problems += compare(f\"the {suite} {label}\", Path(path), expected, \"its hash in INSTALL.json\")\n",
+          "new": "            pass\n"
+        }
+      ],
+      "tests": [
+        "test_changed_step_executable_is_refused",
+        "test_changed_provider_binary_is_refused",
+        "test_executable_changed_before_its_suite_is_not_run"
+      ]
+    },
+    {
+      "id": "F-A14q",
+      "title": "a recorded executable outside the repository is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        elif not inside(layout.repo, path):\n",
+          "new": "        elif False:\n"
+        }
+      ],
+      "tests": [
+        "test_step_path_outside_the_repository_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14r",
+      "title": "the gate does not check the recorded step executables",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    for suite in suites:\n        problems += step_problems(layout, record, suite)\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "test_install_without_step_bindings_is_refused",
+        "test_changed_step_executable_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14s",
+      "title": "A1, A2 and C go through Cargo, which may rebuild them, instead of running the hashed files",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if suite.get(\"runner\") == \"cargo\":\n        return [\"cargo\"",
+          "new": "    if True:\n        return [\"cargo\""
+        }
+      ],
+      "tests": [
+        "test_run_executes_the_recorded_files"
+      ]
+    },
+    {
+      "id": "F-A14t",
+      "title": "a suite runs although its recorded bytes changed after the gate",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            blocked = step_problems(layout, record, name) + launch_problems(layout, suite)\n",
+          "new": "            blocked = []\n"
+        }
+      ],
+      "tests": [
+        "test_executable_changed_before_its_suite_is_not_run",
+        "test_a8_refuses_when_the_launched_copy_differs"
+      ]
+    },
+    {
+      "id": "F-A14u",
+      "title": "A8 runs although the elastos it launches is not the installed copy",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    for name in suite.get(\"launches\", []):\n",
+          "new": "    for name in []:\n"
+        }
+      ],
+      "tests": [
+        "test_a8_refuses_when_the_launched_copy_differs"
+      ]
+    },
+    {
+      "id": "F-A14v",
+      "title": "Cargo may run another A8 test executable than the recorded one",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if [(cwd / path).resolve() for path in ran] != [recorded]:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "tests": [
+        "test_a8_cargo_must_run_the_recorded_executable"
+      ]
+    },
+    {
+      "id": "F-A14w",
+      "title": "a signature that does not verify is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            if status != 0:\n                problems.append(\n                    f\"{name} signature does not verify",
+          "new": "            if False:\n                problems.append(\n                    f\"{name} signature does not verify"
+        }
+      ],
+      "tests": [
+        "test_tampered_signed_receipt_is_refused",
+        "test_tampered_signed_install_record_is_refused",
+        "test_signature_from_another_key_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14x",
+      "title": "an unsigned receipt is accepted while signing is on",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "                problems.append(f\"{name} is unsigned, but signing is on ({layout.signing_pub} exists)\")\n",
+          "new": "                pass\n"
+        }
+      ],
+      "tests": [
+        "test_unsigned_receipt_is_refused_when_signing_is_on"
+      ]
+    },
+    {
+      "id": "F-A14y",
+      "title": "a valid signature by any key is accepted, not only this machine's key",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "                [\"-Y\", \"verify\", \"-f\", str(allowed), \"-I\", SIGNER, \"-n\", SIGNING_NAMESPACE, \"-s\", str(signature)],\n",
+          "new": "                [\"-Y\", \"check-novalidate\", \"-n\", SIGNING_NAMESPACE, \"-s\", str(signature)],\n"
+        }
+      ],
+      "tests": [
+        "test_signature_from_another_key_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14z",
+      "title": "INSTALL.json, which holds the guest and step hashes, is not signed",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "SIGNED = (\"VERSIONS.json\", \"INSTALL.json\")\n",
+          "new": "SIGNED = (\"VERSIONS.json\",)\n"
+        }
+      ],
+      "tests": [
+        "test_tampered_signed_install_record_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14aa",
+      "title": "install picks one of several test executables Cargo built for a suite",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if len(tests) != 1:\n",
+          "new": "    if not tests:\n"
+        }
+      ],
+      "tests": [
+        "test_install_refuses_unclear_test_executables"
+      ]
+    },
+    {
+      "id": "F-A14ab",
+      "title": "the run claims a valid signature without saying it proves integrity here, not the publisher",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        say(f\"  signature  valid for both receipt files; {SIGNATURE_SCOPE}\")\n",
+          "new": "        say(\"  signature  valid for both receipt files\")\n"
+        }
+      ],
+      "tests": [
+        "test_run_states_what_the_signature_proves"
+      ]
+    },
+    {
+      "id": "F-A14ac",
+      "title": "the signing key folder is readable by other users",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    layout.signing_key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)\n",
+          "new": "    layout.signing_key.parent.mkdir(mode=0o755, parents=True, exist_ok=True)\n"
+        }
+      ],
+      "tests": [
+        "test_signing_key_is_private_and_outside_the_repository"
+      ]
     }
   ]
 }

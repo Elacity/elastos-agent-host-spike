@@ -2,10 +2,12 @@
 """One install and one run for M1 check A14, bound to one VERSIONS.json.
 
 `install` takes the receipt that lab/agent-conformance/run.sh writes, pins the
-Runtime and localhost-provider it names, and pins the agent-host guest built
-from the same commit. `run` refuses before any journey when an installed file,
-the receipt or the checkout differs. It then walks journeys.json and checks
-every identity the journeys print against the same receipt.
+Runtime and localhost-provider it names, and records in INSTALL.json the hash of
+the agent-host guest and of every test executable and provider binary Cargo
+built for the journeys. `run` refuses before any journey when an installed file,
+a recorded executable, the receipt or the checkout differs, and when signing is
+on, when either receipt file lacks a valid signature by this machine's demo key.
+It then walks journeys.json and checks every identity the journeys print.
 """
 
 from __future__ import annotations
@@ -50,6 +52,14 @@ FETCH = (
 SUITE_TIMEOUT = 1800
 EXIT_PASS, EXIT_FAIL, EXIT_USAGE, EXIT_REFUSED, EXIT_NOT_RUN = 0, 1, 2, 3, 4
 PASSING = ("PASS", "REFUSED")
+SIGNER = "demo-a14"
+SIGNING_NAMESPACE = "demo-a14-receipt"
+SIGNED = ("VERSIONS.json", "INSTALL.json")
+SIGNATURE_SCOPE = (
+    "it proves VERSIONS.json and INSTALL.json are unchanged since install on this machine; "
+    "it does not prove who published them"
+)
+CARGO_RUNNING = re.compile(r"^\s+Running .*\((.+)\)$")
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,14 @@ class Layout:
     @property
     def agent_host_wasm(self) -> Path:
         return self.repo / "examples" / "agent-host" / "agent-host.component.wasm"
+
+    @property
+    def signing_key(self) -> Path:
+        return self.install.parent / "signing" / "receipt-signing.key"
+
+    @property
+    def signing_pub(self) -> Path:
+        return self.signing_key.with_name(self.signing_key.name + ".pub")
 
 
 @dataclass(frozen=True)
@@ -216,7 +234,156 @@ def compare(label: str, path: Path, expected: str, source: str) -> list:
     return []
 
 
-def version_gate(layout: Layout, checkout: Checkout) -> list:
+def keygen(args: list, data: Optional[bytes] = None) -> tuple:
+    """Run ssh-keygen without the ssh agent; return its status and output."""
+    tool = shutil.which("ssh-keygen")
+    if tool is None:
+        return None, b"ssh-keygen not found"
+    env = {key: value for key, value in os.environ.items() if key != "SSH_AUTH_SOCK"}
+    done = subprocess.run(
+        [tool, *args],
+        input=data,
+        stdin=None if data is not None else subprocess.DEVNULL,
+        capture_output=True,
+        env=env,
+    )
+    return done.returncode, done.stdout + done.stderr
+
+
+def make_signing_key(layout: Layout) -> list:
+    """One ed25519 key for this machine, kept in the demo folder, outside the repository."""
+    if layout.signing_key.exists():
+        return []
+    layout.signing_key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    status, output = keygen(
+        ["-q", "-t", "ed25519", "-N", "", "-C", "demo-a14 receipt key on this machine", "-f", str(layout.signing_key)]
+    )
+    if status != 0:
+        return [f"ssh-keygen could not make the signing key: {output.decode('utf-8', 'replace').strip()}"]
+    return []
+
+
+def sign_file(layout: Layout, path: Path) -> list:
+    status, output = keygen(["-Y", "sign", "-f", str(layout.signing_key), "-n", SIGNING_NAMESPACE], path.read_bytes())
+    signature = output[output.find(b"-----BEGIN SSH SIGNATURE-----"):] if status == 0 else b""
+    if not signature.startswith(b"-----BEGIN SSH SIGNATURE-----"):
+        return [f"could not sign {path.name}: {output.decode('utf-8', 'replace').strip()}"]
+    path.with_name(path.name + ".sig").write_bytes(signature)
+    return []
+
+
+def signature_problems(layout: Layout) -> list:
+    """Signing is on while this machine's demo key exists; then both receipt files need its signature."""
+    if not layout.signing_pub.exists():
+        return []
+    try:
+        key = layout.signing_pub.read_text(encoding="utf-8").split()
+    except OSError as error:
+        return [f"the demo signing key cannot be read: {error}"]
+    if len(key) < 2 or key[0] != "ssh-ed25519":
+        return [f"the demo signing key is not an ed25519 key: {layout.signing_pub}"]
+    problems = []
+    with tempfile.TemporaryDirectory(prefix="demo-a14-signers-") as scratch:
+        allowed = Path(scratch) / "allowed_signers"
+        allowed.write_text(f"{SIGNER} {key[0]} {key[1]}\n", encoding="utf-8")
+        for name in SIGNED:
+            path = layout.install / name
+            signature = path.with_name(name + ".sig")
+            if not signature.is_file():
+                problems.append(f"{name} is unsigned, but signing is on ({layout.signing_pub} exists)")
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            status, output = keygen(
+                ["-Y", "verify", "-f", str(allowed), "-I", SIGNER, "-n", SIGNING_NAMESPACE, "-s", str(signature)],
+                data,
+            )
+            if status is None:
+                problems.append("signing is on, but ssh-keygen is not found to check the signatures")
+                break
+            if status != 0:
+                problems.append(
+                    f"{name} signature does not verify with this machine's demo key: "
+                    "the file changed after signing, or another key signed it"
+                )
+    return problems
+
+
+def inside(repo: Path, path: str) -> bool:
+    return Path(path).is_absolute() and repo in Path(path).parents
+
+
+def step_problems(layout: Layout, record: dict, suite: str) -> list:
+    """The test executable and provider binaries of one suite must be the ones INSTALL.json hashed."""
+    steps = record.get("steps")
+    entry = steps.get(suite) if isinstance(steps, dict) else None
+    test = entry.get("test") if isinstance(entry, dict) else None
+    bins = entry.get("bins") if isinstance(entry, dict) else None
+    if not isinstance(test, dict) or not isinstance(bins, dict):
+        return [f"INSTALL.json binds no executables for {suite}; run install.sh again"]
+    if not isinstance(test.get("cwd"), str) or not inside(layout.repo, test["cwd"] + "/x"):
+        return [f"INSTALL.json gives {suite} a working folder outside the repository: {test.get('cwd')!r}"]
+    problems = []
+    for label, item in [("test executable", test)] + [(f"binary {name}", bins[name]) for name in sorted(bins)]:
+        path = item.get("path") if isinstance(item, dict) else None
+        expected = item.get("sha256") if isinstance(item, dict) else None
+        if not isinstance(path, str) or not is_hex(expected, 64):
+            problems.append(f"INSTALL.json has a malformed {suite} {label} entry")
+        elif not inside(layout.repo, path):
+            problems.append(f"the {suite} {label} is outside the repository: {path}")
+        else:
+            problems += compare(f"the {suite} {label}", Path(path), expected, "its hash in INSTALL.json")
+    return problems
+
+
+def launch_problems(layout: Layout, suite: dict) -> list:
+    """A journey that launches its own build of a native binary must launch the installed bytes."""
+    problems = []
+    for name in suite.get("launches", []):
+        installed = layout.install / "bin" / name
+        try:
+            expected = sha256_file(installed)
+        except OSError as error:
+            problems.append(f"installed {name} cannot be read: {error}")
+            continue
+        problems += compare(
+            f"the {name} that {suite['label']} launches", layout.runtime_build / name, expected, "the installed copy"
+        )
+    return problems
+
+
+def record_executables(suite: str, artifacts: list, repo: Path) -> tuple:
+    """Pick one suite's test executable and its package's binaries from Cargo's artifact messages."""
+    tests = [a for a in artifacts if isinstance(a.get("profile"), dict) and a["profile"].get("test")]
+    if len(tests) != 1:
+        return None, [f"Cargo built {len(tests)} test executables for {suite}; the run needs exactly one"]
+    test = tests[0]
+    bins = {
+        a["target"]["name"]: a["executable"]
+        for a in artifacts
+        if a is not test and a.get("package_id") == test.get("package_id") and "bin" in a["target"]["kind"]
+    }
+    files = {"test executable": test["executable"], **{f"binary {name}": path for name, path in bins.items()}}
+    problems = [f"the {suite} {label} is outside the repository: {path}" for label, path in files.items() if not inside(repo, path)]
+    if problems:
+        return None, problems
+    try:
+        entry = {
+            "test": {
+                "path": test["executable"],
+                "cwd": str(Path(test["manifest_path"]).parent),
+                "sha256": sha256_file(Path(test["executable"])),
+            },
+            "bins": {name: {"path": path, "sha256": sha256_file(Path(path))} for name, path in sorted(bins.items())},
+        }
+    except OSError as error:
+        return None, [f"a {suite} executable Cargo reported cannot be read: {error}"]
+    return entry, []
+
+
+def version_gate(layout: Layout, checkout: Checkout, suites: tuple = ()) -> list:
     """Every reason the installed demo does not match its VERSIONS.json."""
     try:
         record = json.loads((layout.install / "INSTALL.json").read_text(encoding="utf-8"))
@@ -230,7 +397,7 @@ def version_gate(layout: Layout, checkout: Checkout) -> list:
         receipt_bytes = (layout.install / "VERSIONS.json").read_bytes()
     except OSError as error:
         return [f"the installed VERSIONS.json cannot be read: {error}"]
-    problems = []
+    problems = signature_problems(layout)
     actual = sha256_bytes(receipt_bytes)
     if actual != record.get("versions_sha256"):
         problems.append(
@@ -262,6 +429,8 @@ def version_gate(layout: Layout, checkout: Checkout) -> list:
         problems += compare(
             "the agent-host component the journeys load", layout.agent_host_wasm, pinned, source
         )
+    for suite in suites:
+        problems += step_problems(layout, record, suite)
     commit = receipt["repository"]["commit"]
     installed = record.get("repository")
     if not isinstance(installed, dict) or installed.get("commit") != commit:
@@ -383,11 +552,39 @@ def suite_order(steps: list) -> list:
     return order
 
 
+def suites_here(steps: list, host_os: str) -> tuple:
+    return tuple(name for name in suite_order(steps) if any(s.suite == name and runs_here(s, host_os) for s in steps))
+
+
 def suite_env(suite: dict, repo: Path) -> dict:
     env = dict(os.environ)
     env.update(suite.get("env", {}))
     env.update({key: str(repo / value) for key, value in suite.get("env_paths", {}).items()})
     return env
+
+
+def invocation(suite: dict, entry: dict, names: list, repo: Path) -> tuple:
+    """A direct suite runs the hashed test executable itself, so Cargo cannot rebuild it first."""
+    env = suite_env(suite, repo)
+    if suite.get("runner") == "cargo":
+        return ["cargo", *suite["cargo"], "--", *suite["libtest"], *names], repo / suite["cwd"], env
+    env["CARGO_MANIFEST_DIR"] = entry["test"]["cwd"]
+    return [entry["test"]["path"], *suite["libtest"], *names], Path(entry["test"]["cwd"]), env
+
+
+def cargo_ran_problems(text: str, cwd: Path, entry: dict) -> list:
+    """Cargo must report that it ran exactly the test executable INSTALL.json hashed."""
+    ran = []
+    for line in text.splitlines():
+        if line.startswith("running "):
+            break
+        match = CARGO_RUNNING.match(line)
+        if match:
+            ran.append(match.group(1))
+    recorded = Path(entry["test"]["path"]).resolve()
+    if [(cwd / path).resolve() for path in ran] != [recorded]:
+        return [f"cargo ran {ran or 'no test executable'}, not the recorded test executable {recorded}"]
+    return []
 
 
 RESULT = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored\b.*)$")
@@ -510,6 +707,33 @@ def stream(args: list, cwd: Path, env: Optional[dict] = None) -> tuple:
     return status, lines
 
 
+def cargo_artifacts(args: list, cwd: Path, env: dict) -> tuple:
+    """Build with Cargo in view of the person; return its status and the executables it reported."""
+    artifacts = []
+    try:
+        with subprocess.Popen(
+            [*args, "--message-format=json-render-diagnostics"],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors="replace",
+        ) as child:
+            for line in child.stdout:
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and message.get("reason") == "compiler-artifact" and message.get("executable"):
+                    artifacts.append(message)
+            status = child.wait()
+    except OSError as error:
+        print(f"could not start {args[0]}: {error}")
+        return 127, []
+    return status, artifacts
+
+
 class Say:
     """Print each line and keep it for the run's summary file."""
 
@@ -537,7 +761,9 @@ def run_demo(
 ) -> int:
     say = Say()
     say(f"A14 installed demo: {layout.install}")
-    problems = version_gate(layout, read(layout.repo))
+    checks, suites, steps = load_journeys(journeys)
+    here = suites_here(steps, host_os)
+    problems = version_gate(layout, read(layout.repo), here)
     if problems:
         installed = (layout.install / "INSTALL.json").exists()
         refuse(
@@ -550,12 +776,18 @@ def run_demo(
         return EXIT_REFUSED
     receipt_bytes = (layout.install / "VERSIONS.json").read_bytes()
     receipt = json.loads(receipt_bytes)
+    record = json.loads((layout.install / "INSTALL.json").read_text(encoding="utf-8"))
     say("Versions match VERSIONS.json:")
     say(f"  receipt  SHA-256 {sha256_bytes(receipt_bytes)}")
     say(f"  commit   {receipt['repository']['commit']}")
     for name, field in NATIVE.items():
         say(f"  {name:<19} SHA-256 {receipt[field]}")
-    checks, suites, steps = load_journeys(journeys)
+    bins = sum(len(record["steps"][name]["bins"]) for name in here)
+    say(f"  steps    {len(here)} test executables and {bins} provider binaries match their hashes in INSTALL.json")
+    if layout.signing_pub.exists():
+        say(f"  signature  valid for both receipt files; {SIGNATURE_SCOPE}")
+    else:
+        say("  signature  off (install with --sign to turn it on)")
     runs = layout.install.parent / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%SZ-", time.gmtime()), dir=runs))
@@ -565,15 +797,27 @@ def run_demo(
         members = [step for step in steps if step.suite == name]
         runnable = [step for step in members if runs_here(step, host_os)]
         status, text, log = None, "", run_dir / f"{name}.log"
+        blocked = []
         say()
         if runnable:
+            blocked = step_problems(layout, record, name) + launch_problems(layout, suite)
+        if blocked:
+            say(f"Refusing {suite['label']}: it would not run the bytes this install recorded.")
+            binding += blocked
+        elif runnable:
             say(f"Running {suite['label']}: {len(runnable)} of {len(members)} steps...")
-            args = ["cargo", *suite["cargo"], "--", *suite["libtest"], *(s.test for s in runnable)]
-            status, text = runner(args, layout.repo / suite["cwd"], suite_env(suite, layout.repo), log, SUITE_TIMEOUT)
+            args, cwd, env = invocation(suite, record["steps"][name], [s.test for s in runnable], layout.repo)
+            status, text = runner(args, cwd, env, log, SUITE_TIMEOUT)
+            binding += step_problems(layout, record, name) + launch_problems(layout, suite)
+            if suite.get("runner") == "cargo":
+                binding += cargo_ran_problems(text, cwd, record["steps"][name])
         else:
             say(f"Skipping {suite['label']}: it needs macOS ({suite['macos_reason']}).")
         results, sections = parse_libtest(text)
         graded = [grade(step, results, sections, status, host_os, suites, log) for step in members]
+        if blocked:
+            refused = "refused before running: " + "; ".join(blocked)
+            graded = [Outcome(o.step, "FAIL", refused) if runs_here(o.step, host_os) else o for o in graded]
         outcomes += graded
         for outcome in graded:
             label = {"PASS": "why", "REFUSED": "reason", "FAIL": "failure", "NOT RUN": "not run"}
@@ -589,7 +833,7 @@ def run_demo(
             for required in suite.get("identities", []):
                 if required not in seen:
                     binding.append(f"{suite['label']} printed no {required} identity, so it is not bound")
-    binding += version_gate(layout, read(layout.repo))
+    binding += version_gate(layout, read(layout.repo), here)
     say()
     say("Summary")
     for check, title in checks.items():
@@ -612,7 +856,9 @@ def run_demo(
     return {"PASS": EXIT_PASS, "NOT RUN": EXIT_NOT_RUN}.get(verdict, EXIT_FAIL)
 
 
-def write_install(layout: Layout, receipt_bytes: bytes, receipt_source: Path, checkout: Checkout) -> list:
+def write_install(
+    layout: Layout, receipt_bytes: bytes, receipt_source: Path, checkout: Checkout, steps: dict
+) -> list:
     home = layout.install.parent
     if layout.install.exists() and not (layout.install / "INSTALL.json").is_file():
         return [f"{layout.install} exists and is not a demo install; move it away, then install again"]
@@ -638,13 +884,21 @@ def write_install(layout: Layout, receipt_bytes: bytes, receipt_source: Path, ch
             "receipt_source": str(receipt_source),
             "versions_sha256": sha256_bytes(receipt_bytes),
             "components": components,
+            "steps": steps,
         }
         (staging / "INSTALL.json").write_text(
             json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+        signed = []
+        if layout.signing_key.exists():
+            for name in SIGNED:
+                signed += sign_file(layout, staging / name)
     except OSError as error:
         shutil.rmtree(staging, ignore_errors=True)
         return [f"could not write the install: {error}"]
+    if signed:
+        shutil.rmtree(staging, ignore_errors=True)
+        return signed
     if layout.install.exists():
         retired = Path(tempfile.mkdtemp(prefix=".replaced-", dir=home))
         layout.install.rename(retired / "current")
@@ -660,8 +914,11 @@ def install(
     read: Callable = read_checkout,
     runner: Callable = stream,
     journeys: Path = JOURNEYS,
+    sign: bool = False,
+    builder: Optional[Callable] = None,
 ) -> int:
     say = Say()
+    builder = builder or cargo_artifacts
     again = "fix the item above, then run `bash lab/demo-a14/install.sh` again."
     say(f"Installing the A14 demo into {layout.install}")
     checkout = read(layout.repo)
@@ -669,6 +926,13 @@ def install(
         problems = [checkout.error or "this copy of the repository has local changes; commit or stash them"]
         refuse(say, "the repository is not ready.", problems, again)
         return EXIT_REFUSED
+    if sign:
+        problems = make_signing_key(layout)
+        if problems:
+            refuse(say, "signing cannot be turned on.", problems, again)
+            return EXIT_REFUSED
+    if layout.signing_key.exists():
+        say(f"Signing is on: this machine's key is {layout.signing_key} ({SIGNATURE_SCOPE}).")
     if not receipt_arg and host_os != "Darwin":
         problems = [
             "VERSIONS.json comes from lab/agent-conformance/run.sh, which runs on macOS only; "
@@ -721,20 +985,24 @@ def install(
     if status != 0:
         refuse(say, "the agent-host guest did not build.", [f"examples/agent-host/build.sh exited {status}"], again)
         return EXIT_REFUSED
-    say("Step 4 of 5: building the journey tests, so the run only runs them")
+    say("Step 4 of 5: building the journey tests and recording the hash of each executable")
     _, suites, steps = load_journeys(journeys)
-    for name in suite_order(steps):
-        if not any(runs_here(step, host_os) for step in steps if step.suite == name):
-            continue
+    here = suites_here(steps, host_os)
+    recorded = {}
+    for name in here:
         suite = suites[name]
         args = ["cargo", *suite["cargo"], "--no-run"]
-        status, _ = runner(args, layout.repo / suite["cwd"], suite_env(suite, layout.repo))
+        status, artifacts = builder(args, layout.repo / suite["cwd"], suite_env(suite, layout.repo))
         if status != 0:
             refuse(say, f"the {suite['label']} tests did not build.", [f"{' '.join(args)} exited {status}"], again)
             return EXIT_REFUSED
+        recorded[name], problems = record_executables(name, artifacts, layout.repo)
+        if problems:
+            refuse(say, f"the {suite['label']} executables cannot be recorded.", problems, again)
+            return EXIT_REFUSED
     say("Step 5 of 5: copying the pinned files")
-    problems = write_install(layout, receipt_bytes, receipt_path, checkout)
-    problems = problems or version_gate(layout, read(layout.repo))
+    problems = write_install(layout, receipt_bytes, receipt_path, checkout, recorded)
+    problems = problems or version_gate(layout, read(layout.repo), here)
     if problems:
         refuse(say, "the install does not match VERSIONS.json.", problems, again)
         return EXIT_REFUSED
@@ -763,6 +1031,9 @@ def main(argv: Optional[list] = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     install_command = commands.add_parser("install", help="pin one VERSIONS.json and its components")
     install_command.add_argument("--receipt", help="use this VERSIONS.json instead of making a fresh one")
+    install_command.add_argument(
+        "--sign", action="store_true", help="make this machine's demo key if needed and sign both receipt files"
+    )
     commands.add_parser("run", help="walk the journeys against the installed versions")
     args = parser.parse_args(argv)
     host_os = platform.system()
@@ -772,7 +1043,7 @@ def main(argv: Optional[list] = None) -> int:
         print(f"REFUSED: {error}")
         return EXIT_USAGE
     if args.command == "install":
-        return install(layout, host_os, args.receipt)
+        return install(layout, host_os, args.receipt, sign=args.sign)
     return run_demo(layout, host_os)
 
 
