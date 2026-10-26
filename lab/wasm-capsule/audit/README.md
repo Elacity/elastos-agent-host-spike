@@ -110,6 +110,8 @@ apply and verify each entry by hand in this workspace.
 | F-CWA13a | Drop build metadata only from the declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA13b | Drop the pre-release only from the declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA14a | Match the module and name against separate declared entries | `declared_import_passes_and_only_that_one` |
+| F-CWA15a | Match the name by a declared prefix while the module matches exactly | `declared_import_passes_and_only_that_one` |
+| F-CWA15b | Match the module by a declared prefix while the name matches exactly | `declared_import_passes_and_only_that_one` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -309,3 +311,26 @@ and after both catches, with all 20 tests passing offline under
 `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation, API document,
 other tests, audit manifest, workspace manifest and workspace lockfile stayed
 unchanged, and `audit/Cargo.lock` stayed absent.
+
+The cwa-015 in-tree run first applied F-CWA15a and F-CWA15b separately to the
+base; all 20 tests passed under each before the new cases. With the exact-pair
+pass control and both prefix cases added, each entry built and failed
+`declared_import_passes_and_only_that_one` at `assert_undeclared`'s `expect_err`.
+F-CWA15a failed at the name case: `audit` returned
+`Ok([DeclaredImport { module: "wasi_snapshot_preview1", name: "fd_readdir" }])`.
+F-CWA15b passed the name case's refusal checks, then failed at the module case:
+`audit` returned
+`Ok([DeclaredImport { module: "wasi:cli/environment@0.2.0-rc.1", name: "get-environment" }])`.
+The earlier cases and the exact-pair pass control passed before each failure.
+F-CWA1b still failed at the equal-count, different-name case, returning
+`Ok([DeclaredImport { module: "env", name: "second" }])` with only `env.first`
+declared. F-CWA14a still failed at the crossed case, returning
+`Ok([DeclaredImport { module: "wasi_snapshot_preview1", name: "fd_write" }])`.
+All four checked entries built and failed their named test at an assertion,
+each run separately with `--exact`. Each temporary edit restored `src/lib.rs`
+byte-identical, checked by SHA-256, and every falsifier's `old` text still
+occurred exactly once. The clean format and locked-test checks passed before
+the first mutation and after the catches, with all 20 tests passing offline
+under `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation, API
+document, other tests, audit manifest, workspace manifest and workspace lockfile
+stayed unchanged, and `audit/Cargo.lock` stayed absent.
