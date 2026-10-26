@@ -1,0 +1,8 @@
+id: F-A5-forge
+file: src/lib.rs
+test: model_forged_identity_session_and_instance_have_no_effect
+--- old
+            identity: record.identity,
+--- new
+            identity: request.forged_identity.clone().unwrap_or_default(),
+--- end

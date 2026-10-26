@@ -1,0 +1,9 @@
+id: F-A5-instance
+file: src/lib.rs
+test: model_sibling_instance_is_refused
+--- old
+        if call.instance != grant.instance {
+            return Err(Refuse::Instance);
+        }
+--- new
+--- end

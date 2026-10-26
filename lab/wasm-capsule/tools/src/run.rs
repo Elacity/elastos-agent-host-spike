@@ -78,6 +78,11 @@
 //! unused grants; [`crate::receipt`] renders the first five. The
 //! versions are what the engines printed, never configured, so an engine
 //! upgrade shows in the receipt, and none of them is part of the lab CID.
+//! wc-010c: success also returns the declared `memory_mb` the module runs were
+//! given and, per engine, the memory cap argument it was started with, read
+//! back from that process's own argv (the argument after `-W`), never from the
+//! engine's name or a constant; the receipt renders these too. `wasmer`'s is
+//! none.
 //!
 //! The two-engine result is a behaviour proof on one core module on this
 //! machine, not the Component ABI. Both engines are test-only, not endorsed.
@@ -272,10 +277,16 @@ impl Error for Refusal {}
 
 /// One engine run that exited successfully: its exit status, as the OS
 /// reported it, and its stdout.
+///
+/// wc-010c: also the declared `memory_mb` the run was given, and the memory
+/// cap argument the engine was started with: the argument after `-W` in the
+/// argv the process got, read back from that argv, or none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineRun {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
+    pub memory_mb: u32,
+    pub memory_cap: Option<String>,
 }
 
 /// Run `engine`, the program at the absolute path `program`, once on
@@ -304,7 +315,8 @@ pub fn run_engine(
 }
 
 /// The memory cap, in bytes, for a declared `memory_mb`: `memory_mb ×
-/// 1048576` in `u64`, so no `u32` overflows.
+/// 1048576` in `u64`, so no `u32` overflows. The one MB to bytes conversion:
+/// the cap argument and [`TwoEngineRun::memory_cap_bytes`] both use it.
 fn memory_cap_bytes(memory_mb: u32) -> u64 {
     u64::from(memory_mb) * BYTES_PER_MB
 }
@@ -399,14 +411,16 @@ fn engine_command(program: &Path) -> Command {
 
 /// Start `program` once with the fixed argv and the memory cap for
 /// `memory_mb`, stdin null and an empty environment, and wait for it. A
-/// nonzero exit is refused with its stderr.
+/// nonzero exit is refused with its stderr. The cap argument it returns is
+/// read back from the argv the process was started with.
 fn start_engine(
     engine: Engine,
     program: &Path,
     module: &Path,
     memory_mb: u32,
 ) -> Result<EngineRun, Refusal> {
-    let output = engine_command(program)
+    let mut command = engine_command(program);
+    let output = command
         .args(["run", "--invoke", DIGEST_EXPORT])
         .args(memory_cap_args(engine, memory_mb))
         .arg(module)
@@ -427,7 +441,18 @@ fn start_engine(
     Ok(EngineRun {
         status: output.status,
         stdout: output.stdout,
+        memory_mb,
+        memory_cap: memory_cap_given(&command),
     })
+}
+
+/// The memory cap argument `command` was started with: the argument after
+/// its `-W`, as passed, or none when its argv has no `-W`. Only
+/// [`memory_cap_args`] adds a `-W`.
+fn memory_cap_given(command: &Command) -> Option<String> {
+    let mut args = command.get_args();
+    args.find(|arg| *arg == "-W")?;
+    args.next().map(|arg| arg.to_string_lossy().into_owned())
 }
 
 /// Ask `engine`, the program at the absolute path `program`, for its version:
@@ -482,7 +507,9 @@ pub struct RunInput<'a> {
 
 /// A two-engine run that passed: the verified lab CID, each engine's observed
 /// version and exit status, both stdouts, the linked imports and the unused
-/// grants.
+/// grants; wc-010c: the declared `memory_mb` the module runs were given and
+/// each engine's memory cap argument, as its [`EngineRun`] read it back from
+/// the argv it was started with.
 ///
 /// Its fields are private and it has no public constructor, so a value exists
 /// only as [`run`] made it. It is no admission or launch value.
@@ -496,6 +523,8 @@ pub struct TwoEngineRun {
     wasmer: Vec<u8>,
     linked: Vec<DeclaredImport>,
     unused_grants: Vec<DeclaredImport>,
+    memory_mb: u32,
+    memory_caps: [Option<String>; 2],
 }
 
 impl TwoEngineRun {
@@ -549,6 +578,27 @@ impl TwoEngineRun {
     pub fn unused_grants(&self) -> &[DeclaredImport] {
         &self.unused_grants
     }
+
+    /// The declared `memory_mb` the module runs were given: the manifest's
+    /// `resources.memory_mb`, from the verifier's one manifest read.
+    pub fn memory_mb(&self) -> u32 {
+        self.memory_mb
+    }
+
+    /// The declared size in bytes, `memory_mb × 1048576`, by the same
+    /// conversion that makes `wasmtime`'s cap argument.
+    pub fn memory_cap_bytes(&self) -> u64 {
+        memory_cap_bytes(self.memory_mb)
+    }
+
+    /// The memory cap argument `engine`'s module run was started with (the
+    /// argument after its `-W`), or `None` when it was given none.
+    pub fn memory_cap(&self, engine: Engine) -> Option<&str> {
+        match engine {
+            Engine::Wasmtime => self.memory_caps[0].as_deref(),
+            Engine::Wasmer => self.memory_caps[1].as_deref(),
+        }
+    }
 }
 
 /// Why a two-engine run was refused. Each reason has its own variant and its
@@ -600,6 +650,8 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)
         .map_err(TwoEngineRefusal::Engine)?;
     let statuses = [wasmtime.status, wasmer.status];
+    let memory_mb = wasmtime.memory_mb;
+    let memory_caps = [wasmtime.memory_cap, wasmer.memory_cap];
     let (wasmtime, wasmer) = (wasmtime.stdout, wasmer.stdout);
     if wasmtime != wasmer {
         return Err(TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer });
@@ -613,5 +665,7 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
         wasmer,
         linked: bundle.imports().to_vec(),
         unused_grants: bundle.unused_grants().to_vec(),
+        memory_mb,
+        memory_caps,
     })
 }
