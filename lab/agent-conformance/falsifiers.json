@@ -331,7 +331,7 @@
       "edits": [
         {
           "file": "probe/src/lib.rs",
-          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        + cfg!(feature = \"granted-read\") as u8\n        + cfg!(feature = \"sibling-read\") as u8\n        + cfg!(feature = \"memory-write\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
+          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        + cfg!(feature = \"granted-read\") as u8\n        + cfg!(feature = \"sibling-read\") as u8\n        + cfg!(feature = \"memory-write\") as u8\n        + cfg!(feature = \"host-key-read\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
           "new": ""
         }
       ],
@@ -805,6 +805,60 @@
       ],
       "tests": [
         "ungranted_memory_write_is_refused"
+      ]
+    },
+    {
+      "id": "F-ac8a",
+      "title": "grant the exact fake host-file request and its manifest bound",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/grants.json",
+          "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n",
+          "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    },\n    {\n      \"resource\": \"localhost://Public/../../../../.ssh/id_ed25519\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
+        },
+        {
+          "file": "probe/capsule.json",
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
+        }
+      ],
+      "tests": [
+        "host_key_read_is_refused",
+        "attach_secret_stays_in_memory"
+      ]
+    },
+    {
+      "id": "F-ac8-fixture",
+      "title": "use the wrong relative depth for the fake file",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/host-key-read.txt",
+          "old": "localhost://Public/../../../../.ssh/id_ed25519",
+          "new": "localhost://Public/../../../.ssh/id_ed25519"
+        }
+      ],
+      "tests": [
+        "host_key::fixture_path_uses_the_guarded_home_rule"
+      ]
+    },
+    {
+      "id": "F-ac8-receipt",
+      "title": "accept the host read without its launched bundle identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "\"host_key_read_is_refused\" => &[\"host-key-read\"],",
+          "new": "\"host_key_read_is_refused\" => &[],"
+        }
+      ],
+      "tests": [
+        "host_key_receipt_requires_this_launched_bundle"
       ]
     }
   ]

@@ -28,7 +28,7 @@ if cargo test --locked --manifest-path "$manifest" -- --list >"$run_dir/list" 2>
 else
     status=$?
 fi
-sed -n '/^version identity:/p; /^operator census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^fixture controller:/p; /^fixture read:/p; /^SKIPPED /p' "$run_dir/results"
+sed -n '/^version identity:/p; /^operator census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^fixture controller:/p; /^fixture read:/p; /^host key read:/p; /^SKIPPED /p' "$run_dir/results"
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
 if "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"; then
     rm -- "$run_dir/list" "$run_dir/results" "$run_dir/build" "$run_dir/report-build"
