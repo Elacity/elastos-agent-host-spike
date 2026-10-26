@@ -594,7 +594,8 @@ def run_demo(
     say("Summary")
     for check, title in checks.items():
         mine = [outcome for outcome in outcomes if outcome.step.check == check]
-        say(f"  {check:<4} {title:<62} {check_verdict(mine)} ({len(mine)} steps)")
+        steps_word = "step" if len(mine) == 1 else "steps"
+        say(f"  {check:<4} {title:<62} {check_verdict(mine)} ({len(mine)} {steps_word})")
     say(f"  versions bound after the run: {'no' if binding else 'yes'}")
     for problem in binding:
         say(f"    - {problem}")
