@@ -3,3 +3,7 @@
 /target/
 /capsule.wasm
 /receipt.txt
+# A test-key seed is never committed (wc-004). Test keys live in memory only;
+# this is the backstop. `*.key` is the root .gitignore's rule, not repeated
+# here (one rule, P10).
+*.seed

@@ -1,9 +1,10 @@
-# wasm-capsule lab — wc-001, its lab name (task 010) and `tools/bundle` (task 009)
+# wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009) and the verifier (wc-004)
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
 byte for byte on this one Mac. A lab bundle of it is named by
-cc-capsule-identity's lab CID (task 010); later tasks sign that name (wc-004) and
-run it on two engines (wc-005). This is lab tooling Anders may adopt; it is not
+cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
+over that name and audits its module, and a later task runs it on two engines
+(wc-005). This is lab tooling Anders may adopt; it is not
 a second Runtime.
 
 ## What the capsule is
@@ -34,6 +35,7 @@ tools/bundle          writes a new lab bundle and prints its lab CID (bash wrapp
 tools/Cargo.toml      the `wasm-capsule-tools` crate: the lab's host-side library
 tools/src/lib.rs      `bundle_identity` (the shared lab CID, one re-export) + the manifest bytes
 tools/src/bundle.rs   `tools/bundle`'s rules: `parse_args` and `run`
+tools/src/verify.rs   wc-004's one verify path: `verify_checked` and `verify_bundle`
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
@@ -46,23 +48,28 @@ The lane is a Cargo workspace whose root is the package `capsule` (not a virtual
 workspace), so the lane gates — `cargo fmt`/`cargo test --manifest-path
 .../Cargo.toml` — act on `capsule` without `--all`/`--workspace`. Its other
 members are `audit/` and `tools/`. `audit/` is the `wasm-capsule-audit` crate:
-the one import-audit path (P10) that wc-004's verifier will call through a path
+the one import-audit path (P10), which wc-004's verifier calls through a path
 dependency. The cx-wasm-audit lane owns it; this lane does not edit it. Test it
 from this directory with `cargo test -p wasm-capsule-audit --locked`. `tools/`
-is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name,
-below).
+is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name
+and the verifier, below).
 
 `capsule` itself has **no dependencies**: it has no `[dependencies]` (P18). Its
-tests' dev-dependencies are built only for tests: `wasm-capsule-tools`, and the
+tests' dev-dependencies are built only for tests: `wasm-capsule-tools`, the
 Runtime's `elastos-common` (a read-only path dependency, for its
-`CapsuleManifest`) with `serde_json` to read it. `tools/` path-depends on
-`lab/capsule-identity/` (the cc-capsule-identity lane's crate, read-only here),
-which path-depends on `elastos/crates/elastos-common` and
+`CapsuleManifest`) with `serde_json` to read it, and for wc-004's tests
+`capsule-identity`, `wasm-capsule-audit`, the Runtime's `elastos-identity`
+(read-only, for `encode_signing_key_did`), `ed25519-dalek` and `rand` (fresh
+test keys in memory). `tools/` path-depends on `lab/capsule-identity/` (the
+cc-capsule-identity lane's crate, read-only here), on `wasm-capsule-audit`
+(`../audit`), and on `elastos-common` with `serde_json` (the Runtime's
+manifest reader). `capsule-identity` path-depends on `elastos/crates/elastos-common` and
 `elastos/crates/elastos-identity`. `Cargo.lock` pins all their crates: the
 audit's `wasmparser` 0.258.0 and dev-only `wat` 1.258.0, capsule-identity's
 `ed25519-dalek` 2.2.0, `rustix` 1.1.4, `sha2` 0.10.9, `hex` 0.4.3 and
 `serde_json` 1.0.151, the Runtime crates' own dependencies, and their transitive
-dependencies: 135 registry crates. `tools/build` compiles only `capsule`, so
+dependencies: 135 registry crates (wc-004 added none: every crate it uses
+was already locked). `tools/build` compiles only `capsule`, so
 none of them is in the artifact. But Cargo resolves the whole workspace, so
 every build, `tools/build` included, needs those crates in the local cargo
 cache. They are cached on this Mac, so the lane builds offline here; on a
@@ -299,6 +306,86 @@ real `tools/bundle`. Its child `cargo run` gets its own `CARGO_TARGET_DIR` and
 so it never waits on the outer `cargo test`'s build lock and writes nothing in
 the checkout. Each run builds the command fresh there.
 
+## Verify (wc-004)
+
+```rust
+wasm_capsule_tools::verify::verify_checked(checked: CheckedBundle, signature: Option<&NameSignature>,
+    accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
+wasm_capsule_tools::verify::verify_bundle(bundle: &Path, signature: Option<&NameSignature>,
+    accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
+```
+
+**One call, four checks, in order.** `verify_checked` takes a
+`CheckedBundle` from cc-capsule-identity's `checked_bundle` (the lab CID with
+the bytes its one walk read), the bundle's in-memory `NameSignature`, the
+accepted signer DIDs and the granted imports. The first refusal is the answer:
+
+1. no signature (`None`): refused as unsigned;
+2. cc-capsule-identity's `verify_checked_signature` on the checked value: a
+   canonical `did:key`, the accepted list, the signed name against the checked
+   bytes, then Ed25519;
+3. the manifest's `entrypoint`, read from the checked `capsule.json` with the
+   Runtime's `CapsuleManifest` (the one reader of that file), names the module
+   among the checked entries;
+4. the cx-wasm-audit crate's `audit(module, granted)` on that module's checked
+   bytes.
+
+`verify_bundle` is `checked_bundle` and then `verify_checked`, with no check of
+its own, so the walk's refusals come first. The tools crate has exactly one
+`verify_checked_signature` call and one `audit` call, and no name, walk, hash,
+signature or import code of its own (no `wasmparser`).
+
+**The reasons.** Each has its own exact text:
+
+- unsigned: `the bundle has no signature: an unsigned bundle is refused`;
+- the entrypoint is not in the bundle:
+  `the manifest's entrypoint "<path>" is not a file in the bundle`;
+- every cc-capsule-identity refusal (the walk's, a malformed signer DID, a
+  signer not in the accepted list, which an empty list gives every signer,
+  bytes that do not match the signed name, naming both values, and a
+  signature that does not verify), carried unchanged and printed exactly as
+  that lane prints it;
+- every audit refusal (`undeclared import {module}.{name}`, `malformed module`,
+  `code in custom section`), carried unchanged.
+
+A fifth reason, `the Runtime's CapsuleManifest could not read the checked
+capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
+walk runs the same parse and refuses first. It is kept so the verifier fails
+closed with a reason rather than a panic, and no test can reach it.
+
+**The value.** `VerifiedBundle` holds the checked bundle and the audit's own
+import list, read through `cid()`, `entries()` and `imports()`. Its fields are
+private, and it has no public constructor, no `&mut` access and no
+`Deserialize`, so a value exists only as `verify_checked` made it. wc-005
+(task 006) stages its `entries()`.
+
+**The checked bytes, never the folder again.** The audit reads the module
+bytes the signed name covers, from the checked value. The verifier reads no
+file by a path. If the folder changes after `checked_bundle`, `verify_checked`
+on the held value still judges the held bytes, and `verify_bundle` on the
+changed folder is refused with the identity lane's mismatch reason.
+
+**No command and no signature file.** cc-capsule-identity's answer to ask C2:
+reuse its `sign_bundle`, `verify_checked_signature` and `NameSignature`, and
+keep the signature in memory only. So there is no `tools/sign` or
+`tools/verify`, no signature file and no serialized signature here. Signing and
+verifying are library calls, tested in process with keys made fresh in memory
+inside each test. If a file form is ever wanted, cc-capsule-identity owns it.
+
+**Granted imports.** The module's own import section is the declaration
+(Rong, 26 Oct, ruling (c)). The granted list goes to `audit` unchanged, and the
+result is exactly the module's imports. Ordinary callers pass an empty list
+until wc-009, which will pass the lab grants file's list to this same call;
+only the grant tests here pass a non-empty list. The granted list is a lab
+stand-in, not admission.
+
+**Claim scope.** An offline lab check, on this one Mac with test keys only,
+that a bundle's bytes match a signed lab CID, that an accepted test key signed
+it, and that every import of its entrypoint module is granted. It answers
+nothing about "may this run": it makes no admission, launch or
+publisher-trust decision and sits in no admission or launch path. The signed
+name is a lab CID, not the Runtime's CID.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -319,8 +406,10 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
 - `this_capsule_bundle_has_the_pinned_lab_cid` — the pinned vector above.
 - `the_lane_keeps_no_bundle_name_rule_of_its_own` — the lane's own files (from
   `git ls-files`, without `audit/`, the docs and `falsifiers.json`) hold none of
-  007's retired names, and the shared crate is imported by the one export line
-  only. If git cannot run, it fails.
+  007's retired names, and the shared crate's naming functions (`lab_cid`,
+  `lab_cid_observed`, `checked_bundle_observed`, `encode_entries`) are named by
+  the one export line only. wc-004's imports of the checked bundle and the name
+  signature are allowed. If git cannot run, it fails.
 
 `tools/bundle`, in `tests/bundle.rs`:
 
@@ -349,14 +438,85 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   manifest's creation and write, and the module's move each keep their path
   and the system's cause.
 
+The verifier, in `tests/verify.rs`. "The fixture" is this capsule's manifest
+and the 8-byte module in a temp folder; every key is fresh in memory:
+
+- `signed_bundle_verifies_against_its_key` — the fixture, signed and verified
+  with its key's DID accepted and no grants, passes; `cid()` is
+  `bundle_identity` of the folder, `imports()` is empty, `entries()` hold
+  exactly the folder's two files.
+- `unsigned_bundle_is_refused` — `None` gets the unsigned reason, in both
+  forms.
+- `bundle_signed_by_an_unlisted_key_is_refused` — key B signs, only key A is
+  accepted, and an empty list: the identity lane's accepted-list refusal.
+- `wasm_changed_after_signing_is_refused`,
+  `manifest_changed_after_signing_is_refused` (one `description` byte) and
+  `extra_file_after_signing_is_refused` — the identity lane's mismatch
+  refusal, naming both values.
+- `bundle_with_undeclared_import_is_refused_even_if_signed` — a module that
+  imports `env.f`, validly signed, no grants: `undeclared import env.f`.
+- `a_grant_reaches_the_audit_unchanged` — `env.f` granted passes, and
+  `imports()` is the audit's own list, `[env.f]`.
+- `verifier_audits_the_checked_bytes` — a held `CheckedBundle` still passes
+  with no imports after `capsule.wasm` on disk becomes the importing module;
+  `verify_bundle` on the changed folder gets the mismatch refusal.
+- `the_real_capsule_passes_the_verifier` — the capsule `tools/build` makes,
+  bundled with this capsule's manifest, signed and verified with no grants,
+  passes with no imports; its sha256 is the receipt's `artifact_sha256` and
+  the pinned `6dd9af1a…`.
+- `missing_entrypoint_is_refused` — an entrypoint no entry has gets its own
+  reason; `capsule.wasm` beside it does not stand in.
+- `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
+  importing module) beside the 8-byte `capsule.wasm`, the audit reads
+  `main.wasm`.
+- `verifier_preserves_upstream_refusals` — the walk's (no manifest, a link),
+  the signature check's (a malformed DID, a name that is not a lab CID, a
+  signature that does not verify) and the audit's (a malformed module, code in
+  a custom section) refusals each come back equal to the owning lane's own,
+  with the same text.
+- `verifier_preserves_check_order` — inputs with two faults each: the walk
+  before unsigned, unsigned before the audit, the signature before the
+  entrypoint and the audit, the name before the audit.
+- `verified_bundle_is_sealed` — the source, comments stripped: no public
+  field, exactly five public functions (`verify_checked`, `verify_bundle` and
+  the three accessors), no `&mut self`, no `Deserialize`, `Default` or trait
+  impl for the value, and one literal that makes it, in `verify_checked`.
+- `verifier_has_one_check_path` — the tools crate calls
+  `verify_checked_signature` once and `audit` once, uses neither
+  `verify_name_signature` nor `audit_component`, and `verify_bundle` only walks
+  and delegates.
+- `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
+- `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
+  `tools/src`, comments stripped, name no `wasmparser`.
+- `verifier_reads_no_bundle_file_by_path` — the verifier, comments stripped,
+  has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
+  `read_to_end`.
+- `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
+  --cached --others --exclude-standard -z` lists in the lane: no `.key` or
+  `.seed` name, no PEM private-key line, no 32-byte file that is not UTF-8.
+  The name is checked before any read, and a listed file that cannot be read
+  is a finding with its path and cause, never skipped: a key file still in
+  git's index but gone from the worktree fails the scan. Four planted items, in
+  memory, are each reported, and so is a listed file that is absent (a `.seed`
+  by name and as unreadable). If git cannot run, it fails.
+- `key_and_seed_files_are_ignored_by_git` — `git check-ignore` reports
+  `x.key`, `tools/x.key`, `x.seed` and `tools/x.seed`. `*.key` is the root
+  `.gitignore`'s rule; `*.seed` is this lane's (`.gitignore`). If git cannot
+  run, it fails.
+
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010 and 23 task-009 planted
-bugs in the provider format (`command: "lab"`). Each requires all its named tests to fail at
-an assertion. The canonical runner
-`examples/agent-host/falsify.py` has no `lab` command yet (ask **R1**), so each
-is proved by the repo's break → named test fails → revert method with
-`cargo test` in this workspace until R1 lands. Runner-caught: none yet.
+`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009 and 21
+wc-004 planted bugs in the provider format (`command: "lab"`). Each requires
+all its named tests to fail at an assertion. The canonical runner
+`examples/agent-host/falsify.py` now has a `lab` command (`cargo test
+--workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
+still name the retired `tools/src/lab_name.rs` and none of `tools/src/lib.rs`,
+`tools/src/bundle.rs`, `tools/src/verify.rs`, `capsule/capsule.json`,
+`tests/common/build.rs`, `.gitignore` or `README.md`, so a killed run cannot
+restore those files (ask **R1**, pending). So each falsifier is proved by the
+repo's break → named test fails → revert method with `cargo test` in this
+workspace, and is listed as hand-proven, pending R1. Runner-caught: none.
 
 Task 010's seven, each hand-proven, pending R1:
 
@@ -397,3 +557,36 @@ assertion with the bug in, and passed again after the revert):
 - F-WC3-CMD-STDOUT — a run refusal goes to stdout.
 - F-WC3-ARTIFACT-PIN — the capsule source changes, so `tools/build` makes
   another module with a matching receipt; only the pinned sha256 catches it.
+
+wc-004's 21, each hand-proven, pending R1 (every named test failed at its
+assertion with the bug in, and passed again after the revert). Task 010's
+F-WC3-SECOND-IMPORT and F-WC3-SECOND-RULE were proved again against the
+updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
+
+- F-WC4a — the verifier skips `verify_checked_signature` and trusts the
+  signature's `name`: changed bytes, a changed manifest and an extra file pass
+  or reach the audit.
+- F-WC4b — a `None` signature passes.
+- F-WC4c — the verifier skips the `audit` call.
+- F-WC4d — the path form audits `capsule.wasm` read again by its path.
+- F-WC4e — the verifier passes an empty list to `audit`, not the caller's
+  grants.
+- F-WC4f — `*.seed` is removed from the lane's `.gitignore`.
+- F-WC4g — a PEM private-key header line is appended to this README.
+- F-WC4-SCAN-SKIP-MISSING — the key scan skips a listed file that is gone
+  from the worktree but still in git's index.
+- F-WC4-SCAN-NAME-AFTER-READ — the key scan checks a listed name only after
+  the file reads.
+- F-WC4-ENTRY-SUBSTITUTE — a missing entrypoint falls back to another bundled
+  module.
+- F-WC4-ENTRY-HARDCODED — the verifier audits `capsule.wasm`, not the
+  manifest's entrypoint.
+- F-WC4-WALK-REASON, -SIG-REASON and -AUDIT-REASON — the walk's, the signature
+  check's or the audit's refusal is replaced by another reason.
+- F-WC4-ORDER-AUDIT-FIRST — the audit runs before the signature check.
+- F-WC4-ORDER-UNSIGNED-FIRST — the path form refuses an unsigned bundle before
+  the walk.
+- F-WC4-SEALED-FIELD, -SEALED-NEW and -SEALED-MUT — a public field, a public
+  constructor, or mutable access to the verified value.
+- F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT — a second signature check or a
+  second audit call in the tools crate.

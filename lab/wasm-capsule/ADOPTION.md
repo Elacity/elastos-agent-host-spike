@@ -18,8 +18,8 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   zero-import check onto `audit/` after cwa-001 is an open item for Flint.
 - `audit/` — the `wasm-capsule-audit` crate, owned by the cx-wasm-audit lane and
   a member of this workspace (wc-000). It is the one static import-audit path
-  (PRINCIPLES P10): wc-004's verifier will call `wasm_capsule_audit::audit`
-  through a path dependency and parse no imports itself. cwa-001 implemented
+  (PRINCIPLES P10): wc-004's verifier calls `wasm_capsule_audit::audit`
+  through a path dependency and parses no imports itself. cwa-001 implemented
   its API v1 (`audit/INTERFACE.md`).
 - `tools/bundle` — the lab bundle command (task 009). `tools/bundle OUT_DIR`
   builds with `tools/build` into a new OUT_DIR and writes a new `bundle/` of
@@ -37,6 +37,17 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   refused, each with its own reason) and the manifest check (the Runtime's own
   `CapsuleManifest` parse and `validate()`). Take that crate for the rule; this
   crate shows one caller using it through one export.
+- `wasm_capsule_tools::verify` — wc-004's one verify path, as library calls.
+  `verify_checked(checked, signature, accepted, granted)` refuses a missing
+  signature, checks the in-memory name signature on the `CheckedBundle` with
+  cc-capsule-identity's `verify_checked_signature`, finds the manifest's
+  `entrypoint` among the checked entries (read with the Runtime's
+  `CapsuleManifest`), and runs `wasm_capsule_audit::audit` on those checked
+  bytes with the granted imports, unchanged. `verify_bundle(bundle, ...)` is
+  `checked_bundle` and then `verify_checked`. It returns a sealed
+  `VerifiedBundle` (`cid()`, `entries()`, `imports()`) for wc-005 to stage.
+  It is a lab check of name, signer and imports; it is no admission or launch
+  decision (README.md, "Verify (wc-004)").
 - `capsule/capsule.json` — this capsule's `elastos.capsule/v1` manifest, with
   only fields of the Runtime's `CapsuleManifest`. The tools crate compiles its
   bytes in (`CAPSULE_MANIFEST`). It lists no Wasm imports: the module's own
@@ -83,7 +94,7 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   discovery below), so a bundle's name is a **lab CID**,
   `lab-cid:sha256:<hex>`, cc-capsule-identity's rule. It is a lab CID, not a
   CID: never call it the Runtime's CID, and never use it as a package identity.
-  wc-004 is to sign it.
+  wc-004 checks a test-key signature over it (below).
 - What the walk covers, and what it does not, is cc-capsule-identity's claim
   (`lab/capsule-identity/README.md`); this lane claims only that it names
   bundles through that one function.
@@ -170,10 +181,58 @@ None is an admission or launch path.
    profile above (and the required files) would need a byte-level spec in
    `docs/`. Today it lives only in code.
 
+## Signature (wc-004)
+
+Discovery, read only at base `be952af5f` (2026-10-26).
+
+**What the docs say.** `docs/CAPSULE_INSPECTOR.md:23` lists "CID, signature
+presence, and a signature fingerprint" among what the Inspector may return,
+and `:26-27` says it "reports manifest signature evidence as declared but
+unverified: `verified=false`, while `verified_by` and `signed_by` are `null`".
+`docs/CAPSULE_MODEL.md:53` (the Artifact row): "A valid signature proves
+control of its signing key; Runtime publisher policy establishes publisher
+trust." So a signature is evidence of key control, and trust is a separate
+Runtime policy; neither doc gives a lab signature format.
+
+**What the Runtime has.** `elastos/crates/elastos-server/src/crypto.rs:133`
+(`verify_signed_json_envelope_against_dids`) verifies a signed JSON envelope
+`{ payload, signature, signer_did }` under a domain separator. This lane does
+not reproduce it: no envelope, no JSON signature and no copy of that function.
+
+**Decision (C2).** This lane uses cc-capsule-identity's in-memory name
+signature, a lab proposal: `sign_bundle`, `verify_checked_signature` and
+`NameSignature`, Ed25519 over SHA-256(`lab.capsule-identity.name-signature/v1`
+|| 0x00 || the printed lab CID). It adds no signature format, file or command
+of its own: no `tools/sign`, no `tools/verify`, no signature file and no
+serialized signature. Signing and verifying are library calls, tested in
+process. If a file form is wanted, cc-capsule-identity owns it.
+
+**"Unsupported signature version" has no input here.** Rong's wc-004 listed
+that refusal. The in-memory `NameSignature` has no version field, and the
+fixed domain string is checked by cc-capsule-identity's own tests, so there is
+no version for this verifier to read or refuse.
+
+**Who verifies what (Q8, Flint, 26 Oct 10:40).** The Runtime launch path owns
+verification of the accepted record, the selected platform variant and the
+installed contents. This lab verifier checks the signed test bundle in memory,
+and nothing more. cc-capsule-identity owns the future separate signed record,
+kept outside the package.
+
+**The function.** `wasm_capsule_tools::verify::verify_checked` and
+`verify_bundle` (README.md, "Verify (wc-004)"). Claim scope: an offline lab
+check, on this one Mac with test keys only, that the bytes match a signed lab
+CID, that an accepted test key signed it, and that every import is granted. It
+makes no admission, launch or publisher-trust decision, and the granted list
+(empty for ordinary callers until wc-009) is a lab stand-in, not admission.
+
 ## Not yet wired
 
-The canonical falsifier runner (`examples/agent-host/falsify.py`) has no `lab`
-command or recovery target for this workspace (ask **R1**, owned by the
-model-provider lane). Until that one-line addition lands, run the lane's
-falsifiers by hand (break → named test fails → revert); do not add a second
-runner or edit `falsify.py`.
+The canonical falsifier runner (`examples/agent-host/falsify.py`) now has a
+`lab` command for this workspace (`cargo test --workspace`). Its recovery
+targets (`PROVIDER_TARGETS`) still name the retired `tools/src/lab_name.rs` and
+not this lane's current edit files (`tools/src/lib.rs`, `tools/src/bundle.rs`,
+`tools/src/verify.rs`, `capsule/capsule.json`, `tests/common/build.rs`,
+`.gitignore`, `README.md`), so a killed run cannot restore them (ask **R1**,
+pending, owned by the model-provider lane). Until that lands, the lane's
+falsifiers are proved by hand (break → named test fails → revert); do not add
+a second runner or edit `falsify.py`.
