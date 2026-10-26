@@ -234,6 +234,60 @@ fn start_with_profile_refuses_a_canonical_parameter() {
     }
 }
 
+/// The same launch check owns canonical names encoded before `=`.
+///
+/// `sandbox-exec -D` reads the name before the first `=`, so a caller's
+/// `STORAGE_ROOT=/outside` would replace the canonical storage binding.
+/// Check every canonical name with an empty value, a path, and another `=`.
+/// Each refusal names the caller's parameter and precedes directory creation.
+///
+/// Falsifier: WP55 checks the caller's whole name again, so an encoded
+/// canonical name reaches the launch instead of this refusal.
+#[test]
+fn start_with_profile_refuses_an_encoded_canonical_parameter() {
+    for canonical_name in CANONICAL_PARAMS {
+        for suffix in ["", "/outside", "/outside=/fixture"] {
+            let name = format!("{canonical_name}={suffix}");
+            let base = tempfile::tempdir().expect("temporary wallet base");
+            let base = resolved(base.path());
+            let rebinding = wallet_dir(&base).join("rebound");
+            let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ConfinedProvider::start_with_profile(
+                    &base,
+                    Path::new(PROFILE_PATH),
+                    &[(name.as_str(), rebinding.as_path())],
+                )
+            }));
+            let failure = match settled {
+                Err(payload) => payload,
+                Ok(_provider) => panic!(
+                    "binding the encoded canonical parameter {name} must be refused, \
+                     but start_with_profile returned a provider"
+                ),
+            };
+            let message = failure
+                .downcast_ref::<String>()
+                .expect("the refusal must arrive as a String payload");
+            assert_eq!(
+                message,
+                &format!(
+                    "the launch must not bind the canonical parameter {name} again: \
+                     canonical bindings come only from canonical_bindings"
+                ),
+                "the encoded canonical parameter must receive the canonical-binding refusal"
+            );
+            assert!(
+                fs::read_dir(&base)
+                    .expect("the temporary base must be readable")
+                    .next()
+                    .is_none(),
+                "the refusal must come before the shared ancestors are created: {}",
+                base.display()
+            );
+        }
+    }
+}
+
 fn now_ts() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -268,6 +322,8 @@ fn canonical_bindings(base: &Path) -> [(&'static str, PathBuf); 3] {
 /// apart (P10). `start_with_profile` refuses a second binding of a canonical
 /// parameter, so this derivation stays the only source of those three paths;
 /// `start_with_profile_refuses_a_canonical_parameter` and WP54 hold that rule.
+/// `start_with_profile_refuses_an_encoded_canonical_parameter` and WP55 cover
+/// names encoded before `=` through the same check.
 fn create_shared_ancestors(bindings: &[(&'static str, PathBuf)]) {
     let (_, parent) = bindings
         .iter()
@@ -402,8 +458,10 @@ impl ConfinedProvider {
 
     fn start_with_profile(base: &Path, profile: &Path, parameters: &[(&str, &Path)]) -> Self {
         for (name, _) in parameters {
+            // Match the name sandbox-exec reads from the serialized -D binding.
+            let binding_name = name.split_once('=').map_or(*name, |(binding, _)| binding);
             assert!(
-                !CANONICAL_PARAMS.contains(name),
+                !CANONICAL_PARAMS.contains(&binding_name),
                 "the launch must not bind the canonical parameter {name} again: \
                  canonical bindings come only from canonical_bindings"
             );
