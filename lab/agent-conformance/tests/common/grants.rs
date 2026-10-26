@@ -231,6 +231,15 @@ impl Controller {
         Ok(())
     }
 
+    /// Shell pending is global. The current grant list is session-local, so
+    /// it supplies zero proof about a collected run client's live grants.
+    pub fn cleanup_state(&self) -> Result<&'static str> {
+        let pending = self.call("GET", "/api/capability/pending", &Value::Null)?;
+        require_empty_pending(&pending)?;
+        let grants = self.call("GET", "/api/capability/list", &Value::Null)?;
+        live_grant_state(&grants)
+    }
+
     pub fn print_checked(&self, line: &str) -> Result<()> {
         self.check_bytes(line.as_bytes(), Surface::Printed)?;
         self.printed.borrow_mut().push_str(&format!("{line}\n"));
@@ -558,6 +567,32 @@ pub fn assert_memory_surfaces() {
     home.finish().unwrap();
 }
 
+fn require_empty_pending(response: &Value) -> Result<()> {
+    let requests = response["requests"]
+        .as_array()
+        .ok_or("cleanup pending response requires a request list")?;
+    if !requests.is_empty() {
+        return Err("pending request leftover");
+    }
+    Ok(())
+}
+
+fn live_grant_state(response: &Value) -> Result<&'static str> {
+    let grants = response["capabilities"]
+        .as_array()
+        .ok_or("cleanup grant response requires a capability list")?;
+    // Future Runtime contract: the shell gets an explicit global live scope,
+    // with exhausted/revoked grants filtered by Runtime. A local empty list
+    // and audit events cannot substitute for that evidence.
+    if response["scope"] != "all_sessions_live" {
+        return Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)");
+    }
+    if !grants.is_empty() {
+        return Err("live grant leftover");
+    }
+    Ok("pending:0 grants:0")
+}
+
 fn attach_secret(bytes: &[u8]) -> Result<String> {
     let value: Value =
         serde_json::from_slice(bytes).map_err(|_| "invalid fixture coordinates JSON")?;
@@ -696,6 +731,31 @@ mod tests {
 
     fn request() -> Value {
         json!({"resource":"localhost://Public/test/one","action":"read","reason":"test read"})
+    }
+
+    #[test]
+    fn cleanup_state_refuses_pending_and_requires_global_live_grants() {
+        assert_eq!(require_empty_pending(&json!({"requests": []})), Ok(()));
+        assert_eq!(
+            require_empty_pending(&json!({"requests": [{}]})),
+            Err("pending request leftover")
+        );
+        assert!(require_empty_pending(&json!({})).is_err());
+        assert!(live_grant_state(&json!({})).is_err());
+        for capabilities in [json!([]), json!([{}])] {
+            assert_eq!(
+                live_grant_state(&json!({"capabilities": capabilities})),
+                Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)")
+            );
+        }
+        assert_eq!(
+            live_grant_state(&json!({"scope":"all_sessions_live", "capabilities": []})),
+            Ok("pending:0 grants:0")
+        );
+        assert_eq!(
+            live_grant_state(&json!({"scope":"all_sessions_live", "capabilities": [{}]})),
+            Err("live grant leftover")
+        );
     }
 
     #[test]

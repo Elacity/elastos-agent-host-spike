@@ -860,6 +860,139 @@
       "tests": [
         "host_key_receipt_requires_this_launched_bundle"
       ]
+    },
+    {
+      "id": "F-cleanup-temp",
+      "title": "plant a TMPDIR file after the run children finish",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "    let cleanup_state = if outcome == ReadOutcome::NoPolicy {",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = if outcome == ReadOutcome::NoPolicy {"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cleanup-process",
+      "title": "leave a separate bounded process group holding the root through the census",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "    let cleanup_state = if outcome == ReadOutcome::NoPolicy {",
+          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = if outcome == ReadOutcome::NoPolicy {"
+        },
+        {
+          "file": "tests/effects.rs",
+          "old": "    if require_live_grants {",
+          "new": "    drop(_leftover);\n    if require_live_grants {"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cleanup-pending",
+      "title": "accept a pending request after the journey",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    if !requests.is_empty() {",
+          "new": "    if false && !requests.is_empty() {"
+        }
+      ],
+      "tests": [
+        "grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants"
+      ]
+    },
+    {
+      "id": "F-cleanup-scope",
+      "title": "count a shell-local grant list as global live evidence",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    if response[\"scope\"] != \"all_sessions_live\" {",
+          "new": "    if false && response[\"scope\"] != \"all_sessions_live\" {"
+        }
+      ],
+      "tests": [
+        "grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants"
+      ]
+    },
+    {
+      "id": "F-cleanup-socket",
+      "title": "ignore a successful connection after stop",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/census.rs",
+          "old": "            Ok(_) => 1,",
+          "new": "            Ok(_) => 0,"
+        }
+      ],
+      "tests": [
+        "cleanup_census_refuses_each_leftover"
+      ]
+    },
+    {
+      "id": "F-cleanup-captures",
+      "title": "discard the census capture inventory",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/census.rs",
+          "old": "    home.collect_captures_from(&tool_home)?;",
+          "new": "    // Planted: discard tool captures."
+        }
+      ],
+      "tests": [
+        "cleanup_census_refuses_each_leftover"
+      ]
+    },
+    {
+      "id": "F-cleanup-earlier",
+      "title": "skip roots left by earlier runs",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/census.rs",
+          "old": "    let holders = root_holders(&home, &roots)?;",
+          "new": "    let holders = Vec::new();"
+        }
+      ],
+      "tests": [
+        "earlier_run_check_refuses_live_owner"
+      ]
+    },
+    {
+      "id": "F-cleanup-report",
+      "title": "omit the cleanup scope from the existing table",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "                text.push_str(\" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included\");",
+          "new": "                text.push_str(\"\");"
+        }
+      ],
+      "tests": [
+        "cleanup_report_keeps_scope_and_grant_blocker"
+      ]
     }
   ]
 }

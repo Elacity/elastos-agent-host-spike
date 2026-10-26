@@ -172,12 +172,17 @@ fn fixture_operator_starts_ready_and_stops_cleanly() {
     );
     assert!(home.root().join("storage").is_dir());
     // Also check this operator before retaining it for any later fixture work.
-    operator.census().expect("ready operator socket census");
+    let sampled = operator
+        .begin_check()
+        .expect("ready operator socket census");
     let pgid = operator.child.pgid();
-    operator.child.stop().expect("clean operator stop");
-    assert!(!operator.child.is_alive().unwrap());
+    println!(
+        "{}",
+        operator
+            .finish_check(sampled)
+            .expect("operator stop and cleanup census")
+    );
     assert!(!home.group_is_alive(pgid).unwrap());
-    drop(operator);
     home.finish().unwrap();
 }
 
@@ -227,4 +232,75 @@ fn socket_census_requires_parseable_loopback_endpoints_and_api_listener() {
             "census must refuse incomplete or non-loopback evidence"
         );
     }
+}
+
+#[test]
+fn cleanup_census_refuses_each_leftover() {
+    use agent_conformance::census::cleanup;
+    let home = ThrowawayHome::new().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reason = cleanup(&home, port).unwrap_err();
+    assert!(reason.contains("API socket leftover"), "{reason}");
+    let captures = home.capture_paths().unwrap();
+    assert_eq!(
+        captures.len(),
+        1,
+        "the census capture belongs to the same inventory"
+    );
+    assert!(captures[0].iter().all(|path| path.is_file()));
+    drop(listener);
+
+    let planted = home.temp().join("planted");
+    fs::write(&planted, b"cleanup fixture").unwrap();
+    let reason = cleanup(&home, port).unwrap_err();
+    assert!(reason.contains("temp leftover"));
+    assert!(reason.contains("tmp/planted"));
+    assert!(reason.contains(home.root().file_name().unwrap().to_str().unwrap()));
+    fs::remove_file(planted).unwrap();
+
+    let mut child = home
+        .start(
+            std::path::Path::new("/bin/sh"),
+            &["-c", "cd \"$HOME/..\"; exec /bin/sleep 20"],
+        )
+        .unwrap();
+    let reason = cleanup(&home, port).unwrap_err();
+    assert!(reason.contains("process leftover"));
+    assert!(reason.contains("processes:1"));
+    assert!(reason.contains("\".\""), "root cwd must be visible");
+    child.stop().unwrap();
+    drop(child);
+
+    let line = cleanup(&home, port).unwrap();
+    assert!(line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]"));
+    assert!(line.contains("excludes only test PID"));
+    home.finish().unwrap();
+}
+
+#[test]
+fn cleanup_root_selection_finds_other_groups() {
+    use agent_conformance::census::root_holders;
+    let first = ThrowawayHome::new().unwrap();
+    let second = ThrowawayHome::new().unwrap();
+    let mut a = first
+        .start(std::path::Path::new("/bin/sleep"), &["20"])
+        .unwrap();
+    let mut b = second
+        .start(std::path::Path::new("/bin/sleep"), &["20"])
+        .unwrap();
+    let roots = [first.root().to_owned(), second.root().to_owned()];
+    let holders = root_holders(&first, &roots).unwrap();
+    for (home, child) in [(&first, &a), (&second, &b)] {
+        assert!(holders.iter().any(|holder| holder.pid == child.pgid()
+            && holder.root == home.root().file_name().unwrap().to_str().unwrap()
+            && holder.path == "home"));
+    }
+    assert!(a.is_alive().unwrap() && b.is_alive().unwrap());
+    a.stop().unwrap();
+    b.stop().unwrap();
+    drop((a, b));
+    assert!(root_holders(&first, &roots).unwrap().is_empty());
+    first.finish().unwrap();
+    second.finish().unwrap();
 }

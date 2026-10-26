@@ -1,10 +1,10 @@
 //! Ready operator and socket census through the lane's single launch primitive.
 
+pub use agent_conformance::census::loopback_socket_count;
 use agent_conformance::harness::{RunningChild, ThrowawayHome};
 use agent_conformance::runtime::runtime_under_test;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 pub struct Operator<'a> {
@@ -75,7 +75,8 @@ impl<'a> Operator<'a> {
         }
         let second = self.census()?;
         self.child.stop()?;
-        Ok(format!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped"))
+        let cleanup = agent_conformance::census::cleanup(self.home, self.port)?;
+        Ok(format!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped\n{cleanup}"))
     }
 
     pub fn require_alive(&mut self) -> Result<(), &'static str> {
@@ -98,8 +99,8 @@ impl<'a> Operator<'a> {
 
     fn sample(&mut self) -> Result<usize, String> {
         self.require_alive()?;
-        let output = self.home.launch(
-            Path::new("/usr/sbin/lsof"),
+        let listing = agent_conformance::census::listing(
+            self.home,
             &[
                 "-nP",
                 "-a",
@@ -109,15 +110,10 @@ impl<'a> Operator<'a> {
                 "-FpfPtnT",
                 "-Ts",
             ],
-            Duration::from_secs(5),
+            false,
         )?;
-        if !output.status.success() || !output.stderr.is_empty() {
-            return Err("socket census tool failed or returned a warning".into());
-        }
         self.require_alive()?;
-        let listing =
-            std::str::from_utf8(&output.stdout).map_err(|_| "socket census is not UTF-8")?;
-        loopback_socket_count(listing, self.port)
+        loopback_socket_count(&listing, self.port)
     }
 }
 
@@ -143,105 +139,4 @@ fn health_is_ok(port: u16) -> bool {
         }
         Err(_) => false,
     }
-}
-
-#[derive(Default)]
-struct Socket<'a> {
-    family: Option<&'a str>,
-    protocol: Option<&'a str>,
-    name: Option<&'a str>,
-    state: Option<&'a str>,
-}
-
-fn set_once<'a>(field: &mut Option<&'a str>, value: &'a str) -> Result<(), String> {
-    if field.replace(value).is_some() {
-        return Err("socket census repeats a field".into());
-    }
-    Ok(())
-}
-
-impl Socket<'_> {
-    fn check(&self, api_port: u16) -> Result<bool, String> {
-        let family = self.family.ok_or("socket census lacks an address family")?;
-        let protocol = self.protocol.ok_or("socket census lacks a protocol")?;
-        if !matches!(family, "IPv4" | "IPv6") || !matches!(protocol, "TCP" | "UDP") {
-            return Err("socket census has an unknown socket kind or family".into());
-        }
-        let name = self.name.ok_or("socket census lacks an address")?;
-        let ends: Vec<_> = name.split("->").collect();
-        if ends.is_empty() || ends.len() > 2 {
-            return Err("socket census has an unparseable connection".into());
-        }
-        let mut addresses = Vec::new();
-        for end in ends {
-            if end.starts_with("*:") {
-                return Err(format!(
-                    "socket census refused {protocol} {family} non-loopback address"
-                ));
-            }
-            let address: SocketAddr = end
-                .parse()
-                .map_err(|_| "socket census has an unparseable address")?;
-            if !matches!(address.ip(), IpAddr::V4(ip) if ip == Ipv4Addr::LOCALHOST)
-                && !matches!(address.ip(), IpAddr::V6(ip) if ip == Ipv6Addr::LOCALHOST)
-            {
-                return Err(format!(
-                    "socket census refused {protocol} {family} non-loopback address"
-                ));
-            }
-            if (address.is_ipv4() != (family == "IPv4")) || address.port() == 0 {
-                return Err(
-                    "socket census address disagrees with its family or has zero port".into(),
-                );
-            }
-            addresses.push(address);
-        }
-        Ok(protocol == "TCP"
-            && self.state == Some("ST=LISTEN")
-            && addresses == [SocketAddr::from((Ipv4Addr::LOCALHOST, api_port))])
-    }
-}
-
-/// Parse lsof's selected field format; every socket and both connection ends
-/// must be readable. The API listener is the census visibility control.
-pub fn loopback_socket_count(listing: &str, api_port: u16) -> Result<usize, String> {
-    let mut process = false;
-    let mut socket: Option<Socket<'_>> = None;
-    let mut count = 0;
-    let mut api_seen = false;
-    for line in listing.lines() {
-        let (tag, value) = line
-            .split_at_checked(1)
-            .ok_or("socket census has an empty field")?;
-        if matches!(tag, "p" | "f") {
-            if let Some(previous) = socket.take() {
-                api_seen |= previous.check(api_port)?;
-                count += 1;
-            }
-        }
-        match tag {
-            "p" if value.parse::<u32>().is_ok_and(|pid| pid > 0) => process = true,
-            "f" if process && value.parse::<u32>().is_ok() => socket = Some(Socket::default()),
-            _ => {
-                let current = socket
-                    .as_mut()
-                    .ok_or("socket census has a field outside a socket")?;
-                match tag {
-                    "t" => set_once(&mut current.family, value)?,
-                    "P" => set_once(&mut current.protocol, value)?,
-                    "n" => set_once(&mut current.name, value)?,
-                    "T" if value.starts_with("ST=") => set_once(&mut current.state, value)?,
-                    _ => return Err("socket census has an unknown or misplaced field".into()),
-                }
-            }
-        }
-    }
-    if let Some(previous) = socket {
-        api_seen |= previous.check(api_port)?;
-        count += 1;
-    }
-    if count == 0 || !api_seen {
-        return Err("socket census requires the loopback API listener positive control".into());
-    }
-    Ok(count)
 }
