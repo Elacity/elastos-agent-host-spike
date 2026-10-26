@@ -1289,6 +1289,9 @@ By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 wc-005c (task 016), two task 019 and 17 wc-009a (task 020). Each requires all
 its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
+This section is the one place for evidence labels and counts, and
+`falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
+`falsifiers.json` free of them.
 
 Two kinds of evidence, kept apart. Runner-caught: 75, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019 and 020: 1 + 1 + 23 +
@@ -1614,3 +1617,11 @@ held by `runner_uses_only_explicit_inputs` and `granted_import_is_linked`; its
 planted bug (`&[]` in place of `input.granted`, in `tools/src/run.rs`) has no
 `falsifiers.json` entry, because `run.rs` is not a recovery target (ask R2), and
 is hand-proven, pending R1 (LOG.md, task 020), outside every count above.
+
+Task 023's eight planted bugs in the `"about"` text, each hand-proven
+(`falsifiers.json` is the canonical runner's own input and not a recovery
+target, so they have no `falsifiers.json` entry and are outside every count
+above; LOG.md, task 023). Each makes
+`falsifiers_about_states_no_evidence_status` fail at its assertion: the base's
+evidence sentence put back, each of the five evidence words planted alone, and
+the pointer losing `README.md` or `## Falsifiers`.
