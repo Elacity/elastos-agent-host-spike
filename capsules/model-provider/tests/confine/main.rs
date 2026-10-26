@@ -2412,7 +2412,8 @@ fn allow_rules_trace_to_declared_rights() {
 ///
 /// Falsifier: F-cc35a replaces the root pin with
 /// `(allow file-read* (literal "/"))`. F-cc35b appends `(allow sysctl-write)`
-/// after the sysctl pin.
+/// after the sysctl pin. F-cc35c, F-cc35d and F-cc35e append literal reads
+/// whose filenames contain STORAGE_ROOT, STORAGE_PARENT or PROVIDER_EXECUTABLE.
 #[test]
 fn platform_baseline_rules_stay_narrow() {
     fn root_operation_widens(line: &str) -> bool {
@@ -2461,14 +2462,18 @@ fn platform_baseline_rules_stay_narrow() {
         .collect();
 
     // Wider grants are refused even when the narrow pin is still present.
+    // Exempt only the exact storage grants; parameter names in other rules
+    // (including literal filenames) do not bind those rules to storage.
     let root_candidates: Vec<&str> = allow_lines
         .iter()
         .copied()
         .filter(|line| {
             line.contains("file-read")
-                && !line.contains("STORAGE_PARENT")
-                && !line.contains("STORAGE_ROOT")
-                && !line.contains("PROVIDER_EXECUTABLE")
+                && !matches!(
+                    *line,
+                    "(allow file-read* (literal (param \"STORAGE_PARENT\")))"
+                        | "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))"
+                )
         })
         .collect();
     let mut root_pins = 0usize;

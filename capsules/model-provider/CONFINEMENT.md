@@ -539,7 +539,9 @@ profile does not grant".
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
   operation on the root read, or a wider operation or sysctl name on the
   sysctl read, fails the test even when those two lines remain, so a fixture
-  and a profile that widen together still fail. The test reads `confine.sb`
+  and a profile that widen together still fail. The test exempts only the
+  exact parameter-bound storage grants. Literal filenames that contain
+  parameter names still fail. The test reads `confine.sb`
   from disk. It starts no process and needs no sandbox.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
@@ -666,6 +668,9 @@ allow_rules_trace_to_declared_rights.
 | F-cc31a | In the test, `model_provider_ops_under_profile` is renamed `model_provider_ops_under_profile_renamed` | `operations_section_cites_existing_tests` | The operations section cites that test, and the function is gone. |
 | F-cc35a | `(allow file-read-data (literal "/"))` becomes `(allow file-read* (literal "/"))` | `platform_baseline_rules_stay_narrow` | The root read's operation widens to `file-read*`. |
 | F-cc35b | One line, `(allow sysctl-write)`, is added after `(allow sysctl-read)`; the sysctl pin stays | `platform_baseline_rules_stay_narrow` | The added write is a wider sysctl operation while the pin remains. |
+| F-cc35c | One line, `(allow file-read-data (literal "/tmp/STORAGE_ROOT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_ROOT`. |
+| F-cc35d | One line, `(allow file-read-data (literal "/tmp/STORAGE_PARENT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_PARENT`. |
+| F-cc35e | One line, `(allow file-read-data (literal "/tmp/PROVIDER_EXECUTABLE-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `PROVIDER_EXECUTABLE`. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -677,6 +682,7 @@ the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
 F-cc35b needs no rebuild: the test reads confine.sb at runtime.
+F-cc35c, F-cc35d and F-cc35e also read confine.sb at runtime and need no rebuild.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -684,7 +690,7 @@ suite fails, so a list run there is no evidence. Off macOS, when
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
-F-cc35a and F-cc35b) are
+F-cc35a, F-cc35b, F-cc35c, F-cc35d and F-cc35e) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
