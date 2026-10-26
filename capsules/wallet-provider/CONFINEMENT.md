@@ -83,6 +83,15 @@ under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
 `startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
 refused when the profile cannot be applied.
 
+`every_did_and_wallet_allow_rule_traces_to_one_declared_right` reads
+`capsules/wallet-provider/tests/fixtures/confine/declared-rights.json`. That
+file is a lab stand-in for the Runtime generator's input and not a manifest
+field. Every top-level allow rule of the wallet profile traces to exactly one
+right the shared contract names, or to one observed startup need. The profile
+rules are evidence for Anders to review and not accepted rights. The startup
+label says "observed startup needs, not approved rights; Anders decides". The
+generator stays the Runtime's.
+
 ## The model provider's inline profile
 
 `elastos/crates/elastos-runtime/src/provider/bridge.rs` builds a third,
@@ -409,6 +418,14 @@ binding is the only difference between the two runs.
   that is a directory fails as a read error naming its path; and a missing did
   profile fails, naming did-provider.
 
+- `every_did_and_wallet_allow_rule_traces_to_one_declared_right` reads each
+  provider's `tests/fixtures/confine/declared-rights.json` and requires every
+  top-level allow rule of the did and wallet profiles to trace to exactly one
+  declared right or observed startup need.
+  `declared_rights_trace_refuses_each_bad_input` builds the same files in a
+  temporary `capsules/` directory and proves each refusal. Neither test starts
+  a process.
+
 When a request goes unanswered, the harness failure names the request, the
 child's exit status or the deadline that ended the wait, and all the child
 wrote to standard error.
@@ -647,6 +664,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Rename `confined_outside_write_is_denied` in `tests/confine.rs` (WP83):
   `every_operations_table_cites_existing_tests` fails because the wallet
   operations table cites a function that file does not hold.
+- Append `(allow file-read* (literal "/private/var/cc-confine-unnamed"))` to
+  the did profile (WP84):
+  `every_did_and_wallet_allow_rule_traces_to_one_declared_right` fails because
+  no declared right and no observed startup need claims that form.
+- Append the same rule to this profile (WP85): the same test fails because the
+  wallet form likewise has no claimant.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

@@ -221,3 +221,313 @@ The guest denies a step with no grant id and does not mint one.
     /// no grant. A second answer does not replace the first, and it does not
     /// authorize another step. A child cannot be answered with the parent's
     /// grant. The answer name is kept in the log. The grant string is not.
+
+## 3. Grant requests and A5 binding
+
+This section is design input for A5. A5 stays open. This section cites no lab/grant-binding test.
+
+The verified agent identity is who the launch runs as. The grant is the Runtime's admission of one step. A budget stays a separate Runtime decision.
+
+For the agent identity, a capability request calls `scope_current_user_alias` with `BridgeContext.principal_id` before the pending request is stored. The identity host reports that same `principal_id`.
+
+`elastos/crates/elastos-server/src/resource_bridge.rs:43` is the `principal_id` field on `BridgeContext`. The field holds the Runtime principal used to resolve a capsule-facing `Users/self` alias.
+
+    /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
+    pub principal_id: Option<String>,
+
+`elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
+
+                let scoped_resource =
+                    match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
+                        Ok(resource) => resource,
+                        Err(message) => {
+                            return Ok(serde_json::json!({
+                                "id": id,
+                                "response": {
+                                    "type": "error",
+                                    "code": "principal_context_required",
+                                    "message": message,
+                                },
+                            }));
+                        }
+                    };
+                let resource = scoped_resource.as_str();
+
+`elastos/crates/elastos-compute/src/providers/component.rs:350` is the identity host `context`. The body returns an `IdentityContext` whose `principal` is `self.principal_id.clone()`.
+
+    impl elastos::bus::identity::Host for ComponentState {
+        fn context(&mut self) -> elastos::bus::types::IdentityContext {
+            elastos::bus::types::IdentityContext {
+                principal: self.principal_id.clone(),
+                capsule: self.capsule_id.clone(),
+                session: self.capsule_id.clone(),
+                device: None,
+            }
+        }
+    }
+
+For the session, the pending request's session id is the bridge capsule id. The identity host copies `capsule_id` into `session`. A status read of another session is refused. The shell grant passes `request.session_id` into `grant`.
+
+`elastos/crates/elastos-server/src/resource_bridge.rs:984` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
+
+                let resource_id = elastos_runtime::capability::ResourceId::new(resource);
+
+                // Create a pending request — the shell decides whether to grant.
+                let pending = ctx
+                    .pending_store
+                    .create_request_with_reason(
+                        elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+                        resource_id.clone(),
+                        action,
+                        reason,
+                    )
+                    .await;
+
+`elastos/crates/elastos-compute/src/providers/component.rs:352` is the `session` field in that same `context` body. The body sets `session` to `self.capsule_id.clone()`.
+
+            session: self.capsule_id.clone(),
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:182` is the refusal in `request_status`. The body loads the pending request by id. When `request.session_id` differs from the caller session id, the body returns Forbidden and the text Cannot access another session's request. Otherwise the body returns that request's status.
+
+    // Verify the request belongs to this session
+    if request.session_id != session.id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot access another session's request".to_string(),
+        ));
+    }
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:339` is the comment on the shell grant. `elastos/crates/elastos-server/src/api/handlers/capability.rs:341` is the capsule id passed into `grant`. `grant_request` loads the pending request, requires it to be pending, and calls `capability_manager.grant`. The capsule id argument is `request.session_id.to_string()`. The resource argument is `request.resource`. The body then marks that pending request granted with the token `grant` returns.
+
+    // Use session ID as capsule ID for now
+    let token = state.capability_manager.grant(
+        &request.session_id.to_string(),
+        request.resource.clone(),
+        request.action,
+        constraints,
+        None, // No expiry for now (session-scoped)
+    );
+
+For the capsule instance, `grant` stores its capsule id argument on the token. `validate` refuses a caller whose capsule id differs, and `test_wrong_capsule` shows that refusal. The component invoke passes `BridgeContext.capsule_id` as that caller. The bridge comment says this field is the capsule identity for token minting, a session id or a capsule name.
+
+`elastos/crates/elastos-server/src/resource_bridge.rs:40` is that comment on `BridgeContext.capsule_id`.
+
+    /// Capsule identity for token minting (session ID or capsule name)
+    pub capsule_id: String,
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs:326` is the capsule argument in `grant`. The body passes `capsule_id.to_string()` to `CapabilityToken::new`, signs the token, and returns the token.
+
+    /// Grant a new capability token
+    pub fn grant(
+        &self,
+        capsule_id: &str,
+        resource: ResourceId,
+        action: Action,
+        constraints: TokenConstraints,
+        expiry: Option<SecureTimestamp>,
+    ) -> CapabilityToken {
+        let issued_at = SecureTimestamp::now();
+
+        // Ensure token epoch is at least current epoch
+        let mut constraints = constraints;
+        if constraints.epoch < self.store.current_epoch() {
+            constraints.epoch = self.store.current_epoch();
+        }
+
+        let mut token = CapabilityToken::new(
+            capsule_id.to_string(),
+            self.public_key_bytes(),
+            resource.clone(),
+            action,
+            constraints,
+            issued_at,
+            expiry,
+        );
+
+        // Sign the token
+        token.sign(&self.signing_key);
+
+        // Record metrics
+        self.metrics.record_capability_request(capsule_id);
+
+        // Audit log
+        self.audit_log
+            .capability_grant(&token.id, capsule_id, &resource, action, expiry);
+
+        token
+    }
+
+`elastos/crates/elastos-runtime/src/capability/token.rs:203` is the token field that holds the capsule id. The field is the capsule that can use the token.
+
+    /// Who can use this token (capsule ID)
+    pub(crate) capsule: String,
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs:409` is the caller check. `validate` passes the caller capsule id to `validate_recurring`. That body returns WrongCapsule when `token.capsule` differs from `caller_capsule_id`, and it audits the failure as wrong_capsule.
+
+    pub async fn validate(
+        &self,
+        token: &CapabilityToken,
+        caller_capsule_id: &str,
+        requested_action: Action,
+        requested_resource: &ResourceId,
+        resource_classification: Option<u8>,
+    ) -> Result<(), ValidationError> {
+        self.validate_recurring(
+            token,
+            caller_capsule_id,
+            requested_action,
+            requested_resource,
+            resource_classification,
+            true,
+        )
+        .await
+    }
+
+        // 4. Caller verification
+        if token.capsule != caller_capsule_id {
+            self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");
+            return Err(ValidationError::WrongCapsule {
+                expected: token.capsule.clone(),
+                got: caller_capsule_id.to_string(),
+            });
+        }
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule` shows that refusal. The body grants a token for capsule-a, calls `validate` with capsule-b, and requires WrongCapsule.
+
+    #[tokio::test]
+    async fn test_wrong_capsule() {
+        let manager = create_test_manager();
+
+        let token = manager.grant(
+            "capsule-a",
+            ResourceId::new("localhost://Users/self/Documents/test.txt"),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+
+        // Wrong capsule trying to use it
+        let result = manager
+            .validate(
+                &token,
+                "capsule-b",
+                Action::Read,
+                &ResourceId::new("localhost://Users/self/Documents/test.txt"),
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
+    }
+
+`elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
+
+    if bridge_ctx
+        .capability_manager
+        .validate(
+            &token,
+            &bridge_ctx.capsule_id,
+            dispatch.required_action,
+            &resource_id,
+            None,
+        )
+        .await
+        .is_err()
+    {
+        return finish_component_invoke(
+            bridge_ctx,
+            &audit_id,
+            &dispatch,
+            "denied",
+            resource_error_response("capability_denied", "Capability validation failed"),
+        );
+    }
+
+For the owned storage root, the same scope call rewrites `Users/self` onto the principal root before the request is stored, so the resource on the grant is that scoped name. The guest's `JournalGrant` is one id, held in memory, for its own journal. `request_journal_grants` asks write, then read, on that resource.
+
+The body of `scope_current_user_alias`, quoted in section 1, returns the principal root for the `Users/self` alias and that root plus the remainder for a path under the alias. `handle_request` stores that returned string on the pending request. `grant_request` passes the stored resource into `grant`, so the resource on the token is that scoped name.
+
+`examples/agent-host/src/lib.rs:3767` is `JournalGrant`. The comment says it is a grant the Runtime gave this guest for its own journal, one resource and one action, held in memory. `new` stores one non-empty id. `id` returns that string. `Debug` prints the type and does not print the id.
+
+    /// A grant the Runtime gave this guest for its own journal, one resource and
+    /// one action. It is held in memory only: the journal format has no field for
+    /// it, and `Debug` does not print it.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    struct JournalGrant(String);
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    impl JournalGrant {
+        fn new(id: &str) -> Option<Self> {
+            (!id.is_empty()).then(|| Self(id.to_string()))
+        }
+
+        fn id(&self) -> &str {
+            &self.0
+        }
+    }
+
+`examples/agent-host/src/lib.rs:3849` asks write. `examples/agent-host/src/lib.rs:3850` asks read. Both lines are in `request_journal_grants`. The body returns empty grants when the resource does not start with the journal root or when `host_path` reports a host path. Otherwise the body asks the bus for write, then read, on `cursor.resource`, and keeps each returned id in a `JournalGrant`. The journal resource sits under `Users/self`.
+
+    /// Ask the Runtime for exactly two grants on this agent's own journal: write,
+    /// then read. Nothing else is asked for. A refusal leaves that grant empty, so
+    /// nothing is sent with it.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {
+        if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
+            return JournalGrants {
+                write: None,
+                read: None,
+            };
+        }
+        let mut ask = |action: &str| {
+            bus.request_grant(&cursor.resource, action, "Agent Host task journal")
+                .ok()
+                .and_then(|id| JournalGrant::new(&id))
+        };
+        let write = ask("write");
+        let read = ask("read");
+        JournalGrants { write, read }
+    }
+
+The required binding is a grant bound to the verified agent identity, the session, the capsule instance, and the owned storage root, and a host-side handle bound to the capsule instance and the session. The guest presents a handle. The host binds that handle to the verified agent identity, the session, the capsule instance, and the owned storage root. Identity, session, and instance come from the host record of the handle. `elastos/crates/elastos-compute/src/providers/component.rs:384` sets `CapabilityGrant.id` to the token string. The body of `request` on the capabilities host requires one action, asks the bridge, and returns a `CapabilityGrant` whose id is the token string from that response. `elastos/wit/elastos-bus-v1.wit:10` defines `grant-id` as a string, and the capability-grant record uses that type for its id. The cited functions return the token string as the grant id. The cited functions do not show a separate handle table. A5 stays open.
+
+    fn request(
+        &mut self,
+        request: elastos::bus::types::CapabilityRequest,
+    ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
+    {
+        if request.actions.len() != 1 {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "component capability requests currently require exactly one action".into(),
+            ));
+        }
+        let resource = request.resource;
+        let action = request.actions[0].clone();
+        let response = self.call_bridge(
+            guest_bus::capability_request(guest_bus::CapabilityRequest {
+                resource: resource.clone(),
+                actions: vec![action.clone()],
+                reason: request.reason,
+            })
+            .map_err(|err| bus_error("invalid", err))?,
+        )?;
+        let token = match response {
+            RuntimeResponse::CapabilityToken { token } => token,
+            response => return Err(response_error(&response)),
+        };
+        Ok(elastos::bus::types::CapabilityGrant {
+            id: token,
+            resource,
+            actions: vec![action],
+            expires_at_ms: None,
+        })
+    }
+
+    type grant-id = string;
+
+    record capability-grant {
+      id: grant-id,
+      %resource: resource-uri,
+      actions: list<action>,
+      expires-at-ms: option<u64>,
+    }
