@@ -217,7 +217,7 @@ class BuildFailed(Exception):
 
 
 def linked_deps(source):
-    """The capsule-identity and elastos paths beside a <prefix>/lab/wasm-capsule copy."""
+    """Validate the copy layout and return its capsule-identity and elastos paths."""
     source = Path(source)
     if source.name != "wasm-capsule" or source.parent.name != "lab":
         raise ValueError(f"copy path must end in lab/wasm-capsule: {source}")
@@ -282,12 +282,12 @@ def build_copy(root, copy_path, plant, *, links=True, copy=True):
         return _run_tools_build(root, LANE_DIR)
 
     relative = Path(copy_path)
-    if relative.is_absolute() or relative.parts[-2:] != ("lab", "wasm-capsule"):
-        raise ValueError(f"copy path must end in lab/wasm-capsule: {copy_path}")
+    if relative.is_absolute():
+        raise ValueError(f"copy path must be relative: {copy_path}")
     source = root / relative
+    identity, elastos = linked_deps(source)
     shutil.copytree(LANE_DIR, source, ignore=shutil.ignore_patterns(*BUILD_OUTPUTS))
     if links:
-        identity, elastos = linked_deps(source)
         identity.symlink_to(
             (REPO_ROOT / "lab" / "capsule-identity").resolve(), target_is_directory=True
         )
@@ -573,6 +573,13 @@ F_BUILD_PATH = Falsifier(
     ("test_two_builds_in_different_paths_are_byte_identical",),
     "two builds in different paths differ",
 )
+F_REAL_TREE = Falsifier(
+    "F-RT008-REAL-TREE",
+    "a source plant makes the linked copy differ from the real tree",
+    F_BUILD_PATH.plant,
+    ("test_linked_copy_matches_a_build_of_the_real_tree",),
+    "the linked copy does not match a build of the real tree",
+)
 
 FORCED_EXIT = "planted: tools/build exits 3 before it builds"
 BUILD_FAILS = (
@@ -639,6 +646,7 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
         if self.skip_reason and self._testMethodName not in (
             "test_falsifier_missing_links_is_caught",
             "test_plant_does_not_write_the_real_trees",
+            "test_invalid_copy_paths_are_refused_before_copying",
         ):
             self.skipTest(self.skip_reason)
 
@@ -664,6 +672,49 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
 
     def test_falsifier_build_path_is_caught(self):
         self.assert_caught(F_BUILD_PATH)
+
+    def test_falsifier_real_tree_match_is_caught_then_restored(self):
+        # Reuse the existing source plant, but require the real-tree comparison
+        # itself to fail. Fresh unplanted copies must then pass that same test.
+        self.assert_caught(F_REAL_TREE)
+        _, restored = run_probe(F_REAL_TREE.tests)
+        self.assertEqual(restored.testsRun, len(F_REAL_TREE.tests))
+        self.assertEqual(restored.errors + restored.failures, [])
+        self.assertEqual(restored.skipped, [], "the restored comparison must run")
+        self.assertEqual(restored.expectedFailures + restored.unexpectedSuccesses, [])
+        self.assertTrue(restored.wasSuccessful())
+
+    def test_invalid_copy_paths_are_refused_before_copying(self):
+        root = Path("/review")
+        module = sys.modules[__name__]
+        with mock.patch.object(shutil, "copytree") as copier, mock.patch.object(
+            module, "_run_tools_build"
+        ) as builder:
+            for relative in (
+                "", "lab/wrong", "wrong/wasm-capsule", "wasm-capsule",
+                "lab/wasm-capsule/extra",
+            ):
+                source = root / relative
+                reason = f"copy path must end in lab/wasm-capsule: {source}"
+                with self.subTest(entry="linked_deps", path=relative):
+                    with self.assertRaises(ValueError) as caught:
+                        linked_deps(source)
+                    self.assertEqual(str(caught.exception), reason)
+                for links in (True, False):
+                    with self.subTest(entry="build_copy", path=relative, links=links):
+                        with self.assertRaises(ValueError) as caught:
+                            build_copy(root, relative, (), links=links)
+                        self.assertEqual(str(caught.exception), reason)
+            for links in (True, False):
+                with self.subTest(path="absolute", links=links):
+                    with self.assertRaises(ValueError) as caught:
+                        build_copy(root, "/review/lab/wasm-capsule", (), links=links)
+                    self.assertEqual(
+                        str(caught.exception),
+                        "copy path must be relative: /review/lab/wasm-capsule",
+                    )
+            copier.assert_not_called()
+            builder.assert_not_called()
 
     def test_build_failure_remains_failure(self):
         # Every integrity test is marked as a recorded finding, and still a build
