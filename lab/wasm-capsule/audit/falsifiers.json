@@ -769,6 +769,38 @@
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA17a",
+      "title": "Match the import name by a declared suffix while the module matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| entry.module == import.module && import.name.ends_with(entry.name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA17b",
+      "title": "Match the import module by a declared suffix while the name matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| import.module.ends_with(entry.module.as_str()) && entry.name == import.name) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
     }
   ]
 }

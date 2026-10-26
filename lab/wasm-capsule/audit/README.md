@@ -115,6 +115,8 @@ apply and verify each entry by hand in this workspace.
 | F-CWA15b | Match the module by a declared prefix while the name matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA16a | Match the whole interface name ignoring ASCII case | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA16b | Lowercase only the declared interface before matching | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA17a | Match the name by a declared suffix while the module matches exactly | `declared_import_passes_and_only_that_one` |
+| F-CWA17b | Match the module by a declared suffix while the name matches exactly | `declared_import_passes_and_only_that_one` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -367,3 +369,30 @@ passed before the first mutation and after the sweep, with all 20 tests passing
 offline under `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation,
 API document, other tests, audit manifest, workspace manifest and workspace
 lockfile stayed unchanged.
+
+The cwa-017 in-tree run first applied F-CWA17a and F-CWA17b separately to the
+base; all 20 tests passed under each before the new cases. With the shared
+declaration, pass control and both suffix cases added, each entry built and
+failed `declared_import_passes_and_only_that_one` at `assert_undeclared`'s
+`expect_err`. F-CWA17a failed at the name case: `audit` returned
+`Ok([DeclaredImport { module: "env", name: "fd_read" }])`.
+F-CWA17b passed the name case's refusal checks, then failed at the module case:
+`audit` returned
+`Ok([DeclaredImport { module: "my-wasi:cli/environment@0.2.0", name: "get-environment" }])`.
+The earlier cases and the shared pass control passed before each failure.
+On the clean code, the control returned both declared pairs in import order,
+and both cases returned `Undeclared` with the exact module, name and string.
+F-CWA1b still failed at the equal-count, different-name case (`env.second`);
+F-CWA14a at the crossed case (`wasi_snapshot_preview1.fd_write`);
+F-CWA15a at the prefix name case (`wasi_snapshot_preview1.fd_readdir`);
+and F-CWA15b at the prefix module case
+(`wasi:cli/environment@0.2.0-rc.1` / `get-environment`). Each returned `Ok`
+holding the named import. All six checked entries built and failed their
+named test at an assertion, each run separately with `--exact`. Each temporary
+edit restored `src/lib.rs` byte-identical, checked by SHA-256, and every
+falsifier's `old` text still occurred exactly once. The clean format and
+locked-test checks passed before the first mutation and after the catches,
+with all 20 tests passing offline under `RUST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0`. The implementation, API document, other tests, audit
+manifest, workspace manifest and workspace lockfile stayed unchanged, and
+`audit/Cargo.lock` stayed absent.

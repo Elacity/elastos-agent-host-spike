@@ -137,6 +137,33 @@ fn declared_import_passes_and_only_that_one() {
         &import("wasi:cli/environment@0.2.0-rc.1", "get-environment"),
     );
 
+    // Exact matches pass; matching only a declared suffix is refused.
+    let suffix_pairs = [
+        import("env", "read"),
+        import("wasi:cli/environment@0.2.0", "get-environment"),
+    ];
+    let suffix_control = wat::parse_str(
+        r#"(module
+            (import "env" "read" (func))
+            (import "wasi:cli/environment@0.2.0" "get-environment" (func)))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        audit(&suffix_control, &suffix_pairs),
+        Ok(suffix_pairs.to_vec())
+    );
+    let name_suffix = wat::parse_str(r#"(module (import "env" "fd_read" (func)))"#).unwrap();
+    assert_undeclared(&name_suffix, &suffix_pairs, &import("env", "fd_read"));
+    let module_suffix = wat::parse_str(
+        r#"(module (import "my-wasi:cli/environment@0.2.0" "get-environment" (func)))"#,
+    )
+    .unwrap();
+    assert_undeclared(
+        &module_suffix,
+        &suffix_pairs,
+        &import("my-wasi:cli/environment@0.2.0", "get-environment"),
+    );
+
     // v1 matches the pair, regardless of the import kind, and keeps duplicates.
     let memory = wat::parse_str(r#"(module (import "env" "first" (memory 1)))"#).unwrap();
     assert_eq!(audit(&memory, declared), Ok(vec![allowed.clone()]));
