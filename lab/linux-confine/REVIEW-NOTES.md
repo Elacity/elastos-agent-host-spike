@@ -48,7 +48,7 @@ These seven stay denied on `STORAGE_ROOT`:
 | `REFER` | 13 | link or rename a file to a different directory |
 | `IOCTL_DEV` | 15 | ioctl a device node |
 
-The ruleset still handles those seven, so an attempt is denied rather than ignored. A rename inside one directory does not need `REFER`. The three provider binaries complete their permitted operations with `0x41be`. The enforced line prints `storage_rights=0x41be`. `F-LC-STORAGE` adds `IOCTL_DEV` to the macro and `did_profile_permits_its_operations_and_refuses_the_rest` fails with `storage root rights drifted`.
+The ruleset still handles those seven, so an attempt is denied rather than ignored. A rename inside one directory does not need `REFER`. The three provider binaries complete their permitted operations with `0x41be`. The enforced line prints `storage_rights=0x41be`. `F-LC-STORAGE` adds `IOCTL_DEV` to the macro and `did_profile_permits_its_operations_and_refuses_the_rest` fails with `storage root rights drifted`. `withheld_storage_rights_are_landlock_eacces` lets `symlinkat`, `mknodat` and `linkat` through the probe filter and requires Landlock `EACCES` for make char, socket, fifo, block, symlink and device ioctl. Landlock returns `EXDEV` for a withheld `REFER`.
 
 The guard's fifteen-right helper is a generic directory grant. This profile's storage root is a data directory, and the mask stays at the eight rights above. This lab does not edit the guard.
 
@@ -69,11 +69,13 @@ The binaries are glibc dynamic builds, which is how this repo builds them. The l
 
 ## Two deliberate widenings
 
-**Unix socket pair.** `model-provider` starts a Tokio thread. That runtime calls `socketpair(AF_UNIX, ...)`. The provider filter allows `socketpair` only when the first argument is `AF_UNIX`. `socket` itself stays refused, including `AF_INET`. Did and wallet do not call `socketpair`; the same filter covers them. The probe does not get this exception.
+**Unix socket pair (C9 departure).** `model-provider` starts a Tokio thread. That runtime calls `socketpair(AF_UNIX, ...)`. The provider filter allows `socketpair` only when the first argument is `AF_UNIX`. `socket` itself stays refused, including `AF_INET` and `AF_UNIX`. `socketpair(AF_INET)` is refused. Did and wallet do not call `socketpair`; the same filter covers them. The probe filter still refuses every pair. `F-LC-PROVIDER-SOCKET` flips `provider_deny_socket` and `provider_filter_refuses_socket` fails. See `CONFINEMENT-LINUX.md`.
+
+`clone` is allowed only with `CLONE_THREAD`. `clone3` returns `ENOSYS`. `clone(SIGCHLD)` is refused under `mode=provider`.
 
 **Wallet parent.** Wallet init opens `STORAGE_PARENT` and syncs it. A Landlock rule on that directory would also cover every sibling. The launcher therefore bind-mounts `STORAGE_ROOT` aside, mounts a fresh tmpfs on `STORAGE_PARENT`, and bind-mounts the wallet directory back as the only child. The read rule is on that private parent. A host sibling is not in the mount. Did and model do not set this flag.
 
-`clone` and `clone3` are on the provider allow-list because the model runtime creates a thread (`clone3` with `CLONE_THREAD`). The probe still refuses `clone`. Exec of any file other than the granted binary is Landlock's job: the copy under `STORAGE_ROOT` is readable and not executable.
+The model runtime creates a thread. The filter admits that as `clone` with `CLONE_THREAD`. The probe still refuses `clone`. Exec of any file other than the granted binary is Landlock's job: the copy under `STORAGE_ROOT` is readable and not executable.
 
 ## How each refusal was produced
 

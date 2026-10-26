@@ -11,10 +11,12 @@ fn compiler() -> Option<String> {
 }
 
 #[test]
+#[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64; Jetson execution is NOT RUN"]
 fn aarch64_launcher_compiles() {
     let Some(cc) = compiler() else {
-        eprintln!("aarch64 cross compiler is absent. NOT RUN");
-        return;
+        panic!(
+            "aarch64 cross compiler is absent. NOT RUN. This ignored test must not count as a pass."
+        );
     };
     let dir = std::env::temp_dir().join(format!("linux-confine-aarch64-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -86,9 +88,10 @@ fn aarch64_launcher_compiles() {
         .output()
         .is_err()
     {
-        eprintln!("qemu-aarch64 is absent. The aarch64 binaries compiled. Execution under qemu is NOT RUN. Jetson execution is NOT RUN.");
         let _ = std::fs::remove_dir_all(&dir);
-        return;
+        panic!(
+            "qemu-aarch64 is absent. NOT RUN. This ignored test must not count as a pass. Jetson execution is NOT RUN."
+        );
     }
     let explain = Command::new("qemu-aarch64")
         .args(["-L", "/usr/aarch64-linux-gnu"])

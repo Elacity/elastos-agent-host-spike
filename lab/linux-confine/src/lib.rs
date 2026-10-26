@@ -69,6 +69,10 @@ pub struct Launch {
     pub outside: PathBuf,
     pub parent: PathBuf,
     pub copy: PathBuf,
+    /// Install the provider seccomp filter, then still exec the freestanding
+    /// probe with the check arguments. The shipping `mode=provider` path execs
+    /// a provider binary instead.
+    pub provider_filter: bool,
 }
 
 pub fn explain_abi(abi: i32) -> Result<String, String> {
@@ -106,8 +110,13 @@ fn write_policy(launch: &Launch) -> Result<PathBuf, String> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "-".to_string());
     let body = format!(
-        "deny_network={}\nhelper={}\nstorage_root={}\nstorage={}\nstorage2={}\noutside={}\nparent={}\ncopy={}\n",
+        "deny_network={}\nfilter={}\nhelper={}\nstorage_root={}\nstorage={}\nstorage2={}\noutside={}\nparent={}\ncopy={}\n",
         if launch.deny_network { "1" } else { "0" },
+        if launch.provider_filter {
+            "provider"
+        } else {
+            "probe"
+        },
         env_bin("LC_PROBE"),
         launch.storage_root.display(),
         launch.storage.display(),
@@ -258,6 +267,56 @@ fn parse_i32(text: &str) -> Result<i32, String> {
         .map_err(|_| format!("not an integer: {text}"))
 }
 
+/// Op lines only. Used for an unconfined positive control that has no
+/// `enforced` line.
+pub fn parse_ops(raw: &str) -> Result<Vec<Op>, String> {
+    let mut ops = Vec::new();
+    for line in raw.lines() {
+        if line.is_empty() || line.starts_with("enforced ") {
+            continue;
+        }
+        if line.starts_with("op=") {
+            ops.push(parse_op(line)?);
+        } else if line.starts_with("bad args") {
+            return Err(raw.to_string());
+        } else {
+            return Err(format!("unexpected probe line: {line}"));
+        }
+    }
+    Ok(ops)
+}
+
+/// Run the freestanding probe with no launcher, so a denied confined row
+/// has a matching unconfined success.
+pub fn run_unconfined(launch: &Launch) -> Result<Vec<Op>, String> {
+    let storage2 = launch
+        .storage2
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let output = Command::new(env_bin("LC_PROBE"))
+        .args([
+            "check",
+            &launch.storage.display().to_string(),
+            &launch.outside.display().to_string(),
+            &launch.parent.display().to_string(),
+            &launch.copy.display().to_string(),
+            &storage2,
+            "1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|err| format!("cannot start the unconfined probe: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stdout.trim().is_empty() {
+        return Err(format!("the unconfined probe wrote nothing\n{stderr}"));
+    }
+    parse_ops(&stdout).map_err(|err| format!("{err}\n{stdout}"))
+}
+
 pub fn op<'a>(report: &'a Report, name: &str) -> Result<&'a Op, String> {
     report
         .ops
@@ -299,6 +358,8 @@ pub struct ProviderLaunch {
     pub read_parent: bool,
     /// Load the lab witness into the provider process.
     pub preload: bool,
+    /// Path the witness opens to record a Landlock outside-read errno.
+    pub outside: Option<PathBuf>,
     pub paths: Vec<ExtraPath>,
 }
 
@@ -460,12 +521,18 @@ fn write_provider_policy(launch: &ProviderLaunch) -> Result<PathBuf, String> {
         .parent()
         .ok_or("the storage root has no parent")?;
     let path = parent.join("launch.policy");
+    let outside = launch
+        .outside
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
     let mut body = format!(
-        "mode=provider\ndeny_network={}\nhelper={}\nexecute={}\nstorage_root={}\nstorage=-\nstorage2=-\noutside=-\nparent={}\ncopy={}\nread_parent={}\n",
+        "mode=provider\ndeny_network={}\nhelper={}\nexecute={}\nstorage_root={}\nstorage=-\nstorage2=-\noutside={}\nparent={}\ncopy={}\nread_parent={}\n",
         if launch.deny_network { "1" } else { "0" },
         launch.binary.display(),
         launch.execute.display(),
         launch.storage_root.display(),
+        outside,
         launch.parent.display(),
         launch.copy.display(),
         if launch.read_parent { "1" } else { "0" },

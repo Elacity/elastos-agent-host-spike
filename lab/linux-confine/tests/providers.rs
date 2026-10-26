@@ -193,6 +193,7 @@ fn prepare(name: &str, kind: &str, preload: bool) -> Fixture {
             copy,
             read_parent,
             preload,
+            outside: Some(outside_file.clone()),
             paths: ldd_paths(&binary(name)),
         },
         base,
@@ -260,7 +261,64 @@ fn confinement_rows(provider: &RunningProvider) -> (String, String) {
 }
 
 fn print_row(side: &str, operation: &str, result: &str, reason: &str) {
-    println!("| {side} | {operation} | {result} | {reason} |");
+    println!("| {side} | {operation} | {result} | - | {reason} | - |");
+}
+
+fn print_denied(operation: &str, errno: i32, reason: &str, positive: &str) {
+    println!("| denied | {operation} | refused | {errno} | {reason} | {positive} |");
+}
+
+fn header(name: &str) {
+    println!("### {name}");
+    println!();
+    println!("| side | operation | result | errno | reason | positive control |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+}
+
+fn positive_socket() -> String {
+    std::net::UdpSocket::bind("127.0.0.1:0").expect("positive control: unconfined socket");
+    "unconfined socket(AF_INET) succeeded".to_string()
+}
+
+fn positive_kill() -> String {
+    let pid = std::process::id().to_string();
+    let status = Command::new("kill")
+        .args(["-0", &pid])
+        .status()
+        .expect("positive control: kill");
+    assert!(
+        status.success(),
+        "positive control: unconfined kill(host, 0) failed"
+    );
+    "unconfined kill(host, 0) succeeded".to_string()
+}
+
+fn positive_exec(path: &Path) -> String {
+    let mut child = Command::new(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("positive control: unconfined exec of the copy failed");
+    let _ = child.kill();
+    let _ = child.wait();
+    "unconfined exec of the copy succeeded".to_string()
+}
+
+fn positive_file(path: &Path) -> String {
+    fs::read(path).expect("positive control: unconfined read of the outside file failed");
+    format!("unconfined read of {} succeeded", path.display())
+}
+
+fn errno_from_os_error(text: &str) -> i32 {
+    let marker = "os error ";
+    if let Some(rest) = text.split(marker).nth(1) {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<i32>() {
+            return n;
+        }
+    }
+    panic!("denied row has no kernel errno: {text}");
 }
 
 #[test]
@@ -288,13 +346,6 @@ fn confined_process_cap_bnd_is_zero() {
     let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap();
     assert!(comm.starts_with("did-provider"), "{comm}");
     println!("/proc/{pid}/status {line} comm={comm}");
-}
-
-fn header(name: &str) {
-    println!("### {name}");
-    println!();
-    println!("| side | operation | result | reason |");
-    println!("| --- | --- | --- | --- |");
 }
 
 #[test]
@@ -363,6 +414,18 @@ fn did_provider_binary_under_its_profile() {
         EACCES,
         "landlock refused exec of a file other than PROVIDER_EXECUTABLE",
     );
+    assert_witness(
+        &stderr,
+        "outside-read",
+        EACCES,
+        "landlock refused the read outside STORAGE_ROOT",
+    );
+    assert_witness(
+        &stderr,
+        "outside-write",
+        EACCES,
+        "landlock refused the write outside STORAGE_ROOT",
+    );
 
     let exec_reason = unbound_exec_reason(&mut fix.launch);
     let read_fix = prepare("did-provider", "did", false);
@@ -381,6 +444,8 @@ fn did_provider_binary_under_its_profile() {
     );
     assert_eq!(fs::read(&read_fix.outside_file).unwrap(), b"outside-bytes");
 
+    let write_errno = errno_from_os_error(&write_reason);
+    let read_errno = errno_from_os_error(&read_reason);
     header("did-provider");
     print_row(
         "permitted",
@@ -408,35 +473,30 @@ fn did_provider_binary_under_its_profile() {
         "wrote personas/fixture.enc under STORAGE_ROOT",
     );
     print_row("permitted", "shutdown", "ok", "answered and exited");
-    print_row(
-        "denied",
+    print_denied(
         "write outside STORAGE_ROOT",
-        "refused",
+        write_errno,
         &write_reason,
+        &positive_file(&fix.outside_file),
     );
-    print_row(
-        "denied",
+    print_denied(
         "read outside STORAGE_ROOT",
-        "refused",
+        read_errno,
         &read_reason,
+        &positive_file(&read_fix.outside_file),
     );
-    print_row(
-        "denied",
-        "socket",
-        "refused",
-        "seccomp refused socket (errno 1)",
-    );
-    print_row(
-        "denied",
+    print_denied("socket", 1, "seccomp refused socket", &positive_socket());
+    print_denied(
         "exec a copy of the provider",
-        "refused",
+        EACCES,
         &exec_reason,
+        &positive_exec(&fix.launch.copy),
     );
-    print_row(
-        "denied",
+    print_denied(
         "signal a host pid",
-        "refused",
-        "the pid namespace has no such host process (errno 3)",
+        3,
+        "the pid namespace has no such host process",
+        &positive_kill(),
     );
     print_row("confined", "/proc/self/status CapBnd", "0", &cap_row);
     print_row(
@@ -522,6 +582,18 @@ fn wallet_provider_binary_under_its_profile() {
         EACCES,
         "landlock refused exec of a file other than PROVIDER_EXECUTABLE",
     );
+    assert_witness(
+        &stderr,
+        "outside-read",
+        EACCES,
+        "landlock refused the read outside STORAGE_ROOT",
+    );
+    assert_witness(
+        &stderr,
+        "outside-write",
+        EACCES,
+        "landlock refused the write outside STORAGE_ROOT",
+    );
     let exec_reason = unbound_exec_reason(&mut fix.launch);
 
     let outside = prepare("wallet-provider", "wallet", false);
@@ -573,6 +645,8 @@ fn wallet_provider_binary_under_its_profile() {
     let read_reason = denied_read["message"].as_str().unwrap().to_string();
     assert_eq!(fs::read(&read_fix.outside_file).unwrap(), b"outside-bytes");
 
+    let write_errno = errno_from_os_error(&outside_reason);
+    let read_errno = errno_from_os_error(&read_reason);
     header("wallet-provider");
     print_row(
         "permitted",
@@ -594,35 +668,30 @@ fn wallet_provider_binary_under_its_profile() {
         "listed the account stored under STORAGE_ROOT",
     );
     print_row("permitted", "shutdown", "ok", "answered and exited");
-    print_row(
-        "denied",
+    print_denied(
         "write outside STORAGE_ROOT",
-        "refused",
+        write_errno,
         &outside_reason,
+        &positive_file(&outside.outside_file),
     );
-    print_row(
-        "denied",
+    print_denied(
         "read outside STORAGE_ROOT",
-        "refused",
+        read_errno,
         &read_reason,
+        &positive_file(&read_fix.outside_file),
     );
-    print_row(
-        "denied",
-        "socket",
-        "refused",
-        "seccomp refused socket (errno 1)",
-    );
-    print_row(
-        "denied",
+    print_denied("socket", 1, "seccomp refused socket", &positive_socket());
+    print_denied(
         "exec a copy of the provider",
-        "refused",
+        EACCES,
         &exec_reason,
+        &positive_exec(&fix.launch.copy),
     );
-    print_row(
-        "denied",
+    print_denied(
         "signal a host pid",
-        "refused",
-        "the pid namespace has no such host process (errno 3)",
+        3,
+        "the pid namespace has no such host process",
+        &positive_kill(),
     );
     print_row("confined", "/proc/self/status CapBnd", "0", &cap_row);
     print_row(
@@ -786,6 +855,18 @@ fn model_provider_binary_under_its_profile() {
         EACCES,
         "landlock refused exec of a file other than PROVIDER_EXECUTABLE",
     );
+    assert_witness(
+        &stderr,
+        "outside-read",
+        EACCES,
+        "landlock refused the read outside STORAGE_ROOT",
+    );
+    assert_witness(
+        &stderr,
+        "outside-write",
+        EACCES,
+        "landlock refused the write outside STORAGE_ROOT",
+    );
     let runs = fix.root.join("runs");
     let moved = fix.outside_base.join("moved-runs");
     fs::rename(&runs, &moved).unwrap();
@@ -867,35 +948,37 @@ fn model_provider_binary_under_its_profile() {
         "read the run record back from STORAGE_ROOT",
     );
     print_row("permitted", "shutdown", "ok", "answered and exited");
-    print_row(
-        "denied",
+    assert!(
+        outside_reason.contains("journal_access_denied") || outside_reason.contains("not writable"),
+        "model outside write mapping drifted: {outside_reason}"
+    );
+    print_denied(
         "write outside STORAGE_ROOT",
-        "refused",
-        &outside_reason,
+        EACCES,
+        "landlock refused the write outside STORAGE_ROOT",
+        &positive_file(&outside.outside_file),
     );
-    print_row(
-        "denied",
+    print_denied(
         "read outside STORAGE_ROOT",
-        "refused",
-        &read_reason,
+        EACCES,
+        "landlock refused the read outside STORAGE_ROOT",
+        &positive_file(&fix.outside_file),
     );
-    print_row(
-        "denied",
-        "socket",
-        "refused",
-        "seccomp refused socket (errno 1)",
-    );
-    print_row(
-        "denied",
+    print_denied("socket", 1, "seccomp refused socket", &positive_socket());
+    print_denied(
         "exec a copy of the provider",
-        "refused",
+        EACCES,
         &exec_reason,
+        &positive_exec(&fix.launch.copy),
     );
-    print_row(
-        "denied",
+    print_denied(
         "signal a host pid",
-        "refused",
-        "the pid namespace has no such host process (errno 3)",
+        3,
+        "the pid namespace has no such host process",
+        &positive_kill(),
+    );
+    println!(
+        "provider mapping for the denied outside journal read stays {read_reason}. That string is not the Landlock-read row."
     );
     print_row("confined", "/proc/self/status CapBnd", "0", &cap_row);
     print_row(

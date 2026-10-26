@@ -5,13 +5,14 @@ use std::process::Command;
 
 use linux_confine::{
     allow_rules, block_landlock, block_seccomp, block_userns, deny_network_by_default, explain_abi,
-    launch, op, parse_profile, read_profile, Launch, Report, ABI_IOCTL, ABI_STORAGE, NO_LANDLOCK,
-    NO_SECCOMP, NO_USERNS, STORAGE_ROOT_RIGHTS,
+    launch, op, parse_profile, read_profile, run_unconfined, Launch, Report, ABI_IOCTL,
+    ABI_STORAGE, NO_LANDLOCK, NO_SECCOMP, NO_USERNS, STORAGE_ROOT_RIGHTS,
 };
 
 const EPERM: i32 = 1;
 const ESRCH: i32 = 3;
 const EACCES: i32 = 13;
+const EXDEV: i32 = 18;
 
 struct Tmp(PathBuf);
 impl Drop for Tmp {
@@ -120,6 +121,7 @@ fn build(name: &str, kind: &str) -> Built {
             outside,
             parent,
             copy,
+            provider_filter: false,
         },
         _tmp: Tmp(base),
         secret,
@@ -134,101 +136,30 @@ fn expect(report: &Report, name: &str, result: &str, errno: Option<i32>, reason:
     assert_eq!(found.reason, reason, "{name}\n{}", report.raw);
 }
 
-fn print_table(profile: &str, rows: &[(&str, &str, &str, &str)]) {
-    println!("### {profile}");
+fn print_probe_table(profile: &str, report: &Report) {
+    println!("### {profile} (freestanding probe)");
     println!();
-    println!("| side | operation | result | reason |");
-    println!("| --- | --- | --- | --- |");
-    for (side, operation, result, reason) in rows {
-        println!("| {side} | {operation} | {result} | {reason} |");
+    println!("| side | operation | result | errno | reason |");
+    println!("| --- | --- | --- | --- | --- |");
+    for found in &report.ops {
+        let side = if found.result == "ok" {
+            "permitted"
+        } else {
+            "denied"
+        };
+        let errno = found
+            .errno
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "| {side} | {} | {} | {errno} | {} |",
+            found.op, found.result, found.reason
+        );
     }
     println!();
 }
 
-fn profile_rows(
-    storage: &[&str],
-    persona: &[&str],
-    memory: &[&str],
-) -> Vec<(String, String, String, String)> {
-    let mut rows = Vec::new();
-    for name in storage {
-        rows.push((
-            "permitted".to_string(),
-            (*name).to_string(),
-            "ok".to_string(),
-            "wrote and read a file under STORAGE_ROOT".to_string(),
-        ));
-    }
-    for name in persona {
-        rows.push((
-            "permitted".to_string(),
-            (*name).to_string(),
-            "ok".to_string(),
-            "wrote and read personas/fixture.enc under STORAGE_ROOT".to_string(),
-        ));
-    }
-    for name in memory {
-        rows.push((
-            "permitted".to_string(),
-            (*name).to_string(),
-            "ok".to_string(),
-            "no file and no socket; the confined process ran".to_string(),
-        ));
-    }
-    rows.push((
-        "permitted".to_string(),
-        "process-exec PROVIDER_EXECUTABLE".to_string(),
-        "ok".to_string(),
-        "process-exec of PROVIDER_EXECUTABLE".to_string(),
-    ));
-    rows.push((
-        "permitted".to_string(),
-        "sysctl-read".to_string(),
-        "ok".to_string(),
-        "read kernel identity".to_string(),
-    ));
-    let denied = [
-        (
-            "read outside STORAGE_ROOT",
-            "landlock refused the read outside STORAGE_ROOT",
-        ),
-        (
-            "write outside STORAGE_ROOT",
-            "landlock refused the write outside STORAGE_ROOT",
-        ),
-        (
-            "read STORAGE_PARENT",
-            "the Landlock ABI cannot express the STORAGE_PARENT read, so the read is refused",
-        ),
-        ("read /", "no Landlock rule for the root directory read"),
-        (
-            "read /proc/kallsyms",
-            "landlock refused the read of kernel state",
-        ),
-        ("socket", "seccomp refused socket"),
-        ("socketpair", "seccomp refused socketpair"),
-        (
-            "exec a copy under STORAGE_ROOT",
-            "landlock refused exec of a file other than PROVIDER_EXECUTABLE",
-        ),
-        (
-            "signal a host pid",
-            "the pid namespace has no such host process",
-        ),
-        ("clone a process", "seccomp refused clone"),
-    ];
-    for (operation, reason) in denied {
-        rows.push((
-            "denied".to_string(),
-            operation.to_string(),
-            "refused".to_string(),
-            reason.to_string(),
-        ));
-    }
-    rows
-}
-
-fn prove(name: &str, kind: &str, storage: &[&str], persona: &[&str], memory: &[&str], note: &str) {
+fn prove(name: &str, kind: &str, note: &str) {
     let built = build(name, kind);
     let report = launch(&built.launch).unwrap_or_else(|err| panic!("{name}: {err}"));
     assert_eq!(
@@ -357,18 +288,6 @@ fn prove(name: &str, kind: &str, storage: &[&str], persona: &[&str], memory: &[&
     );
     assert_eq!(fs::read(&built.launch.outside).unwrap(), built.secret);
     assert_eq!(fs::read(&built.launch.copy).unwrap(), built.copy_bytes);
-    let rows = profile_rows(storage, persona, memory);
-    let borrowed: Vec<(&str, &str, &str, &str)> = rows
-        .iter()
-        .map(|row| {
-            (
-                row.0.as_str(),
-                row.1.as_str(),
-                row.2.as_str(),
-                row.3.as_str(),
-            )
-        })
-        .collect();
     println!(
         "enforced abi={} uid={} caps={} nnp={} netns={} storage_rights=0x{:x}",
         report.enforced.abi,
@@ -378,7 +297,7 @@ fn prove(name: &str, kind: &str, storage: &[&str], persona: &[&str], memory: &[&
         report.enforced.netns,
         report.enforced.storage_rights
     );
-    print_table(name, &borrowed);
+    print_probe_table(name, &report);
     if !note.is_empty() {
         println!("{note}");
         println!();
@@ -443,22 +362,7 @@ fn a_wider_root_read_is_refused() {
 
 #[test]
 fn did_profile_permits_its_operations_and_refuses_the_rest() {
-    prove(
-        "did-provider",
-        "did",
-        &["init", "set_nickname"],
-        &["get_persona_did"],
-        &[
-            "get_did",
-            "resolve",
-            "sign_chat_message",
-            "verify",
-            "verify_did_recovery",
-            "get_nickname",
-            "shutdown",
-        ],
-        "",
-    );
+    prove("did-provider", "did", "");
 }
 
 #[test]
@@ -466,33 +370,7 @@ fn wallet_profile_permits_its_operations_and_refuses_the_rest() {
     prove(
         "wallet-provider",
         "wallet",
-        &[
-            "init",
-            "wallet_contract create_managed_account",
-            "wallet_contract link_verified_account",
-            "wallet_contract revoke_account",
-            "wallet_contract rename_account",
-            "wallet_contract set_default_account",
-            "wallet_contract challenge",
-            "wallet_contract bitcoin_challenge",
-            "wallet_contract verify_proof",
-            "wallet_contract verify_contract_proof",
-            "wallet_contract verify_bip322_proof",
-            "wallet_contract request_protected_content_rights_signature",
-            "wallet_contract request_approval",
-            "wallet_contract reject_approval",
-            "wallet_contract approve_and_sign_managed",
-            "wallet_contract approve_connector_handoff",
-            "wallet_contract complete_connector_handoff",
-            "wallet_contract attach_validated_chain_outcome",
-            "wallet_contract export_managed_recovery_key",
-            "wallet_contract import_managed_recovery_key",
-            "wallet_contract export_managed_recovery_set",
-            "wallet_contract import_managed_recovery_set",
-        ],
-        &[],
-        &["status", "shutdown", "wallet_contract list_accounts"],
-        "default_account and list_approvals have no named macOS test. This run does not claim them.",
+        "The freestanding probe writes one file under STORAGE_ROOT. Named wallet operations are the provider-binary tests.",
     );
 }
 
@@ -501,9 +379,6 @@ fn model_profile_permits_its_operations_and_refuses_the_rest() {
     prove(
         "model-provider",
         "model",
-        &["init", "runs_create", "runs_get"],
-        &[],
-        &["status", "shutdown", "offers_list"],
         "runs_events and runs_cancel have no named macOS test. This run does not claim them. The model root read is file-read-data of / on macOS. Linux grants no rule for that path, and the read of / is refused.",
     );
 }
@@ -524,6 +399,177 @@ fn removing_the_socket_denial_lets_the_call_succeed() {
         "landlock refused the read outside STORAGE_ROOT",
     );
     println!("F-LC-SOCKET CAUGHT");
+}
+
+fn provider_probe(kind: &str) -> (Built, Report) {
+    let mut built = build("provider-filter", kind);
+    built.launch.provider_filter = true;
+    let report = launch(&built.launch).unwrap_or_else(|err| panic!("{err}"));
+    (built, report)
+}
+
+fn expect_refused(report: &Report, name: &str, errno: i32, reason: &str) {
+    expect(report, name, "refused", Some(errno), reason);
+}
+
+#[test]
+fn provider_filter_refuses_clone_process() {
+    let (built, report) = provider_probe("did");
+    expect_refused(&report, "clone", EPERM, "seccomp refused clone");
+    let control = run_unconfined(&built.launch).unwrap_or_else(|err| panic!("{err}"));
+    let clone = control
+        .iter()
+        .find(|op| op.op == "clone")
+        .unwrap_or_else(|| panic!("unconfined probe omitted clone\n{control:?}"));
+    assert_eq!(
+        clone.result, "ok",
+        "positive control: unconfined clone(SIGCHLD) must succeed: {clone:?}"
+    );
+}
+
+#[test]
+fn provider_filter_refuses_socket() {
+    let (built, report) = provider_probe("did");
+    let socket = op(&report, "socket").unwrap();
+    assert!(
+        socket.result == "refused"
+            && socket.errno == Some(EPERM)
+            && socket.reason == "seccomp refused socket",
+        "provider filter socket denial did not hold: {}",
+        report.raw
+    );
+    let control = run_unconfined(&built.launch).unwrap_or_else(|err| panic!("{err}"));
+    let socket = control
+        .iter()
+        .find(|op| op.op == "socket")
+        .unwrap_or_else(|| panic!("unconfined probe omitted socket"));
+    assert_eq!(
+        socket.result, "ok",
+        "positive control: unconfined socket(AF_INET) must succeed: {socket:?}"
+    );
+}
+
+#[test]
+fn provider_filter_refuses_socketpair_inet() {
+    let (built, report) = provider_probe("did");
+    expect_refused(
+        &report,
+        "socketpair-inet",
+        EPERM,
+        "seccomp refused socketpair",
+    );
+    expect(&report, "socketpair", "ok", None, "socketpair succeeded");
+    let control = run_unconfined(&built.launch).unwrap_or_else(|err| panic!("{err}"));
+    let inet = control
+        .iter()
+        .find(|op| op.op == "socketpair-inet")
+        .unwrap_or_else(|| panic!("unconfined probe omitted socketpair-inet"));
+    assert_eq!(inet.result, "refused", "{inet:?}");
+    assert_eq!(
+        inet.errno,
+        Some(95),
+        "positive control: unconfined socketpair(AF_INET) is EOPNOTSUPP from the kernel, not seccomp EPERM: {inet:?}"
+    );
+}
+
+#[test]
+fn withheld_storage_rights_are_landlock_eacces() {
+    let built = build("landlock-rights", "did");
+    let report = launch(&built.launch).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(
+        report.enforced.storage_rights, STORAGE_ROOT_RIGHTS,
+        "storage root rights drifted"
+    );
+    for (name, errno, reason) in [
+        ("make-sym", EACCES, "landlock refused MAKE_SYM"),
+        ("make-fifo", EACCES, "landlock refused MAKE_FIFO"),
+        ("make-sock", EACCES, "landlock refused MAKE_SOCK"),
+        ("make-char", EACCES, "landlock refused MAKE_CHAR"),
+        ("make-block", EACCES, "landlock refused MAKE_BLOCK"),
+        ("refer", EXDEV, "landlock refused REFER"),
+        ("ioctl-dev", EACCES, "landlock refused IOCTL_DEV"),
+    ] {
+        expect_refused(&report, name, errno, reason);
+    }
+    expect(
+        &report,
+        "refer-mkdir",
+        "ok",
+        None,
+        "mkdir under STORAGE_ROOT",
+    );
+    let control = run_unconfined(&built.launch).unwrap_or_else(|err| panic!("{err}"));
+    for name in ["make-sym", "make-fifo", "make-sock", "refer"] {
+        let found = control
+            .iter()
+            .find(|op| op.op == name)
+            .unwrap_or_else(|| panic!("unconfined probe omitted {name}"));
+        assert_eq!(
+            found.result, "ok",
+            "positive control: unconfined {name} must succeed: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn provider_filter_refuses_ptrace() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "ptrace", EPERM, "seccomp refused ptrace");
+}
+
+#[test]
+fn provider_filter_refuses_proc_self_mem() {
+    let (_, report) = provider_probe("did");
+    expect_refused(
+        &report,
+        "proc-self-mem",
+        EACCES,
+        "landlock refused /proc/self/mem",
+    );
+}
+
+#[test]
+fn provider_filter_refuses_io_uring() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "io-uring", EPERM, "seccomp refused io_uring_setup");
+}
+
+#[test]
+fn provider_filter_refuses_bpf() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "bpf", EPERM, "seccomp refused bpf");
+}
+
+#[test]
+fn provider_filter_refuses_unshare() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "unshare-user", EPERM, "seccomp refused unshare");
+    expect_refused(&report, "unshare-net", EPERM, "seccomp refused unshare");
+}
+
+#[test]
+fn provider_filter_refuses_setns() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "setns", EPERM, "seccomp refused setns");
+}
+
+#[test]
+fn provider_filter_refuses_keyctl() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "keyctl", EPERM, "seccomp refused keyctl");
+}
+
+#[test]
+fn provider_filter_refuses_dev_nodes() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "dev-null", EACCES, "landlock refused /dev/null");
+    expect_refused(&report, "dev-zero", EACCES, "landlock refused /dev/zero");
+}
+
+#[test]
+fn provider_filter_refuses_abstract_unix() {
+    let (_, report) = provider_probe("did");
+    expect_refused(&report, "socket-unix", EPERM, "seccomp refused socket");
 }
 
 #[test]

@@ -86,6 +86,8 @@ cargo test --manifest-path lab/linux-confine/Cargo.toml -- --test-threads=1 --no
 python3 lab/linux-confine/falsify.py
 ```
 
-`tests/aarch64.rs` cross-compiles the launcher, the test launcher, the probe, and the witness with `aarch64-linux-gnu-gcc` and runs the explain path on the test launcher and the probe under `qemu-aarch64` when those tools are installed. The production aarch64 launcher refuses `--block-landlock`. Jetson execution is NOT RUN.
+`tests/aarch64.rs` `aarch64_launcher_compiles` is `#[ignore]`. It cross-compiles the launcher, the test launcher, the probe, and the witness with `aarch64-linux-gnu-gcc` and runs the explain path on the test launcher and the probe under `qemu-aarch64`. When those tools are absent the test is ignored, never counted as a pass, and panics if someone runs it with `--ignored`. The production aarch64 launcher refuses `--block-landlock`. Jetson execution is NOT RUN.
 
-The second command plants four bugs, one at a time, and restores each file. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, and `F-LC-STORAGE CAUGHT`.
+The second command plants five bugs, one at a time, and restores each file. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, and `F-LC-PROVIDER-SOCKET CAUGHT`.
+
+`socketpair(AF_UNIX)` on the provider filter is a named C9 departure. See `CONFINEMENT-LINUX.md`. `clone(SIGCHLD)` is refused. The seven withheld Landlock rights are proven by `EACCES` from Landlock, not by the printed mask alone.

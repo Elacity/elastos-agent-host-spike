@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -50,6 +51,7 @@
 struct policy {
     int deny_network;
     int provider;
+    int provider_filter;
     int read_parent;
     char helper[4096];
     char execute[4096];
@@ -257,6 +259,8 @@ static void load_policy(const char *path, struct policy *pol) {
                 copy_value(pol->preload, sizeof pol->preload, eq + 1);
             } else if (strcmp(p, "mode") == 0) {
                 pol->provider = strcmp(eq + 1, "provider") == 0;
+            } else if (strcmp(p, "filter") == 0) {
+                pol->provider_filter = strcmp(eq + 1, "provider") == 0;
             } else if (strcmp(p, "read_parent") == 0) {
                 pol->read_parent = strcmp(eq + 1, "1") == 0;
             } else if (strcmp(p, "read_exec") == 0) {
@@ -355,10 +359,10 @@ static void add_rule(int ruleset, const char *path, __u64 access, const char *wh
 }
 
 static void install_allow_list(int deny_network) {
-    int allow[16];
+    int allow[24];
     int nallow = 0;
     int i;
-    struct sock_filter filt[64];
+    struct sock_filter filt[80];
     int n = 0;
     allow[nallow++] = SYS_read;
     allow[nallow++] = SYS_write;
@@ -368,6 +372,12 @@ static void install_allow_list(int deny_network) {
     allow[nallow++] = SYS_exit_group;
     allow[nallow++] = SYS_uname;
     allow[nallow++] = SYS_kill;
+    /* Landlock withheld-right probes. These stay off the provider filter. */
+    allow[nallow++] = SYS_symlinkat;
+    allow[nallow++] = SYS_mknodat;
+    allow[nallow++] = SYS_linkat;
+    allow[nallow++] = SYS_ioctl;
+    allow[nallow++] = SYS_mkdirat;
     if (!deny_network) {
         allow[nallow++] = SYS_socket;
         allow[nallow++] = SYS_socketpair;
@@ -400,6 +410,7 @@ static void install_provider_filter(int deny_network) {
     struct sock_filter filt[320];
     int n = 0;
     int i;
+    int provider_deny_socket = deny_network;
     int denied[] = {
         SYS_socket,   SYS_connect, SYS_bind,      SYS_listen,    SYS_accept,   SYS_accept4,
         SYS_sendto,   SYS_recvfrom, SYS_sendmsg,  SYS_recvmsg,   SYS_sendmmsg, SYS_recvmmsg,
@@ -441,8 +452,6 @@ static void install_provider_filter(int deny_network) {
     push_nr(allow, &nallow, SYS_sched_yield);
     push_nr(allow, &nallow, SYS_prctl);
     push_nr(allow, &nallow, SYS_futex);
-    push_nr(allow, &nallow, SYS_clone);
-    push_nr(allow, &nallow, SYS_clone3);
     push_nr(allow, &nallow, SYS_fcntl);
     push_nr(allow, &nallow, SYS_ioctl);
     push_nr(allow, &nallow, SYS_dup);
@@ -511,7 +520,8 @@ static void install_provider_filter(int deny_network) {
 #ifdef SYS_close_range
     push_nr(allow, &nallow, SYS_close_range);
 #endif
-    if (!deny_network) {
+    /* F-LC-PROVIDER-SOCKET */
+    if (!provider_deny_socket) {
         push_nr(allow, &nallow, SYS_socket);
         push_nr(allow, &nallow, SYS_socketpair);
     }
@@ -519,7 +529,7 @@ static void install_provider_filter(int deny_network) {
     filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, LC_AUDIT_ARCH, 1, 0);
     filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
     filt[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0);
-    if (deny_network) {
+    if (provider_deny_socket) {
         for (i = 0; i < (int)(sizeof denied / sizeof denied[0]); i++) {
             filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)denied[i], 0, 1);
             filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
@@ -529,7 +539,17 @@ static void install_provider_filter(int deny_network) {
         filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 0, 1);
         filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
         filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
+        filt[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0);
     }
+    /* Thread form of clone only. clone3 cannot expose flags to cBPF, so it
+     * returns ENOSYS and glibc falls back to clone(CLONE_THREAD). */
+    filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4);
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16);
+    filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 0, 1);
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
+    filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone3, 0, 1);
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS);
     for (i = 0; i < nallow; i++) {
         filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)allow[i], 0, 1);
         filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
@@ -715,6 +735,27 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
         add_rule(ruleset, pol->read_only[extra], LANDLOCK_ACCESS_FS_READ_FILE,
                  "linux confinement refused: the launch cannot open a loader file");
     }
+    if (!pol->provider) {
+        char devpath[4200];
+        const char *slash = strrchr(pol->storage, '/');
+        int nfd;
+        int wrote;
+        if (slash == NULL || slash[1] == 0) {
+            refuse("linux confinement refused: the ioctl-dev fixture cannot be planted");
+        }
+        wrote = snprintf(devpath, sizeof devpath, "%.*s/.lc-char", (int)(slash - pol->storage), pol->storage);
+        if (wrote < 0 || wrote >= (int)sizeof devpath) {
+            refuse("linux confinement refused: the ioctl-dev fixture cannot be planted");
+        }
+        nfd = open(devpath, O_CREAT | O_WRONLY | O_CLOEXEC, 0666);
+        if (nfd < 0) {
+            refuse_errno("linux confinement refused: the ioctl-dev fixture cannot be planted", errno);
+        }
+        close(nfd);
+        if (mount("/dev/null", devpath, NULL, MS_BIND, NULL) != 0) {
+            refuse_errno("linux confinement refused: the ioctl-dev fixture cannot be planted", errno);
+        }
+    }
 
     if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0) {
         refuse_errno("linux confinement refused: the capability set cannot be dropped", errno);
@@ -756,7 +797,8 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
         char preload_env[4200];
         char pid_env[64];
         char copy_env[4200];
-        char *envp[4];
+        char outside_env[4200];
+        char *envp[5];
         int envn = 0;
         av[0] = pol->helper;
         av[1] = NULL;
@@ -767,6 +809,10 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
             envp[envn++] = preload_env;
             envp[envn++] = pid_env;
             envp[envn++] = copy_env;
+            if (pol->outside[0] != 0 && !(pol->outside[0] == '-' && pol->outside[1] == 0)) {
+                snprintf(outside_env, sizeof outside_env, "LC_OUTSIDE=%s", pol->outside);
+                envp[envn++] = outside_env;
+            }
         }
         envp[envn] = NULL;
         install_provider_filter(pol->deny_network);
@@ -790,7 +836,11 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
     av[6] = pol->storage2;
     av[7] = pidbuf;
     av[8] = NULL;
-    install_allow_list(pol->deny_network);
+    if (pol->provider_filter) {
+        install_provider_filter(pol->deny_network);
+    } else {
+        install_allow_list(pol->deny_network);
+    }
     emit(enforced);
     {
         char *empty_env[] = {NULL};

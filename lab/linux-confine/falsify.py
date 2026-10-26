@@ -51,6 +51,14 @@ CHECKS = [
         "test": "did_profile_permits_its_operations_and_refuses_the_rest",
         "caught": "storage root rights drifted",
     },
+    {
+        "id": "F-LC-PROVIDER-SOCKET",
+        "file": HERE / "helper" / "setup.c",
+        "old": "    int provider_deny_socket = deny_network;",
+        "new": "    int provider_deny_socket = 0;",
+        "test": "provider_filter_refuses_socket",
+        "caught": "provider filter socket denial did not hold",
+    },
 ]
 
 

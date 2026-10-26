@@ -8,6 +8,7 @@
 #define AT_FDCWD (-100)
 #define O_RDONLY 0
 #define O_WRONLY 1
+#define O_RDWR 2
 #define O_CREAT 0100
 #define O_TRUNC 01000
 #define O_DIRECTORY 0200000
@@ -15,6 +16,14 @@
 #define AF_UNIX 1
 #define AF_INET 2
 #define SOCK_STREAM 1
+#define CLONE_NEWUSER 0x10000000
+#define CLONE_NEWNET 0x40000000
+#define S_IFIFO 0010000
+#define S_IFCHR 0020000
+#define S_IFBLK 0060000
+#define S_IFSOCK 0140000
+#define S_IRUSR 0400
+#define S_IWUSR 0200
 
 static long sc(long n, long a, long b, long c, long d, long e, long f) {
 #if defined(__x86_64__)
@@ -159,6 +168,32 @@ static void open_expect_denied(const char *op, const char *path, long flags, con
     }
 }
 
+static void join_dir(char *out, long cap, const char *file, const char *name) {
+    long i = 0;
+    long slash = 0;
+    while (file[i] && i + 1 < cap) {
+        out[i] = file[i];
+        if (file[i] == '/') {
+            slash = i;
+        }
+        i++;
+    }
+    i = slash + 1;
+    long j = 0;
+    while (name[j] && i + 1 < cap) {
+        out[i++] = name[j++];
+    }
+    out[i] = 0;
+}
+
+static void call_result(const char *op, long r, const char *denied, const char *ok) {
+    if (r < 0) {
+        line(op, "refused", r, denied);
+    } else {
+        line(op, "ok", 0, ok);
+    }
+}
+
 __attribute__((noreturn, noinline, used)) void finish(int code) {
     sc(SYS_exit_group, code, 0, 0, 0, 0, 0);
     for (;;) {
@@ -215,6 +250,13 @@ int main(int argc, char **argv) {
         sc(SYS_close, sock, 0, 0, 0, 0, 0);
         line("socket", "ok", 0, "socket succeeded");
     }
+    long sock_unix = sc(SYS_socket, AF_UNIX, SOCK_STREAM, 0, 0, 0, 0);
+    if (sock_unix < 0) {
+        line("socket-unix", "refused", sock_unix, "seccomp refused socket");
+    } else {
+        sc(SYS_close, sock_unix, 0, 0, 0, 0, 0);
+        line("socket-unix", "ok", 0, "socket succeeded");
+    }
     int pair[2];
     long sp = sc(SYS_socketpair, AF_UNIX, SOCK_STREAM, 0, (long)pair, 0, 0);
     if (sp < 0) {
@@ -224,6 +266,14 @@ int main(int argc, char **argv) {
         sc(SYS_close, pair[1], 0, 0, 0, 0, 0);
         line("socketpair", "ok", 0, "socketpair succeeded");
     }
+    long sp_inet = sc(SYS_socketpair, AF_INET, SOCK_STREAM, 0, (long)pair, 0, 0);
+    if (sp_inet < 0) {
+        line("socketpair-inet", "refused", sp_inet, "seccomp refused socketpair");
+    } else {
+        sc(SYS_close, pair[0], 0, 0, 0, 0, 0);
+        sc(SYS_close, pair[1], 0, 0, 0, 0, 0);
+        line("socketpair-inet", "ok", 0, "socketpair succeeded");
+    }
 
     long sig = sc(SYS_kill, host_pid, 0, 0, 0, 0, 0);
     if (sig < 0) {
@@ -232,9 +282,87 @@ int main(int argc, char **argv) {
         line("signal-host", "ok", 0, "signal succeeded");
     }
 
+    char make_sym[4096];
+    char make_fifo[4096];
+    char make_sock[4096];
+    char make_char[4096];
+    char make_block[4096];
+    char refer_dir[4096];
+    char refer_dest[4096];
+    char ioctl_dev[4096];
+    join_dir(make_sym, 4096, storage, "make-sym");
+    join_dir(make_fifo, 4096, storage, "make-fifo");
+    join_dir(make_sock, 4096, storage, "make-sock");
+    join_dir(make_char, 4096, storage, "make-char");
+    join_dir(make_block, 4096, storage, "make-block");
+    join_dir(refer_dir, 4096, storage, "refer-dest");
+    join_dir(refer_dest, 4096, storage, "refer-dest/link");
+    join_dir(ioctl_dev, 4096, storage, ".lc-char");
+    call_result("make-sym", sc(SYS_symlinkat, (long)"target", AT_FDCWD, (long)make_sym, 0, 0, 0),
+                "landlock refused MAKE_SYM", "symlinkat succeeded");
+    call_result("make-fifo",
+                sc(SYS_mknodat, AT_FDCWD, (long)make_fifo, S_IFIFO | S_IRUSR | S_IWUSR, 0, 0, 0),
+                "landlock refused MAKE_FIFO", "mknodat fifo succeeded");
+    call_result("make-sock",
+                sc(SYS_mknodat, AT_FDCWD, (long)make_sock, S_IFSOCK | S_IRUSR | S_IWUSR, 0, 0, 0),
+                "landlock refused MAKE_SOCK", "mknodat sock succeeded");
+    call_result("make-char",
+                sc(SYS_mknodat, AT_FDCWD, (long)make_char, S_IFCHR | S_IRUSR | S_IWUSR, 259, 0, 0),
+                "landlock refused MAKE_CHAR", "mknodat char succeeded");
+    call_result("make-block",
+                sc(SYS_mknodat, AT_FDCWD, (long)make_block, S_IFBLK | S_IRUSR | S_IWUSR, 2048, 0, 0),
+                "landlock refused MAKE_BLOCK", "mknodat block succeeded");
+    call_result("refer-mkdir", sc(SYS_mkdirat, AT_FDCWD, (long)refer_dir, 0700, 0, 0, 0),
+                "mkdir under STORAGE_ROOT failed", "mkdir under STORAGE_ROOT");
+    call_result("refer", sc(SYS_linkat, AT_FDCWD, (long)storage, AT_FDCWD, (long)refer_dest, 0, 0),
+                "landlock refused REFER", "linkat across directories succeeded");
+    {
+        long fd = sc(SYS_openat, AT_FDCWD, (long)ioctl_dev, O_RDONLY, 0, 0, 0);
+        if (fd < 0) {
+            line("ioctl-dev", "refused", fd, "open of planted device failed");
+        } else {
+            long r = sc(SYS_ioctl, fd, 0, 0, 0, 0, 0);
+            sc(SYS_close, fd, 0, 0, 0, 0, 0);
+            call_result("ioctl-dev", r, "landlock refused IOCTL_DEV", "ioctl of planted device succeeded");
+        }
+    }
+
+#ifdef SYS_ptrace
+    /* PTRACE_ATTACH of pid 1. PTRACE_TRACEME would stop an unconfined probe
+     * and hang the positive control. */
+    call_result("ptrace", sc(SYS_ptrace, 16, 1, 0, 0, 0, 0), "seccomp refused ptrace",
+                "ptrace succeeded");
+#endif
+    open_expect_denied("proc-self-mem", "/proc/self/mem", O_RDWR, "landlock refused /proc/self/mem");
+    open_expect_denied("dev-null", "/dev/null", O_RDWR, "landlock refused /dev/null");
+    open_expect_denied("dev-zero", "/dev/zero", O_RDWR, "landlock refused /dev/zero");
+#ifdef SYS_io_uring_setup
+    call_result("io-uring", sc(SYS_io_uring_setup, 1, 0, 0, 0, 0, 0), "seccomp refused io_uring_setup",
+                "io_uring_setup succeeded");
+#endif
+#ifdef SYS_bpf
+    call_result("bpf", sc(SYS_bpf, 5, 0, 0, 0, 0, 0), "seccomp refused bpf", "bpf succeeded");
+#endif
+    call_result("unshare-user", sc(SYS_unshare, CLONE_NEWUSER, 0, 0, 0, 0, 0),
+                "seccomp refused unshare", "unshare user succeeded");
+    call_result("unshare-net", sc(SYS_unshare, CLONE_NEWNET, 0, 0, 0, 0, 0),
+                "seccomp refused unshare", "unshare net succeeded");
+#ifdef SYS_setns
+    call_result("setns", sc(SYS_setns, 0, 0, 0, 0, 0, 0), "seccomp refused setns", "setns succeeded");
+#endif
+#ifdef SYS_keyctl
+    call_result("keyctl", sc(SYS_keyctl, 0, 0, 0, 0, 0, 0), "seccomp refused keyctl",
+                "keyctl succeeded");
+#endif
+#ifdef SYS_mount
+    call_result("mount", sc(SYS_mount, 0, 0, 0, 0, 0, 0), "seccomp refused mount", "mount succeeded");
+#endif
+
     long cl = sc(SYS_clone, 17, 0, 0, 0, 0, 0);
     if (cl < 0) {
         line("clone", "refused", cl, "seccomp refused clone");
+    } else if (cl == 0) {
+        sc(SYS_exit_group, 0, 0, 0, 0, 0, 0);
     } else {
         line("clone", "ok", 0, "clone succeeded");
     }

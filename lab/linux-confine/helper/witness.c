@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,5 +43,26 @@ __attribute__((constructor)) static void lc_witness(void) {
         execve(copy, argv, envp);
         line("exec-unbound", "refused", errno,
              "landlock refused exec of a file other than PROVIDER_EXECUTABLE");
+    }
+    {
+        const char *outside = getenv("LC_OUTSIDE");
+        if (outside != NULL && outside[0] != 0) {
+            int outside_fd = open(outside, O_RDONLY);
+            if (outside_fd < 0) {
+                line("outside-read", "refused", errno,
+                     "landlock refused the read outside STORAGE_ROOT");
+            } else {
+                close(outside_fd);
+                line("outside-read", "ok", 0, "open succeeded");
+            }
+            outside_fd = open(outside, O_WRONLY);
+            if (outside_fd < 0) {
+                line("outside-write", "refused", errno,
+                     "landlock refused the write outside STORAGE_ROOT");
+            } else {
+                close(outside_fd);
+                line("outside-write", "ok", 0, "open succeeded");
+            }
+        }
     }
 }
