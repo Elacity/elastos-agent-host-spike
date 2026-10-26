@@ -1,4 +1,4 @@
-# wasm-capsule lab — wc-001, and its lab name (task 010)
+# wasm-capsule lab — wc-001, its lab name (task 010) and `tools/bundle` (task 009)
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
 byte for byte on this one Mac. A lab bundle of it is named by
@@ -30,10 +30,14 @@ capsule/src/lib.rs    the guest (no_std on wasm32) + the digest host test
 capsule/capsule.json  this capsule's `elastos.capsule/v1` manifest
 audit/                the `wasm-capsule-audit` crate (owned by the cx-wasm-audit lane)
 tools/build           the reproducible build script (bash)
+tools/bundle          writes a new lab bundle and prints its lab CID (bash wrapper)
 tools/Cargo.toml      the `wasm-capsule-tools` crate: the lab's host-side library
 tools/src/lib.rs      `bundle_identity` (the shared lab CID, one re-export) + the manifest bytes
+tools/src/bundle.rs   `tools/bundle`'s rules: `parse_args` and `run`
+tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
+  bundle_builds/      small stand-in build scripts for `tools/bundle`'s tests
 falsifiers.json       planted bugs, each caught by a named test (provider format)
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
 ```
@@ -221,6 +225,80 @@ inside `tools/` would never run in the gate. So every named test is in
 gate's `cargo fmt` also covers only `capsule`; check the tools crate with
 `cargo fmt -p wasm-capsule-tools --manifest-path lab/wasm-capsule/Cargo.toml -- --check`.
 
+## tools/bundle
+
+```bash
+tools/bundle OUT_DIR             # build, write OUT_DIR/bundle/, print its lab CID
+tools/bundle --name BUNDLE_DIR   # print the lab CID of an existing bundle
+```
+
+On success stdout is exactly the lab CID and a newline, and the exit status is
+0. An argument refusal prints `bundle: <reason>` and the usage line on stderr,
+exit status 2. A run refusal prints `bundle: refused: <path>: <reason>` on
+stderr, exit status 1. A refusal prints nothing to stdout. The wrapper execs
+`cargo run --quiet --locked` for the tools crate's `bundle` binary, which only
+parses, runs, prints and sets the status. The rules are library functions in
+`tools/src/bundle.rs`, tested in-process.
+
+**One name rule (P10).** Both modes name a bundle only with
+`wasm_capsule_tools::bundle_identity` and print its Display form. Its
+refusals pass through unchanged (for example, a link in a bundle gets the
+shared walk's own link reason).
+
+**A new OUT_DIR.** OUT_DIR is required (there is no default) and must not
+exist. The build mode:
+
+1. makes OUT_DIR with `create_dir`, which refuses anything already there: a
+   folder, a file or a link;
+2. runs `tools/build OUT_DIR` by its path (never a PATH lookup), with its
+   stdout sent to stderr, so stdout carries only the name;
+3. makes `OUT_DIR/bundle/` with `create_dir`, so a link planted there during
+   the build is refused;
+4. makes `bundle/capsule.json` with `create_new`, which refuses any entry
+   already there (a link included), and writes this capsule's manifest bytes
+   (`CAPSULE_MANIFEST`);
+5. moves the module in with `rename(OUT_DIR/capsule.wasm,
+   OUT_DIR/bundle/capsule.wasm)`. A rename moves a folder entry: it reads and
+   writes no file content and never follows a link. A link at the source moves
+   as a link, and step 6 refuses it;
+6. names `OUT_DIR/bundle` with `bundle_identity` and prints the name.
+
+So `bundle/` holds exactly `capsule.json` and `capsule.wasm`, and nothing is
+written through a link at OUT_DIR or under it. A refused run leaves what it
+made in OUT_DIR, to look at; it removes nothing.
+
+**The receipt.** `OUT_DIR/receipt.txt` stays where `tools/build` wrote it.
+Its `artifact_sha256` describes `bundle/capsule.wasm`: the same file, moved
+there unchanged (its `artifact: capsule.wasm` line names the file before the
+move). The receipt is outside the bundle, so it is not in the lab CID (P13:
+the bundle carries the artifact `tools/build` receipted).
+
+**Not covered.** The guarantee is for the OUT_DIR leaf and the entries under
+it. Links in OUT_DIR's parent folders are followed as usual by `create_dir`
+and `rename`. Another process changing OUT_DIR during the run is not covered
+either: that needs folder-relative opens. The retired lane-own name had the
+same limit.
+
+**Reference lab CID on this Mac** (2026-10-26), for this capsule's 277-byte
+manifest beside `capsule.wasm` `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`:
+
+```
+lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930
+```
+
+`tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it. It was
+also recomputed outside the lab code, with Python's `hashlib` over
+capsule-identity's encoding. It is a lab CID, not the Runtime's CID.
+
+**The test seam.** `run(mode, build_script)` takes the build script's path, so
+the tests pass small stand-in scripts from `tests/bundle_builds/` (one plants a
+link during the build, one fails with status 3, and so on). They change no
+environment, working folder or resource limit. Exactly one test spawns the
+real `tools/bundle`. Its child `cargo run` gets its own `CARGO_TARGET_DIR` and
+`CARGO_BUILD_BUILD_DIR` under that test's own temp dir, set on the child only,
+so it never waits on the outer `cargo test`'s build lock and writes nothing in
+the checkout. Each run builds the command fresh there.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -244,10 +322,37 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   007's retired names, and the shared crate is imported by the one export line
   only. If git cannot run, it fails.
 
+`tools/bundle`, in `tests/bundle.rs`:
+
+- `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` — the one test
+  that spawns the real wrapper. A fresh OUT_DIR gives one stdout line, equal to
+  `bundle_identity(OUT_DIR/bundle)` and to the reference lab CID; the bundle
+  holds exactly the two regular files; `capsule.wasm`'s sha256 is the
+  receipt's `artifact_sha256` and the pinned `6dd9af1a…`; `capsule.json` is
+  `CAPSULE_MANIFEST`; `--name` prints the same name. Then the same OUT_DIR
+  again, an empty folder for `--name` (the shared reason, unchanged) and
+  `--unknown` are each refused with the right status, the path and reason on
+  stderr, and an empty stdout.
+- `tools_bundle_name_mode_prints_the_lab_cid` — in-process, on this capsule's
+  manifest and the 8-byte module: 010's pinned vector.
+- `bundle_arguments_are_refused_with_their_reason` — every argument rule's
+  exact reason.
+- `bundle_arguments_preserve_non_utf8_paths` — both modes keep every byte.
+- `an_existing_out_dir_is_refused_and_nothing_is_written` — a folder, a file
+  and a link to a sentinel folder; the sentinel stays byte-identical.
+- `a_link_planted_during_the_build_is_never_written_through` — a link at
+  `OUT_DIR/bundle` to a sentinel folder, and a link at `OUT_DIR/capsule.wasm` to
+  a sentinel file (the shared link reason); both sentinels stay unchanged.
+- `a_failed_build_is_refused_with_its_cause` — exit status 3 and a missing
+  script give two different reasons.
+- `bundle_io_refusals_keep_path_and_cause` — OUT_DIR, `bundle/`, the
+  manifest's creation and write, and the module's move each keep their path
+  and the system's cause.
+
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001 and seven task-010 planted bugs in the
-provider format (`command: "lab"`). Each requires all its named tests to fail at
+`falsifiers.json` holds nine wc-001, seven task-010 and 23 task-009 planted
+bugs in the provider format (`command: "lab"`). Each requires all its named tests to fail at
 an assertion. The canonical runner
 `examples/agent-host/falsify.py` has no `lab` command yet (ask **R1**), so each
 is proved by the repo's break → named test fails → revert method with
@@ -266,3 +371,29 @@ Task 010's seven, each hand-proven, pending R1:
   path dependencies, so the child `tools/build` fails with cargo's "failed to
   load manifest" error and the named test fails at its assertion that the build
   succeeded.
+
+Task 009's 23, each hand-proven, pending R1 (every named test failed at its
+assertion with the bug in, and passed again after the revert):
+
+- F-WC3-CMD-BYPASS — the command names `capsule.wasm` alone with the shared
+  encoder, not the bundle with `bundle_identity`.
+- F-WC3-REUSE-OUT — `create_dir_all` for OUT_DIR, so an existing one is used.
+- F-WC3-FOLLOW-WRITE — `create_dir_all` for `bundle/`, so a planted link is
+  followed.
+- F-WC3-MODULE-COPY — `fs::copy` instead of `rename`, so a linked file's bytes
+  enter the bundle.
+- F-WC3-ARGS-UNKNOWN, -ARGS-MISSING, -ARGS-NONE, -ARGS-EXTRA and -ARGS-EMPTY —
+  each argument rule falls back to the usage line only.
+- F-WC3-ARGS-UTF8 — a lossy UTF-8 conversion loses a path's bytes.
+- F-WC3-BUILD-CAUSE — both build failures give one shared reason.
+- F-WC3-BUILD-STDOUT — `tools/build`'s stdout reaches the command's stdout.
+- F-WC3-IO-PATH — a run refusal drops its path.
+- F-WC3-IO-MOVE-PATH — a failed move names the destination, not the module.
+- F-WC3-IO-CAUSE-OUT, -BUNDLE, -MANIFEST, -WRITE and -MOVE — each I/O refusal
+  drops the system's cause.
+- F-WC3-CMD-REASON — `bundle_identity`'s refusal is replaced by the command's
+  own text.
+- F-WC3-CMD-STATUS — a run refusal exits 2.
+- F-WC3-CMD-STDOUT — a run refusal goes to stdout.
+- F-WC3-ARTIFACT-PIN — the capsule source changes, so `tools/build` makes
+  another module with a matching receipt; only the pinned sha256 catches it.

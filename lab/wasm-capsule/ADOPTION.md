@@ -21,8 +21,16 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   (PRINCIPLES P10): wc-004's verifier will call `wasm_capsule_audit::audit`
   through a path dependency and parse no imports itself. cwa-001 implemented
   its API v1 (`audit/INTERFACE.md`).
-- `tools/` — the `wasm-capsule-tools` crate, a library with no command and no
-  writes. It names a lab bundle through one function,
+- `tools/bundle` — the lab bundle command (task 009). `tools/bundle OUT_DIR`
+  builds with `tools/build` into a new OUT_DIR and writes a new `bundle/` of
+  exactly `capsule.json` and `capsule.wasm` (moved in with `rename`), then
+  prints its lab CID; `tools/bundle --name BUNDLE_DIR` prints an existing
+  bundle's lab CID. Each entry is made new, so nothing is written through a
+  link at OUT_DIR or under it; every refusal has its own reason, and stdout
+  carries only the name (README.md, "tools/bundle"). Its rules are library
+  functions (`wasm_capsule_tools::bundle`); the binary is thin.
+- `tools/` — the `wasm-capsule-tools` crate, the lab's host-side library. Its
+  only writes are `tools/bundle`'s new bundle. It names a lab bundle through one function,
   `wasm_capsule_tools::bundle_identity`: cc-capsule-identity's `lab_cid`,
   re-exported once and unchanged (task 010). That lane owns the hash, the walk
   (only checked handles; links, FIFOs, sockets, devices and non-UTF-8 names
