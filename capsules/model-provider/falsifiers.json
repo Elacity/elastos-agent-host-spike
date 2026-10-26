@@ -802,8 +802,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    \"capsules/model-provider/src/local_llama.rs\",\n    \"capsules/model-provider/src/adapters.rs\",\n)",
-          "new": "    \"capsules/model-provider/src/local_llama.rs\",\n)"
+          "old": "    \"capsules/model-provider/src/local_llama.rs\",\n    \"capsules/model-provider/src/adapters.rs\",\n    \"lab/agent-conformance/fixtures/granted-bytes.txt\",",
+          "new": "    \"capsules/model-provider/src/local_llama.rs\",\n    \"lab/agent-conformance/fixtures/granted-bytes.txt\","
         }
       ],
       "tests": [
@@ -2254,6 +2254,72 @@
       ],
       "tests": [
         "hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect"
+      ]
+    },
+    {
+      "id": "PV117",
+      "title": "the agent-conformance command is not registered",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"agent-conformance\": (REPO / \"lab\" / \"agent-conformance\" / \"Cargo.toml\", ()),\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest",
+        "an agent-conformance entry loads and runs its crate"
+      ]
+    },
+    {
+      "id": "PV118",
+      "title": "the agent-conformance command builds the capsule-identity manifest",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"agent-conformance\": (REPO / \"lab\" / \"agent-conformance\" / \"Cargo.toml\", ()),",
+          "new": "    \"agent-conformance\": (REPO / \"lab\" / \"capsule-identity\" / \"Cargo.toml\", ()),"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest",
+        "an agent-conformance entry loads and runs its crate"
+      ]
+    },
+    {
+      "id": "PV119",
+      "title": "startup recovery skips agent-conformance's first target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/model-provider/src/adapters.rs\",\n    \"lab/agent-conformance/fixtures/granted-bytes.txt\",",
+          "new": "    \"capsules/model-provider/src/adapters.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV120",
+      "title": "startup recovery skips agent-conformance's last target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/agent-conformance/tests/runtime.rs\",\n)",
+          "new": ")"
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
       ]
     }
   ]
