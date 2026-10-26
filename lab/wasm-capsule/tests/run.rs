@@ -15,6 +15,9 @@
 //! linked imports and the unused grants. A module with an import that is not
 //! granted never reaches an engine.
 //!
+//! Task 031: a module that imports, granted, an import with no typed lab
+//! operation (`LAB_OPERATIONS`) never reaches an engine either.
+//!
 //! The stand-in engines are small shell scripts written into each test's own
 //! temp dir. Every stand-in the two-engine runner starts answers `--version`
 //! on its own branch, apart from its module run. The real-engine tests start
@@ -28,7 +31,7 @@ mod common;
 use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
-use common::grants::{env_f, grants_file, IMPORTING_MODULE};
+use common::grants::{env_f, grants_file, importing_env, IMPORTING_MODULE};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
@@ -1855,7 +1858,7 @@ fn run_with_grants(
     root: &Path,
     case: &str,
     module: &[u8],
-    grants: &[(&str, &str)],
+    grants: &[(&str, &str, &str)],
 ) -> (Result<TwoEngineRun, TwoEngineRefusal>, GrantsRun) {
     let key = fresh_key();
     let (bundle, sig) = signed_bundle(root, &format!("bundle-{case}"), module, &key);
@@ -2029,7 +2032,7 @@ fn grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported() 
     let tmp = TempDir::new("run9-unused");
     let root = canonical(&tmp);
 
-    let (result, ran) = run_with_grants(&root, "unused", MODULE, &[("env", "f")]);
+    let (result, ran) = run_with_grants(&root, "unused", MODULE, &[("env", "f", "call")]);
     let passed = two_ran(result);
     assert_eq!(passed.linked(), [], "a grant was linked with no import");
     assert_eq!(passed.unused_grants(), [env_f()], "the unused grant");
@@ -2045,7 +2048,7 @@ fn granted_import_is_linked() {
     let tmp = TempDir::new("run9-linked");
     let root = canonical(&tmp);
 
-    let (result, ran) = run_with_grants(&root, "linked", IMPORTING_MODULE, &[("env", "f")]);
+    let (result, ran) = run_with_grants(&root, "linked", IMPORTING_MODULE, &[("env", "f", "call")]);
     let passed = two_ran(result);
     assert_eq!(passed.linked(), [env_f()], "the linked imports");
     assert!(passed.unused_grants().is_empty());
@@ -2057,6 +2060,52 @@ fn granted_import_is_linked() {
             "{engine_kind}: not the verified importing module"
         );
     }
+}
+
+/// Task 031: the signed module that imports `env.g`, which has no typed lab
+/// operation, is refused by the verifier with `env.g` granted, by the import's
+/// name; with no grant, the audit still refuses it as undeclared. Either way no
+/// run folder is made and no engine is started, not even for `--version`.
+#[test]
+fn module_import_with_no_typed_operation_is_refused() {
+    let tmp = TempDir::new("run31-untyped");
+    let root = canonical(&tmp);
+    let module = importing_env(b'g');
+
+    let (result, ran) = run_with_grants(&root, "untyped", &module, &[("env", "g", "call")]);
+    let refusal = two_refused(result);
+    assert_eq!(
+        refusal.to_string(),
+        "no typed lab operation for import env.g"
+    );
+    match refusal {
+        TwoEngineRefusal::Verify(reason) => assert_eq!(
+            reason,
+            VerifyRefusal::UntypedImport {
+                module: "env".into(),
+                name: "g".into(),
+            }
+        ),
+        other => panic!("not a verifier refusal: {other}"),
+    }
+    assert!(names(&ran.work).is_empty(), "a run folder was made");
+    assert_engine_starts(&ran, 0, "untyped");
+
+    let (result, ran) = run_with_grants(&root, "untyped-not-granted", &module, &[]);
+    let refusal = two_refused(result);
+    assert_eq!(refusal.to_string(), "undeclared import env.g");
+    match refusal {
+        TwoEngineRefusal::Verify(reason) => assert_eq!(
+            reason,
+            VerifyRefusal::Audit(AuditRefusal::Undeclared {
+                module: "env".into(),
+                name: "g".into(),
+            })
+        ),
+        other => panic!("not a verifier refusal: {other}"),
+    }
+    assert!(names(&ran.work).is_empty(), "a run folder was made");
+    assert_engine_starts(&ran, 0, "untyped-not-granted");
 }
 
 /// wc-010b: a hand-written core module, as bytes: one memory of 1 page with no

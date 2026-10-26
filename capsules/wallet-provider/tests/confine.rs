@@ -921,6 +921,133 @@ fn planted_key_beneath_storage_parent_is_not_read() {
     provider.shutdown();
 }
 
+/// Account operations beneath `STORAGE_PARENT` are refused.
+///
+/// `<STORAGE_PARENT>/Sibling` is outside `STORAGE_ROOT`, and its wallet
+/// directory is precreated empty, so the refusal is neither the `mkdir` of
+/// `<STORAGE_PARENT>/Fresh` nor a read of a planted key. `init` for that
+/// sibling base refuses with `storage_error`, and `init` resets the root
+/// first, so the provider keeps no usable root. The account call that follows
+/// therefore answers through `data.result` with `status` `error`, `code`
+/// `not_initialized` and a reason, and the sibling's wallet directory stays
+/// empty. `list_accounts` is sent only to show that the refused
+/// `create_managed_account` created nothing. After `init` for the granted root
+/// answers ok, the same call answers ok, the listing holds that account, and
+/// the account is in the store under the root.
+///
+/// Falsifiers: append a read and write grant on `STORAGE_PARENT` (WP88); the
+/// sibling `init` and the account call then succeed, so this test fails on its
+/// refusal. Remove the storage-root grant (WP18); the granted `init` fails, so
+/// this test fails on its ok.
+#[test]
+fn account_operations_beneath_storage_parent_are_refused() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
+    // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
+    let sibling = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Sibling");
+    let sibling_wallet = wallet_dir(&sibling);
+    fs::create_dir_all(&sibling_wallet).expect("precreate the sibling wallet directory");
+    let mut provider = ConfinedProvider::start(&root);
+
+    let denied = provider.init(&sibling);
+    assert_storage_error(&denied);
+    let message = denied["message"]
+        .as_str()
+        .expect("storage refusal must carry a reason");
+    assert!(
+        message.starts_with("failed to inspect wallet storage directory"),
+        "the refused step must be the inspect beneath STORAGE_PARENT: {message}"
+    );
+
+    let operations = [
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Outside".to_string()),
+            create_new: false,
+        },
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    ];
+    for operation in operations {
+        let request = wallet_request(operation);
+        let answer = provider.send(&json!({
+            "op": "wallet_contract",
+            "request": request,
+            "_runtime_invocation": runtime_invocation_envelope(),
+        }));
+        assert_eq!(
+            answer["status"], "ok",
+            "wallet_contract must answer through the protocol: {answer}"
+        );
+        let result = &answer["data"]["result"];
+        assert_eq!(
+            result["status"], "error",
+            "the account call must answer with a result error: {answer}"
+        );
+        assert_eq!(
+            result["code"], "not_initialized",
+            "the refused Init must leave no usable root: {answer}"
+        );
+        assert!(
+            result["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "the result error must carry a reason: {answer}"
+        );
+    }
+
+    assert!(
+        !sibling_wallet.join(WALLET_KEY_FILE).exists(),
+        "the refused account call must create no key: {}",
+        sibling_wallet.display()
+    );
+    assert!(
+        !sibling_wallet.join("wallet-state.json").exists(),
+        "the refused account call must create no store: {}",
+        sibling_wallet.display()
+    );
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "the granted root must serve: {init}");
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Inside".to_string()),
+            create_new: false,
+        }),
+    );
+    let account_id = data["account"]["account_id"]
+        .as_str()
+        .expect("managed account must name its id")
+        .to_string();
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListAccounts {
+        include_revoked: false,
+    }));
+    assert!(
+        data["accounts"].as_array().is_some_and(|accounts| accounts
+            .iter()
+            .any(|account| account["account_id"] == account_id.as_str())),
+        "the created managed account must be listed: {data}"
+    );
+    let store = read_store(&root);
+    assert!(
+        store["accounts"].as_array().is_some_and(|accounts| accounts
+            .iter()
+            .any(|account| account["account_id"] == account_id.as_str())),
+        "account state must land under the wallet root: {store}"
+    );
+
+    provider.shutdown();
+}
+
 /// A complete key file makes the outside root readable if the profile ever
 /// grants that path, so the denial above proves the profile, not the file.
 fn plant_storage_key(wallet_dir: &Path) {
