@@ -847,6 +847,149 @@ Both runs grew linear memory to 64 MB, yet each process's resident size is
 below that: untouched pages are not resident. So this number is no measure of
 the capsule's declared or used linear memory.
 
+## Granted import hosting discovery (wc-009b0)
+
+Read-only discovery for wc-009b. wc-009a lets a granted import through the
+verifier, but `run` gives the engines no host function, so a granted import is
+allowed, not hosted. This section records whether each engine's CLI can supply
+a named core-module import from a second Wasm module file (no host code of the
+engine's own, no WASI flag), the exact flag, and what happens without it. It is
+what each CLI does on this Mac only, not a choice of import path, and no
+Component Model or Bus claim. No runner, argv, receipt, test or
+`falsifiers.json` change; `run.rs` still passes no such flag. Base
+`3a4d2812aa71fce5a92e6bf7b314aee9844c7293`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0`. Each
+engine ran as its own process from a shell (no engine inside an engine, no VM,
+no Docker), in the runner's shape: `env -i` (an empty environment), stdin from
+`/dev/null`, and `run --invoke digest <absolute module path> 1592590337` plus
+only the flag under test.
+
+**The probe modules** (WAT text under the git-ignored `target/wc009b0/`, never
+committed; both engines took the `.wat` files directly, so no `wat` crate step
+was needed). `main.wat` uses the import name of `IMPORTING_MODULE`, `env.f`:
+
+```wat
+(module
+  (import "env" "f" (func $f (param i32) (result i32)))
+  (func (export "digest") (param i32) (result i32)
+    local.get 0
+    call $f))
+```
+
+`host.wat` has no imports and exports `f`, which returns its argument plus 1:
+
+```wat
+(module
+  (func (export "f") (param i32) (result i32)
+    local.get 0
+    i32.const 1
+    i32.add))
+```
+
+`host-wasi.wat` is `host.wat` plus
+`(import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))`, never
+called. `host-unknown.wat` is `host.wat` plus
+`(import "nope" "g" (func (param i32)))`, never called: a contrast for (iv). In
+the commands, `<D>` is the absolute path of
+`lab/wasm-capsule/target/wc009b0` and each module path is absolute.
+
+### wasmtime 45.0.1: FOUND, `--preload env=<path>`
+
+The flag, from `/opt/homebrew/bin/wasmtime run --help`:
+
+```text
+      --preload <NAME=MODULE_PATH>
+          Load the given WebAssembly module before the main module
+```
+
+`NAME` is the import module name the preloaded module's exports answer, so
+`env.f` is supplied by `--preload env=<D>/host.wat`. The runs (each successful
+run's stderr is the CLI's own two `--invoke` warnings, the first being
+``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future``):
+
+| Run | Flag added to the runner's argv | Exit | stdout | stderr (first line, then the cause) |
+|---|---|---|---|---|
+| (i) `host` as `env` | `--preload env=<D>/host.wat` | 0 | `1592590338` | the warnings |
+| (ii) nothing supplied | (none) | 1 | (none) | ``Error: failed to run main module `<D>/main.wat` ``; last: ``1: unknown import: `env::f` has not been defined`` |
+| (iii) `host` as `other` | `--preload other=<D>/host.wat` | 1 | (none) | the same as (ii), word for word |
+| (iv) `host-wasi` as `env` | `--preload env=<D>/host-wasi.wat` | 0 | `1592590338` | the warnings |
+| (iv-c) `host-unknown` as `env` | `--preload env=<D>/host-unknown.wat` | 1 | (none) | ``Error: failed to process preload `env` at `<D>/host-unknown.wat` ``; last: ``unknown import: `nope::g` has not been defined`` |
+
+(ii) is the contrast: the same `main.wat` and argument, without the flag, is
+refused at start, and the message names both `env` and `f`. (iii) shows the
+name matters: a module preloaded under another name supplies nothing.
+
+**(iv): a supplied module can bring WASI in.** wasmtime did not refuse
+`host-wasi.wat`: it linked the supplied module's `wasi_snapshot_preview1`
+import with no WASI flag on the command line, and the run printed
+`1592590338`. (iv-c) shows the import was really resolved, not skipped: an
+import wasmtime has no definition for is refused when the preload is
+processed. So on this CLI, a module supplied with `--preload` can bring
+wasmtime's own WASI into the run by its own imports. wc-009b must not treat a
+preloaded module as authority-free.
+
+**The flag on a zero-import module.** The real `tools/build` capsule (built
+into `<D>/build/`, sha256
+`6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`, the pinned
+value): without the flag, exit 0, stdout `230101071268130872`; with
+`--preload env=<D>/host.wat`, exit 0, stdout `230101071268130872`, the same
+two warnings on stderr each time. Both equal `FIXED_OUTPUT` for `1592590337`,
+so the preload changes nothing a zero-import module sees.
+
+### wasmer 7.5.0: SKIPPED
+
+No flag in its help supplies a core-module import from another module file.
+Searched `/opt/homebrew/bin/wasmer run --help` and
+`/opt/homebrew/bin/wasmer --help` (both exit 0) case-insensitively for
+`preload`, `import`, `link`, `module`, `host`, `use` and `env`. `wasmer --help`
+matched none of `preload`, `import`, `link`, `module` or `host`; its `use` and
+`env` matches are about logs, config and the registry login. In
+`wasmer run --help` no line matched `preload`; `import` matched only "Require
+WASI modules to only import 1 version of WASI" and "Enable experimental N-API
+imports for modules that require them"; the `module`, `host`, `use` and `env`
+matches are about other things (compile threads, folders and the CWD, network,
+journals, the cache, the webc entrypoint, and `--env <KEY=VALUE>`, "Pass
+custom environment variables", which is ambient, not an import). Two lines
+look close, and each was tried once:
+
+```text
+      --enable-module-linking
+          Enable support for the module linking proposal
+      --use <USE>
+          List of other containers this module depends on
+```
+
+`--use` names containers (webc packages), not a module that answers an import
+name, and `--enable-module-linking` is a Wasm feature switch that takes no
+module. Neither supplies `env.f`:
+
+| Run | Flag added to the runner's argv | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (ii) nothing supplied | (none) | 1 | (none) | `error: Unable to instantiate the WebAssembly module`, then `╰─▶ 1: Error while importing "env"."f": unknown import. Expected Function(FunctionType { params: [I32], results: [I32] })` |
+| `--use` | `--use <D>/host.wat --offline` | 1 | (none) | the same two lines as (ii) |
+| `--enable-module-linking` | `--enable-module-linking` | 1 | (none) | `error: No backends support the required features for the Wasm module. Feel free to open an issue at https://github.com/wasmerio/wasmer/issues` |
+
+(`--offline` keeps `--use` from asking a registry: "Resolve only from local
+sources ... never the registry".) The (ii) refusal names both `env` and `f`.
+So wasmer 7.5.0's CLI cannot host `env.f` from a second module file, and
+hosting cannot be claimed for wasmer.
+
+### The answer for wc-009b
+
+- wasmtime: hosts by flag `--preload env=<path>` (the name before `=` is the
+  import module name); without it, start is refused naming `env::f`; a
+  preloaded module gets wasmtime's WASI linked in by its own imports, with no
+  flag.
+- wasmer: SKIPPED: neither `wasmer run --help` nor `wasmer --help` has a flag
+  that supplies a core-module import from another module; `--use` and
+  `--enable-module-linking` were tried and do not.
+- The engines differ. Only wasmtime's (i) printed `1592590338`. So "same
+  results on both engines" cannot be tested for a hosted granted import with
+  these two CLIs; both refuse an unsupplied `env.f` at start, naming it, which
+  is the only result they share. wc-009b's wasmer hosting test must report
+  SKIPPED with this reason, never PASS.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
