@@ -76,6 +76,26 @@
 //! digest, one DID encoder and decoder, one accepted-list check and one
 //! Ed25519 verification. `Ok(())` grants nothing.
 //!
+//! # Lab variant binding
+//!
+//! A [`VariantBinding`] sits outside every bundle and groups the printed lab
+//! CIDs of a capsule's platform variants, each under a platform label from
+//! [`VARIANT_PLATFORMS`], with the lab CID of their recipe. The label lives
+//! only in the binding: no manifest or bundle holds one. Its bytes are
+//! [`VariantBinding::variant_binding_payload`], compact JSON with the keys
+//! `recipe`, `schema` ([`VARIANT_BINDING_SCHEMA`]), `signer_did` and
+//! `variants`, and no name or group identity field. [`sign_variant_binding`]
+//! signs [`domain_separated_digest`] of [`VARIANT_BINDING_DOMAIN`] and that
+//! payload; it writes nothing. [`verify_checked_variant_binding`] checks, in
+//! order, the signer's `did:key`, the explicit accepted list, the shape of
+//! both variant lists, the platforms, each variant's CID, the recipe's CID,
+//! then the Ed25519 signature. [`verify_variant_binding`] is [`checked_bundle`]
+//! for each variant and then that check. It shares the record's digest, DID
+//! encoder and decoder, accepted-list check and Ed25519 verification. Each
+//! variant is still its own closure with its own [`PackageRecord`]. The
+//! binding groups CIDs; it defines no shared capsule identity, and `Ok(())`
+//! grants nothing.
+//!
 //! # The walk reads only checked handles
 //!
 //! The walk opens the bundle root once, by its path. After that it reaches
@@ -130,6 +150,22 @@ pub const PACKAGE_RECORD_SCHEMA: &str = "lab.capsule-identity.record/v1";
 /// Domain of the lab package record's signature, for
 /// [`domain_separated_digest`]. It is a lab proposal.
 pub const PACKAGE_RECORD_DOMAIN: &str = "lab.capsule-identity.package-record/v1";
+
+/// Schema of the lab variant binding's payload. It is the lab's own name.
+pub const VARIANT_BINDING_SCHEMA: &str = "lab.capsule-identity.variant-binding/v1";
+
+/// Domain of the lab variant binding's signature, for
+/// [`domain_separated_digest`]. It is a lab proposal.
+pub const VARIANT_BINDING_DOMAIN: &str = "lab.capsule-identity.variant-binding/v1";
+
+/// The platform labels a variant binding may hold, in byte order: the three
+/// the Runtime's release script uses. A label is not identity: it lives only
+/// in the binding, never in a bundle.
+pub const VARIANT_PLATFORMS: [&str; 3] = ["aarch64-darwin", "aarch64-linux", "x86_64-linux"];
+
+/// The path of the one entry a variant recipe is named under: its lab CID is
+/// [`encode_entries`] of one entry with this path and the recipe's bytes.
+pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 /// A lab CID: SHA-256 over a bundle's lab CID stream. It prints with its
 /// `lab-cid:sha256:` label so it is never mistaken for the Runtime's CID.
@@ -226,6 +262,29 @@ pub struct PackageRecord {
     pub signature: [u8; 64],
 }
 
+/// A test-key signed binding, outside every bundle, that groups the lab CIDs
+/// of a capsule's platform variants and the lab CID of their recipe.
+///
+/// It lives in memory only, like [`PackageRecord`]: no serde derive, no file,
+/// and nothing writes it. It has no name and no group identity field: it
+/// groups CIDs and defines no shared capsule identity. Each variant is still
+/// its own closure with its own [`PackageRecord`]. The signature is not part
+/// of the payload it covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantBinding {
+    /// The recipe's printed lab CID.
+    pub recipe: String,
+    /// The `(platform, cid)` pairs: a platform label and the printed lab CID
+    /// of that variant's bundle, in the order signing was given them. The
+    /// payload sorts them.
+    pub variants: Vec<(String, String)>,
+    /// The signer's canonical Ed25519 `did:key`.
+    pub signer_did: String,
+    /// The 64-byte Ed25519 signature over [`domain_separated_digest`] of
+    /// [`VARIANT_BINDING_DOMAIN`] and [`VariantBinding::variant_binding_payload`].
+    pub signature: [u8; 64],
+}
+
 /// What the walk does with one entry, decided from the entry's own type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -302,6 +361,30 @@ pub enum Refusal {
     /// is the record's CID, kept only to say what was refused; `bundle` is the
     /// lab CID of the checked bytes.
     RecordNamesAnotherCid { record: String, bundle: LabCid },
+    /// A variant list holds no variant. `list` says whose: `binding` (the
+    /// binding's pairs) or `given` (the pairs given to sign or verify).
+    NoVariants { list: &'static str },
+    /// A variant list holds a label that is not one of [`VARIANT_PLATFORMS`].
+    UnknownPlatform { list: &'static str, label: String },
+    /// A variant list holds one label twice.
+    DuplicatePlatform { list: &'static str, label: String },
+    /// The platforms given are not the binding's platforms. Both lists are
+    /// sorted in byte order.
+    PlatformsDiffer {
+        binding: Vec<String>,
+        given: Vec<String>,
+    },
+    /// A binding names, for `platform`, a CID that is not the given bundle's.
+    /// `binding` is the binding's CID, kept only to say what was refused;
+    /// `bundle` is the lab CID of the checked bytes given for that platform.
+    VariantNamesAnotherCid {
+        platform: String,
+        binding: String,
+        bundle: LabCid,
+    },
+    /// A binding names a recipe CID that is not the lab CID of the recipe
+    /// bytes given. `binding` is the binding's CID; `recipe` is the bytes'.
+    RecipeNamesAnotherCid { binding: String, recipe: LabCid },
 }
 
 impl fmt::Display for Refusal {
@@ -350,6 +433,35 @@ impl fmt::Display for Refusal {
             Refusal::RecordNamesAnotherCid { record, bundle } => {
                 write!(f, "record names {record}; the bundle names {bundle}")
             }
+            Refusal::NoVariants { list } => write!(
+                f,
+                "the {list} variant list is empty: a binding holds at least one variant"
+            ),
+            Refusal::UnknownPlatform { list, label } => write!(
+                f,
+                "the {list} variant list holds the platform {label:?}, which is not one of {}",
+                VARIANT_PLATFORMS.join(", ")
+            ),
+            Refusal::DuplicatePlatform { list, label } => write!(
+                f,
+                "the {list} variant list holds the platform {label} twice: one CID per platform"
+            ),
+            Refusal::PlatformsDiffer { binding, given } => write!(
+                f,
+                "the binding holds the platforms {binding:?}; the given variants are {given:?}"
+            ),
+            Refusal::VariantNamesAnotherCid {
+                platform,
+                binding,
+                bundle,
+            } => write!(
+                f,
+                "the binding names {binding} for {platform}; the bundle given for {platform} names {bundle}"
+            ),
+            Refusal::RecipeNamesAnotherCid { binding, recipe } => write!(
+                f,
+                "the binding names the recipe {binding}; the recipe bytes name {recipe}"
+            ),
         }
     }
 }
@@ -961,6 +1073,258 @@ fn require_record_cid(checked: &CheckedBundle, record: &PackageRecord) -> Result
         return Err(Refusal::RecordNamesAnotherCid {
             record: record.cid.clone(),
             bundle: checked.cid(),
+        });
+    }
+    Ok(())
+}
+
+impl VariantBinding {
+    /// The bytes the binding's signature covers: compact JSON, keys in this
+    /// order, no spaces and no trailing newline, the variants sorted by
+    /// platform label in byte order:
+    /// `{"recipe":"<cid>","schema":"lab.capsule-identity.variant-binding/v1","signer_did":"<did>","variants":[{"cid":"<cid>","platform":"<label>"},...]}`.
+    ///
+    /// This is the only builder of those bytes, and the one place the pairs
+    /// are sorted, so the order they were given in does not change them. The
+    /// signature is not in them, and there is no name or group identity
+    /// field. The values are written as they are: when verification hashes
+    /// these bytes, check (a) has decoded the DID as a canonical `did:key`,
+    /// check (c) has found every label in [`VARIANT_PLATFORMS`], and checks
+    /// (e) and (f) have found every CID equal to a printed lab CID, so none
+    /// holds a character JSON would escape.
+    pub fn variant_binding_payload(&self) -> Vec<u8> {
+        let mut pairs: Vec<&(String, String)> = self.variants.iter().collect();
+        pairs.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let variants: Vec<String> = pairs
+            .iter()
+            .map(|(platform, cid)| format!("{{\"cid\":\"{cid}\",\"platform\":\"{platform}\"}}"))
+            .collect();
+        format!(
+            "{{\"recipe\":\"{}\",\"schema\":\"{}\",\"signer_did\":\"{}\",\"variants\":[{}]}}",
+            self.recipe,
+            VARIANT_BINDING_SCHEMA,
+            self.signer_did,
+            variants.join(",")
+        )
+        .into_bytes()
+    }
+}
+
+/// The digest a variant binding's signature covers: [`domain_separated_digest`]
+/// of [`VARIANT_BINDING_DOMAIN`] and `payload`, the binding's
+/// [`VariantBinding::variant_binding_payload`]. Signing and verifying both
+/// call this.
+fn variant_binding_message(payload: &[u8]) -> [u8; 32] {
+    domain_separated_digest(VARIANT_BINDING_DOMAIN, payload)
+}
+
+/// The lab CID of a variant recipe: [`encode_entries`], the one encoder, of
+/// one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`. Nothing here reads
+/// the recipe from disk; the caller gives its bytes.
+fn recipe_cid(recipe: &[u8]) -> Result<LabCid, Refusal> {
+    encode_entries(&[BundleEntry {
+        path: VARIANT_RECIPE_ENTRY.to_owned(),
+        content: recipe.to_vec(),
+    }])
+}
+
+/// Sign a variant binding with `key` for the bundles in `variants`, each
+/// given with its platform label, and the recipe bytes `recipe`.
+///
+/// It first refuses the shapes verification refuses (check (c), for the
+/// `given` list): no variant, a label not in [`VARIANT_PLATFORMS`], or one
+/// label twice. Then it names each bundle with [`lab_cid`]; a bundle
+/// [`lab_cid`] refuses gets no binding, and the refusal is [`lab_cid`]'s own.
+/// The recipe is named with [`encode_entries`] of one entry. `signer_did` is
+/// `elastos_identity::encode_signing_key_did` of `key`. The signature is
+/// Ed25519 over [`domain_separated_digest`] of [`VARIANT_BINDING_DOMAIN`] and
+/// the binding's payload. It writes no file and changes no bundle byte.
+pub fn sign_variant_binding(
+    key: &SigningKey,
+    variants: &[(&str, &Path)],
+    recipe: &[u8],
+) -> Result<VariantBinding, Refusal> {
+    let labels = variants.iter().map(|(platform, _)| *platform);
+    require_variant_shape("given", labels)?;
+    let mut binding = VariantBinding {
+        variants: variants
+            .iter()
+            .map(|(platform, bundle)| Ok(((*platform).to_owned(), lab_cid(bundle)?.to_string())))
+            .collect::<Result<_, Refusal>>()?,
+        recipe: recipe_cid(recipe)?.to_string(),
+        signer_did: signer_did_of(key),
+        signature: [0; 64],
+    };
+    let payload = binding.variant_binding_payload();
+    binding.signature = key.sign(&variant_binding_message(&payload)).to_bytes();
+    Ok(binding)
+}
+
+/// Check `binding` against the checked bundles in `variants`, each given with
+/// its platform label, and the recipe bytes `recipe`.
+///
+/// The checks run in this order, and the first refusal is the answer:
+///
+/// 1. (a) `elastos_identity::decode_did_key` on `binding.signer_did`, with
+///    the name signature's reason.
+/// 2. (b) `binding.signer_did` is an exact member of `accepted`, with the name
+///    signature's reason. An empty list refuses every signer.
+/// 3. (c) The shape of the binding's pairs, then of the given pairs: at least
+///    one variant, every label one of [`VARIANT_PLATFORMS`], no label twice.
+/// 4. (d) The given platforms are the binding's platforms; otherwise both
+///    sorted lists are named.
+/// 5. (e) Each given bundle's printed lab CID is the binding's CID for its
+///    label; otherwise the label and both CIDs are named.
+/// 6. (f) The lab CID of `recipe` is the binding's recipe CID; otherwise
+///    both are named.
+/// 7. (g) Ed25519 verification of `binding.signature` over the binding's
+///    digest, with the key from step 1 and the name signature's reason. The
+///    signed name in that reason is the payload, as text.
+///
+/// It reads nothing from disk. `Ok(())` means all seven passed. It is not a
+/// trust, admission or launch value, and it grants nothing.
+pub fn verify_checked_variant_binding(
+    binding: &VariantBinding,
+    variants: &[(&str, &CheckedBundle)],
+    recipe: &[u8],
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    let key = decode_signer(&binding.signer_did)?;
+    require_accepted(&binding.signer_did, accepted)?;
+    require_variant_shape(
+        "binding",
+        binding
+            .variants
+            .iter()
+            .map(|(platform, _)| platform.as_str()),
+    )?;
+    require_variant_shape("given", variants.iter().map(|(platform, _)| *platform))?;
+    require_same_platforms(binding, variants)?;
+    require_variant_cids(binding, variants)?;
+    require_recipe_cid(binding, recipe)?;
+    let payload = binding.variant_binding_payload();
+    let message = variant_binding_message(&payload);
+    verify_ed25519(
+        &key,
+        &message,
+        &binding.signature,
+        &binding.signer_did,
+        &String::from_utf8_lossy(&payload),
+    )?;
+    Ok(())
+}
+
+/// Check `binding` against the bundles at the paths in `variants`, each given
+/// with its platform label, and the recipe bytes `recipe`.
+///
+/// This is [`checked_bundle`] for each path, in the order given, and then
+/// [`verify_checked_variant_binding`]. It holds no check of its own, so a
+/// bundle the walk refuses is refused first, with the walk's own reason.
+pub fn verify_variant_binding(
+    binding: &VariantBinding,
+    variants: &[(&str, &Path)],
+    recipe: &[u8],
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    let walked = variants
+        .iter()
+        .map(|(platform, bundle)| Ok((*platform, checked_bundle(bundle)?)))
+        .collect::<Result<Vec<_>, Refusal>>()?;
+    let given: Vec<(&str, &CheckedBundle)> = walked
+        .iter()
+        .map(|(platform, walked)| (*platform, walked))
+        .collect();
+    verify_checked_variant_binding(binding, &given, recipe, accepted)
+}
+
+/// Check (c) on one list of platform labels; `list` says whose, `binding` or
+/// `given`. The first label not in [`VARIANT_PLATFORMS`], or the first label
+/// seen twice, is refused; a list with no label is refused.
+fn require_variant_shape<'a>(
+    list: &'static str,
+    labels: impl IntoIterator<Item = &'a str>,
+) -> Result<(), Refusal> {
+    let mut seen: Vec<&str> = Vec::new();
+    for label in labels {
+        if !VARIANT_PLATFORMS.contains(&label) {
+            return Err(Refusal::UnknownPlatform {
+                list,
+                label: label.to_owned(),
+            });
+        }
+        if seen.contains(&label) {
+            return Err(Refusal::DuplicatePlatform {
+                list,
+                label: label.to_owned(),
+            });
+        }
+        seen.push(label);
+    }
+    if seen.is_empty() {
+        return Err(Refusal::NoVariants { list });
+    }
+    Ok(())
+}
+
+/// Check (d): the given platforms, sorted, are the binding's, sorted.
+fn require_same_platforms(
+    binding: &VariantBinding,
+    variants: &[(&str, &CheckedBundle)],
+) -> Result<(), Refusal> {
+    let mut bound: Vec<String> = binding
+        .variants
+        .iter()
+        .map(|(platform, _)| platform.clone())
+        .collect();
+    let mut given: Vec<String> = variants
+        .iter()
+        .map(|(platform, _)| (*platform).to_owned())
+        .collect();
+    bound.sort();
+    given.sort();
+    if bound != given {
+        return Err(Refusal::PlatformsDiffer {
+            binding: bound,
+            given,
+        });
+    }
+    Ok(())
+}
+
+/// Check (e): each given bundle, taken in label byte order, has the printed
+/// lab CID the binding names for its label. Check (d) has matched the
+/// platforms, so every label is bound; were one not, its empty CID would
+/// match no bundle and be refused here too.
+fn require_variant_cids(
+    binding: &VariantBinding,
+    variants: &[(&str, &CheckedBundle)],
+) -> Result<(), Refusal> {
+    let mut given: Vec<&(&str, &CheckedBundle)> = variants.iter().collect();
+    given.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    for (platform, checked) in given {
+        let bound = binding
+            .variants
+            .iter()
+            .find(|(label, _)| label == platform)
+            .map_or("", |(_, cid)| cid.as_str());
+        if bound != checked.cid().to_string() {
+            return Err(Refusal::VariantNamesAnotherCid {
+                platform: (*platform).to_owned(),
+                binding: bound.to_owned(),
+                bundle: checked.cid(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Check (f): the recipe bytes' lab CID is the binding's recipe CID.
+fn require_recipe_cid(binding: &VariantBinding, recipe: &[u8]) -> Result<(), Refusal> {
+    let named = recipe_cid(recipe)?;
+    if binding.recipe != named.to_string() {
+        return Err(Refusal::RecipeNamesAnotherCid {
+            binding: binding.recipe.clone(),
+            recipe: named,
         });
     }
     Ok(())
