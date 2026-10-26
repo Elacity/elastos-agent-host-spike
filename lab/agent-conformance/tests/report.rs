@@ -134,6 +134,127 @@ use std::{fs, path::Path};
 
 const LIVE: &str = "default_activation_refuses_without_selector";
 
+#[test]
+fn agent_host_row_requires_its_launched_identity() {
+    use agent_conformance::report::render_run;
+    let name = "real_agent_host_gets_no_ungranted_authority";
+    let (mut observations, git) = synthetic(1, true);
+    let listed = format!("{name}: test\n");
+    let evidence = |observations: &[Observation], result: &str| {
+        let lines = observations
+            .iter()
+            .map(Observation::line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{lines}\ntest {name} ... {result}\n")
+    };
+    let missing = render_run(
+        &listed,
+        &evidence(&observations, "ok"),
+        true,
+        Ok(git.clone()),
+    );
+    assert!(!missing.passed);
+    assert!(missing
+        .failures
+        .contains(&"missing launched probe identity: agent-host".into()));
+    let mut identity = match &observations[2] {
+        Observation::Launched { probe } => probe.clone(),
+        _ => unreachable!(),
+    };
+    identity.effect = "agent-host".into();
+    observations.push(Observation::BuildOnly {
+        probe: identity.clone(),
+    });
+    assert!(
+        !render_run(
+            &listed,
+            &evidence(&observations, "ok"),
+            true,
+            Ok(git.clone())
+        )
+        .passed
+    );
+    observations.push(Observation::Launched { probe: identity });
+    let passed = render_run(
+        &listed,
+        &evidence(&observations, "ok"),
+        true,
+        Ok(git.clone()),
+    );
+    assert!(passed.passed);
+    assert!(passed.table.contains(&format!(
+        "{name} | PASS | real agent-host capsule, deny half; no model call (RT3)"
+    )));
+    assert!(!table("other: test\n", "test other ... ok\n", true)
+        .0
+        .contains(name));
+    let failed = render_run(
+        &listed,
+        &format!(
+            "{}FAILURE {name}: expected exit 0, got 1; fixture reason\n",
+            evidence(&observations, "FAILED")
+        ),
+        false,
+        Ok(git),
+    );
+    assert!(!failed.passed);
+    assert!(failed.table.contains(&format!(
+        "{name} | FAIL | expected exit 0, got 1; fixture reason"
+    )));
+}
+
+#[test]
+fn staging_uses_manifest_entrypoint_and_refuses_escape() {
+    for entrypoint in ["agent-host.component.wasm", "nested/agent.component.wasm"] {
+        let home = ThrowawayHome::new().unwrap();
+        let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
+        manifest["entrypoint"] = entrypoint.into();
+        let staged = stage_probe(
+            &home,
+            b"synthetic component",
+            &serde_json::to_vec(&manifest).unwrap(),
+            "agent-host",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(staged.path.join(entrypoint)).unwrap(),
+            b"synthetic component"
+        );
+        assert_eq!(
+            staged.identity.bundle_lab_cid,
+            capsule_identity::checked_bundle(&staged.path)
+                .unwrap()
+                .cid()
+                .to_string()
+        );
+        home.finish().unwrap();
+    }
+    for selected in ["../escape.wasm", "absolute", "", "./escape.wasm"] {
+        let home = ThrowawayHome::new().unwrap();
+        let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
+        let absolute = home.root().join("escape.wasm");
+        let entrypoint = if selected == "absolute" {
+            absolute.to_str().unwrap()
+        } else {
+            selected
+        };
+        manifest["entrypoint"] = entrypoint.into();
+        assert!(stage_probe(
+            &home,
+            b"synthetic component",
+            &serde_json::to_vec(&manifest).unwrap(),
+            "agent-host"
+        )
+        .is_err());
+        assert!(
+            !absolute.exists(),
+            "refused entrypoint must not write outside the bundle"
+        );
+        home.finish().unwrap();
+    }
+}
+
 // These synthetic hashes test report wiring only. They are never emitted as
 // this Cargo run's identities and supply zero live Runtime evidence.
 fn synthetic(seed: u8, dirty: bool) -> (Vec<Observation>, GitIdentity) {

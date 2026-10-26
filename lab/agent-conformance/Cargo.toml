@@ -5,6 +5,13 @@ edition = "2021"
 license = "MIT"
 publish = false
 
+[features]
+agent-host = []
+
+[[test]]
+name = "agent_host"
+required-features = ["agent-host"]
+
 [workspace]
 members = ["probe"]
 default-members = [".", "probe"]
