@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020 and 025). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule or the Cargo-based consumer scan (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025 and 023). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan or the claim scan of the lane's docs and code (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -3498,6 +3498,199 @@
       ],
       "tests": [
         "the_adoption_list_is_read_strictly"
+      ]
+    },
+    {
+      "id": "F-CI23a",
+      "title": "a doc comment in src/lib.rs says the lab CID equals the Runtime's CID, over a line break",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "/// The manifest every bundle holds at its root.\n",
+          "new": "/// The manifest every bundle holds at its root. Its lab CID equals the\n/// Runtime's CID.\n"
+        }
+      ],
+      "tests": [
+        "the_lab_cid_claim_stays_computed_by_the_lab"
+      ]
+    },
+    {
+      "id": "F-CI23b",
+      "title": "the module doc in src/lib.rs drops ', computed by the lab'",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "//! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,\n",
+          "new": "//! Kubo v0.40.1 profile: no Kubo has computed any pin,\n"
+        }
+      ],
+      "tests": [
+        "the_lab_cid_claim_stays_computed_by_the_lab"
+      ]
+    },
+    {
+      "id": "F-CI23c",
+      "title": "the claim scan filters on a wrong extension and reads no file",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    (path.ends_with(\".md\") || path.starts_with(\"src/\")) && !path.starts_with(\"tests/\")\n",
+          "new": "    (path.ends_with(\".mdx\") && path.starts_with(\"src/\")) && !path.starts_with(\"tests/\")\n"
+        }
+      ],
+      "tests": [
+        "the_lab_cid_claim_stays_computed_by_the_lab"
+      ]
+    },
+    {
+      "id": "F-CI23d",
+      "title": "the wording check reads README's Run section for Claim scope, so it misses the gate",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "pub const CLAIM_SCOPE_HEADING: &str = \"## Claim scope\\n\";\n",
+          "new": "pub const CLAIM_SCOPE_HEADING: &str = \"## Run\\n\";\n"
+        }
+      ],
+      "tests": [
+        "the_lab_cid_claim_stays_computed_by_the_lab",
+        "the_claim_wording_check_names_each_gap"
+      ]
+    },
+    {
+      "id": "F-CI23e",
+      "title": "the claim scan compares words in their own case",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    word.to_lowercase().replace(",
+          "new": "    word.to_owned().replace("
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI23f",
+      "title": "the claim scan reads each line alone, so a claim over a line break is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        for word in comment_body(line).split_whitespace() {\n",
+          "new": "        for word in comment_body(line).split_whitespace().chain([\"\\n\"]) {\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI23g",
+      "title": "the claim scan keeps comment markers, so a claim over two comment lines is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .find_map(|marker| line.strip_prefix(marker))\n",
+          "new": "        .find_map(|marker| line.strip_prefix(marker).map(|_| line))\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI23h",
+      "title": "the claim scan does not read a typographic apostrophe as an apostrophe",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    word.to_lowercase().replace('\\u{2019}', \"'\")\n",
+          "new": "    word.to_lowercase()\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI23i",
+      "title": "the claim scan skips a file it cannot read",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            Err(error) => return Err(format!(\"the claim scan cannot read {path}: {error}\")),\n",
+          "new": "            Err(_) => continue,\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI23j",
+      "title": "the claim scan reads bytes that are not UTF-8 lossily instead of refusing them",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        std::str::from_utf8(bytes).map_err(|error| format!(\"{path} is not UTF-8: {error}\"))?;\n",
+          "new": "        String::from_utf8_lossy(bytes);\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI23k",
+      "title": "the wording check no longer asks Claim scope for the Kubo gate",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        (CLAIM_SCOPE_HEADING, KUBO_GATE),\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_claim_wording_check_names_each_gap"
+      ]
+    },
+    {
+      "id": "F-CI23l",
+      "title": "the module doc check reads every line of src/lib.rs, so the claim in a plain comment counts",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .map_while(|line| line.strip_prefix(\"//!\"))\n",
+          "new": "        .map(|line| line.strip_prefix(\"//!\").unwrap_or(line))\n"
+        }
+      ],
+      "tests": [
+        "the_claim_wording_check_names_each_gap"
       ]
     }
   ]

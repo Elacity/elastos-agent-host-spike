@@ -2628,8 +2628,9 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// required file profiles and the two platform-baseline allow forms, plus a
 /// declared-rights file for each of did and wallet. The valid pair passes.
 /// Then one case for each refusal, in the check's order: a file without the
-/// lab role, a file that names another provider, a platform baseline without
-/// its status sentence, a right id and a
+/// lab role, a file that names another provider, a file without a rights list,
+/// a file without a platform baseline, a platform baseline without its status
+/// sentence, a platform baseline without its rules list, a right id and a
 /// platform-baseline id the shared contract does not name, a platform-baseline
 /// entry with no justification, an entry whose justification names another
 /// provider or gives no reason, an entry with no rules, an id declared twice,
@@ -2649,7 +2650,11 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// WP90 drops the repeated-id refusal, WP91 the repeated-rule refusal, and
 /// WP92 the duplicate-form refusal, so the profile that holds
 /// `(allow sysctl-read)` twice reads "declared rule is not an allow rule of
-/// its profile".
+/// its profile". WP98 drops the missing rights-list refusal, WP99 the missing
+/// platform-baseline refusal and WP100 the missing baseline rules-list
+/// refusal, each replaced with an empty value, so the check goes on and
+/// refuses later with other words, and the case finds no refusal in its own
+/// words.
 #[test]
 fn declared_rights_trace_refuses_each_bad_input() {
     let capsules = contract_fixture_capsules();
@@ -2696,12 +2701,45 @@ fn declared_rights_trace_refuses_each_bad_input() {
     );
 
     let mut declared = read();
+    declared
+        .as_object_mut()
+        .expect("fixture declared rights")
+        .remove("rights");
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("must hold a rights list"),
+        "a declared-rights file without a rights list must be refused by its rights: {reason}"
+    );
+
+    let mut declared = read();
+    declared
+        .as_object_mut()
+        .expect("fixture declared rights")
+        .remove(PLATFORM_BASELINE);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("must hold a platform baseline"),
+        "a declared-rights file without a platform baseline must be refused by its baseline: {reason}"
+    );
+
+    let mut declared = read();
     declared[PLATFORM_BASELINE]["status"] =
         json!(platform_baseline_status(name).replace(", not approved rights", ""));
     let reason = refuse(&declared, &profile);
     assert!(
         reason.contains("must give the status"),
         "a platform baseline without its status sentence must be refused by its status: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]
+        .as_object_mut()
+        .expect("fixture platform baseline")
+        .remove("rules");
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("platform baseline must hold a rules list"),
+        "a platform baseline without a rules list must be refused by its rules: {reason}"
     );
 
     let mut declared = read();

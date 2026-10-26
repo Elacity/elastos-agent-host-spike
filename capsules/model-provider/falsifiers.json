@@ -2207,6 +2207,38 @@
       "tests": [
         "local_llama::tests::zombie_left_past_the_deadline_is_a_close_failure"
       ]
+    },
+    {
+      "id": "MP21",
+      "title": "the hosted run id header carries the request id",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            .header(\"x-elastos-run-id\", run_id)",
+          "new": "            .header(\"x-elastos-run-id\", request_id)"
+        }
+      ],
+      "tests": [
+        "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
+      ]
+    },
+    {
+      "id": "MP22",
+      "title": "the hosted text request carries the bearer key",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        if runtime_socket.is_none() {",
+          "new": "        if runtime_socket.is_none() || runtime_socket.is_some() {"
+        }
+      ],
+      "tests": [
+        "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
+      ]
     }
   ]
 }

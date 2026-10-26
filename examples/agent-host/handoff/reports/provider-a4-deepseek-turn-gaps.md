@@ -37,8 +37,10 @@ No test in the tree takes the Runtime grant + hosted transport path with a real
 model. The two halves exist only against stand-ins: the provider's hosted
 socket control answers through a fake Runtime socket
 (`capsules/model-provider/tests/confine/main.rs:1533-1560`), and the Runtime's
-egress tests forward to loopback fixture URLs
-(`elastos/crates/elastos-server/src/api/model_provider_egress.rs:2268`).
+egress tests forward to loopback fixture URLs (the first is
+`hosted_job_effects_require_the_persisted_create_result` at
+`elastos/crates/elastos-server/src/api/model_provider_egress.rs:2650`, whose
+loopback sink, destination and `forward` call are at `:2716-2742`).
 
 ## The A4 path, as Anders states it
 
@@ -84,9 +86,10 @@ shape and host, then checks the offer, the effect, the model selector, the
 output cap, the destination and the run binding
 (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:536-600`,
 `:629-690`). The broker reads the key from the Home and never gives it to the
-provider (`:684`). The public routes are pinned to the two approved chat URLs
-(`:63-68`, `:1765-1776`). The Runtime records each hosted run before dispatch
-and checks it on every effect and every 250 ms
+provider (`:684`). The public routes are pinned to three routes: OpenRouter
+chat, Venice chat and OpenRouter decisions (`:63-68`, `:1767-1769`). The
+Runtime records each hosted run before dispatch and checks it on every effect
+and every 250 ms
 (`elastos/crates/elastos-runtime/src/provider/bridge.rs:926-1010`, `:1077-1092`,
 `:1407-1437`;
 `elastos/crates/elastos-server/src/api/model_provider_egress.rs:471-500`).
@@ -110,9 +113,11 @@ broker uses the saved connection approval
 (`elastos/crates/elastos-server/src/api/model_provider_config.rs:716-727`).
 
 Missing: a real key, an approved connection, and a DeepSeek selector that the
-provider lists. These are operator inputs, not code. The tree contains no
-DeepSeek model id: the only DeepSeek string is a fixture connection name
-(`elastos/crates/elastos-server/src/api/gateway_tests/home_system.rs:12071`).
+provider lists. These are operator inputs, not code. No hosted offer or
+Runtime config names a DeepSeek model id: the `deepseek-v4-flash` strings in
+the tree are the `model` field of two by-URL tests
+(`examples/agent-host/src/lib.rs:10153`, `:13256`) and one fixture connection
+name (`elastos/crates/elastos-server/src/api/gateway_tests/home_system.rs:12071`).
 This part is not checked here, because it needs a key and a network call.
 
 ### The Sparks or DGX engine is not a path
@@ -125,8 +130,9 @@ Sparks adapter among its five adapter kinds
 journey proves a local llama engine, not a host engine
 (`scripts/ci-installed-journeys.py:511`, `:1081`). In production the provider
 also refuses every external adapter that has no Runtime socket
-(`capsules/model-provider/src/adapters.rs:111-128`), and the broker forwards only
-to the two pins (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1765-1776`).
+(`capsules/model-provider/src/adapters.rs:111-128`), and the broker forwards
+only to those three pinned routes
+(`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1767-1769`).
 A private Sparks URL therefore has no production route. The Sparks or DGX model
 reached by URL (`SPARKS_MODEL_URL`) is not the A4 path (Anders, 26 Oct).
 
@@ -139,18 +145,13 @@ Each item sits on the Runtime grant + hosted transport path.
    the verified launch token and rejects a caller-supplied one
    (`elastos/crates/elastos-server/src/api/gateway_provider_proxy.rs:3995-4030`;
    test `elastos/crates/elastos-server/src/api/gateway_tests/model.rs:504-545`).
-   On the capsule Bus path the guest's body reaches the provider unchanged,
-   `runtime_binding` included
-   (`elastos/crates/elastos-server/src/resource_bridge.rs:183-250`, `:428-429`).
-   The Runtime records that binding and checks the offer, operation and input
-   hash only (`elastos/crates/elastos-model-contract/src/lib.rs:123-157`;
-   `elastos/crates/elastos-runtime/src/provider/bridge.rs:926-1010`). Build: the
-   Runtime replaces the guest's identity fields with the verified principal,
-   session and grant on the Bus path.
+   Build: the Runtime replaces the guest's identity fields with the verified
+   principal, session and grant on the Bus path.
 
 2. **The component launch supplies no verified principal.** Runtime-side
    (Anders). `elastos run` calls `Runtime::run_local`
-   (`elastos/crates/elastos-server/src/run_cmd.rs:231-233`), which passes
+   (`elastos/crates/elastos-server/src/run_cmd.rs:264-266`, the component
+   path; the capsule path calls it at `:71`), which passes
    `None` (`elastos/crates/elastos-server/src/runtime.rs:231-233`), and the
    component keeps that `None`
    (`elastos/crates/elastos-compute/src/providers/component.rs:201-213`). The

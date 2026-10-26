@@ -13,12 +13,6 @@ use tempfile::TempDir;
 /// The sentence of the note that keeps a pin outside the code, as written.
 const NEVER_COPIED: &str = "A pin is never copied from the code's output.";
 
-/// The note's text with every run of white space one space, so a sentence
-/// is found however README wraps it.
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// A one-package crate in a fresh temp folder outside the tree: a manifest
 /// with `tables` after its `[package]` table, and an empty `src/lib.rs`.
 fn consumer_fixture(tables: &str) -> TempDir {
