@@ -17,7 +17,9 @@ and complete bundle lab CID, with separate `build_only` and `launched` kinds.
 Cargo's `--show-output` supplies these records from this invocation. The existing
 build helpers hash the native binaries; the staging path names the exact probe
 manifest and payload through `capsule_identity::checked_bundle`.
-`ok` becomes PASS. `ignored, blocked: <id> …` becomes BLOCKED with that ID.
+`ok` becomes PASS. `ignored, blocked: <reason>` becomes BLOCKED with each
+semicolon-separated part trimmed and kept whole, joined by `; `.
+An empty reason or part gives FAIL.
 A failure, missing result, repeated result, ignored test without a blocker ID,
 or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
 remain open in [GAPS.md](GAPS.md).
@@ -29,6 +31,7 @@ remain open in [GAPS.md](GAPS.md).
 - `runtime_data_dir_is_under_throwaway_home`: places a dummy coordinates file in the guarded data directory and requires Runtime to remove it and return the same refusal reason. Its documentation-address URL is rejected before any network call.
 - `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
+- `run_table_grades_blocker_lists_by_one_rule`: checks whole multi-word blocker reasons, trimmed semicolon lists and FAIL for empty reasons or parts. F-report-blocker-list keeps only the first whitespace word; the named test must fail planted and pass restored.
 - `foreign_and_wrong_version_imports_are_refused`: rejects imports outside the probe's Bus subset.
 - `non_component_and_invalid_component_are_refused`: rejects a core module and invalid component bytes.
 - `probe_hash_is_stable`: compares the SHA-256 values from two independent probe compilations on this Mac.
@@ -375,8 +378,11 @@ Task 004 adds the agent-memory rows to the same Cargo-derived table:
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 
 F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
-instances the same principal. Run these only after the corresponding blocked
-journeys become live; forcing today's placeholders is zero falsifier evidence.
+instances the same principal. Both are retired under `UsersAI binding;
+AC-002-ARGS` in `falsifiers.json` until their named tests,
+`agent_cannot_read_other_agent_memory` and `agent_memory_under_own_principal`,
+respectively, become live. Then return each mutation to the active list and
+run it; forcing today's placeholders supplies zero falsifier evidence.
 F-ac2c adds the absent `fixtures/no-policy.json` file using its `new` text in
 `falsifiers.json` (`old: ""` denotes an absent file for this manual step).
 The entry allows every effect attempted by this instance: its one read.
