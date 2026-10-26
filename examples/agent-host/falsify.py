@@ -25,6 +25,11 @@ falsifier SURVIVED, and a survivor counts
 only when at least one of its named tests ran and none reported failed. A
 survivor whose named test did not run is NOT RUN.
 
+Before the first edit, every chosen named test runs once on the unmutated
+tree. A test that fails or cannot run there proves nothing: its entry is NOT
+RUN with that reason, and a command whose unmutated build fails makes every
+chosen entry of that command NOT RUN.
+
 The original file's bytes are kept as a hard link while the mutated copy is
 in place, and the restore is a rename, so it needs no free space. The restore
 runs on error, Ctrl-C and SIGTERM, and signals stay blocked until every
@@ -642,15 +647,95 @@ def falsify(entry, how=None):
     return verdict(entry, *result)
 
 
-def reported(entry):
+def reported(entry, how=None):
     """One falsifier's result. A data mismatch and a backup this run does not
     own each keep their own word and reason, so neither reads as a catch."""
     try:
-        return falsify(entry)
+        return falsify(entry, how)
     except LookupError as error:
         return False, "NO MATCH", str(error)
     except BackupCollision as error:
         return False, "BACKUP TAKEN", str(error)
+
+
+def baseline(chosen, how_for):
+    """(command -> (build_failed, outcomes)) from the unmutated tree, before
+    any edit. Each chosen command is built once and each distinct named test
+    runs once through evaluate(), the one per-named-test rule. A compile_error
+    entry adds only its command's build."""
+    check_disk()
+    tests = {}
+    for entry in chosen:
+        names = tests.setdefault(entry["command"], set())
+        if entry["expect"] in ("caught", "survives"):
+            names.update(entry["tests"])
+    return {command: evaluate({"command": command, "tests": sorted(names)},
+                              how_for(command))
+            for command, names in tests.items()}
+
+
+def baseline_line(base, chosen):
+    """One line for the run: how many distinct named-test pairs pass without
+    an edit, and how many do not. A compile_error entry has no named test."""
+    passed = not_passed = 0
+    seen = set()
+    for entry in chosen:
+        if entry["expect"] not in ("caught", "survives"):
+            continue
+        build_failed, outcomes = base.get(entry["command"], (False, {}))
+        for name in entry["tests"]:
+            if (entry["command"], name) in seen:
+                continue
+            seen.add((entry["command"], name))
+            if not build_failed and outcomes.get(name) == "passed":
+                passed += 1
+            else:
+                not_passed += 1
+    return f"baseline: {passed} named tests pass without an edit, {not_passed} do not"
+
+
+def judged(entry, base, how_for):
+    """One entry's result, held to the unmutated baseline first. An edit is
+    evidence for a test only when that test passes without it: a test that
+    fails, or cannot run, without the edit proves nothing (P11). A command
+    whose unmutated build fails proves nothing for any entry of it,
+    compile_error included."""
+    build_failed, outcomes = base.get(entry["command"], (False, {}))
+    if build_failed:
+        return False, "NOT RUN", "the unmutated build fails"
+    if entry["expect"] != "compile_error":
+        failed = [name for name in entry["tests"] if outcomes.get(name) == "failed"]
+        if failed:
+            return False, "NOT RUN", "fails without the edit: " + ", ".join(failed)
+        missing = [name for name in entry["tests"]
+                   if outcomes.get(name, "not run") == "not run"]
+        if missing:
+            return False, "NOT RUN", "did not run without the edit: " + ", ".join(missing)
+    return reported(entry, how_for(entry["command"]))
+
+
+def judged_entries(chosen, base, how_for):
+    """Yield each judgment lazily so run_chosen() can time its execution."""
+    for entry in chosen:
+        yield entry, judged(entry, base, how_for)
+
+
+def run_chosen(chosen, how_for=None, on_baseline=None):
+    """The one order for a run: the unmutated baseline for the chosen
+    commands, then each entry's result. main() and the self-test cases use
+    this same function, so a case never rebuilds the order by hand. The
+    baseline finishes before the first edit, and on_baseline(line) runs
+    between them. Yield each entry, result and execution duration; baseline
+    work and time spent by the caller between entries have separate costs."""
+    how_for = how_for or spec
+    base = baseline(chosen, how_for)
+    if on_baseline is not None:
+        on_baseline(baseline_line(base, chosen))
+    pending = judged_entries(chosen, base, how_for)
+    for _ in chosen:
+        start = time.monotonic()
+        entry, result = next(pending)
+        yield entry, result, time.monotonic() - start
 
 
 REAL_CRATE = {
@@ -693,9 +778,28 @@ mod tests {
 }
 """
 
+# A crate that cannot build: the baseline must refuse every entry of its
+# command instead of crediting an edit that leaves it broken.
+BROKEN_LIB_RS = "this is not Rust\n"
+
 STUB_LIST_MISSING = """import sys
 print("tests::some_other_test: test")
 raise SystemExit(0)
+"""
+
+# The named test exists only after the edit: the baseline could not run it,
+# while an accepted baseline would let the edited run report a failure.
+STUB_LISTS_ONLY_WHEN_MUTATED = """import pathlib
+import sys
+mutated = pathlib.Path(__file__).with_name("mutable.txt").read_text(
+    encoding="utf-8") == "mutated bytes\\n"
+if "--list" in sys.argv:
+    if mutated:
+        print("tests::planted_check: test")
+    raise SystemExit(0)
+if mutated:
+    print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101 if mutated else 0)
 """
 
 STUB_HARNESS_ERROR = """import sys
@@ -1352,6 +1456,297 @@ def provider_failure_with_stderr_counts():
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
+
+
+def real_crate():
+    """Write REAL_CRATE under SELF_TEST_DIR and return its host spec."""
+    for name, text in REAL_CRATE.items():
+        path = SELF_TEST_DIR / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return spec("host", SELF_TEST_DIR / "Cargo.toml", ("--offline",))
+
+
+def a_test_that_fails_without_the_edit_is_not_a_catch():
+    """A named test that already fails without the edit proves nothing: the
+    entry reads NOT RUN with that reason and no edit is applied. Original
+    bytes and an absent backup also hold after an applied and restored edit,
+    so this case also asserts Mutation is never entered (task 024)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        how = real_crate()
+        path = SELF_TEST_DIR / "harmless.txt"
+        original = "original bytes\n"
+        path.write_text(original, encoding="utf-8")
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "edits": [{"file": "harmless.txt", "old": "original bytes",
+                            "new": "mutated bytes"}],
+                 "tests": ["tests::fails_plainly"]}
+        entered = []
+        real_mutation = Mutation
+
+        def recording_mutation(item, base=HERE):
+            entered.append(item["id"])
+            return real_mutation(item, base)
+
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: recording_mutation(item, SELF_TEST_DIR)):
+            got = list(run_chosen([entry], how_for=lambda _command: how))[0][1]
+        backup = path.with_name(path.name + BACKUP_SUFFIX)
+        kept = path.read_text(encoding="utf-8") == original
+        print(f"self-test: a test that fails without the edit: {got[1]} ({got[2]}); "
+              f"entered={entered}, bytes kept={kept}, backup left={backup.exists()}")
+        reason = "fails without the edit: tests::fails_plainly"
+        if got != (False, "NOT RUN", reason):
+            ok = False
+        if entered or not kept or backup.exists():
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_test_that_passes_without_the_edit_still_counts():
+    """The edit makes a test that passes without it panic: that is a catch,
+    and the baseline must not hide it (task 024)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        how = real_crate()
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "edits": [{
+                     "file": "src/lib.rs",
+                     "old": '        println!("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out");',
+                     "new": '        panic!("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out");',
+                 }],
+                 "tests": ["tests::genuinely_passing"]}
+        real_mutation = Mutation
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: real_mutation(item, SELF_TEST_DIR)):
+            got = list(run_chosen([entry], how_for=lambda _command: how))[0][1]
+        print(f"self-test: a test that passes without the edit: {got[1]} ({got[2]})")
+        if got[:2] != (True, "CAUGHT"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_unmutated_build_failure_is_not_a_catch():
+    """A command whose unmutated build fails is refused for every entry of
+    it, compile_error included: an edit that leaves it broken is no catch
+    (task 024)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        (SELF_TEST_DIR / "src").mkdir(parents=True, exist_ok=True)
+        (SELF_TEST_DIR / "Cargo.toml").write_text(REAL_CRATE["Cargo.toml"], encoding="utf-8")
+        (SELF_TEST_DIR / "src" / "lib.rs").write_text(BROKEN_LIB_RS, encoding="utf-8")
+        entry = {"id": "ST", "command": "host", "expect": "compile_error",
+                 "edits": [{"file": "src/lib.rs", "old": "this is not Rust",
+                            "new": "this is still not Rust"}],
+                 "tests": []}
+        how = spec("host", SELF_TEST_DIR / "Cargo.toml", ("--offline",))
+        real_mutation = Mutation
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: real_mutation(item, SELF_TEST_DIR)):
+            got = list(run_chosen([entry], how_for=lambda _command: how))[0][1]
+        print(f"self-test: an unmutated build failure: {got[1]} ({got[2]})")
+        if got != (False, "NOT RUN", "the unmutated build fails"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_baseline_test_that_cannot_run_is_refused():
+    """A named test the baseline could not run is not evidence: the entry
+    reads NOT RUN with that reason, never a catch (task 024)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        (SELF_TEST_DIR / "mutable.txt").write_text("original bytes\n", encoding="utf-8")
+        stub = SELF_TEST_DIR / "stub.py"
+        stub.write_text(STUB_LISTS_ONLY_WHEN_MUTATED, encoding="utf-8")
+        how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "edits": [{"file": "mutable.txt", "old": "original bytes",
+                            "new": "mutated bytes"}],
+                 "tests": ["tests::planted_check"]}
+        real_mutation = Mutation
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: real_mutation(item, SELF_TEST_DIR)):
+            got = list(run_chosen([entry], how_for=lambda _command: how))[0][1]
+        print(f"self-test: a baseline test that cannot run: {got[1]} ({got[2]})")
+        if got != (False, "NOT RUN",
+                   "did not run without the edit: tests::planted_check"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_survivor_requires_a_passing_baseline():
+    """A survives entry needs the same passing baseline as a catch: a test
+    that fails without the edit is NOT RUN, never CAUGHT, and one the baseline
+    could not run is NOT RUN with that reason, never SURVIVED (task 024)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        how = real_crate()
+        failed = {"id": "ST", "command": "host", "expect": "survives",
+                  "edits": [], "tests": ["tests::fails_plainly"]}
+        got = list(run_chosen([failed], how_for=lambda _command: how))[0][1]
+        print(f"self-test: survivor with a failing baseline: {got[1]} ({got[2]})")
+        if got != (False, "NOT RUN", "fails without the edit: tests::fails_plainly"):
+            ok = False
+        stub = SELF_TEST_DIR / "stub.py"
+        stub.write_text(STUB_LIST_MISSING, encoding="utf-8")
+        stub_how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+        missing = {"id": "ST", "command": "host", "expect": "survives",
+                   "edits": [], "tests": ["tests::planted_check"]}
+        got = list(run_chosen([missing], how_for=lambda _command: stub_how))[0][1]
+        print(f"self-test: survivor with a baseline that did not run: {got[1]} ({got[2]})")
+        if got != (False, "NOT RUN",
+                   "did not run without the edit: tests::planted_check"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def baseline_batches_chosen_pairs_before_edits():
+    """The baseline runs each distinct (command, named test) pair once, one
+    evaluate() call per command, and finishes before the first edit. A
+    compile_error entry adds only its command (task 024)."""
+    ok = True
+    calls = []
+    events = []
+    mutated = []
+    entries = [
+        {"id": "ST1", "command": "one", "expect": "caught",
+         "tests": ["x", "y"], "edits": []},
+        {"id": "ST2", "command": "one", "expect": "survives",
+         "tests": ["y", "z"], "edits": []},
+        {"id": "ST3", "command": "two", "expect": "caught",
+         "tests": ["x"], "edits": []},
+        {"id": "ST4", "command": "one", "expect": "compile_error",
+         "tests": [], "edits": []},
+    ]
+
+    class FakeMutation:
+        def __init__(self, item, base=HERE):
+            self.item = item
+
+        def __enter__(self):
+            mutated.append(self.item["id"])
+            events.append("mutate " + self.item["id"])
+            return self
+
+        def __exit__(self, *_):
+            events.append("restore " + self.item["id"])
+            mutated.pop()
+            return False
+
+    def fake_evaluate(item, _how):
+        if mutated:
+            events.append("edited " + item["command"])
+            if item.get("expect") == "compile_error":
+                return True, {}
+            return False, {name: "failed" for name in item["tests"]}
+        events.append("baseline " + item["command"])
+        calls.append((item["command"], list(item["tests"])))
+        return False, {name: "passed" for name in item["tests"]}
+
+    lines = []
+    with mock.patch.dict(globals(), evaluate=fake_evaluate, Mutation=FakeMutation):
+        results = list(run_chosen(
+            entries, how_for=lambda _command: {"build": [], "one": ([], REPO, [])},
+            on_baseline=lines.append))
+    first_edit = next((at for at, event in enumerate(events)
+                       if event.startswith("mutate")), len(events))
+    last_baseline = max((at for at, event in enumerate(events)
+                         if event.startswith("baseline")), default=-1)
+    words = [got[1] for _entry, got, _duration in results]
+    print(f"self-test: baseline batches chosen pairs: calls={calls}, lines={lines}, "
+          f"baseline before edits={last_baseline < first_edit}, words={words}")
+    if calls != [("one", ["x", "y", "z"]), ("two", ["x"])]:
+        ok = False
+    if lines != ["baseline: 4 named tests pass without an edit, 0 do not"]:
+        ok = False
+    if first_edit <= last_baseline:
+        ok = False
+    if words != ["CAUGHT", "CAUGHT (listed as a survivor)", "CAUGHT",
+                 "CAUGHT (does not build)"]:
+        ok = False
+    return ok
+
+
+def baseline_checks_free_space_before_building():
+    """The baseline checks free space before it builds or runs anything
+    (task 024)."""
+    built = []
+
+    def no_space():
+        raise DiskFull("planted full disk")
+
+    def fake_evaluate(item, _how):
+        built.append(item["command"])
+        return False, {}
+
+    entry = {"id": "ST", "command": "host", "expect": "caught",
+             "tests": ["tests::x"], "edits": []}
+    raised = False
+    with mock.patch.dict(globals(), check_disk=no_space, evaluate=fake_evaluate):
+        try:
+            list(run_chosen([entry]))
+        except DiskFull:
+            raised = True
+    print(f"self-test: baseline disk check: raised={raised}, built={built}")
+    return raised and not built
+
+
+def entry_durations_include_execution():
+    """Printed durations cover each entry's work, with baseline and output
+    time excluded. A refused entry keeps its own duration too."""
+    clock = [0.0]
+    entries = [
+        {"id": "ST1", "command": "host", "expect": "caught",
+         "tests": ["ready"], "edits": [], "title": "first entry"},
+        {"id": "ST2", "command": "host", "expect": "caught",
+         "tests": ["ready"], "edits": [], "title": "second entry"},
+        {"id": "ST3", "command": "host", "expect": "caught",
+         "tests": ["blocked"], "edits": [], "title": "refused entry"},
+    ]
+
+    def fake_evaluate(_entry, _how):
+        clock[0] += 11
+        return False, {"ready": "passed", "blocked": "failed"}
+
+    def fake_reported(entry, _how):
+        clock[0] += {"ST1": 5, "ST2": 7}[entry["id"]]
+        return True, "CAUGHT", ""
+
+    class SlowOutput(io.StringIO):
+        def write(self, text):
+            clock[0] += 100
+            return super().write(text)
+
+    output = SlowOutput()
+    with mock.patch.dict(globals(), load=lambda _path: entries,
+                         evaluate=fake_evaluate, reported=fake_reported,
+                         check_disk=lambda: None), \
+            mock.patch.object(time, "monotonic", side_effect=lambda: clock[0]), \
+            contextlib.redirect_stdout(output):
+        code = main(["ST", "--keep-backups"])
+    printed = output.getvalue()
+    durations = re.findall(r"^(ST[123])\s+.+?\s+(\d+)s  ", printed, re.MULTILINE)
+    print(f"self-test: entry durations include execution: {durations}")
+    return (code == 1 and durations == [("ST1", "5"), ("ST2", "7"), ("ST3", "0")]
+            and "summary: 2 CAUGHT, 1 NOT RUN of 3\n" in printed
+            and "fails without the edit: blocked\n" in printed)
 
 
 def interruption_at_the_end_of_the_edit():
@@ -2319,6 +2714,16 @@ SELF_TEST_CASES = {
     "the streams keep their own lines": the_streams_keep_their_own_lines,
     "a real catch counts": real_catch_counts,
     "a provider failure with stderr counts": provider_failure_with_stderr_counts,
+    "a test that fails without the edit is not a catch":
+        a_test_that_fails_without_the_edit_is_not_a_catch,
+    "a test that passes without the edit still counts":
+        a_test_that_passes_without_the_edit_still_counts,
+    "an unmutated build failure is not a catch": an_unmutated_build_failure_is_not_a_catch,
+    "a baseline test that cannot run is refused": a_baseline_test_that_cannot_run_is_refused,
+    "a survivor requires a passing baseline": a_survivor_requires_a_passing_baseline,
+    "baseline batches chosen pairs before edits": baseline_batches_chosen_pairs_before_edits,
+    "baseline checks free space before building": baseline_checks_free_space_before_building,
+    "entry durations include execution": entry_durations_include_execution,
     "an unterminated failure section stays checked": an_unterminated_failure_section_stays_checked,
     "the section header is an exact line": section_header_is_an_exact_line,
     "the closing delimiter is an exact line": closing_delimiter_is_an_exact_line,
@@ -2424,14 +2829,12 @@ def main(argv):
     ran_e2e = False
     stopped_for_disk = False
     try:
-        for entry in chosen:
-            start = time.monotonic()
-            ok, word, detail = reported(entry)
+        for entry, (ok, word, detail), duration in run_chosen(chosen, on_baseline=print):
             ran_e2e |= entry["command"] == "e2e"
             counts[word] = counts.get(word, 0) + 1
             if not ok:
                 bad.append(entry["id"])
-            print(f"{entry['id']:6} {word:30} {time.monotonic() - start:5.0f}s  {entry['title']}"
+            print(f"{entry['id']:6} {word:30} {duration:5.0f}s  {entry['title']}"
                   + (f"\n       {detail}" if detail else ""), flush=True)
     except DiskFull as error:
         stopped_for_disk = True

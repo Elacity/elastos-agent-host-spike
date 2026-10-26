@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. PV54 and PV55 remove or over-extend the failed test's own captured section that keeps a quoted child standard error out of the harness error search, and PV56-PV59 accept the end of the output as its closing delimiter, match the section header anywhere on a line, end the section at its last delimiter, remove only the first section, and PV60 lets a line that starts with the closing delimiter and goes on close a section. PV61-PV64 read the loader or Cargo marker after the section removal, accept text after the section header, and close a section at a line that ends with the closing delimiter. MP17-MP20 break the post-reap group probe for a zombie-only group on the Mac: MP17 restores the immediate EPERM failure, MP18 makes an EPERM that lasts to the deadline a bare timeout, MP19 accepts that EPERM as closure without ESRCH, and MP20 drops the deadline's closure reason; their evidence is macOS only. Files are relative to examples/agent-host. PV75-PV84 drop one of the wasm lab's ten edit and run-log recovery targets, so a killed lab run leaves that file mutated.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. PV54 and PV55 remove or over-extend the failed test's own captured section that keeps a quoted child standard error out of the harness error search, and PV56-PV59 accept the end of the output as its closing delimiter, match the section header anywhere on a line, end the section at its last delimiter, remove only the first section, and PV60 lets a line that starts with the closing delimiter and goes on close a section. PV61-PV64 read the loader or Cargo marker after the section removal, accept text after the section header, and close a section at a line that ends with the closing delimiter. MP17-MP20 break the post-reap group probe for a zombie-only group on the Mac: MP17 restores the immediate EPERM failure, MP18 makes an EPERM that lasts to the deadline a bare timeout, MP19 accepts that EPERM as closure without ESRCH, and MP20 drops the deadline's closure reason; their evidence is macOS only. Files are relative to examples/agent-host. PV75-PV84 drop one of the wasm lab's ten edit and run-log recovery targets, so a killed lab run leaves that file mutated. PV85-PV95 break the unmutated baseline: the run proves each named test passes without the edit before it credits the edit, and these entries skip, accept, reorder or bypass that proof.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -1608,6 +1608,187 @@
       ],
       "tests": [
         "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV85",
+      "title": "the baseline is skipped, so no named test is proved to pass without the edit",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    base = baseline(chosen, how_for)\n",
+          "new": "    base = {entry[\"command\"]: (False, {name: \"passed\"\n            for chosen_entry in chosen if chosen_entry[\"command\"] == entry[\"command\"]\n            for name in chosen_entry[\"tests\"]}) for entry in chosen}\n"
+        }
+      ],
+      "tests": [
+        "a test that fails without the edit is not a catch"
+      ]
+    },
+    {
+      "id": "PV86",
+      "title": "a baseline outcome of failed is accepted as passed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        failed = [name for name in entry[\"tests\"] if outcomes.get(name) == \"failed\"]\n",
+          "new": "        failed = []\n"
+        }
+      ],
+      "tests": [
+        "a test that fails without the edit is not a catch"
+      ]
+    },
+    {
+      "id": "PV87",
+      "title": "the unmutated build failure is ignored for compile_error entries",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if build_failed:\n        return False, \"NOT RUN\", \"the unmutated build fails\"\n",
+          "new": "    if build_failed and entry[\"expect\"] != \"compile_error\":\n        return False, \"NOT RUN\", \"the unmutated build fails\"\n"
+        }
+      ],
+      "tests": [
+        "an unmutated build failure is not a catch"
+      ]
+    },
+    {
+      "id": "PV88",
+      "title": "a baseline outcome of not run is accepted as passed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        missing = [name for name in entry[\"tests\"]\n                   if outcomes.get(name, \"not run\") == \"not run\"]\n",
+          "new": "        missing = []\n"
+        }
+      ],
+      "tests": [
+        "a baseline test that cannot run is refused"
+      ]
+    },
+    {
+      "id": "PV89",
+      "title": "the baseline guard is bypassed for survives entries",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if entry[\"expect\"] != \"compile_error\":\n",
+          "new": "    if entry[\"expect\"] == \"caught\":\n"
+        }
+      ],
+      "tests": [
+        "a survivor requires a passing baseline"
+      ]
+    },
+    {
+      "id": "PV90",
+      "title": "the baseline keeps duplicate named tests instead of one pair",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        names = tests.setdefault(entry[\"command\"], set())\n        if entry[\"expect\"] in (\"caught\", \"survives\"):\n            names.update(entry[\"tests\"])\n",
+          "new": "        names = tests.setdefault(entry[\"command\"], [])\n        if entry[\"expect\"] in (\"caught\", \"survives\"):\n            names.extend(entry[\"tests\"])\n"
+        }
+      ],
+      "tests": [
+        "baseline batches chosen pairs before edits"
+      ]
+    },
+    {
+      "id": "PV91",
+      "title": "the baseline merges every command's named tests into one command",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        names = tests.setdefault(entry[\"command\"], set())\n",
+          "new": "        names = tests.setdefault(\"host\", set())\n"
+        }
+      ],
+      "tests": [
+        "baseline batches chosen pairs before edits"
+      ]
+    },
+    {
+      "id": "PV92",
+      "title": "the baseline runs each entry's named tests separately instead of once per command",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    tests = {}\n    for entry in chosen:\n        names = tests.setdefault(entry[\"command\"], set())\n        if entry[\"expect\"] in (\"caught\", \"survives\"):\n            names.update(entry[\"tests\"])\n    return {command: evaluate({\"command\": command, \"tests\": sorted(names)},\n                              how_for(command))\n            for command, names in tests.items()}\n",
+          "new": "    results = {}\n    for entry in chosen:\n        results[entry[\"command\"]] = evaluate(\n            {\"command\": entry[\"command\"], \"tests\": list(entry[\"tests\"])},\n            how_for(entry[\"command\"]))\n    return results\n"
+        }
+      ],
+      "tests": [
+        "baseline batches chosen pairs before edits"
+      ]
+    },
+    {
+      "id": "PV93",
+      "title": "the baseline runs again before each entry instead of once before the first edit",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    for entry in chosen:\n        yield entry, judged(entry, base, how_for)\n",
+          "new": "    for entry in chosen:\n        base = baseline([entry], how_for)\n        yield entry, judged(entry, base, how_for)\n"
+        }
+      ],
+      "tests": [
+        "baseline batches chosen pairs before edits"
+      ]
+    },
+    {
+      "id": "PV94",
+      "title": "the entry is mutated before the baseline refuses it",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    build_failed, outcomes = base.get(entry[\"command\"], (False, {}))\n    if build_failed:\n",
+          "new": "    result = reported(entry, how_for(entry[\"command\"]))\n    build_failed, outcomes = base.get(entry[\"command\"], (False, {}))\n    if build_failed:\n"
+        },
+        {
+          "file": "falsify.py",
+          "old": "    return reported(entry, how_for(entry[\"command\"]))\n",
+          "new": "    return result\n"
+        }
+      ],
+      "tests": [
+        "a test that fails without the edit is not a catch"
+      ]
+    },
+    {
+      "id": "PV95",
+      "title": "the baseline skips its free-space check before building",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    check_disk()\n    tests = {}\n",
+          "new": "    tests = {}\n"
+        }
+      ],
+      "tests": [
+        "baseline checks free space before building"
       ]
     },
     {
