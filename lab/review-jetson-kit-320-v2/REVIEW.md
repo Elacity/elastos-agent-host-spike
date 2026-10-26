@@ -6,6 +6,7 @@ Draft only. Do not merge. This folder does not edit
 ```text
 Lane:         lab/review-jetson-kit-320-v2
 Reviewed:     Elacity/elastos-agent-host-spike#320
+Review PR:    Elacity/elastos-agent-host-spike#345
 #320 head:    2bb0b5859bbf8582a43d958e3ddc1569eb77bf97
               (cursor/jetson-proof-kit-fd7b)
 #307 pin:     2c70a0d845f9acc15144a2afec889370612cca66
@@ -152,21 +153,37 @@ offline while C0 is still expected to build.
 
 ```text
 bash /tmp/jpk-320/lab/jetson-proof-kit/tests/test_guards.sh
-  (re-run; numbers in the next commit if this file landed first)
-
+  summary 74 passed 0 failed
 bash /tmp/jpk-320/lab/jetson-proof-kit/tests/test_decisions.sh
-  (re-run)
-
+  summary 55 passed 0 failed
 bash /tmp/jpk-320/lab/jetson-proof-kit/falsify.sh
-  (re-run)
-
+  F-JPK-OUTSIDE CAUGHT
+  F-JPK-MEM CAUGHT
+  F-JPK-ABI CAUGHT
+  F-JPK-CAP CAUGHT
+  F-JPK-REASON CAUGHT
+  F-JPK-LIE CAUGHT
+  F-JPK-ABSENT CAUGHT
+  summary 7 CAUGHT of 7
 python3 -I lab/review-jetson-kit-320-v2/check.py
   summary 54 passed 0 failed
+bash lab/review-jetson-kit-320-v2/falsify.sh
+  F-RV-ORACLE CAUGHT
+  F-RV-PIN CAUGHT
+  F-RV-REASON CAUGHT
+  F-RV-LIE CAUGHT
+  F-RV-ENOEXEC CAUGHT
+  F-RV-JOBS CAUGHT
+  F-RV-PC2 CAUGHT
+  summary 7 CAUGHT of 7
 
 This host:
   rustc standin.rs -C target-feature=+crt-static
     static-pie linked; ldd: statically linked
 ```
+
+`#307` `cargo test` and a live `fcl-launch` were not re-run. The
+reason-text and lying-ABI checks used the #307 source at `2c70a0d8`.
 
 ## New falsifiers
 
