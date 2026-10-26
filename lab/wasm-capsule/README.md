@@ -343,7 +343,7 @@ wasm_capsule_tools::verify::verify_bundle(bundle: &Path, signature: Option<&Name
     accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
 ```
 
-**One call, four checks, in order.** `verify_checked` takes a
+**One call, five checks, in order.** `verify_checked` takes a
 `CheckedBundle` from cc-capsule-identity's `checked_bundle` (the lab CID with
 the bytes its one walk read), the bundle's in-memory `NameSignature`, the
 accepted signer DIDs and the granted imports. The first refusal is the answer:
@@ -356,7 +356,9 @@ accepted signer DIDs and the granted imports. The first refusal is the answer:
    Runtime's `CapsuleManifest` (the one reader of that file), names the module
    among the checked entries;
 4. the cx-wasm-audit crate's `audit(module, granted)` on that module's checked
-   bytes.
+   bytes;
+5. since task 031, each import on the audit's returned list has a typed entry
+   in `LAB_OPERATIONS` ("Typed lab operations (M1 B4 lab half)", below).
 
 `verify_bundle` is `checked_bundle` and then `verify_checked`, with no check of
 its own, so the walk's refusals come first. The tools crate has exactly one
@@ -374,7 +376,9 @@ signature or import code of its own (no `wasmparser`).
   signature that does not verify), carried unchanged and printed exactly as
   that lane prints it;
 - every audit refusal (`undeclared import {module}.{name}`, `malformed module`,
-  `code in custom section`), carried unchanged.
+  `code in custom section`), carried unchanged;
+- a granted import with no typed lab operation (task 031):
+  `no typed lab operation for import <module>.<name>`.
 
 A fifth reason, `the Runtime's CapsuleManifest could not read the checked
 capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
@@ -701,16 +705,18 @@ signature. The grants file is the caller's input, like the bundle path; it sits
 outside the bundle and is never part of the lab CID.
 
 **The grants file.** JSON, read once with `fs::read` and parsed from memory,
-exactly:
+exactly (task 031 made it v2: each grant names a right):
 
 ```json
-{"schema": "wc-009.lab-grants/v1", "label": "lab stand-in, not admission", "imports": [{"module": "env", "name": "f"}]}
+{"schema": "wc-009.lab-grants/v2", "label": "lab stand-in, not admission", "imports": [{"module": "env", "name": "f", "right": "call"}]}
 ```
 
-An empty `imports` list is valid. The label is exactly "lab stand-in, not
+An empty `imports` list is valid. A v1 file (grants with no `right`) is refused
+by the schema check. The label is exactly "lab stand-in, not
 admission": the file stands in for the Runtime's grant decision
 (https://github.com/Elacity/elastos-runtime/issues/464), and is never
-admission. `read_grants` returns the grants in file order. It is the one grants
+admission. `read_grants` returns the grants in file order, without their
+rights. It is the one grants
 reader and lives in `tools/src/verify.rs`, beside the verifier input it feeds;
 no other code in the tools crate reads grants or imports. Each refusal has its
 own reason, after `<path>: `:
@@ -720,11 +726,14 @@ own reason, after `<path>: `:
 - `the grants file is not a JSON object`;
 - `the grants file has an unknown key "<key>"`;
 - `the grants file has no "<schema|label|imports>" key`;
-- `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v1"`;
+- `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v2"`;
 - `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
 - `the grants file's imports is not a list`;
-- `grant <index> is not an object of exactly two strings, module and name`;
-- `the grant <module>.<name> is listed twice`.
+- `grant <index> is not an object of exactly three strings, module, name and right`;
+- `the grant <module>.<name> is listed twice`;
+- `the grant <module>.<name> names the right "<granted>", but its typed lab
+  operation needs "<needed>"` (task 031: the grant of an import that has a
+  typed lab operation names any right but the one it needs).
 
 A key written twice in one JSON object is not refused: `serde_json` keeps its
 last value, so the file reads as that value. This is a known limit of the lab
@@ -736,7 +745,10 @@ call, so to the verifier's one `audit(module, granted)` call. There is no
 second import check, parser or walk. A module with an import that is not
 granted is refused there, `undeclared import <module>.<name>`, and never
 reaches an engine: no run folder is made and neither engine is started, not
-even for `--version`. On success the run reports:
+even for `--version`. Task 031: a module import that is granted but has no
+typed lab operation (below) is refused the same way, right after that `audit`
+call, on the audit's own list, `no typed lab operation for import
+<module>.<name>`. On success the run reports:
 
 - `linked()`: the audit's own list, the imports both in the signed module and
   granted, in section order;
@@ -755,6 +767,40 @@ the accepted record, the selected platform variant and the installed contents.
 Those checks are Runtime work, outside this lane. The grants file is "lab
 stand-in, not admission" everywhere: this lane decides no admission, launch or
 publisher trust, and its lab name is not the Runtime's CID.
+
+### Typed lab operations (M1 B4 lab half)
+
+Task 031 (Flint, INBOX 26 Oct 23:50, "one permission model"). Each import the
+lab runner can link is listed once as a typed operation in `pub const
+LAB_OPERATIONS` (`tools/src/verify.rs`): its module and name, its inputs and
+outputs (Wasm value type names), the one right a grant of it must name, and its
+effect (`none`, `read` or `write`). It is the only copy of the table in code,
+and `readme_lists_each_typed_lab_operation` fails if this list and the table
+differ:
+
+- `env.f`: inputs `()`, outputs `()`, right `call`, effect `none`
+
+Two refusals use it, both before any engine starts:
+
+- The grants reader, `read_grants`, refuses a grant whose `right` is not its
+  operation's right (`env.f` granted `write`: `the grant env.f names the right
+  "write", but its typed lab operation needs "call"`). A grant of an import
+  with no typed operation names no needed right; it is read, and it links
+  nothing unless the module imports it.
+- The verifier, `verify_checked`, refuses a module import with no typed
+  operation, even when granted: `no typed lab operation for import env.g`. The
+  check runs on the audit's own returned list, right after the one `audit`
+  call, so it reads no import of its own (P10), and a grant the module does
+  not import stays an unused grant, reported as before. A module importing
+  `env.g` with no grant is still refused by the audit first, `undeclared import
+  env.g`.
+
+No manifest field is added: the module's own import section stays the
+declaration (https://github.com/Elacity/elastos-runtime/issues/464). The lab
+does not check an import's Wasm type against its entry, since the audit's v1
+API returns names only. The table and the grants are a lab stand-in, not
+admission: input for Anders's typed-operations model, not the Runtime's rights
+model.
 
 ## Memory cap discovery (wc-010a)
 
@@ -1329,13 +1375,20 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
   `read_to_end` outside `read_grants`, and `read_grants` has exactly one
   `fs::read` and none of the others.
-- `grants_file_refusals_keep_their_reason` (wc-009a) — `GRANTS_SCHEMA` and
-  `GRANTS_LABEL` are exactly `wc-009.lab-grants/v1` and `lab stand-in, not
-  admission`; an empty list and two grants read in file order; a missing file
-  keeps `NotFound` and its OS text; and 19 malformed files (not JSON, a list or
-  a string document, an unknown key, each missing key, another or a number
-  schema, another label and one with a trailing space, imports as an object,
-  six bad entries, the same pair twice) each give their exact text.
+- `grants_file_refusals_keep_their_reason` (wc-009a; v2 since task 031) —
+  `GRANTS_SCHEMA` and `GRANTS_LABEL` are exactly `wc-009.lab-grants/v2` and
+  `lab stand-in, not admission`; an empty list and two grants read in file
+  order; a missing file keeps `NotFound` and its OS text; and 21 malformed
+  files (not JSON, a list or a string document, an unknown key, each missing
+  key, a v1 file or a number schema, another label and one with a trailing
+  space, imports as an object, eight bad entries among them the v1 pair with
+  no right and a number right, the same pair twice) each give their exact text.
+- `grant_naming_a_right_the_operation_does_not_need_is_refused` (task 031) —
+  `LAB_OPERATIONS` is exactly the one entry `env.f`, inputs and outputs none,
+  right `call`, effect `none`; `env.f` granted `call` reads, and `env.g` (no
+  typed operation) granted `write` reads; `env.f` granted `write`, `read`,
+  `Call`, `call ` or the empty string is refused as `RightNotNeeded` with the
+  import, the right granted and `call`, and its exact text after the path.
 - `unused_grants_excludes_linked_and_preserves_file_order` (wc-009a) — the
   module that imports `env.f`, granted `z.last`, `env.f`, `a.first`:
   `imports()` is `[env.f]`, `unused_grants()` is `[z.last, a.first]`, and the
@@ -1505,11 +1558,17 @@ is zero of both:
   8-byte module, validly signed, with an empty grants file: `linked()` is empty.
 - `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`
   (Rong's rename of `granted_but_undeclared_is_refused`) — the zero-import
-  module, grants `[env.f]`: it runs, `linked()` is empty, `unused_grants()` is
-  exactly `[env.f]`.
+  module, grants `[env.f]` (right `call`): it runs, `linked()` is empty,
+  `unused_grants()` is exactly `[env.f]`.
 - `granted_import_is_linked` — the module that imports `env.f`, grants
-  `[env.f]`: it passes verification, `linked()` is exactly `[env.f]`, each
-  engine once, and both run folders hold the verified module.
+  `[env.f]` (right `call`): it passes verification, `linked()` is exactly
+  `[env.f]`, each engine once, and both run folders hold the verified module.
+- `module_import_with_no_typed_operation_is_refused` (task 031) — the module
+  that imports `env.g` (no typed lab operation), granted `env.g`: refused as
+  `TwoEngineRefusal::Verify(VerifyRefusal::UntypedImport { module: "env", name:
+  "g" })`, text exactly `no typed lab operation for import env.g`; with no
+  grant, refused by the audit as `undeclared import env.g`. Both: no run
+  folder, and zero starts of either kind.
 
 Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
 (26 Oct) as one exact sentence, read through `lane_file`:
@@ -1526,6 +1585,13 @@ Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
   before its first per-engine answer line (a line starting `### wasmtime`,
   `### wasmer`, `- wasmtime:` or `- wasmer:`), and ADOPTION holds it exactly
   once on one line. It fails naming what is missing or out of place.
+
+Task 031's README guard, in `tests/docs.rs`:
+
+- `readme_lists_each_typed_lab_operation` — README has the heading "### Typed
+  lab operations (M1 B4 lab half)" once, and its lines that start ``- ` `` are,
+  in order, exactly one line per `LAB_OPERATIONS` entry, rendered from the
+  table's own fields. It fails showing both lists.
 
 wc-010b's run tests (task 027), in `tests/run.rs`. The grow modules are
 hand-written bytes: one memory of 1 page with no maximum, no import, and one
@@ -1581,20 +1647,21 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 
 ## Falsifiers
 
-`falsifiers.json` holds 157 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 159 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
-seven wc-010b (task 027), two wc-010c (task 028) and two task 029.
+seven wc-010b (task 027), two wc-010c (task 028), two task 029 and two task
+031.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 93, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028
-and 029: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2), each run by the
+Two kinds of evidence, kept apart. Runner-caught: 95, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
+029 and 031: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2), each run by the
 canonical runner with its summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
@@ -2049,4 +2116,19 @@ test fails at its assertion:
   `granted_import_is_linked`).
 
 Task 029 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before.
+
+Task 031's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 031). Both anchors are in `tools/src/verify.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC-B4-UNTYPED-LINKED — `verify_checked` drops the typed-entry check, so a
+  granted import with no typed lab operation is linked and the module runs
+  (`module_import_with_no_typed_operation_is_refused`, at its refusal).
+- F-WC-B4-RIGHT-IGNORED — `parse_grants` drops the right comparison, so
+  `env.f` granted `write` is read
+  (`grant_naming_a_right_the_operation_does_not_need_is_refused`, at its
+  refusal).
+
+Task 031 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before.
