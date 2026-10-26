@@ -1034,7 +1034,13 @@ fn report_inventory(
         output.push_str(&observation.line());
         output.push('\n');
     }
-    let report = render_run(&listed, &output, passed, GitIdentity::read(&repository()));
+    let report = render_run(
+        &listed,
+        &output,
+        passed,
+        GitIdentity::read(&repository()),
+        Some(include_str!("../../GAPS.md")),
+    );
     if !report.failures.is_empty() {
         return Err("credential check requires a complete report");
     }

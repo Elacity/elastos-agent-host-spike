@@ -36,6 +36,7 @@ fn main() {
     };
     let listed = read(&args[1], "inventory");
     let output = read(&args[2], "results");
+    let gaps = fs::read_to_string(build::lane().join("GAPS.md")).ok();
     let receipt = Path::new(&args[4]);
     let result = report::write_run(
         &listed,
@@ -43,6 +44,7 @@ fn main() {
         inputs_ok && args[3] == "0",
         report::GitIdentity::read(&build::repository()),
         receipt,
+        gaps.as_deref(),
     );
     print!("{}", result.table);
     if result.receipt_written {
