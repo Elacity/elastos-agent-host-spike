@@ -1,0 +1,6 @@
+target/
+homes/
+scratch/
+store-*/
+*.component.wasm
+/evidence.txt

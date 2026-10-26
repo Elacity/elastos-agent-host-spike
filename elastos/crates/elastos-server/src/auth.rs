@@ -10309,8 +10309,9 @@ fn prune_auth_state(state: &mut AuthState, now: u64) {
     });
 }
 
-#[cfg(test)]
-pub(crate) fn store_test_principal_root_protection(
+/// Disposable principal-root protection for tests and the A2 resume lab.
+/// The product Home still creates protection through init and recovery.
+pub fn store_test_principal_root_protection(
     data_dir: &Path,
     principal_id: &str,
 ) -> PrincipalRootProtectionV1 {

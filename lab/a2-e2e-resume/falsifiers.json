@@ -1,0 +1,34 @@
+{
+  "falsifiers": [
+    {
+      "id": "F-A2-CREATE-ONLY",
+      "path": "examples/agent-host/src/lib.rs",
+      "old": "        let opened = match open_task_journal(&mut WasmBus, &mut journal, &mut cursor, &grants) {\n            Ok(opened) => opened,\n            Err(reason) => {\n                return Err(elastos::bus::types::BusError::Invalid(reason.to_string()));\n            }\n        };",
+      "new": "        let opened = match append_journal(\n            &mut WasmBus,\n            &mut journal,\n            &mut cursor,\n            grants.write.as_ref(),\n        ) {\n            AppendOutcome::Denied => OpenOutcome::Denied,\n            AppendOutcome::Written => OpenOutcome::Created,\n            _ => {\n                return Err(elastos::bus::types::BusError::Invalid(\"conflict\".to_string()));\n            }\n        };",
+      "rebuild": "guest",
+      "phases": ["first", "second"],
+      "catch_row": "RESUME",
+      "why": "A new launch writes with create_only instead of loading the stored journal"
+    },
+    {
+      "id": "F-A2-SKIP-LOAD",
+      "path": "examples/agent-host/src/lib.rs",
+      "old": "    match read_stored_journal(bus, cursor, grant) {\n        Ok((stored, head, revision)) => {\n            cursor.revision = Some(revision);\n            cursor.head = head;\n            cursor.stale = false;\n            Ok(Some(stored))\n        }",
+      "new": "    if true {\n        return Ok(None);\n    }\n    match read_stored_journal(bus, cursor, grant) {\n        Ok((stored, head, revision)) => {\n            cursor.revision = Some(revision);\n            cursor.head = head;\n            cursor.stale = false;\n            Ok(Some(stored))\n        }",
+      "rebuild": "guest",
+      "phases": ["first", "second"],
+      "catch_row": "RESUME",
+      "why": "load_latest_journal returns no stored journal even when one exists"
+    },
+    {
+      "id": "F-A2-REVISION",
+      "path": "elastos/crates/elastos-server/src/resource_bridge.rs",
+      "old": "                Err(err) if err.is::<crate::auth::PrincipalRootObjectWriteConflict>() => {\n                    Some(provider_error_result(\"revision_conflict\", &err.to_string()))\n                }",
+      "new": "                Err(err) if err.is::<crate::auth::PrincipalRootObjectWriteConflict>() => {\n                    Some(provider_ok_result(serde_json::json!({\n                        \"bytes_written\": content.len(),\n                        \"revision\": \"forged-stale\",\n                    })))\n                }",
+      "rebuild": "driver",
+      "phases": ["first"],
+      "catch_row": "STALE",
+      "why": "A stale if_revision write is accepted instead of revision_conflict"
+    }
+  ]
+}
