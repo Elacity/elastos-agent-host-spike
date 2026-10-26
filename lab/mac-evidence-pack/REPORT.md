@@ -2,7 +2,8 @@
 
 ```text
 Lane:         lab/mac-evidence-pack (this folder only)
-Branch / PR:  cursor/mac-evidence-pack-be32
+Branch / PR:  cursor/mac-evidence-pack-be32  https://github.com/Elacity/elastos-agent-host-spike/pull/359
+Commit:       fbaaff699193bfda656b2d4e62bb8164e0e214c0
 Base:         spike/agent-host
 Machine:      Linux x86_64 cloud VM, rustc 1.91.0, no sandbox-exec, no KVM
 ```
