@@ -214,8 +214,11 @@ impl std::fmt::Display for ChildExit {
 ///
 /// `spawn` is the only spawn path. It pipes all three streams and drains
 /// standard error on its own thread from the moment the child starts, so a
-/// child that fills the pipe still reaches its own exit. `unanswered` is the
-/// only failure message.
+/// child that fills the pipe still reaches its own exit. A request the child
+/// never answered fails with the one message from `unanswered`, which names the
+/// request, the child's exit status and all the child wrote to standard error.
+/// An answer that is not JSON fails with its own message, which names the
+/// request, the parse error and the answer.
 struct ConfinedProvider {
     child: Child,
     stdin: ChildStdin,
@@ -282,16 +285,22 @@ impl ConfinedProvider {
         Self::spawn(command)
     }
 
-    /// Sends one request and returns its answer; a failure panics with the one
-    /// message from `unanswered`.
+    /// Sends one request and returns its answer; a failure panics with the
+    /// message from `try_send`. A request the child never answered fails with
+    /// the one message from `unanswered`, which names the request, the child's
+    /// exit status and all the child wrote to standard error. An answer that is
+    /// not JSON fails with its own message, which names the request, the parse
+    /// error and the answer.
     fn send(&mut self, request: &Value) -> Value {
         self.try_send(request)
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// Sends one request and returns its answer, or the one failure message,
-    /// which names the request, the child's exit status and all the child
-    /// wrote to standard error.
+    /// Sends one request and returns its answer. A request the child never
+    /// answered fails with the one message from `unanswered`, which names the
+    /// request, the child's exit status and all the child wrote to standard
+    /// error. An answer that is not JSON fails with its own message, which
+    /// names the request, the parse error and the answer.
     fn try_send(&mut self, request: &Value) -> Result<Value, String> {
         let written = writeln!(self.stdin, "{request}").and_then(|()| self.stdin.flush());
         if let Err(err) = written {
