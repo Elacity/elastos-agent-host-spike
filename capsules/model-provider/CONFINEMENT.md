@@ -353,8 +353,8 @@ the decision lands, this profile has no network grant, and
 
 ## Host-OS status
 
-This Seatbelt profile is declared enforced on macOS through
-`/usr/bin/sandbox-exec`, where the confined tests run. On macOS a confinement
+The confinement tests exercise this oracle on macOS through
+`/usr/bin/sandbox-exec`. On macOS a confinement
 test that cannot run because `/usr/bin/sandbox-exec` is missing fails the
 gate; it never passes by skipping. The caller that fails the test is
 `sandbox_available`, and
