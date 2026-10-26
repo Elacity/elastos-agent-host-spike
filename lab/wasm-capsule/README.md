@@ -728,6 +728,125 @@ Those checks are Runtime work, outside this lane. The grants file is "lab
 stand-in, not admission" everywhere: this lane decides no admission, launch or
 publisher trust, and its lab name is not the Runtime's CID.
 
+## Memory cap discovery (wc-010a)
+
+Read-only discovery for wc-010 ("fixed bare memory with a host-enforced
+limit"). No runner, argv, receipt, test or `falsifiers.json` change; `run.rs`
+still passes no memory flag. Facts are what each engine's CLI does on this Mac
+only, at base `a5b4e8a105fca181469ce15b2b84c03b86f0266d`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0`. Each
+engine ran as its own process from a shell (no engine inside an engine, no
+VM, no Docker). This is not the ~4 GB DigitCapsule and not any-RTOS loading.
+
+**The declared size.** `elastos/crates/elastos-common/src/manifest.rs` at this
+base: `CapsuleManifest` has `#[serde(default)] pub resources: ResourceLimits`
+(lines 102-103); `ResourceLimits` has `#[serde(default = "default_memory")]
+pub memory_mb: u32` (lines 1167-1169), and `fn default_memory() -> u32 { 64 }`
+(lines 1188-1190). `capsule/capsule.json` has no `resources` key
+(`grep -n resources lab/wasm-capsule/capsule/capsule.json` prints nothing,
+exit 1), so this capsule declares the default, 64 MB. The manifest does not say
+whether MB is 10^6 or 2^20 bytes; the probes read it as 64 × 2^20 =
+67108864 bytes = 1024 Wasm pages of 64 KiB. wc-010b must state the same
+reading. No field was invented and `capsule.json` is unchanged.
+
+**The probe modules** (WAT text under the git-ignored `target/wc010a/`, never
+committed; both engines took the `.wat` file directly, so no `wat` crate step
+was needed):
+
+```wat
+(module
+  (memory (export "memory") 1)
+  (func (export "grow") (param i32) (result i32)
+    local.get 0
+    memory.grow))
+```
+
+`grow.wat` starts at 1 page and has no declared maximum. `memory.grow` returns
+the old size in pages (1) on success and -1 on failure. Growing by 1023 pages
+reaches exactly 1024 pages (64 MB, at the cap); growing by 1024 reaches 1025
+pages (67174400 bytes, past it). `big-min.wat` is
+`(module (memory (export "memory") 1025) (func (export "size") (result i32) memory.size))`:
+its own minimum is one page above the cap.
+
+### wasmtime 45.0.1: FOUND
+
+The flag, from `wasmtime -W help`:
+
+```text
+  -W                         max-memory-size=N -- Maximum size, in bytes, that a linear memory is allowed to reach.
+  -W                trap-on-grow-failure[=y|n] -- Force a trap to be raised on `memory.grow` and `table.grow` failure instead of returning -1 from these instructions.
+```
+
+Unit: bytes, so 64 MB is `-W max-memory-size=67108864`. Runs from
+`lab/wasm-capsule/target/wc010a/`, engine path `/opt/homebrew/bin/wasmtime`
+(each first stderr line is the CLI's own `--invoke` warning, quoted as
+printed):
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (i) within the cap | `wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1023` | 0 | `1` | ``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future`` |
+| (ii) past the cap | `wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1024` | 0 | `-1` | the same warning |
+| (ii-t) past the cap, trap flag | `wasmtime run -W max-memory-size=67108864,trap-on-grow-failure=y --invoke grow grow.wat 1024` | 1 | (none) | the same warning, then ``Error: failed to run main module `grow.wat` `` and, last, `2: forcing trap when growing memory to 67174400 bytes` |
+| (i-t) within the cap, trap flag | `wasmtime run -W max-memory-size=67108864,trap-on-grow-failure=y --invoke grow grow.wat 1023` | 0 | `1` | the same warning |
+| (iii) past 64 MB, no flag | `wasmtime run --invoke grow grow.wat 1024` | 0 | `1` | the same warning |
+| start, above-cap minimum | `wasmtime run -W max-memory-size=67108864 --invoke size big-min.wat` | 1 | (none) | ``Error: failed to run main module `big-min.wat` ``, then `0: failed to instantiate "big-min.wat"` and `1: memory minimum size of 1025 pages exceeds memory limits` |
+| start, no flag | `wasmtime run --invoke size big-min.wat` | 0 | `1025` | ``warning: using `--invoke` with a function that returns values is experimental and may break in the future`` |
+
+(iii) returning `1` where (ii) returned `-1`, on the same module and argument,
+shows the flag, not the module, made the grow fail.
+
+### wasmer 7.5.0: SKIPPED
+
+No memory cap flag in its help. Searched `wasmer run --help` and
+`wasmer --help` (both exit 0) case-insensitively for `memory`, `grow`, `trap`,
+`limit`, `pages`, `max`, `heap`, `size`, `resource`, `rlimit` and `bytes`.
+`wasmer --help` matched none. `wasmer run --help` matched only lines about
+other things: `--enable-experimental-unaligned-memory-accesses`,
+`--enable-bulk-memory`, `--enable-multi-memory`, `--enable-memory64` (Wasm
+features), `--with-compact-on-growth` (journal compaction), a CPU back-off
+"maximum amount of time", and `--stack-size <STACK_SIZE>` with "Set the default
+stack size (default is 1048576)" (the stack, not linear memory). So this CLI
+gives no way to cap a module's linear memory, and a cap cannot be claimed for
+wasmer. The contrast and start runs, engine path `/opt/homebrew/bin/wasmer`,
+from the same folder (stderr empty, 0 bytes, on each):
+
+| Run | Command | Exit | stdout |
+|---|---|---|---|
+| (iii) past 64 MB, no flag | `wasmer run --invoke grow grow.wat 1024` | 0 | `1` |
+| grow to 65536 pages (the wasm32 limit), no flag | `wasmer run --invoke grow grow.wat 65535` | 0 | `1` |
+| start, above-cap minimum | `wasmer run --invoke size big-min.wat` | 0 | `1025` |
+
+### The answer for wc-010b
+
+- wasmtime: **grow returns -1** with `-W max-memory-size=67108864`; adding
+  `-W trap-on-grow-failure=y` turns that -1 into a **trap** (exit 1,
+  "forcing trap when growing memory to 67174400 bytes"); a module whose own
+  minimum is above the cap is **start refused** ("memory minimum size of 1025
+  pages exceeds memory limits").
+- wasmer: **SKIPPED** (no memory cap flag in `wasmer run --help` or
+  `wasmer --help`); no flag turns a failed grow into a trap, and with no cap
+  the grow past 64 MB succeeds.
+- The two engines differ. Rong's draft name
+  `memory_grow_past_limit_traps_on_both` is not right: only wasmtime traps,
+  and only with the extra flag. wc-010b's wasmer memory test must report
+  SKIPPED with the reason above, never PASS.
+
+**Peak memory for wc-010's receipt.** `/usr/bin/time -l` prints a "maximum
+resident set size" line. This is the **engine process's resident memory**, not
+the capsule's linear memory:
+
+- `/usr/bin/time -l /opt/homebrew/bin/wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1023`
+  printed `            14696448  maximum resident set size` (and
+  `             5538248  peak memory footprint`).
+- `/usr/bin/time -l /opt/homebrew/bin/wasmer run --invoke grow grow.wat 1023`
+  printed `            19218432  maximum resident set size` (and
+  `             5374408  peak memory footprint`).
+
+Both runs grew linear memory to 64 MB, yet each process's resident size is
+below that: untouched pages are not resident. So this number is no measure of
+the capsule's declared or used linear memory.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
