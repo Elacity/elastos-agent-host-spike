@@ -24,16 +24,29 @@
 //!
 //! # One naming path
 //!
-//! [`lab_cid`] walks a bundle and hands its entries to [`encode_entries`],
-//! the encoder. Together they are the only code that names a bundle; tests
-//! and tools call them and re-implement neither. [`check_name`] checks a
-//! claimed name, such as one a URL or a Store row gives, by recomputing the
-//! name with [`lab_cid`]: it computes no name of its own. [`lab_cid`] is
-//! [`lab_cid_observed`] with an observer that does nothing, so there is one
-//! walk; tests watch it at two [`Moment`]s to change a bundle while it is
-//! named. The walk's two checks, [`entry_kind`] and [`entry_path`], are
-//! public only so tests can give them what a test folder cannot hold: a
-//! device, or a name that is not UTF-8.
+//! [`checked_bundle`] walks a bundle, checks its root manifest, and hands its
+//! entries to [`encode_entries`], the encoder. Together the walk and the
+//! encoder are the only code that names a bundle; tests and tools call them
+//! and re-implement neither. [`lab_cid`] is the same walk and returns only
+//! its lab CID. [`check_name`] checks a claimed name, such as one a URL or a
+//! Store row gives, by recomputing the name with [`lab_cid`]: it computes no
+//! name of its own. [`CheckedBundle::check_name`] is its checked form: the
+//! same claim check and the same compare, on the lab CID a checked bundle
+//! holds. [`lab_cid`] is [`lab_cid_observed`] with an observer that does
+//! nothing, and [`lab_cid_observed`] is [`checked_bundle_observed`]'s lab
+//! CID, so there is one walk; tests watch it at two [`Moment`]s to change a
+//! bundle while it is named. The walk's two checks, [`entry_kind`] and
+//! [`entry_path`], are public only so tests can give them what a test folder
+//! cannot hold: a device, or a name that is not UTF-8.
+//!
+//! # The checked bundle
+//!
+//! A caller that must use the bytes a name covers, to audit, stage or sign
+//! them, takes them from the [`CheckedBundle`] the walk returns, never from a
+//! second read of the folder: a file changed between two reads would be used
+//! under a name that does not cover it. The value's fields are private, so
+//! its lab CID always names its entries. It holds a name and bytes, never a
+//! decision.
 //!
 //! # The walk reads only checked handles
 //!
@@ -102,6 +115,19 @@ pub struct BundleEntry {
     pub content: Vec<u8>,
 }
 
+/// A bundle as the one walk checked it: its lab CID and every regular file
+/// the walk read, each with the bytes read from its checked handle.
+///
+/// Only [`checked_bundle`] and [`checked_bundle_observed`] make one, from the
+/// one walk and the one manifest check. Its fields are private and nothing
+/// changes them, so its lab CID always names its entries. It holds a name and
+/// bytes, never a decision: it is no trust, admission or launch value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedBundle {
+    cid: LabCid,
+    entries: Vec<BundleEntry>,
+}
+
 /// What the walk does with one entry, decided from the entry's own type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -126,8 +152,9 @@ pub enum Moment {
     AfterCheck,
 }
 
-/// Why a bundle gets no lab CID, or why [`check_name`] refuses a claimed
-/// name. Each refusal has its own reason, and a refused bundle gets no name.
+/// Why a bundle gets no lab CID, or why a name check ([`check_name`] or
+/// [`CheckedBundle::check_name`]) refuses a claimed name. Each refusal has
+/// its own reason, and a refused bundle gets no name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The bundle root holds no regular file `capsule.json`.
@@ -153,13 +180,13 @@ pub enum Refusal {
     /// takes that word with a colon in test output for a harness error, so a
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
-    /// [`check_name`] was given a claim that is not a lab CID: it lacks the
+    /// A name check was given a claim that is not a lab CID: it lacks the
     /// `lab-cid:sha256:` label, or 64 lowercase hex characters after it. The
     /// claim is kept only to say what was refused.
     NotALabCid { claimed: String },
-    /// [`check_name`] was given a lab CID the bundle's bytes do not give.
-    /// `actual` is the lab CID recomputed from the bytes; the claim is kept
-    /// only to say what was refused.
+    /// A name check was given a lab CID the bundle's bytes do not give.
+    /// `actual` is the lab CID of the bytes; the claim is kept only to say
+    /// what was refused.
     NameMismatch { actual: LabCid, claimed: String },
 }
 
@@ -213,16 +240,37 @@ pub fn lab_cid(bundle: &Path) -> Result<LabCid, Refusal> {
 /// Name the bundle at `bundle` by its lab CID, telling `observe` about each
 /// entry under the root at two [`Moment`]s.
 ///
+/// This is [`checked_bundle_observed`]'s lab CID: the same walk and the same
+/// manifest check, not a second one. A refusal returns no name.
+pub fn lab_cid_observed(
+    bundle: &Path,
+    observe: impl FnMut(Moment, &str),
+) -> Result<LabCid, Refusal> {
+    Ok(checked_bundle_observed(bundle, observe)?.cid())
+}
+
+/// Check the bundle at `bundle` and keep what was checked: its lab CID and
+/// the bytes that lab CID names.
+///
+/// This is [`checked_bundle_observed`] with an observer that does nothing:
+/// the same walk, not a second one. A refusal returns no value.
+pub fn checked_bundle(bundle: &Path) -> Result<CheckedBundle, Refusal> {
+    checked_bundle_observed(bundle, |_, _| {})
+}
+
+/// Check the bundle at `bundle` and keep what was checked, telling `observe`
+/// about each entry under the root at two [`Moment`]s.
+///
 /// The walk checks each entry's listed type before it opens it and its open
 /// handle's type before it reads or lists it; it never follows a link and
 /// never waits on a FIFO. It reads every regular file once, from its checked
 /// handle. Then the root `capsule.json` it read gets the Runtime's own two
-/// checks, and exactly the bytes that were checked are named. A refusal
-/// returns no name.
-pub fn lab_cid_observed(
+/// checks, and exactly the bytes that were checked are named and kept. This
+/// is the one walk and the one manifest check. A refusal returns no value.
+pub fn checked_bundle_observed(
     bundle: &Path,
     mut observe: impl FnMut(Moment, &str),
-) -> Result<LabCid, Refusal> {
+) -> Result<CheckedBundle, Refusal> {
     let entries = collect_entries(bundle, &mut observe)?;
     let manifest = entries
         .iter()
@@ -230,6 +278,8 @@ pub fn lab_cid_observed(
         .ok_or(Refusal::NoManifest)?;
     check_manifest(&manifest.content)?;
     encode_entries(&entries)
+        // The value keeps the very entries its lab CID names: no second read.
+        .map(|cid| CheckedBundle { cid, entries })
 }
 
 /// Check the name `claimed` against the bundle at `bundle`.
@@ -240,10 +290,42 @@ pub fn lab_cid_observed(
 /// [`lab_cid`], the one naming path, and compared: a lab CID the bytes do not
 /// give is refused with both values, and `lab_cid`'s own refusals pass
 /// through unchanged. Success returns nothing, so a claim never comes back
-/// as a checked name.
+/// as a checked name. [`CheckedBundle::check_name`] is the checked form.
 pub fn check_name(bundle: &Path, claimed: &str) -> Result<(), Refusal> {
     let claimed_digits = lab_cid_digits(claimed)?;
     let actual = lab_cid(bundle)?;
+    compare_name(actual, claimed_digits, claimed)
+}
+
+impl CheckedBundle {
+    /// The lab CID of [`CheckedBundle::entries`].
+    pub fn cid(&self) -> LabCid {
+        self.cid
+    }
+
+    /// Every regular file the walk read: its bundle path and the bytes read
+    /// from its checked handle. They come in the walk's order; the encoder
+    /// sorts them, and a caller that needs an order sorts them by path.
+    pub fn entries(&self) -> &[BundleEntry] {
+        &self.entries
+    }
+
+    /// Check the name `claimed` against this bundle's lab CID.
+    ///
+    /// The checked form of [`check_name`]: the same claim check, then the
+    /// same compare, with the same refusals. It reads nothing, so it judges
+    /// exactly the bytes in [`CheckedBundle::entries`], even when the folder
+    /// has changed since. Success returns nothing.
+    pub fn check_name(&self, claimed: &str) -> Result<(), Refusal> {
+        let claimed_digits = lab_cid_digits(claimed)?;
+        compare_name(self.cid, claimed_digits, claimed)
+    }
+}
+
+/// The compare both name checks make: a lab CID whose digits are not the
+/// claim's digits is refused with both values. `claimed` is the whole
+/// claim, kept only to say what was refused.
+fn compare_name(actual: LabCid, claimed_digits: &str, claimed: &str) -> Result<(), Refusal> {
     if hex::encode(actual.0) != claimed_digits {
         return Err(Refusal::NameMismatch {
             actual,
