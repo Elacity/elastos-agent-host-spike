@@ -4,9 +4,12 @@
 mod common;
 
 use common::build::{
-    copy_lane_source, lane_dir, run_build, sha256_file, spawn_build, TempDir, SYSTEM_BASH,
+    copy_lane_source, lane_dir, run_build, run_build_with_env, sha256_file, spawn_build, TempDir,
+    SYSTEM_BASH,
 };
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 #[test]
 fn two_clean_builds_in_different_paths_are_byte_identical() {
@@ -49,12 +52,17 @@ fn two_clean_builds_in_different_paths_are_byte_identical() {
     );
 }
 
+/// What the status test's planted line prints on stderr before the build's
+/// target folder, so the test can see that folder is in its own TMPDIR.
+const TARGET_PROBE_PREFIX: &str = "wc-probe target dir: ";
+
 /// The line the status test plants right after the cleanup trap: an expansion
 /// of a variable the test removes from the build's environment.
 const UNSET_PROBE_LINE: &str = ": \"$WC_UNSET_PROBE\"\n";
 
-/// `script` with [`UNSET_PROBE_LINE`] inserted right after the line that arms
-/// the cleanup trap: the one line starting with `trap ` before the `cargo build`
+/// `script` with a line that prints `$TARGET_DIR` after [`TARGET_PROBE_PREFIX`],
+/// then [`UNSET_PROBE_LINE`], inserted right after the line that arms the
+/// cleanup trap: the one line starting with `trap ` before the `cargo build`
 /// line. Panics unless that line is found exactly once.
 fn with_unset_probe_after_the_trap(script: &str) -> String {
     let lines: Vec<&str> = script.split_inclusive('\n').collect();
@@ -75,19 +83,50 @@ fn with_unset_probe_after_the_trap(script: &str) -> String {
     for (index, line) in lines.iter().enumerate() {
         planted.push_str(line);
         if index == traps[0] {
+            planted.push_str(&format!("echo \"{TARGET_PROBE_PREFIX}$TARGET_DIR\" >&2\n"));
             planted.push_str(UNSET_PROBE_LINE);
         }
     }
     planted
 }
 
+/// The first line of `/bin/bash --version`, after checking it names 3.2. The
+/// status test proves nothing on another version, so it fails there, with the
+/// version it found, and never passes or SKIPs (task 036).
+fn require_system_bash_3_2() -> String {
+    let output = Command::new(SYSTEM_BASH)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| panic!("start {SYSTEM_BASH} --version: {error}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().next().unwrap_or("").to_string();
+    assert!(
+        output.status.success() && first.contains(" version 3.2."),
+        "this test needs {SYSTEM_BASH} 3.2, where a `set -u` error reaches the EXIT trap \
+         with $? 0; found: {first:?} ({})",
+        output.status
+    );
+    first
+}
+
+/// The names left in `dir`.
+fn entries(dir: &Path) -> Vec<std::ffi::OsString> {
+    fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+        .map(|entry| entry.expect("a directory entry").file_name())
+        .collect()
+}
+
 /// Task 035 (P11): a `set -u` error after the cleanup trap must still fail the
 /// build. On `/bin/bash` 3.2.57 such an error reaches the EXIT trap with `$?` 0,
 /// so with a plain `rm -rf` trap the script exited 0 with no capsule and no
 /// receipt. A copy of `tools/build` with one unbound expansion right after the
-/// trap runs there, with its own empty TMPDIR (for the target dir) and OUT_DIR.
+/// trap runs there, with its own empty TMPDIR and OUT_DIR. Task 036: the build
+/// makes its target folder in that TMPDIR (the planted line prints it), so the
+/// empty check at the end watches the folder the trap deletes.
 #[test]
 fn build_script_fails_closed_after_an_unbound_variable() {
+    require_system_bash_3_2();
     let real =
         fs::read_to_string(lane_dir().join("tools").join("build")).expect("read tools/build");
     let tmp = TempDir::new("trap-status");
@@ -128,12 +167,42 @@ fn build_script_fails_closed_after_an_unbound_variable() {
             "a failed build left OUT_DIR/{name}"
         );
     }
-    let left: Vec<_> = fs::read_dir(&tmpdir)
-        .expect("read the build's TMPDIR")
-        .map(|entry| entry.expect("a TMPDIR entry").file_name())
-        .collect();
+    let target = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(TARGET_PROBE_PREFIX))
+        .unwrap_or_else(|| panic!("the planted line printed no target dir:\n{stderr}"));
+    assert_eq!(
+        Path::new(target).parent(),
+        Some(tmpdir.as_path()),
+        "tools/build made its target dir {target} outside the TMPDIR it was given"
+    );
+    let left = entries(&tmpdir);
     assert!(
         left.is_empty(),
         "the cleanup trap left {left:?} in the build's TMPDIR"
+    );
+}
+
+/// Task 036 (P11): a finished build removes its target folder too. One real
+/// build, with TMPDIR set to a new empty folder, must leave that folder empty
+/// after it succeeds (the trap the script's last line re-arms).
+#[test]
+fn finished_build_leaves_its_tmpdir_empty() {
+    let tmp = TempDir::new("cleanup-on-success");
+    let tmpdir = tmp.path().join("tmpdir");
+    let out = tmp.path().join("out");
+    fs::create_dir_all(&tmpdir).expect("create the build's TMPDIR");
+
+    let tmpdir_env = tmpdir.to_str().expect("a UTF-8 temp path");
+    run_build_with_env(&lane_dir(), &out, &[("TMPDIR", tmpdir_env)]);
+
+    assert!(
+        out.join("capsule.wasm").is_file(),
+        "the finished build wrote no capsule.wasm"
+    );
+    let left = entries(&tmpdir);
+    assert!(
+        left.is_empty(),
+        "a finished build left {left:?} in its TMPDIR"
     );
 }

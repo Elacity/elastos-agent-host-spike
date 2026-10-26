@@ -754,6 +754,18 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   the same test fails because the check goes on and refuses the startup-root
   form with no claimant, so its rules-list case finds no "platform baseline
   must hold a rules list" reason.
+- Replace the missing-id refusal with an empty id (WP101): the same test fails
+  because the platform-baseline entry without an id reaches the unnamed-id
+  refusal, so its case finds none of the list label, `entry 1` or `string id`.
+- Replace the missing-rules-list refusal with an empty list (WP102): the same
+  test fails because the right without its rules list reaches the "with no
+  rules" refusal, so its case finds no "without a rules list" reason.
+- Skip a rule that is not a string (WP103): the same test fails because the
+  right with the non-string rule passes the check, so its case finds no
+  refusal.
+- Drop only the pin table's `startup-sysctl` row (WP104): the same test fails
+  because the sysctl read moved under `storage` passes the check, so its case
+  finds no refusal.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

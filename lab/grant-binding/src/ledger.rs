@@ -13,7 +13,13 @@
 
 use std::collections::HashMap;
 
-use crate::{Call, GuestRequest, Refuse, Verifier};
+use crate::{Call, GuestRequest, Handle, Refuse, Verifier};
+
+#[derive(Debug, Clone, Copy)]
+struct OpenHold {
+    handle: Handle,
+    amount: u64,
+}
 
 /// The one ledger the verifier owns.
 #[derive(Debug)]
@@ -22,7 +28,7 @@ pub(crate) struct Ledger {
     held: u64,
     next_reservation: u64,
     charged: u64,
-    open: HashMap<u64, u64>,
+    open: HashMap<u64, OpenHold>,
 }
 
 impl Ledger {
@@ -77,6 +83,7 @@ pub enum SettleRefuse {
     NotOutstanding,
     AboveReservation,
     ChargeOverflow,
+    OtherHandle,
     Binding(Refuse),
 }
 
@@ -90,6 +97,9 @@ impl std::fmt::Display for SettleRefuse {
             }
             SettleRefuse::ChargeOverflow => {
                 formatter.write_str("settled charge does not fit in u64")
+            }
+            SettleRefuse::OtherHandle => {
+                formatter.write_str("reservation is bound to another handle")
             }
             SettleRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
@@ -145,7 +155,13 @@ impl Verifier {
         };
         ledger.held = total;
         ledger.next_reservation += 1;
-        ledger.open.insert(ledger.next_reservation, amount);
+        ledger.open.insert(
+            ledger.next_reservation,
+            OpenHold {
+                handle: request.handle,
+                amount,
+            },
+        );
         Ok(Reservation {
             id: ledger.next_reservation,
         })
@@ -175,10 +191,13 @@ impl Verifier {
         };
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let ledger: &mut Ledger = &mut ledger;
-        let stored = match ledger.open.get(&reservation.id) {
-            Some(stored) => *stored,
+        let (bound, stored) = match ledger.open.get(&reservation.id) {
+            Some(open) => (open.handle, open.amount),
             None => return Err(SettleRefuse::NotOutstanding),
         };
+        if bound != request.handle {
+            return Err(SettleRefuse::OtherHandle);
+        }
         if measured > stored {
             return Err(SettleRefuse::AboveReservation);
         }
@@ -205,7 +224,7 @@ impl Verifier {
             .map_err(ReleaseRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let amount = match ledger.open.get(&reservation.id) {
-            Some(amount) => *amount,
+            Some(open) => open.amount,
             None => return Err(ReleaseRefuse::NotOutstanding),
         };
         ledger.open.remove(&reservation.id);
@@ -215,7 +234,7 @@ impl Verifier {
 }
 
 #[cfg(test)]
-use crate::{guest, rights, Handle, InstanceId};
+use crate::{guest, rights, InstanceId};
 
 /// Registers one instance with a fresh grant and returns both.
 #[cfg(test)]
@@ -240,7 +259,11 @@ fn books(verifier: &Verifier) -> Books {
     Books {
         held: ledger.held,
         charged: ledger.charged,
-        open: ledger.open.clone(),
+        open: ledger
+            .open
+            .iter()
+            .map(|(id, open)| (*id, open.amount))
+            .collect(),
     }
 }
 
@@ -672,4 +695,47 @@ fn model_settle_past_the_u64_charge_is_refused() {
     assert_eq!(after_second.charged, u64::MAX);
     assert_eq!(after_second.held, 0);
     assert!(!after_second.open.contains_key(&second.id));
+}
+
+#[test]
+fn model_settle_on_another_handle_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let request = guest(holder);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let refusal = verifier
+        .settle(
+            &verifier.open_call(second),
+            &guest(other),
+            reservation,
+            SettleOutcome::Known(4),
+        )
+        .expect_err("another handle");
+    assert_eq!(refusal, SettleRefuse::OtherHandle);
+    assert_eq!(
+        refusal.to_string(),
+        "reservation is bound to another handle"
+    );
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 4);
+    assert_eq!(after_refusal.charged, 0);
+    assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Known(4)),
+        Ok(4)
+    );
+    let after_settle = books(&verifier);
+    assert_eq!(after_settle.charged, 4);
+    assert_eq!(after_settle.held, 0);
+    assert!(!after_settle.open.contains_key(&reservation.id));
 }
