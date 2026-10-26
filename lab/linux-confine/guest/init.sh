@@ -127,6 +127,12 @@ if [ -f /etc/lc-guest.env ]; then
         echo "helpers_visible=$LC_GUEST_HELPER_DIR"
     fi
 fi
+# Nonce stays root-only. Tester and rust suites must not inherit it.
+if [ -f /etc/lc-nonce ]; then
+    chmod 400 /etc/lc-nonce
+    chown 0:0 /etc/lc-nonce 2>/dev/null || true
+fi
+unset LC_GUEST_NONCE 2>/dev/null || true
 # Test binaries and helpers must be executable.
 find /workspace /tmp /lib -type f \( -name 'lc-*' -o -name 'confine' -o -name 'providers' -o -name 'elf' -o -name 'aarch64' -o -name 'did-provider' -o -name 'wallet-provider' -o -name 'model-provider' -o -name 'guest-landlock-probe' \) -exec chmod a+x {} \; 2>/dev/null || true
 
@@ -164,21 +170,104 @@ run_as_tester() {
     fi
 }
 
+counts_from_log() {
+    log=$1
+    line=$(grep -E '^test result:' "$log" 2>/dev/null | tail -1 || true)
+    if [ -z "$line" ]; then
+        echo "0 0 0"
+        return
+    fi
+    echo "$line" | awk '{
+        p=0; f=0; i=0;
+        for (n=1; n<=NF; n++) {
+            if ($n=="passed;") p=$(n-1);
+            if ($n=="failed;") f=$(n-1);
+            if ($n=="ignored;") i=$(n-1);
+        }
+        print p, f, i
+    }'
+}
+
+probe_nonce_isolation() {
+    leak=0
+    if [ ! -f /etc/lc-nonce ]; then
+        echo "nonce_file=missing"
+        leak=1
+    else
+        chmod 400 /etc/lc-nonce
+        echo "nonce_file_mode=$(stat -c %a /etc/lc-nonce 2>/dev/null || echo unknown)"
+    fi
+    if grep -E 'LC_GUEST_NONCE|NONCE=' /etc/lc-guest.env >/dev/null 2>&1; then
+        echo "env_has_nonce=1"
+        leak=1
+    else
+        echo "env_has_nonce=0"
+    fi
+    if [ -e /evidence/nonce.txt ]; then
+        echo "evidence_nonce_during_run=1"
+        leak=1
+    else
+        echo "evidence_nonce_during_run=0"
+    fi
+    if run_as_tester 'cat /etc/lc-nonce >/dev/null'; then
+        echo "tester_nonce_readable=1"
+        leak=1
+    else
+        echo "tester_nonce_readable=0"
+    fi
+    return "$leak"
+}
+
+emit_suite_marks() {
+    guest_rc=$1
+    nonce=$(cat /etc/lc-nonce 2>/dev/null || echo missing-nonce)
+    for name in elf aarch64 confine providers; do
+        status=$(cat /evidence/${name}.status 2>/dev/null || true)
+        rc=$(cat /evidence/${name}.exit 2>/dev/null || echo -1)
+        passed=0
+        failed=0
+        ignored=0
+        if [ -f "/evidence/${name}.txt" ]; then
+            set -- $(counts_from_log "/evidence/${name}.txt")
+            passed=$1
+            failed=$2
+            ignored=$3
+        fi
+        [ -n "$status" ] || status=MISSING
+        echo "LC_MARK nonce=$nonce suite=$name exit=$rc passed=$passed failed=$failed ignored=$ignored status=$status"
+    done
+    for id in F-LC-CAPBND F-LC-BLOCK F-LC-STORAGE F-LC-PROVIDER-SOCKET \
+        F-LC-SOCKET F-LC-ANY-ERRNO F-LC-SKIP-NETNS F-LC-DROP-SECCOMP \
+        F-LC-WIDE-ROOT F-LC-WRONG-ARCH-CC F-LC-QEMU-USER-LANDLOCK; do
+        if [ -f "/evidence/${id}.status" ]; then
+            st=$(cat "/evidence/${id}.status")
+            echo "LC_MARK nonce=$nonce suite=$id exit=0 passed=0 failed=0 ignored=0 status=$st"
+        fi
+    done
+    echo "LC_MARK nonce=$nonce suite=guest exit=$guest_rc passed=0 failed=0 ignored=0 status=DONE"
+}
+
+echo "--- nonce isolation ---"
+set +e
+probe_nonce_isolation
+isol_rc=$?
+set -e
+
 echo "--- C9 suites ---"
 set +e
 run_as_tester '/usr/local/bin/run-c9.sh'
 status=$?
 set -e
+if [ "$isol_rc" -ne 0 ]; then
+    echo "NONCE LEAK: tester could read the nonce or it was left on a readable path"
+    status=1
+fi
 
 echo "--- guest finished status=$status ---"
 sync
+emit_suite_marks "$status"
 if [ -d /evidence ] && [ -w /evidence ]; then
     echo "guest_exit=$status" >> /evidence/guest-exit.txt
-    if [ -f /etc/lc-guest.env ]; then
-        # shellcheck disable=SC1091
-        . /etc/lc-guest.env
-        echo "LC_MARK nonce=${LC_GUEST_NONCE:-missing} suite=guest exit=$status passed=0 failed=0 ignored=0 status=DONE"
-    fi
     sync
 fi
 # Prefer an orderly halt. sysrq-o stops qemu -nographic.

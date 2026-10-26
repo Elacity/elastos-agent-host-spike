@@ -55,6 +55,7 @@ need curl
 need cpio
 need gzip
 need python3
+need timeout
 
 mkdir -p "$WORK/dl" "$EVIDENCE"
 # Stale PASS files from an earlier boot must not look like this run.
@@ -62,7 +63,8 @@ find "$EVIDENCE" -maxdepth 1 -type f \
     \( -name '*.status' -o -name '*.exit' -o -name '*.txt' -o -name 'LABEL.txt' \) \
     -delete
 echo "$LABEL" > "$EVIDENCE/LABEL.txt"
-echo "$NONCE" > "$EVIDENCE/nonce.txt"
+# Nonce stays off the 9p share until qemu has exited. The guest test uid
+# must not be able to read it from evidence/ or from /etc/lc-guest.env.
 {
     echo "label=$LABEL"
     echo "native=0"
@@ -76,7 +78,6 @@ echo "$NONCE" > "$EVIDENCE/nonce.txt"
     echo "mode=$MODE"
     echo "repo=$REPO"
     echo "head=$(git -C "$REPO" rev-parse HEAD)"
-    echo "nonce=$NONCE"
 } | tee "$EVIDENCE/host-context.txt"
 
 echo "=== rust targets ==="
@@ -274,14 +275,15 @@ if [ -d "$LAB/guest-plants" ]; then
 fi
 
 # Quote every value. The TCG label contains parentheses that break `sh`.
+# The nonce is not in this env file. Init reads it from /etc/lc-nonce (0400).
 {
     printf "LC_GUEST_REPO='%s'\n" "$REPO"
     printf "LC_GUEST_HELPER_DIR='%s'\n" "$HELPER_DIR"
-    printf "LC_GUEST_NONCE='%s'\n" "$NONCE"
     printf "LC_GUEST_LABEL='%s'\n" "$LABEL"
 } > "$ROOT/etc/lc-guest.env"
 echo "$NONCE" > "$ROOT/etc/lc-nonce"
-chmod 644 "$ROOT/etc/lc-guest.env" "$ROOT/etc/lc-nonce"
+chmod 644 "$ROOT/etc/lc-guest.env"
+chmod 400 "$ROOT/etc/lc-nonce"
 
 cp -a "$WORK/guest-landlock-probe" "$ROOT/usr/local/bin/guest-landlock-probe"
 cp -a "$WORK/run-as-tester" "$ROOT/usr/local/bin/run-as-tester"
@@ -295,7 +297,6 @@ if [ "$MODE" = "smoke" ]; then
 #!/bin/sh
 . /etc/lc-guest.env
 echo "SMOKE: skipped C9 suites"
-echo "LC_MARK nonce=\$LC_GUEST_NONCE suite=smoke exit=0 passed=0 failed=0 ignored=0 status=PASS"
 echo "PASS" > /evidence/smoke.status 2>/dev/null || true
 exit 0
 SMOKE
@@ -311,7 +312,6 @@ set -eu
 EVIDENCE=/evidence
 BINS="$LC_GUEST_REPO/lab/linux-confine/guest-bins"
 echo "LABEL=$LC_GUEST_LABEL" | tee "$EVIDENCE/summary.txt"
-echo "nonce=$LC_GUEST_NONCE" | tee -a "$EVIDENCE/summary.txt"
 echo "FAIL-CLOSED: run elf with a name that matches nothing" | tee -a "$EVIDENCE/summary.txt"
 log="$EVIDENCE/elf.txt"
 set +e
@@ -321,9 +321,7 @@ set -e
 echo "$rc" > "$EVIDENCE/elf.exit"
 grep -E '^test |^test result:' "$log" | tee -a "$EVIDENCE/summary.txt" || true
 echo "SHORT" > "$EVIDENCE/elf.status"
-echo "LC_MARK nonce=$LC_GUEST_NONCE suite=elf exit=$rc passed=0 failed=0 ignored=0 status=SHORT"
 echo "suite=elf exit=$rc passed=0 failed=0 ignored=0 status=SHORT" > "$EVIDENCE/guest-results.txt"
-echo "nonce=$LC_GUEST_NONCE" >> "$EVIDENCE/guest-results.txt"
 exit 1
 FAIL
     chmod 755 "$ROOT/usr/local/bin/run-c9.sh"
@@ -336,9 +334,13 @@ ls -lh "$WORK/guest.cpio.gz" | tee -a "$EVIDENCE/host-context.txt"
 echo "=== boot qemu-system-aarch64 TCG ==="
 # -accel tcg: emulated CPU. Do not use kvm. This is not Jetson.
 # virtio-net (user, restricted) plus guest dummy0 so skip-netns is visible.
-QEMU_LOG="$EVIDENCE/qemu-console.txt"
+# Console stays off the 9p share until qemu exits so the test uid cannot
+# read LC_MARK nonce lines mid-run.
+QEMU_TIMEOUT="${LC_QEMU_TIMEOUT:-600}"
+QEMU_LOG="$WORK/qemu-console.txt"
+echo "qemu_timeout_sec=$QEMU_TIMEOUT" | tee -a "$EVIDENCE/host-context.txt"
 set +e
-qemu-system-aarch64 \
+timeout --signal=KILL "$QEMU_TIMEOUT" qemu-system-aarch64 \
     -name linux-confine-c9-aarch64 \
     -M virt \
     -cpu max \
@@ -357,7 +359,14 @@ qemu-system-aarch64 \
     > "$QEMU_LOG" 2>&1
 qemu_rc=$?
 set -e
+if [ "$qemu_rc" -eq 124 ]; then
+    echo "qemu_timeout=1" | tee -a "$EVIDENCE/host-context.txt"
+fi
 echo "qemu_exit=$qemu_rc" | tee -a "$EVIDENCE/host-context.txt"
+cp "$QEMU_LOG" "$EVIDENCE/qemu-console.txt"
+# Guest has halted. Host-only record of the nonce may now land on 9p.
+echo "$NONCE" > "$EVIDENCE/nonce.txt"
+echo "nonce=$NONCE" >> "$EVIDENCE/host-context.txt"
 
 # Console always stays; 9p files are a bonus.
 echo "=== guest console tail ==="
@@ -399,6 +408,11 @@ else
 fi
 set -e
 
+if [ "$qemu_rc" -ne 0 ]; then
+    echo "qemu exited $qemu_rc (non-zero/abnormal or timed out)" >&2
+    echo "wrote $EVIDENCE"
+    exit 1
+fi
 if [ "$check_rc" -ne 0 ]; then
     echo "host check failed; guest suites missing, short, or not PASS" >&2
     echo "wrote $EVIDENCE"

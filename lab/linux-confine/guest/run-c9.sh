@@ -15,13 +15,13 @@ export TMPDIR=/tmp
 export HOME=/tmp
 export RUST_BACKTRACE=1
 
-# Host writes the worktree path and nonce. Fall back to /workspace.
+# Host writes the worktree path. The nonce is root-only and is not here.
 if [ -f /etc/lc-guest.env ]; then
     # shellcheck disable=SC1091
     . /etc/lc-guest.env
 fi
+unset LC_GUEST_NONCE 2>/dev/null || true
 REPO="${LC_GUEST_REPO:-/workspace}"
-NONCE="${LC_GUEST_NONCE:-missing-nonce}"
 DEPS="$REPO/target-build/aarch64-unknown-linux-gnu/debug/deps"
 BINS="$REPO/lab/linux-confine/guest-bins"
 OUT="$REPO/target-build/aarch64-unknown-linux-gnu/debug/build"
@@ -51,7 +51,6 @@ aarch64_bin=$(pick_bin aarch64)
 echo "LABEL=$LABEL" | tee "$SUMMARY"
 echo "native=0" | tee -a "$SUMMARY"
 echo "jetson=0" | tee -a "$SUMMARY"
-echo "nonce=$NONCE" | tee -a "$SUMMARY" | tee -a "$RESULTS"
 echo "repo=$REPO" | tee -a "$SUMMARY"
 echo "uid=$(id -u) gid=$(id -g)" | tee -a "$SUMMARY"
 echo "confine_bin=$confine_bin" | tee -a "$SUMMARY"
@@ -62,7 +61,6 @@ echo "helper_dir=$HELPER_DIR" | tee -a "$SUMMARY"
 
 if [ ! -x "$HELPER_DIR/lc-setup" ]; then
     echo "HELPERS MISSING path=$HELPER_DIR (baked host path hidden?)" | tee -a "$SUMMARY" | tee -a "$RESULTS"
-    echo "LC_MARK nonce=$NONCE suite=helpers exit=1 passed=0 failed=1 ignored=0 status=MISSING"
     echo "FAIL" > "$EVIDENCE/helpers.status"
     echo "1" > "$EVIDENCE/helpers.exit"
     echo "guest_exit=1" >> "$EVIDENCE/guest-exit.txt"
@@ -71,7 +69,6 @@ fi
 for name in did-provider wallet-provider model-provider; do
     if [ ! -x "$REPO/capsules/$name/target/debug/$name" ]; then
         echo "PROVIDER MISSING $REPO/capsules/$name/target/debug/$name" | tee -a "$SUMMARY"
-        echo "LC_MARK nonce=$NONCE suite=providers exit=1 passed=0 failed=1 ignored=0 status=MISSING"
         exit 1
     fi
 done
@@ -102,7 +99,6 @@ mark() {
     failed=$4
     ignored=$5
     status=$6
-    echo "LC_MARK nonce=$NONCE suite=$suite exit=$rc passed=$passed failed=$failed ignored=$ignored status=$status"
     echo "suite=$suite exit=$rc passed=$passed failed=$failed ignored=$ignored status=$status" >> "$RESULTS"
 }
 
@@ -222,19 +218,16 @@ run_plant() {
     if [ "$rc" -ne 0 ] && grep -q "$caught" "$log"; then
         echo "$id CAUGHT" | tee -a "$SUMMARY"
         echo "CAUGHT" > "$EVIDENCE/${id}.status"
-        echo "LC_MARK nonce=$NONCE suite=$id exit=$rc passed=0 failed=1 ignored=0 status=CAUGHT"
         echo "plant=$id status=CAUGHT" >> "$RESULTS"
     elif [ "$rc" -eq 0 ]; then
         echo "$id SURVIVED (test passed under the plant)" | tee -a "$SUMMARY"
         echo "SURVIVED" > "$EVIDENCE/${id}.status"
-        echo "LC_MARK nonce=$NONCE suite=$id exit=$rc passed=1 failed=0 ignored=0 status=SURVIVED"
         echo "plant=$id status=SURVIVED" >> "$RESULTS"
         tail -40 "$log" | tee -a "$SUMMARY"
         fail=1
     else
         echo "$id NOT RUN or unexpected fail (no '$caught')" | tee -a "$SUMMARY"
         echo "UNEXPECTED" > "$EVIDENCE/${id}.status"
-        echo "LC_MARK nonce=$NONCE suite=$id exit=$rc passed=0 failed=1 ignored=0 status=UNEXPECTED"
         echo "plant=$id status=UNEXPECTED" >> "$RESULTS"
         tail -40 "$log" | tee -a "$SUMMARY"
         fail=1

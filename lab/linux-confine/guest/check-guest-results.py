@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check aarch64 guest evidence and write RESULTS.txt from live files.
 
-Exit 0 only when every standing suite passed with at least the expected
-counts, every official plant is CAUGHT, and the nonce matches. Missing
-files, stale files, or a short suite are a failure.
+Exit 0 only when every standing suite passed with the exact expected
+counts, every official plant is CAUGHT, every suite has an LC_MARK
+serial line that matches the 9p files and the host nonce, qemu exited
+0 without a timeout, and the guest proved the test uid could not read
+the nonce. Missing files, missing marks, stale files, a short or
+inflated suite, or an abnormal qemu exit are a failure.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ def load_json(path: pathlib.Path):
 
 
 def parse_result_line(text: str):
+    # Last rust harness line wins. A later forged line must not be ignored.
     matches = RESULT_LINE.findall(text)
     if not matches:
         return None
@@ -39,6 +43,37 @@ def read(path: pathlib.Path) -> str:
     if not path.is_file():
         return ""
     return path.read_text(errors="replace")
+
+
+def parse_host_context(text: str):
+    qemu_exit = None
+    qemu_timeout = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("qemu_exit="):
+            value = line.split("=", 1)[1].strip()
+            try:
+                qemu_exit = int(value)
+            except ValueError:
+                qemu_exit = -1
+        if line.startswith("qemu_timeout="):
+            qemu_timeout = line.split("=", 1)[1].strip() in ("1", "true", "yes")
+    return qemu_exit, qemu_timeout
+
+
+def nonce_present(nonce: str, guest_results: str, console: str) -> bool:
+    token = f"nonce={nonce}"
+    return bool(nonce) and (token in guest_results or token in console)
+
+
+def collect_nonce_problems(nonce: str, guest_results: str, console: str, marks: dict) -> list[str]:
+    problems = []
+    if not nonce_present(nonce, guest_results, console):
+        problems.append(f"nonce {nonce} missing from guest-results.txt and qemu-console.txt")
+    for name, mark in marks.items():
+        if mark["nonce"] != nonce:
+            problems.append(f"{name}: serial nonce {mark['nonce']} != {nonce}")
+    return problems
 
 
 def main() -> int:
@@ -54,10 +89,29 @@ def main() -> int:
     guest_results = read(evidence / "guest-results.txt")
     console = read(evidence / "qemu-console.txt")
     summary = read(evidence / "summary.txt")
-    if nonce and f"nonce={nonce}" not in guest_results and f"nonce={nonce}" not in console:
-        problems.append(f"nonce {nonce} missing from guest-results.txt and qemu-console.txt")
+    host_context = read(evidence / "host-context.txt")
+
+    qemu_exit, qemu_timeout = parse_host_context(host_context)
+    if qemu_timeout:
+        problems.append("qemu timed out")
+    if qemu_exit is None:
+        problems.append("qemu_exit missing from host-context.txt")
+    elif qemu_exit != 0:
+        problems.append(f"qemu_exit={qemu_exit} is non-zero/abnormal")
 
     marks = {m.group("suite"): m.groupdict() for m in MARK_LINE.finditer(console)}
+    problems.extend(collect_nonce_problems(nonce, guest_results, console, marks))
+
+    if mode == "full":
+        if "tester_nonce_readable=1" in console:
+            problems.append("tester could read the nonce")
+        elif "tester_nonce_readable=0" not in console:
+            problems.append("guest did not prove tester cannot read the nonce")
+        if "evidence_nonce_during_run=1" in console:
+            problems.append("evidence/nonce.txt existed during the guest run")
+        if "env_has_nonce=1" in console:
+            problems.append("/etc/lc-guest.env carried a nonce")
+
     suite_rows = []
     for name, want in expected["suites"].items():
         status = read(evidence / f"{name}.status").strip()
@@ -65,8 +119,8 @@ def main() -> int:
         log = read(evidence / f"{name}.txt")
         counts = parse_result_line(log) or parse_result_line(summary)
         mark = marks.get(name)
-        if mark and mark["nonce"] != nonce:
-            problems.append(f"{name}: serial nonce {mark['nonce']} != {nonce}")
+        if not mark:
+            problems.append(f"{name}: missing LC_MARK serial line")
         if not status:
             problems.append(f"{name}: missing status file")
         if not exit_text:
@@ -79,28 +133,41 @@ def main() -> int:
         if counts is None:
             problems.append(f"{name}: no rust 'test result:' line")
             counts = {"passed": 0, "failed": 0, "ignored": 0}
-        if counts["passed"] < want["passed"]:
+        if counts["passed"] != want["passed"]:
             problems.append(
-                f"{name}: passed {counts['passed']} < expected {want['passed']}"
+                f"{name}: passed {counts['passed']} != expected {want['passed']}"
             )
         if counts["failed"] != want["failed"]:
             problems.append(
                 f"{name}: failed {counts['failed']} != expected {want['failed']}"
             )
-        if counts["ignored"] < want["ignored"]:
+        if counts["ignored"] != want["ignored"]:
             problems.append(
-                f"{name}: ignored {counts['ignored']} < expected {want['ignored']}"
+                f"{name}: ignored {counts['ignored']} != expected {want['ignored']}"
             )
         if status != "PASS" or exit_rc not in (0,):
             problems.append(f"{name}: status={status or 'MISSING'} exit={exit_text or 'MISSING'}")
         if mark:
-            if int(mark["exit"]) != (exit_rc if exit_rc is not None else -1):
+            mark_exit = int(mark["exit"])
+            if mark_exit != (exit_rc if exit_rc is not None else -1):
                 problems.append(
                     f"{name}: serial exit {mark['exit']} != 9p exit {exit_text}"
                 )
             if int(mark["passed"]) != counts["passed"]:
                 problems.append(
                     f"{name}: serial passed {mark['passed']} != log passed {counts['passed']}"
+                )
+            if int(mark["failed"]) != counts["failed"]:
+                problems.append(
+                    f"{name}: serial failed {mark['failed']} != log failed {counts['failed']}"
+                )
+            if int(mark["ignored"]) != counts["ignored"]:
+                problems.append(
+                    f"{name}: serial ignored {mark['ignored']} != log ignored {counts['ignored']}"
+                )
+            if mark["status"] != (status or "MISSING"):
+                problems.append(
+                    f"{name}: serial status {mark['status']} != 9p status {status or 'MISSING'}"
                 )
         suite_rows.append((name, status, exit_text, counts, want))
 
@@ -149,6 +216,9 @@ def main() -> int:
     lines.extend(["", "## In-guest plants (live status files)", "", "| id | result |", "| --- | --- |"])
     for plant, status in plant_rows:
         lines.append(f"| {plant} | {status or 'MISSING'} |")
+    qemu_note = "qemu_exit=MISSING" if qemu_exit is None else f"qemu_exit={qemu_exit}"
+    if qemu_timeout:
+        qemu_note += " qemu_timeout=1"
     lines.extend(
         [
             "",
@@ -156,6 +226,7 @@ def main() -> int:
             "",
             f"nonce={nonce}",
             guest_exit.strip() or "guest_exit=MISSING",
+            qemu_note,
             "",
             "Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.",
             "make-char / make-block stay NOT PROVEN (no CAP_MKNOD).",
@@ -174,8 +245,10 @@ def main() -> int:
         lines.append("## Host check PASSED")
         lines.append("")
         lines.append("Every standing suite matched its expected counts.")
+        lines.append("Every suite had an LC_MARK serial line that matched the 9p files.")
         if mode == "full":
             lines.append("Every official in-guest plant was CAUGHT.")
+        lines.append("qemu exited 0 without a timeout.")
         lines.append("")
     results_path.write_text("\n".join(lines))
     print(results_path.read_text(), end="")
