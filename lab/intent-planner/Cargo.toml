@@ -5,3 +5,9 @@ edition = "2021"
 publish = false
 
 [workspace]
+
+[dependencies]
+elastos-runtime = { path = "../../elastos/crates/elastos-runtime" }
+elastos-server = { path = "../../elastos/crates/elastos-server" }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt"] }

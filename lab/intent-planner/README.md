@@ -3,88 +3,70 @@
 This crate is the lab model of one intent-planner flow. A person states an
 intent. A local planner turns that intent into a typed plan. Each step names
 one capability and one resource. The host renders a preview. The person
-approves or rejects that preview. Execution runs after an approval, and it
-runs the approved steps with the grants recorded for those steps.
+approves or rejects that preview.
 
-The planner is a fixed table. It calls no hosted model.
-
-This folder is the check. It leaves the Runtime unchanged, and an effect here
-is a record of the step the host allowed. A real effect still needs the
-Runtime to mint the capability token and a provider to perform the operation.
+Approval mints a real Runtime capability token for each step the Runtime can
+name. The token is one write grant, one use, over the scoped journal resource.
+Execution sends that token on the public elastos:bus bridge,
+`handle_remote_request_with_audit_dir`. The planner is a fixed table. It calls
+no hosted model.
 
 ## Journey
 
-The person is the agent principal `ada`. The intent is `summarize my notes
-into the journal`.
+The person is the agent principal `ada`. The launching person on the bridge is
+`person:local:intent-planner`. The intent is `summarize my notes into the journal`.
 
 The plan has two steps:
 
-1. Capability `read`, operation `read`, resource `UsersAI/ada/notes`.
-2. Capability `write`, operation `append`, resource
-   `UsersAI/ada/.AppData/Agents/agent-host/journal`.
+1. Capability `read`, operation `read`, resource `localhost://UsersAI/ada/notes`.
+   The preview marks this step BLOCKED. The missing capability is
+   `scope_current_user_alias does not bind a UsersAI principal root`.
+   No grant is minted.
+2. Capability `write`, operation `write`, resource
+   `localhost://Users/self/.AppData/Agents/ada/tasks/task-1/journal`.
+   Approval mints one Runtime token for the scoped `localhost://Users/<id>/...`
+   path, with `max_uses` 1. Execution sends that token on the bus bridge.
 
-The preview lists those steps. Approving records one allow-once grant for
-each step. The grant names that step's action, operation and resource.
-Running the approved steps records one effect per grant, and the effect
-carries that grant's token.
+The public bridge answers the journal write with `principal_context_required`
+and `principal-root storage requires an in-runtime protected storage bridge`.
+The host records that as BLOCKED. It does not record a stored journal.
 
 Rejecting records no grant. A later run records no effect and returns
 `the plan was not approved`.
 
-Changing the journal resource to `UsersAI/ada/secrets` after approval makes
-the run return `the plan was altered after approval`. The effect list stays
-empty.
+Changing the journal resource after approval makes the run return
+`the plan was altered after approval`. The effect list stays empty.
 
-Passing the approved plan plus a step that runs `UsersAI/ada/Projects/build`
-makes the run return `a step is outside the approved plan`. The effect list
-stays empty. The host runs the whole call or none of it.
+Passing the approved plan plus another step makes the run return
+`a step is outside the approved plan`. The effect list stays empty.
 
-Running the same approval a second time returns `the approved grant was
-already used`.
+Running the same approval a second time returns
+`the approved grant was already used`.
 
-## Where the rules come from
+## What runs on the real Runtime
 
-A Runtime capability token names a resource and an action (`read`, `write`,
-`execute`, `message`). A resource call also names an operation. The shell
-grants the token, and the caller presents it. See
-`elastos/crates/elastos-runtime/src/capability/token.rs` and
-`handle_grant_capability` in
-`elastos/crates/elastos-runtime/src/handler/request_handler.rs`.
+| Row | Where | Result |
+| --- | --- | --- |
+| Unapproved journal step | public bus bridge, empty token | denied: `missing_token` / `resource_invoke requires a capability token` |
+| Altered journal resource | `CapabilityManager::validate`, the check the in-runtime bridge runs | denied: `wrong resource` |
+| Same altered resource on the public bus bridge | `handle_remote_request_with_audit_dir` | BLOCKED. The bridge returns `principal_context_required` before `capability_denied`. Missing capability: `principal-root storage requires an in-runtime protected storage bridge`. `handle_component_resource_request` is `pub(crate)`. |
+| First use of the allow-once grant | `CapabilityManager::validate` | allowed |
+| Second use of that grant | `CapabilityManager::validate` | denied: `use limit exceeded` |
+| Second use on the public bus bridge | same public function | BLOCKED. The bridge returns `principal_context_required` before the use counter. Same missing capability. |
+| Approved journal write stored | public bus bridge | BLOCKED. Same missing capability. Nothing is stored. |
 
-The Agent Host dispatches a prepared step when a grant id is recorded. A
-prepared step with an empty grant becomes denied. See `dispatch` in
-`examples/agent-host/src/lib.rs`.
+## What stays in this lab
 
-`docs/AGENT_ARCHITECTURE.md` says a model proposal carries no authority, Home
-presents the approval, and the visible card is not the grant. Allow once
-authorizes one exact operation. This lab is that allow-once path. A session
-grant and a standing mandate stay outside this check.
-
-The principal is one agent id, the same shape as `journal_id_ok` in the Agent
-Host: 1 to 64 bytes, `[a-z0-9][a-z0-9._-]*`, and it does not end in `.`.
-Resources sit under `UsersAI/<principal>/...`, the agent root from
-`docs/AGENT_ARCHITECTURE.md` and `lab/grant-binding`. This crate does not
-link to that crate.
-
-## Refusals
-
-| Input | Reason |
-| --- | --- |
-| Principal is outside the agent-id rule | principal is not a single plain name |
-| Intent is outside the planner table | the planner has no steps for this intent |
-| The review rejected the plan | the plan was not approved |
-| The plan bytes differ from the approved plan | the plan was altered after approval |
-| The run list differs from the approved steps | a step is outside the approved plan |
-| The same approval runs again | the approved grant was already used |
-
-A refused run leaves the effect list as it was.
+The planner table, the preview text, and the approval gate stay here. The gate
+is the plan binding: the approved bytes, the exact step list, and one use of
+the recorded token. The Runtime has no plan object. `UsersAI` notes stay
+BLOCKED. Session grants and standing mandates stay outside this check.
 
 ## Falsifier
 
-`plants/F-A15-approval.txt` replaces `approval_check` with a body that
-returns a fresh grant for every presented step. `model_planted_bugs_are_caught`
-runs that plant and requires each of these tests to fail, then restores
-`src/lib.rs`:
+`plants/F-A15-approval.txt` replaces `approval_check` with a body that returns
+a fresh grant for every presented step. `model_planted_bugs_are_caught` runs
+that plant and requires each of these tests to fail, then restores `src/lib.rs`:
 
 - `approved_plan_executes_with_the_approved_grants`
 - `rejected_plan_executes_nothing`

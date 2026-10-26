@@ -179,7 +179,8 @@ pub(crate) fn run_all() {
 fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let manifest = crate_dir.join("Cargo.toml");
-    let target_dir = crate_dir.join("target").join(format!("plant-{plant_id}"));
+    // Reuse this crate's build directory. A private one would compile
+    // elastos-server again for every named test.
     let output = Command::new(cargo)
         .current_dir(crate_dir)
         .args(["test", "--lib", "--locked", "--offline", "--manifest-path"])
@@ -190,8 +191,6 @@ fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
         .arg(test)
         .env("INTENT_PLANNER_PLANT_CHILD", "1")
         .env("CARGO_TERM_COLOR", "never")
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .env("CARGO_BUILD_BUILD_DIR", target_dir.join("build"))
         .output()
         .unwrap_or_else(|error| panic!("plant {plant_id}: cannot run cargo for {test}: {error}"));
     assert!(
