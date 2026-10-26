@@ -39,6 +39,11 @@ manifest under `/tmp/review-a9-290-crate`. The probe calls only public
 does not start `elastos`. It does not create `/tmp/elastos/storage`.
 
 Session results live in `last-run.json` after `python3 -I lab/review-a9-290/run.py`.
+This session: fmt check clean; 8 tests passed, 0 ignored; clippy `-D warnings`
+clean; probe 19 FINDING lines; `lib.rs` /
+`launch.rs` SHA-256 unchanged
+(`a3a1f920…d6481b`, `79b5a46d…a19864`); worktree clean;
+`/tmp/elastos/storage` absent before and after.
 
 ## Findings
 
@@ -165,18 +170,58 @@ AC-006-STORAGE (`lab/agent-conformance/GAPS.md`).
 
 ## #290 suites rerun here
 
-See `last-run.json` after the session run. Commands:
-
-```bash
+```text
 export RUST_TEST_THREADS=2
 cargo fmt --manifest-path lab/owned-storage/Cargo.toml -- --check
+# clean
+
 cargo test --locked --offline --manifest-path lab/owned-storage/Cargo.toml
+# 8 passed; 0 failed; 0 ignored
+# agent_a_reads_and_writes_its_own_storage
+# agent_a_is_denied_b_directly
+# agent_a_is_denied_b_through_a_parent_path
+# agent_a_is_denied_b_through_a_symlink
+# shared_temp_directory_is_refused
+# cleanup_leaves_nothing_behind
+# planted_shared_root_is_caught
+# real_runtime_rows_match_the_launcher
+
+cargo test --locked --offline --manifest-path lab/owned-storage/Cargo.toml -- --list
+# 8 tests, 0 benchmarks. No ignored names.
+
+cargo clippy --manifest-path lab/owned-storage/Cargo.toml --locked --offline --all-targets -- -D warnings
+# Finished `dev` profile, no diagnostics
+
 python3 -I lab/review-a9-290/run.py
+# probe findings as in last-run.json; exit 0
+
 python3 -I lab/review-a9-290/check.py
+# REVIEW.md pins and last-run.json required verdicts hold
 ```
 
-#290 sources `lib.rs` and `launch.rs` must keep the same SHA-256 after the
-official plants. `/tmp/elastos/storage` must not appear.
+Independent plant replay (files restored; SHA-256 match after):
+
+```text
+F-A9-share / tests::agent_a_is_denied_b_directly
+  test tests::agent_a_is_denied_b_directly ... FAILED
+
+F-A9-share / tests::agent_a_is_denied_b_through_a_parent_path
+  assertion `left != right` failed: agents share a storage root
+  left:  .../shared
+  right: .../shared
+  test tests::agent_a_is_denied_b_through_a_parent_path ... FAILED
+
+F-A9-share / tests::agent_a_is_denied_b_through_a_symlink
+  test tests::agent_a_is_denied_b_through_a_symlink ... FAILED
+
+F-A9-fake-runtime / launch::tests::real_runtime_rows_match_the_launcher
+  ready while elastos run still calls create_runtime("/tmp/elastos/storage")
+  test launch::tests::real_runtime_rows_match_the_launcher ... FAILED
+```
+
+The parent-path plant is CAUGHT by the equal-root assertion, not by a
+successful `..` walk. Direct and symlink plants fail because the Store then
+returns B's bytes.
 
 ## Not run here
 
