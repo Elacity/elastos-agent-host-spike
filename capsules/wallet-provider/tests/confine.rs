@@ -711,6 +711,12 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
+/// The last case is the write beneath `STORAGE_PARENT`: `Init` for
+/// `<STORAGE_PARENT>/Fresh` with no precreated parent walks up to the granted
+/// parent, so its first ungranted step is the `mkdir` of `Fresh`. A write
+/// grant on the parent (WP65) creates it, so this test fails on the absence
+/// check.
+///
 /// Falsifier: replace `(deny default)` with `(allow default)`; the outside
 /// `Init` then succeeds and this test fails.
 #[test]
@@ -750,6 +756,33 @@ fn confined_outside_write_is_denied() {
             "the provider must answer after a denied write instead of exiting: {status}"
         );
     }
+
+    // `<STORAGE_PARENT>/Fresh` has no precreated parent, so the walk reaches
+    // the granted parent and the first ungranted step is the `mkdir`.
+    let fresh_base = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Fresh");
+    let denied = provider.init(&fresh_base);
+    assert_storage_error(&denied);
+    assert!(
+        !fresh_base.exists(),
+        "a denied write beneath STORAGE_PARENT must create nothing: {}",
+        fresh_base.display()
+    );
+    let message = denied["message"]
+        .as_str()
+        .expect("storage refusal must carry a reason");
+    assert!(
+        message.starts_with("failed to create wallet storage directory"),
+        "the refused step must be the write beneath STORAGE_PARENT, not an inspect: {message}"
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the provider must answer after a denied write instead of exiting: {status}"
+    );
 
     let recovered = provider.init(&root);
     assert_eq!(
@@ -811,6 +844,77 @@ fn confined_outside_read_is_denied() {
     assert_eq!(
         status["status"], "ok",
         "the provider must answer after a denied read: {status}"
+    );
+
+    provider.shutdown();
+}
+
+/// A key planted beneath `STORAGE_PARENT` stays unread.
+///
+/// The parent read grants the directory itself only, not a directory beneath
+/// it, and the storage-root write grant stops at `STORAGE_ROOT`. The test
+/// plants a complete key at
+/// `<STORAGE_PARENT>/Sibling/ElastOS/SystemServices/Wallet`, beneath
+/// `STORAGE_PARENT` and outside `STORAGE_ROOT`, and records its bytes. With
+/// the real profile `init` for that sibling base refuses with `storage_error`,
+/// the planted bytes stay unchanged and no `wallet-state.json` appears beside
+/// them. The provider then serves its own root, and the key it writes there
+/// differs from the planted one, so it never adopted the planted key. The
+/// write half beneath the parent is the `<STORAGE_PARENT>/Fresh` case of
+/// `confined_outside_write_is_denied`, which is refused at its first write
+/// (the `mkdir`).
+///
+/// Falsifier: widen the parent read from `literal` to `subpath` (WP57); the
+/// planted key then loads, `init` answers ok and this test fails on its
+/// refusal.
+#[test]
+fn planted_key_beneath_storage_parent_is_not_read() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
+    // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
+    let planted = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Sibling");
+    let planted_wallet = wallet_dir(&planted);
+    plant_storage_key(&planted_wallet);
+    let planted_key = planted_wallet.join(WALLET_KEY_FILE);
+    let planted_bytes = fs::read(&planted_key).expect("planted key file");
+
+    let mut provider = ConfinedProvider::start(&root);
+
+    let denied = provider.init(&planted);
+    assert_storage_error(&denied);
+    assert_eq!(
+        fs::read(&planted_key).expect("planted key stays readable to the test"),
+        planted_bytes,
+        "the planted key must stay unchanged after the refused read"
+    );
+    assert!(
+        !planted_wallet.join("wallet-state.json").exists(),
+        "a refused read must write no store beside the planted key: {}",
+        planted_wallet.display()
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the provider must answer after a denied read: {status}"
+    );
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "the granted root must serve: {init}");
+    let own_key = wallet_dir(&root).join(WALLET_KEY_FILE);
+    let own_bytes = fs::read(&own_key).expect("the provider writes its own key");
+    assert_ne!(
+        own_bytes,
+        planted_bytes,
+        "the provider must not adopt the planted key: {}",
+        own_key.display()
     );
 
     provider.shutdown();
@@ -1431,20 +1535,23 @@ struct AllowRuleSources {
     entries: Vec<Value>,
 }
 
-/// Reads `capsules/<name>/confine.sb` and `capsules/<name>/falsifiers.json`
-/// for the profiles selected by `allow_rule_profiles`.
+/// One provider's falsifier list and its registered ids, in list order.
+#[derive(Debug)]
+struct FalsifierList {
+    name: &'static str,
+    ids: Vec<String>,
+    entries: Vec<Value>,
+}
+
+/// Reads every `capsules/<name>/falsifiers.json` list selected by
+/// `allow_rule_profiles` and returns each list's entries and ids.
 ///
-/// A missing or unreadable profile, a profile that does not parse, a missing
-/// or unreadable list, a list that is not JSON and a document without a
-/// `falsifiers` list are refusals with distinct reasons that name the path.
-/// There is no skip path.
-fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
-    let mut profiles = Vec::new();
-    for name in allow_rule_profiles() {
-        let path = capsules.join(name).join("confine.sb");
-        profiles.push((name, read_allow_rule_profile(name, &path)?));
-    }
-    let mut entries = Vec::new();
+/// A missing or unreadable list, a list that is not JSON and a document
+/// without a `falsifiers` list are refusals with distinct reasons that name
+/// the path. There is no skip path. Both checks read the lists through this
+/// one function (P10).
+fn read_falsifier_lists(capsules: &Path) -> Result<Vec<FalsifierList>, String> {
+    let mut lists = Vec::new();
     for name in allow_rule_profiles() {
         let path = capsules.join(name).join("falsifiers.json");
         let text = match fs::read_to_string(&path) {
@@ -1471,8 +1578,33 @@ fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> 
                 path.display()
             ));
         };
-        entries.extend(list.iter().cloned());
+        let entries: Vec<Value> = list.iter().cloned().collect();
+        let ids = entries
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+            .collect();
+        lists.push(FalsifierList { name, ids, entries });
     }
+    Ok(lists)
+}
+
+/// Reads `capsules/<name>/confine.sb` and `capsules/<name>/falsifiers.json`
+/// for the profiles selected by `allow_rule_profiles`.
+///
+/// A missing or unreadable profile, a profile that does not parse, a missing
+/// or unreadable list, a list that is not JSON and a document without a
+/// `falsifiers` list are refusals with distinct reasons that name the path.
+/// There is no skip path.
+fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
+    let mut profiles = Vec::new();
+    for name in allow_rule_profiles() {
+        let path = capsules.join(name).join("confine.sb");
+        profiles.push((name, read_allow_rule_profile(name, &path)?));
+    }
+    let entries = read_falsifier_lists(capsules)?
+        .into_iter()
+        .flat_map(|list| list.entries)
+        .collect();
     Ok(AllowRuleSources { profiles, entries })
 }
 
@@ -1498,6 +1630,139 @@ fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
             )
         })
         .map(|_forms| profile)
+}
+
+/// The one heading line every confinement document uses for its falsifier
+/// section.
+const FALSIFIER_HEADING: &str = "## Falsifiers";
+
+/// Whether `character` can sit directly beside a falsifier id token.
+fn falsifier_id_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+/// Every `DID` or `WP` id token in `text`, in the order it appears.
+///
+/// An id is a whole token: `DID` or `WP` followed by one or more digits, with
+/// no letter, digit or `_` directly before or after it. So `DID10` does not
+/// name `DID1`, and `WP45 to WP48` names only `WP45` and `WP48`.
+fn falsifier_id_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    for (index, _) in text.char_indices() {
+        if text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(falsifier_id_character)
+        {
+            continue;
+        }
+        let rest = &text[index..];
+        let prefix = if rest.starts_with("DID") {
+            "DID"
+        } else if rest.starts_with("WP") {
+            "WP"
+        } else {
+            continue;
+        };
+        let digits_start = index + prefix.len();
+        let digits = text[digits_start..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        let end = digits_start + digits;
+        if text[end..]
+            .chars()
+            .next()
+            .is_some_and(falsifier_id_character)
+        {
+            continue;
+        }
+        tokens.push(&text[index..end]);
+    }
+    tokens
+}
+
+/// Whether `section` names `id` as a whole token.
+fn names_falsifier_id(section: &str, id: &str) -> bool {
+    falsifier_id_tokens(section)
+        .iter()
+        .any(|token| *token == id)
+}
+
+/// Every problem with one document's falsifier section, each naming the
+/// document.
+///
+/// The document must hold exactly one line `## Falsifiers`. Its section runs
+/// from that line to the next line that starts with `## `, or to the end of
+/// the file. Every id of `own_ids` must be named in the section as a whole
+/// token, and every id-shaped token there must appear in `registered_ids`,
+/// which holds both lists' ids. An id may be named more than once.
+fn falsifier_section_problems(
+    document_name: &str,
+    document: &str,
+    own_ids: &[String],
+    registered_ids: &[String],
+) -> Vec<String> {
+    let lines: Vec<&str> = document.lines().collect();
+    let headings: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == FALSIFIER_HEADING)
+        .map(|(index, _)| index)
+        .collect();
+    let Some(heading) = headings.first().copied() else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md must hold one line {FALSIFIER_HEADING}; found none"
+        )];
+    };
+    if headings.len() > 1 {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md must hold one line {FALSIFIER_HEADING}; found {}",
+            headings.len()
+        )];
+    }
+    let start = heading + 1;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.starts_with("## "))
+        .map_or(lines.len(), |offset| start + offset);
+    let section = lines[start..end].join("\n");
+    let mut problems = Vec::new();
+    for id in own_ids {
+        if !names_falsifier_id(&section, id) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: own falsifier id {id} is not named in \
+                 {FALSIFIER_HEADING}"
+            ));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for token in falsifier_id_tokens(&section) {
+        if registered_ids.iter().any(|id| id == token) || seen.contains(&token) {
+            continue;
+        }
+        seen.push(token);
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {FALSIFIER_HEADING} names {token}, which neither \
+             falsifier list registers"
+        ));
+    }
+    problems
+}
+
+/// Reads `capsules/<name>/CONFINEMENT.md`, or refuses with a reason that names
+/// its path. There is no skip path.
+fn read_confinement_document(capsules: &Path, name: &str) -> Result<String, String> {
+    let path = capsules.join(name).join("CONFINEMENT.md");
+    fs::read_to_string(&path).map_err(|err| {
+        format!(
+            "{name} confinement document {} must be readable: {err}",
+            path.display()
+        )
+    })
 }
 
 /// The top-level allow forms of `profile` that no `entries` item removes.
@@ -1648,6 +1913,46 @@ fn every_did_and_wallet_allow_rule_has_a_registered_removal() {
              falsifier or be deleted; no entry removes: {unremoved:?}"
         );
     }
+}
+
+/// Every falsifier id registered for did or wallet is named in its own
+/// document's `## Falsifiers` section, and neither section names an id that
+/// neither list registers.
+///
+/// The check reads `capsules/did-provider/CONFINEMENT.md`,
+/// `capsules/wallet-provider/CONFINEMENT.md` and both `falsifiers.json` lists
+/// through the removal check's one list reader. A missing document or list is
+/// a refusal that names its path, and there is no skip path. The test reads
+/// files and starts no process, so it runs on every platform.
+///
+/// Before the document edits of task 061 this test failed with DID19, DID20
+/// and every missing wallet id.
+///
+/// Falsifier: WP58 drops the own-id rule, WP59 the unregistered-id rule, WP60
+/// matches an id as a substring, WP61 runs a section to the end of the file,
+/// and WP62 to WP64 bypass each refusal; the fixture tests catch each one.
+#[test]
+fn every_falsifier_id_is_named_in_its_confinement_document() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let lists = read_falsifier_lists(capsules).unwrap_or_else(|err| panic!("{err}"));
+    let registered: Vec<String> = lists
+        .iter()
+        .flat_map(|list| list.ids.iter().cloned())
+        .collect();
+    let mut problems = Vec::new();
+    for list in &lists {
+        let document =
+            read_confinement_document(capsules, list.name).unwrap_or_else(|err| panic!("{err}"));
+        problems.extend(falsifier_section_problems(
+            list.name,
+            &document,
+            &list.ids,
+            &registered,
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// The removal check reports an allow form that no entry removes, and only a
@@ -1958,6 +2263,137 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
         refusal.contains(&did_list.display().to_string())
             && refusal.contains("must hold a falsifiers list"),
         "the refusal must name the list path: {refusal}"
+    );
+}
+
+/// The section check reports an own id that the section does not name and an
+/// id-shaped token that neither list registers. It reports no problem when a
+/// section names every id as a whole token.
+///
+/// The list holds `DID1`, `DID2` and `DID10`, and the section names `DID2`,
+/// `DID10` and the unregistered `WP9`. `DID1` is missing even though `DID10`
+/// appears, because an id counts only as a whole token. The check returns
+/// exactly those two problems. The fixtures are built in memory; no file is
+/// read and no process starts.
+///
+/// Falsifier: WP58 drops the own-id rule, WP59 the unregistered-id rule and
+/// WP60 matches an id as a substring; this test fails on each because the
+/// corresponding problem does not come.
+#[test]
+fn falsifier_section_check_reports_missing_and_stale_ids() {
+    let own = vec!["DID1".to_string(), "DID2".to_string()];
+    let registered = vec!["DID1".to_string(), "DID2".to_string(), "DID10".to_string()];
+    let incomplete = "## Falsifiers\n\n- DID2 is named\n- DID10 is named\n- WP9 is named\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", incomplete, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID1 is not named in ## Falsifiers"
+                .to_string(),
+            "fixture-provider CONFINEMENT.md: ## Falsifiers names WP9, which neither falsifier list registers"
+                .to_string(),
+        ],
+        "the check must report the missing own id and the unregistered id"
+    );
+
+    let complete = "## Tests\n\n- DID2 is named\n\n## Falsifiers\n\n- DID1\n- DID2\n- DID10\n";
+    assert!(
+        falsifier_section_problems("fixture-provider", complete, &own, &registered).is_empty(),
+        "a section that names every id whole must report no problem"
+    );
+}
+
+/// The section check refuses a document without its section, one with two
+/// sections, and one whose id appears only after the section's next heading.
+///
+/// A document with no `## Falsifiers` line and one with two such lines each
+/// return one problem that names the document and says how many headings were
+/// found. A document whose section names `DID1` and whose `## Other` section
+/// names `DID2` reports `DID2` as missing, because the section ends at the next
+/// line that starts with `## `. The fixtures are built in memory; no file is
+/// read and no process starts.
+///
+/// Falsifier: WP61 runs the section to the end of the file, WP62 bypasses the
+/// missing-heading refusal and WP63 the duplicate-heading refusal; this test
+/// fails on each because the expected problem does not come.
+#[test]
+fn falsifier_section_check_rejects_a_document_without_its_section() {
+    let own = vec!["DID1".to_string(), "DID2".to_string()];
+    let registered = own.clone();
+
+    let missing = "## Tests\n\n- DID1 and DID2 are named\n";
+    let problems = falsifier_section_problems("fixture-provider", missing, &own, &registered);
+    assert_eq!(
+        problems.len(),
+        1,
+        "no heading must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider") && problems[0].contains("found none"),
+        "the reason must name the document and the missing heading: {}",
+        problems[0]
+    );
+
+    let doubled = "## Falsifiers\n\n- DID1\n\n## Falsifiers\n\n- DID2\n";
+    let problems = falsifier_section_problems("fixture-provider", doubled, &own, &registered);
+    assert_eq!(
+        problems.len(),
+        1,
+        "two headings must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider") && problems[0].contains("found 2"),
+        "the reason must name the document and the heading count: {}",
+        problems[0]
+    );
+
+    let later = "## Falsifiers\n\n- DID1\n\n## Other\n\n- DID2\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", later, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID2 is not named in ## Falsifiers"
+                .to_string()
+        ],
+        "an id after the next ## heading is outside the section"
+    );
+}
+
+/// The document reader refuses a missing document and a document it cannot
+/// read, each with a reason that names its path, and reads a present one.
+///
+/// The real-document test reads through this same function, so no unreadable
+/// document can become an empty one there. The fixtures are a temporary
+/// directory; no process starts.
+///
+/// Falsifier: WP64 skips an unreadable `CONFINEMENT.md` and returns an empty
+/// document; this test fails because the refusal does not come.
+#[test]
+fn falsifier_document_read_rejects_unreadable_source() {
+    let capsules = tempfile::tempdir().expect("temporary capsules directory");
+    let provider = capsules.path().join("did-provider");
+    let path = provider.join("CONFINEMENT.md");
+    let refusal = read_confinement_document(capsules.path(), "did-provider")
+        .expect_err("a missing document must be refused");
+    assert!(
+        refusal.contains(&path.display().to_string()) && refusal.contains("must be readable"),
+        "the refusal must name the document path: {refusal}"
+    );
+
+    fs::create_dir_all(&provider).expect("fixture provider directory");
+    fs::write(&path, "## Falsifiers\n").expect("fixture document");
+    assert_eq!(
+        read_confinement_document(capsules.path(), "did-provider")
+            .expect("a readable document must load"),
+        "## Falsifiers\n",
+        "the reader must return the document's text"
+    );
+
+    fs::remove_file(&path).expect("remove the fixture document");
+    fs::create_dir(&path).expect("make the document path a directory");
+    let refusal = read_confinement_document(capsules.path(), "did-provider")
+        .expect_err("an unreadable document must be refused");
+    assert!(
+        refusal.contains(&path.display().to_string()) && refusal.contains("must be readable"),
+        "the refusal must name the unreadable path: {refusal}"
     );
 }
 

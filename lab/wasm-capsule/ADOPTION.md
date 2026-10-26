@@ -58,6 +58,13 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   then for `wasmer`, one after the other, and requires both to succeed with
   byte-identical stdout. It returns the verified `cid()` and both outputs
   (README.md, "Same output on two engines (wc-005b)").
+  `wasm_capsule_tools::receipt` (wc-005c, task 016) renders that run as
+  `schema: wc-005.run-receipt/v1` lines (the lab CID, `digest`, `1592590337`,
+  each engine's version, exit status and stdout), and writes it only with
+  `bundle::write_new_file`. The versions are observed, not configured: each is
+  the first line the engine printed for `--version` before the module ran, so
+  an engine upgrade shows in the receipt, and none is part of the lab CID
+  (README.md, "Run receipt (wc-005c)").
   The two-engine result is a behaviour proof on one **core module** on this
   Mac, not the Component ABI. `wasmtime` and `wasmer` are test-only host
   engines here; neither is endorsed. This is separate from Wasmer's role

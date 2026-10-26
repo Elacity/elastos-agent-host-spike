@@ -62,31 +62,10 @@ fn printed_lab_cid_parses_back_to_the_same_value() {
 #[test]
 fn parse_refuses_what_the_name_check_refuses() {
     let bundle = assemble(&WEB_APP);
-    let digits = WEB_APP_LAB_CID
-        .strip_prefix("lab-cid:sha256:")
-        .expect("the pin has the label");
-    // A copy of the list in `tests/check_name.rs`
-    // `claimed_name_is_checked_never_trusted` (lines 23-42).
-    let not_lab_cids = [
-        // No label, the right digits.
-        digits.to_owned(),
-        // Another label, or the label in capitals.
-        format!("sha256:{digits}"),
-        format!("LAB-CID:SHA256:{digits}"),
-        // Uppercase hex.
-        format!("lab-cid:sha256:{}", digits.to_uppercase()),
-        // A character that is not hex, in place of the last digit.
-        format!("lab-cid:sha256:{}g", &digits[..63]),
-        // A character that is not ASCII: 64 bytes, but not 64 hex digits.
-        format!("lab-cid:sha256:{}é", &digits[..62]),
-        // 63 and 65 characters, a trailing newline, and none.
-        format!("lab-cid:sha256:{}", &digits[..63]),
-        format!("lab-cid:sha256:{digits}0"),
-        format!("{WEB_APP_LAB_CID}\n"),
-        "lab-cid:sha256:".to_owned(),
-        String::new(),
-    ];
-    for claim in not_lab_cids {
+    let held = checked(bundle.path());
+    // The one list `tests/check_name.rs` `claimed_name_is_checked_never_trusted`
+    // uses.
+    for claim in not_lab_cids() {
         let refusal = claim
             .parse::<LabCid>()
             .expect_err("text that is not a lab CID must not parse");
@@ -101,6 +80,11 @@ fn parse_refuses_what_the_name_check_refuses() {
             .expect_err("the name check refuses a claim that is not a lab CID");
         assert_eq!(refusal, name_check, "{claim:?}");
         assert_eq!(refusal.to_string(), name_check.to_string(), "{claim:?}");
+        assert_eq!(refusal.to_string(), not_a_lab_cid_text(&claim));
+        let checked_form = held
+            .check_name(&claim)
+            .expect_err("the checked form refuses a claim that is not a lab CID");
+        assert_eq!(refusal, checked_form, "{claim:?}");
     }
 }
 
@@ -113,18 +97,12 @@ fn parse_shares_the_one_claim_check() {
         1,
         "the parse must call the one claim check once:\n{parse}"
     );
-    for copy in ["strip_prefix", "LAB_CID_PREFIX", "lab-cid:sha256:"] {
+    // The claim check gives the root digest itself, so the parse decodes
+    // nothing and makes no refusal of its own.
+    for copy in ["strip_prefix", "decode_base32(", "cid_bytes(", "Refusal::"] {
         assert!(
             !parse.contains(copy),
             "the parse holds {copy:?}, a copy of the claim check:\n{parse}"
         );
     }
-    // The map form is used: the parse names `Refusal::NotALabCid` exactly
-    // once, to map the decode error, which the claim check has already ruled
-    // out. It is no second claim check.
-    assert_eq!(
-        parse.matches("Refusal::NotALabCid").count(),
-        1,
-        "the parse names NotALabCid more than in its one decode-error map:\n{parse}"
-    );
 }

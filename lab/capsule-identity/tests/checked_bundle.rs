@@ -132,26 +132,21 @@ fn checked_name_check_judges_the_checked_bytes() {
     assert_eq!(fresh.cid(), changed);
     assert_mismatch(fresh.check_name(WEB_APP_LAB_CID), WEB_APP_LAB_CID, changed);
 
-    // The same claim check as check_name: the right digits without the
-    // label are not a lab CID.
-    let digits = WEB_APP_LAB_CID
-        .strip_prefix("lab-cid:sha256:")
-        .expect("the pin has the label");
-    let refusal = before
-        .check_name(digits)
-        .expect_err("a claim without the label is not a lab CID");
-    assert_eq!(
-        refusal,
-        Refusal::NotALabCid {
-            claimed: digits.to_owned()
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        format!(
-            "the claim {digits:?} is not a lab CID: a lab CID is lab-cid:sha256: and 64 lowercase hex characters"
-        )
-    );
+    // The same claim check as check_name, on the one list of text that is
+    // not a lab CID.
+    for claim in not_lab_cids() {
+        let refusal = before
+            .check_name(&claim)
+            .expect_err("a claim that is not a lab CID must be refused");
+        assert_eq!(
+            refusal,
+            Refusal::NotALabCid {
+                claimed: claim.clone()
+            },
+            "{claim:?}"
+        );
+        assert_eq!(refusal.to_string(), not_a_lab_cid_text(&claim));
+    }
 }
 
 #[test]

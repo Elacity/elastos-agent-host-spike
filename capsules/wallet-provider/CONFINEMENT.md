@@ -130,11 +130,25 @@ oracles and supplies contract evidence, not Linux execution evidence.
   `base_path/sibling`, and a sibling service under `ElastOS/SystemServices`.
   The provider answers `storage_error`, answers the next `status`, and can
   reinitialize its allowed root. Each attempted wallet directory stays absent.
+  A fourth case sends `Init` for `<STORAGE_PARENT>/Fresh` with no precreated
+  parent, so the walk reaches the granted parent and the first ungranted step
+  is the `mkdir`; the refusal is the create step itself, the base stays absent
+  and the next `status` answers ok.
 - `confined_outside_read_is_denied` plants a complete key in a sibling wallet.
   It adds literal fixture directory reads and file metadata reads to a copy
   of the single profile source. These grants let `Init` reach the key open;
   the test asserts that this open is the refused operation. The fixture adds
   neither file-content reads nor writes outside the wallet grant.
+- `planted_key_beneath_storage_parent_is_not_read` plants a complete key in a
+  sibling directory beneath `STORAGE_PARENT` and outside `STORAGE_ROOT`, then
+  sends `Init` for that sibling base. Under the real profile the provider
+  answers `storage_error`, the planted bytes stay unchanged and no
+  `wallet-state.json` appears beside them. The provider then answers `status`
+  and serves its own root; the key it writes there differs from the planted
+  one, so it never adopted the planted key. The parent read grants the
+  directory itself only, so widening it to `subpath` makes this test fail; the
+  write half beneath the parent is the `<STORAGE_PARENT>/Fresh` case of
+  `confined_outside_write_is_denied`, which is refused at its first write.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
 - `startup_denial_reports_its_reason` covers the failure path. It starts the
@@ -195,6 +209,11 @@ binding is the only difference between the two runs.
   falsifier or delete the rule. The model profile is not read here; its
   allow-rule removals live in `../model-provider/confine-falsifiers.json` under
   that lane's own list. The test reads files and starts no process.
+- `every_falsifier_id_is_named_in_its_confinement_document` reads both
+  confinement documents and both falsifier lists, and fails when a registered
+  id is not named in its own document's `## Falsifiers` section or the section
+  names an id that neither list registers. It reads files and starts no
+  process.
 - `allow_rule_removal_check_reports_an_unremoved_rule` builds a fixture
   profile and fixture entries in the test. An entry whose `new` still holds the
   form, whose `expect` is not `caught`, whose edit names the other provider's
@@ -306,11 +325,25 @@ one caller without starting a process: with `macos` and a missing
 `sandbox-exec` it fails the test with the gate's reason, and with `macos` and
 a present one it returns `true`. It runs on every supported build target.
 
+## Falsifiers
+
 Falsifier procedure (run against a temporary edit, then restore the profile):
 
+- Restore a temp-directory fallback for a missing storage root (WP01):
+  `tests::storage_root::missing_storage_root_is_refused` fails.
+- Accept an empty storage root instead of refusing it (WP02):
+  `tests::storage_root::empty_storage_root_is_refused` fails.
+- Accept a relative storage root instead of refusing it (WP03):
+  `tests::storage_root::relative_storage_root_is_refused` fails.
 - Rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in this profile (WP22):
   `both_file_profiles_bind_one_storage_parameter_contract` fails on the
   non-canonical token.
+- Remove the did profile's shared `STORAGE_PARENT` read (WP11, described in
+  `../did-provider/CONFINEMENT.md`):
+  `both_file_profiles_bind_one_storage_parameter_contract` fails.
+- Rename the did profile's `STORAGE_ROOT` to `DID_STORAGE_ROOT` (WP23,
+  described in `../did-provider/CONFINEMENT.md`):
+  `both_file_profiles_bind_one_storage_parameter_contract` fails.
 - `(allow default)` in place of `(deny default)` (WP04) makes the outside
   `Init` succeed, so the outside tests fail.
 - Append `(allow file-read* (literal (param "READ_FIXTURE_KEY")))` (WP24):
@@ -339,6 +372,29 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Remove `(allow file-read* (literal (param "STORAGE_PARENT")))` (WP17): `Init`
   cannot inspect the parent, so the operations and outside-write tests fail,
   and the shared contract check fails.
+- Drop the explicit `(deny network*)` requirement from the shared contract
+  check (WP06): `file_profile_contract_rejects_a_profile_without_deny_network`
+  and `file_profile_contract_checks_the_model_profile_when_present` fail.
+- Drop the model profile from the one required list (WP07):
+  `file_profile_contract_checks_the_model_profile_when_present` fails.
+- Skip a missing required did profile instead of refusing it (WP09):
+  `file_profile_contract_checks_the_model_profile_when_present` fails.
+- Remove the network-allow rule from the shared contract check (WP12):
+  `file_profile_contract_rejects_a_network_allow` fails.
+- Narrow the shared network-allow predicate to the exact form
+  `(allow network*)` (WP13):
+  `file_profile_contract_rejects_a_network_allow` fails.
+- Remove the `(allow default)` refusal from the shared contract check (WP19):
+  `file_profile_contract_rejects_an_allow_default` fails.
+- Remove the canonical-token refusal from the shared contract check (WP21):
+  `file_profile_contract_rejects_a_non_canonical_token` fails.
+- Resolve the honesty test's edit paths from the repository root again (WP25):
+  `tests::falsifiers::falsifiers_list_is_honest` and
+  `tests::falsifiers::falsifiers_list_rejects_a_repository_relative_path` fail.
+- Skip a missing model profile again instead of refusing it (WP26):
+  `file_profile_contract_checks_the_model_profile_when_present` fails.
+- Return `Ok(false)` from the sandbox gate's declared-OS branch (WP27):
+  `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails.
 - Start the provider directly when its profile file is missing (WP28):
   `startup_is_refused_when_the_profile_cannot_be_applied` fails on case (a) at
   the bounded wait, because the provider is still running when the deadline
@@ -392,12 +448,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append `(allow file-read* (literal "/etc"))` to the did profile (WP44):
   `every_did_and_wallet_allow_rule_has_a_registered_removal` fails because no
   entry removes that form.
-- Drop the `expect`, profile-path, `old` or `new` condition from the removal
-  check (WP45 to WP48):
+- Drop the `expect` condition (WP45), the profile-path condition (WP46), the
+  `old` condition (WP47) or the `new` condition (WP48) from the removal check:
   `allow_rule_removal_check_reports_an_unremoved_rule` fails because the
   bypassing entry then counts as a removal.
-- Turn the unreadable-profile, unparsable-profile, unreadable-list, not-JSON or
-  missing-list refusal into a skip (WP49 to WP53):
+- Turn the unreadable-profile refusal into a skip (WP49), the unparsable-profile
+  refusal (WP53), the unreadable-list refusal (WP50), the not-JSON refusal
+  (WP51) or the missing-list refusal (WP52):
   `allow_rule_removal_check_rejects_bad_inputs` fails because the refusal does
   not come.
 - Drop the canonical-parameter refusal from `start_with_profile` (WP54):
@@ -411,6 +468,29 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append a second, unpinned `(allow process-exec)` after the exec rule (WP56):
   `unbound_copy_is_refused_under_profile` fails on its deadline assertion
   because the copy under `STORAGE_ROOT` starts instead of being refused.
+- Widen the parent read from `literal` to `subpath` (WP57):
+  `planted_key_beneath_storage_parent_is_not_read` fails on its refusal
+  because the planted key loads and `init` answers ok.
+- Drop the own-id rule from the section check (WP58):
+  `falsifier_section_check_reports_missing_and_stale_ids` fails because the
+  missing id reports no problem.
+- Drop the unregistered-id rule from the section check (WP59): the same test
+  fails because the stale id reports no problem.
+- Match an id as a substring instead of a whole token (WP60): the same test
+  fails because the longer registered id then names the shorter one.
+- Run the section to the end of the file instead of the next `## ` heading
+  (WP61): `falsifier_section_check_rejects_a_document_without_its_section`
+  fails because an id after the next heading counts as named.
+- Bypass the missing-heading refusal (WP62): the same test fails because a
+  document without `## Falsifiers` reports no problem.
+- Bypass the duplicate-heading refusal (WP63): the same test fails because a
+  second `## Falsifiers` heading reports no problem.
+- Skip an unreadable `CONFINEMENT.md` instead of refusing it (WP64):
+  `falsifier_document_read_rejects_unreadable_source` fails because the
+  refusal does not come.
+- Append `(allow file-write* (subpath (param "STORAGE_PARENT")))` (WP65):
+  `confined_outside_write_is_denied` fails on the new case's absence check
+  because the fresh base beneath the parent is created.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
