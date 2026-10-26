@@ -2,12 +2,13 @@ id: F35-close-pipe-reported-as-start
 file: src/real.rs
 test: real_kernel::real_close_pipe_without_exec_is_not_a_start
 --- old
-                if !exe_matches_expected(init, plan.exe_dev_ino()) {
+                if !matched {
                     unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
                     reap(init as libc::pid_t);
                     unsafe { libc::close(ack_write) };
+                    reap_if_exited(helper, 1);
                     return Err(Fault::exec_identity());
                 }
 --- new
-                let _ = plan.exe_dev_ino();
+                let _ = matched;
 --- end

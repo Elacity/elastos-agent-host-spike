@@ -637,15 +637,22 @@ impl Kernel for RealKernel {
         let mut pid_buf = [0u8; 4];
         let (got_pid, _) = read_all(handoff_read, &mut pid_buf);
         unsafe { libc::close(handoff_read) };
-        // The helper writes the pid and `_exit`s. Do not block forever if a
-        // plant keeps it alive: wait up to 100 ms, then leave it.
-        reap_if_exited(helper, 100);
 
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
 
+        let expected = plan.exe_dev_ino();
+        let mut matched = false;
+        if let Some(init) = init_pid {
+            matched = any_child_matches(init, expected);
+        }
         let mut buf = [0u8; Fault::ENCODED_LEN * 2];
-        let (got, read_error) = read_all(fault_read, &mut buf);
+        let (got, read_error) =
+            read_fault_until_eof(fault_read, init_pid, expected, &mut matched, &mut buf);
         unsafe { libc::close(fault_read) };
+
+        // The helper writes the pid and `_exit`s. One WNOHANG now; do not
+        // sleep here or a fast provider can exit before we sample /proc/exe.
+        reap_if_exited(helper, 1);
 
         match interpret_fault_pipe(&buf[..got], read_error) {
             FaultPipe::Started => {
@@ -655,20 +662,23 @@ impl Kernel for RealKernel {
                         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
                         reap(pid as libc::pid_t);
                         unsafe { libc::close(ack_write) };
+                        reap_if_exited(helper, 1);
                         return Err(Fault::empty_pipe());
                     }
                     None => {
                         unsafe { libc::close(ack_write) };
+                        reap_if_exited(helper, 1);
                         return Err(Fault::empty_pipe());
                     }
                 };
                 // Init is landlocked and cannot read /proc. The parent is
-                // outside. It finds the provider under init and checks
-                // /proc/<pid>/exe against the expected binary.
-                if !exe_matches_expected(init, plan.exe_dev_ino()) {
+                // outside. It samples /proc/<pid>/exe while the provider is
+                // still alive. A fast exit leaves a zombie with no exe.
+                if !matched {
                     unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
                     reap(init as libc::pid_t);
                     unsafe { libc::close(ack_write) };
+                    reap_if_exited(helper, 1);
                     return Err(Fault::exec_identity());
                 }
                 let ack = [1u8];
@@ -676,6 +686,7 @@ impl Kernel for RealKernel {
                     libc::write(ack_write, ack.as_ptr().cast(), ack.len());
                     libc::close(ack_write);
                 }
+                reap_if_exited(helper, 1);
                 Ok(init)
             }
             FaultPipe::Refused(fault) => {
@@ -684,6 +695,7 @@ impl Kernel for RealKernel {
                     reap(pid as libc::pid_t);
                 }
                 unsafe { libc::close(ack_write) };
+                reap_if_exited(helper, 1);
                 Err(fault)
             }
         }
@@ -732,40 +744,86 @@ fn close_pair(a: RawFd, b: RawFd) {
     }
 }
 
-/// Parent-side: `/proc/<init>/exe` is the init image. The provider is the
-/// first child. Init waits on the ack pipe, so a fast exit stays a zombie
-/// long enough for `/proc/<pid>/exe` to stay visible.
-fn exe_matches_expected(init: u32, expected: (u64, u64)) -> bool {
-    for _ in 0..200 {
-        if let Some(pid) = first_child_now(init) {
-            if exe_identity_ok(expected, proc_exe_dev_ino(pid)) {
-                return true;
+/// Read the fault pipe. While waiting, sample `/proc/<child>/exe` so a
+/// fast-exit provider can still prove it was the expected binary.
+fn read_fault_until_eof(
+    fault_read: RawFd,
+    init: Option<u32>,
+    expected: (u64, u64),
+    matched: &mut bool,
+    buf: &mut [u8],
+) -> (usize, Option<Errno>) {
+    let mut got = 0usize;
+    loop {
+        if !*matched {
+            if let Some(pid) = init {
+                *matched = any_child_matches(pid, expected);
             }
         }
-        if !process_alive(init) {
-            return false;
+        let mut pfd = libc::pollfd {
+            fd: fault_read,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is a valid pollfd; 1 ms so we keep sampling exe.
+        let pret = unsafe { libc::poll(&mut pfd, 1, 1) };
+        if pret < 0 {
+            if errno() == libc::EINTR {
+                continue;
+            }
+            return (got, Some(errno()));
         }
-        unsafe { libc::usleep(1000) };
+        if pret == 0 {
+            if let Some(pid) = init {
+                if !process_alive(pid) {
+                    break;
+                }
+            }
+            continue;
+        }
+        let (n, read_error) = read_all(fault_read, &mut buf[got..]);
+        got += n;
+        if let Some(err) = read_error {
+            return (got, Some(err));
+        }
+        if n == 0 || got == buf.len() {
+            break;
+        }
     }
-    false
+    if !*matched {
+        if let Some(pid) = init {
+            *matched = any_child_matches(pid, expected);
+        }
+    }
+    (got, None)
 }
 
-fn first_child_now(init: u32) -> Option<u32> {
+fn any_child_matches(init: u32, expected: (u64, u64)) -> bool {
+    children_of(init)
+        .into_iter()
+        .any(|pid| exe_identity_ok(expected, proc_exe_dev_ino(pid)))
+}
+
+fn children_of(init: u32) -> Vec<u32> {
+    let mut pids = Vec::new();
     let path = format!("/proc/{init}/task/{init}/children");
     if let Ok(text) = std::fs::read_to_string(path) {
-        if let Some(pid) = text
-            .split_whitespace()
-            .next()
-            .and_then(|word| word.parse().ok())
-        {
-            // The children file can name a namespace-local pid. Keep it
-            // only when that pid's host PPid is init.
-            if pid > 0 && pid_has_ppid(pid, init) {
-                return Some(pid);
+        for word in text.split_whitespace() {
+            if let Ok(pid) = word.parse::<u32>() {
+                // The children file can name a namespace-local pid. Keep it
+                // only when that pid's host PPid is init.
+                if pid > 0 && pid_has_ppid(pid, init) && !pids.contains(&pid) {
+                    pids.push(pid);
+                }
             }
         }
     }
-    child_by_ppid(init)
+    if pids.is_empty() {
+        if let Some(pid) = child_by_ppid(init) {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 fn pid_has_ppid(pid: u32, init: u32) -> bool {

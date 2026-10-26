@@ -63,12 +63,13 @@ number.
 The real kernel (`src/real.rs`) creates a close-on-exec pipe and forks. The
 child runs the guard. On a fault, the child writes a 12-byte record (step,
 errno, found ABI) and calls `_exit(71)`. EOF on that pipe is necessary for
-a start, not sufficient. After EOF the parent checks
-`/proc/<provider pid>/exe` against the expected binary (device and inode
-from `stat` before fork). A match is a start. Closing the pipe without
-`execve` leaves the helper image in place and is a refusal. A static
-binary that writes nothing is accepted when that identity matches. Any
-bytes, including a `ConfineReady` record without `execve`, are a refusal.
+a start, not sufficient. The parent samples `/proc/<provider pid>/exe`
+against the expected binary (device and inode from `stat` before fork)
+while the provider is still alive. A match is a start. Closing the pipe
+without `execve` leaves the helper image in place and is a refusal. A
+static binary that writes nothing is accepted when that identity matches.
+Any bytes, including a `ConfineReady` record without `execve`, are a
+refusal.
 If the helper dies before `execve` and there is no live init, that empty
 read is also a refusal. The child uses only data that `Plan` built before
 the fork, and it makes only system calls: it does not allocate, lock or
@@ -112,9 +113,9 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 
 | Suite | Tests |
 | --- | --- |
-| `lib` (unit) | 8 passed |
-| `simulated` | 18 passed |
-| `real_kernel` | 22 passed |
+| `lib` (unit) | 9 passed |
+| `simulated` | 19 passed |
+| `real_kernel` | 26 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -289,8 +290,8 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: `python3 falsify.py` on this tree: counts filled after the
-suite run. A skipped (`ignored`) test is `NOT RUN`, never a pass.
+Result: `python3 falsify.py` on this tree: filled after the falsify run.
+A skipped (`ignored`) test is `NOT RUN`, never a pass.
 F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid` is a
 host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and F32
 catch the #355 / #357 review gaps. F33-F35 catch the r3 residuals:
@@ -313,10 +314,11 @@ without `execve`.
 - File descriptor inheritance: covered. `close_fds` closes every fd except
   stdin, stdout, stderr and the fault pipe. An inherited pre-confine pty
   is gone before `execve`, so `TIOCGWINSZ` on that fd is `EBADF`.
-- Start proof: EOF on the fault pipe is not enough. The parent also checks
+- Start proof: EOF on the fault pipe is not enough. The parent samples
   `/proc/<provider pid>/exe` (device and inode) against the expected
-  binary. Closing the pipe without `execve` is a refusal. A static binary
-  that writes nothing is a start only when that identity matches.
+  binary while that process is alive. Closing the pipe without `execve`
+  is a refusal. A static binary that writes nothing is a start only when
+  that identity matches.
 
 ## How `lab/linux-confine` (PR #296) could plug in
 

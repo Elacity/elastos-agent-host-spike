@@ -2,9 +2,7 @@ id: F33-inherited-fds-left-open
 file: src/lib.rs
 test: real_kernel::real_inherited_pty_ioctl_is_not_available
 --- old
-    kernel
-        .close_unneeded_fds()
-        .map_err(os(Step::CloseFds))?;
+    kernel.close_unneeded_fds().map_err(os(Step::CloseFds))?;
 --- new
     let _ = Step::CloseFds;
 --- end
