@@ -16,6 +16,11 @@ path for starting a provider under its profile (P10). The Runtime loads `confine
 the signed provider bundle, checks its hash, refuses any profile with
 `(allow default)` or a network allow, and fails closed with a reason; the
 provider proposes, the Runtime checks (P4, P11).
+If the profile cannot be applied, because the file is missing, does not parse
+or names a parameter the launch does not bind, `sandbox-exec` exits before the
+provider starts and gives its reason on standard error; the Runtime then
+refuses the start with that reason and never starts the provider another way
+(P11).
 
 Runtime binds three parameters and creates the base before launch:
 
@@ -121,6 +126,18 @@ the pipe still reaches its own exit. `stderr_is_drained_before_wait` writes
 status. The startup case skips with its printed reason when `sandbox-exec` is
 absent on a host OS other than macOS.
 
+`startup_is_refused_when_the_profile_cannot_be_applied` covers a profile that
+never loads. It launches the provider through the one builder three ways: a
+profile path that does not exist, a copy of `confine.sb` with its last `)`
+removed, and the real profile with every parameter bound except
+`STORAGE_ROOT`. In each case `sandbox-exec` exits 65 before it can exec the
+provider, the child exits within the deadline with a status other than 0, the
+one harness failure names the request, that exit status and the profile's
+reason from standard error, and nothing lands under the storage root. The
+failure never names `execvp`, so the exec was never attempted. The case skips
+with its printed reason when `sandbox-exec` is absent on a host OS other than
+macOS.
+
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
 no default grant. It runs on every platform, and removing `(deny network*)`
@@ -220,6 +237,10 @@ from the repository root; the list's edit paths are relative to
 - Widen the write grant from `STORAGE_ROOT` to `STORAGE_PARENT` (DID18):
   `outside_write_denied` fails on its sibling target because that write
   succeeds.
+- Start the provider binary directly when the profile file does not exist
+  (DID21): `startup_is_refused_when_the_profile_cannot_be_applied` fails on
+  its missing-profile case because the provider starts and stays alive instead
+  of being refused.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
@@ -239,10 +260,13 @@ them on macOS 26.5.2 arm64:
 
 A host that needs one of the removed grants receives a sandbox denial for the
 affected access, so that operation fails closed with a reason. In the
-confinement tests that reason appears in the failure of the request the
-provider never answered: the message names the request, the provider's exit
-status and all the provider wrote to standard error. The grant comes back only
-together with a named test that needs it.
+confinement tests the failure of the request the provider never answered names
+the request and the provider's exit status. When the profile denies the exec
+itself (DID07), the failure also carries `sandbox-exec`'s `Operation not
+permitted` from standard error. When the loader runs and a later read is denied
+(DID08, DID09), standard error is empty and the failure shows only the signal,
+`signal: 6 (SIGABRT)`. The grant comes back only together with a named test
+that needs it.
 
 The wallet provider keeps its own profile and tests in `../wallet-provider/`.
 did-provider, wallet-provider and model-provider present the same file-based
