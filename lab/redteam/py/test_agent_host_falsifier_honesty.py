@@ -33,10 +33,12 @@ Run: python3 -I -m unittest discover -s lab/redteam/py
 import collections
 import copy
 import functools
+import io
 import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import falsifier_data
 
@@ -76,6 +78,7 @@ PROBES = (
     "test_expected_failures_are_recorded_findings",
     "test_strict_json_refusals",
     "test_report_names_the_commit_it_read",
+    "test_suite_report_keeps_verified_snapshot",
 )
 
 
@@ -753,7 +756,6 @@ class ProbeControls(unittest.TestCase):
         commit_b = "b" * 40
         lookups = []
         calls = []
-        real = falsifier_data.execute
 
         def fake(root, args):
             calls.append(args)
@@ -778,13 +780,9 @@ class ProbeControls(unittest.TestCase):
                 return (commit_a + "\n").encode()
             return None
 
-        falsifier_data.execute = fake
-        merged_base.cache_clear()
-        try:
-            text = report()
-        finally:
-            falsifier_data.execute = real
-            merged_base.cache_clear()
+        snapshot = Snapshot(run=lambda *args: fake(REPO, args))
+        _entries, problems = probe(snapshot.read)
+        text = report_text(snapshot, problems)
 
         self.assertEqual(len(lookups), 1, lookups)
         self.assertIn("HEAD^{commit}", lookups[0][-1])
@@ -800,6 +798,89 @@ class ProbeControls(unittest.TestCase):
         self.assertNotIn(commit_b, text)
         self.assertIn(commit_a + " pinned", text)
         self.assertFalse("0 of" in text and f"read at HEAD {commit_b}" in text, text)
+
+    def test_suite_report_keeps_verified_snapshot(self):
+        """The suite verifies A, then HEAD and the checkout move to broken B
+        after the changing-HEAD control. Module teardown still reports A.
+
+        Run the other tests and module teardown with an isolated cache and
+        in-memory checkout, leaving the actual suite's snapshot intact.
+        """
+        commit_a, commit_b = "a" * 40, "b" * 40
+        head = commit_a
+        prefix = "examples/agent-host/"
+        commits = {
+            commit: {prefix + name: data for name, data in files.items()}
+            for commit, files in ((commit_a, tree()), (commit_b, tree(asks=b"{}")))
+        }
+        paths = {REPO / path for path in commits[commit_a]}
+        real_is_file, real_read_bytes = Path.is_file, Path.read_bytes
+
+        def is_file(path):
+            return True if path in paths else real_is_file(path)
+
+        def read_bytes(path):
+            if path in paths:
+                return commits[head][path.relative_to(REPO).as_posix()]
+            return real_read_bytes(path)
+
+        def fake(_root, args):
+            if args[0] == "rev-parse":
+                return (head + "\n").encode()
+            if args[0] == "cat-file":
+                commit, _, path = args[-1].partition(":")
+                return commits.get(commit, {}).get(path)
+            if args[0] == "log":
+                return (args[3] + " Merge pull request #1\n").encode()
+            if args[0] == "rev-list":
+                return (args[-1].rsplit("..", 1)[-1] + "\n").encode()
+            if args[0] == "merge-base":
+                return b"" if args[2] == args[3] else None
+            raise AssertionError(f"unexpected fixture command: {args}")
+
+        class MoveCheckout(unittest.TestCase):
+            def runTest(self):
+                nonlocal head
+                head = commit_b
+
+        cases = sorted((case for case in discovered() if method_name(case)
+                        != "test_suite_report_keeps_verified_snapshot"), key=lambda case: case.id())
+        suite = unittest.TestSuite()
+        for case in cases:
+            suite.addTest(case)
+            if method_name(case) == "test_report_names_the_commit_it_read":
+                suite.addTest(MoveCheckout())
+        isolated_base = functools.lru_cache(maxsize=None)(merged_base.__wrapped__)
+        output = io.StringIO()
+        with (patch.object(sys.modules[__name__], "merged_base", isolated_base),
+              patch.object(falsifier_data, "execute", fake),
+              patch.object(Path, "is_file", is_file),
+              patch.object(Path, "read_bytes", read_bytes),
+              patch.object(sys, "stderr", output)):
+            verified = merged_base()
+            expected_text = "\n" + report_text(verified[0], verified[2]) + "\n"
+            result = suite.run(unittest.TestResult())
+            self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+            self.assertEqual(result.testsRun, len(cases) + 1)
+            self.assertEqual(result.skipped, [])
+            self.assertEqual(head, commit_b)
+            self.assertIs(merged_base(), verified)
+            # B's broken schema has matching committed bytes: a pin check
+            # alone cannot detect a new snapshot taken after the probes.
+            changed = Snapshot()
+            _entries, problems = probe(changed.read)
+            self.assertEqual(problems["asks"], [Problem("asks", "", "asks.json", "schema is missing")])
+            self.assertEqual(pin_problems(changed.files, changed.commit,
+                                         committed_bytes(changed.commit, changed.files, changed.run).get), [])
+
+        text = output.getvalue()
+        self.assertEqual(text, expected_text)
+        self.assertIn(f"read at HEAD {commit_a}", text)
+        self.assertNotIn(commit_b, text)
+        self.assertIn("problems by rule: parse 0, caught 0, anchor 0, asks 0", text)
+        self.assertIn("files read that differ from HEAD: 0 of 4", text)
+        for path, data in commits[commit_a].items():
+            self.assertIn(f"{path} {digest(data)}", text)
 
     def test_new_finding_fails_gate(self):
         """A recorded finding hides only its own problems: a second malformed
