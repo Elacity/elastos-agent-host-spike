@@ -1,6 +1,6 @@
 id: F25-empty-pipe-reported-as-start
 file: src/lib.rs
-test: lib::empty_fault_pipe_is_a_refusal_not_a_start
+test: lib::tests::empty_fault_pipe_is_a_refusal_not_a_start
 test: real_kernel::real_empty_fault_pipe_is_not_a_start
 --- old
     if bytes.is_empty() {

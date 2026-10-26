@@ -1,6 +1,6 @@
 id: F26-test-extra-right-ignored
 file: src/lib.rs
-test: lib::extra_test_right_is_absent_from_the_file_profile
+test: lib::tests::extra_test_right_is_absent_from_the_file_profile
 test: simulated::sim_test_extra_right_refuses_on_abi_6
 test: real_kernel::real_per_right_floor_refuses_on_this_kernel
 --- old
