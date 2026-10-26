@@ -63,9 +63,10 @@ number.
 The real kernel (`src/real.rs`) creates a close-on-exec pipe and forks. The
 child runs the guard. On a fault, the child writes a 12-byte record (step,
 errno, found ABI) and calls `_exit(71)`. EOF on that pipe is necessary for
-a start, not sufficient. The parent samples `/proc/<provider pid>/exe`
-against the expected binary (device and inode from `stat` before fork)
-on a side thread while the provider is still alive. A match is a start. Closing the pipe
+a start, not sufficient. The parent checks `/proc/<provider pid>/exe`
+against the expected binary (device and inode from `stat` before fork).
+The provider keeps a non-cloexec identity fd across `execve`, so that
+image is still alive after the fault pipe closes. A match is a start. Closing the pipe
 without `execve` leaves the helper image in place and is a refusal. A
 static binary that writes nothing is accepted when that identity matches.
 Any bytes, including a `ConfineReady` record without `execve`, are a
@@ -314,11 +315,12 @@ without `execve`.
 - File descriptor inheritance: covered. `close_fds` closes every fd except
   stdin, stdout, stderr and the fault pipe. An inherited pre-confine pty
   is gone before `execve`, so `TIOCGWINSZ` on that fd is `EBADF`.
-- Start proof: EOF on the fault pipe is not enough. The parent samples
+- Start proof: EOF on the fault pipe is not enough. The parent checks
   `/proc/<provider pid>/exe` (device and inode) against the expected
-  binary while that process is alive. Closing the pipe without `execve`
-  is a refusal. A static binary that writes nothing is a start only when
-  that identity matches.
+  binary. A non-cloexec identity fd keeps the post-`execve` image alive
+  for that check. Closing the pipe without `execve` is a refusal. A
+  static binary that writes nothing is a start only when that identity
+  matches.
 
 ## How `lab/linux-confine` (PR #296) could plug in
 

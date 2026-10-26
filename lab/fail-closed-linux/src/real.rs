@@ -7,9 +7,9 @@
 //! `launch` returns the PID-namespace init. The helper that unshares the
 //! namespace writes that host pid and exits. Init reaps every child. SIGKILL
 //! of init kills the namespace. A start is EOF on the close-on-exec pipe
-//! plus `/proc/<provider pid>/exe` matching the expected binary. The parent
-//! samples that identity on a side thread so a fast exit is still a start
-//! when the image matched while it was alive. Any bytes are a fault.
+//! plus `/proc/<provider pid>/exe` matching the expected binary. The
+//! provider keeps a non-cloexec identity fd so that image stays alive
+//! after the fault pipe closes. Any bytes are a fault.
 
 use crate::{
     confine_and_exec, exe_identity_ok, interpret_fault_pipe, landlock, proc_exe_dev_ino,
@@ -20,14 +20,14 @@ use std::ffi::CStr;
 use std::io;
 use std::os::fd::RawFd;
 use std::os::raw::{c_int, c_long};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
-use std::thread;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// The real kernel. `fault_write` is the child's end of the close-on-exec
 /// pipe. Reapers close their copy so a successful `execve` produces EOF.
+/// `identity_write` is not cloexec: only the post-`execve` image keeps it.
 pub struct RealKernel {
     fault_write: RawFd,
+    identity_write: RawFd,
     lie_rights: bool,
     lie_enforcement: bool,
     keep: [RawFd; 8],
@@ -38,6 +38,7 @@ impl RealKernel {
     pub fn new() -> RealKernel {
         RealKernel {
             fault_write: -1,
+            identity_write: -1,
             lie_rights: false,
             lie_enforcement: false,
             keep: [-1; 8],
@@ -232,6 +233,26 @@ fn close_fault_write(kernel: &mut RealKernel) {
     }
 }
 
+fn close_identity_write(kernel: &mut RealKernel) {
+    if kernel.identity_write >= 0 {
+        // SAFETY: this is our copy of the identity write end.
+        unsafe { libc::close(kernel.identity_write) };
+        kernel.identity_write = -1;
+    }
+}
+
+fn clear_cloexec(fd: RawFd) -> Result<(), Errno> {
+    // SAFETY: integer fcntl on a pipe we own.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(errno());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } != 0 {
+        return Err(errno());
+    }
+    Ok(())
+}
+
 fn process_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) only probes existence.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -288,6 +309,7 @@ impl Kernel for RealKernel {
                 HANDOFF_WRITE.store(-1, Ordering::Relaxed);
             }
             close_fault_write(self);
+            close_identity_write(self);
             unsafe { libc::_exit(0) };
         }
         // Init is PID 1. Do not set PDEATHSIG here: the helper (creator)
@@ -303,6 +325,7 @@ impl Kernel for RealKernel {
         }
         if provider > 0 {
             close_fault_write(self);
+            close_identity_write(self);
             wait_for_identity_ack();
             reap_namespace();
         }
@@ -582,6 +605,15 @@ impl Kernel for RealKernel {
                 return Err(Fault::os(Step::Pipe, err));
             }
         };
+        let [identity_read, identity_write] = match pipe2_cloexec() {
+            Ok(pair) => pair,
+            Err(err) => {
+                close_pair(fault_read, fault_write);
+                close_pair(handoff_read, handoff_write);
+                close_pair(ack_read, ack_write);
+                return Err(Fault::os(Step::Pipe, err));
+            }
+        };
 
         // SAFETY: the child runs only system calls on `plan` and then
         // `_exit`s or execs; see the module comment.
@@ -591,6 +623,7 @@ impl Kernel for RealKernel {
             close_pair(fault_read, fault_write);
             close_pair(handoff_read, handoff_write);
             close_pair(ack_read, ack_write);
+            close_pair(identity_read, identity_write);
             return Err(Fault::os(Step::Fork, err));
         }
         if helper == 0 {
@@ -598,6 +631,10 @@ impl Kernel for RealKernel {
                 libc::close(fault_read);
                 libc::close(handoff_read);
                 libc::close(ack_write);
+                libc::close(identity_read);
+            }
+            if clear_cloexec(identity_write).is_err() {
+                unsafe { libc::_exit(REFUSAL_EXIT_CODE) };
             }
             HANDOFF_WRITE.store(handoff_write, Ordering::Relaxed);
             ACK_READ.store(ack_read, Ordering::Relaxed);
@@ -614,10 +651,11 @@ impl Kernel for RealKernel {
             let fault = match confine_and_exec(
                 &mut RealKernel {
                     fault_write,
+                    identity_write,
                     lie_rights: plan.test_lie_rights,
                     lie_enforcement: plan.test_lie_enforcement,
-                    keep: [handoff_write, ack_read, -1, -1, -1, -1, -1, -1],
-                    keep_n: 2,
+                    keep: [handoff_write, ack_read, identity_write, -1, -1, -1, -1, -1],
+                    keep_n: 3,
                 },
                 plan,
             ) {
@@ -635,6 +673,7 @@ impl Kernel for RealKernel {
             libc::close(fault_write);
             libc::close(handoff_write);
             libc::close(ack_read);
+            libc::close(identity_write);
         }
 
         let mut pid_buf = [0u8; 4];
@@ -643,24 +682,13 @@ impl Kernel for RealKernel {
 
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
 
-        let expected = plan.exe_dev_ino();
-        let stop = Arc::new(AtomicBool::new(false));
-        let spinner = init_pid.map(|init| {
-            let stop = Arc::clone(&stop);
-            thread::spawn(move || sample_exe_until(init, expected, &stop))
-        });
         let mut buf = [0u8; Fault::ENCODED_LEN * 2];
         let (got, read_error) = read_all(fault_read, &mut buf);
-        stop.store(true, Ordering::Relaxed);
-        let mut matched = spinner
-            .and_then(|handle| handle.join().ok())
-            .unwrap_or(false);
-        if !matched {
-            if let Some(init) = init_pid {
-                matched = any_child_matches(init, expected);
-            }
-        }
         unsafe { libc::close(fault_read) };
+        // Fault EOF means execve (or close-pipe). The identity write end is
+        // not cloexec, so the post-exec image is still alive here.
+        let matched = init_pid.is_some_and(|init| any_child_matches(init, plan.exe_dev_ino()));
+        unsafe { libc::close(identity_read) };
 
         // The helper writes the pid and `_exit`s. One WNOHANG now; do not
         // sleep here or a fast provider can exit before we sample /proc/exe.
@@ -684,8 +712,8 @@ impl Kernel for RealKernel {
                     }
                 };
                 // Init is landlocked and cannot read /proc. The parent is
-                // outside. It samples /proc/<pid>/exe while the provider is
-                // still alive. A fast exit leaves a zombie with no exe.
+                // outside. The identity fd keeps the post-exec image alive
+                // so /proc/<pid>/exe can be stated after fault-pipe EOF.
                 if !matched {
                     unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
                     reap(init as libc::pid_t);
@@ -754,19 +782,6 @@ fn close_pair(a: RawFd, b: RawFd) {
         libc::close(a);
         libc::close(b);
     }
-}
-
-/// Parent-side spinner. A fast-exit provider is only briefly alive after
-/// `execve`; this thread keeps stating `/proc/<pid>/exe` until it matches
-/// or the fault pipe is done.
-fn sample_exe_until(init: u32, expected: (u64, u64), stop: &AtomicBool) -> bool {
-    while !stop.load(Ordering::Relaxed) {
-        if any_child_matches(init, expected) {
-            return true;
-        }
-        thread::yield_now();
-    }
-    any_child_matches(init, expected)
 }
 
 fn any_child_matches(init: u32, expected: (u64, u64)) -> bool {
