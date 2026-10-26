@@ -1,0 +1,4 @@
+scratch/
+checkout/
+*.pyc
+__pycache__/

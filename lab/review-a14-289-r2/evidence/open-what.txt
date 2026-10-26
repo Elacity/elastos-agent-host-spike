@@ -1,0 +1,8 @@
+/usr/bin/open
+open is /usr/bin/open
+lrwxrwxrwx. 1 root root 22 Aug  1  2022 /usr/bin/open -> /etc/alternatives/open
+xdg-open - opens a file or URL in the user's preferred application
+
+Synopsis
+
+xdg-open { file | URL }

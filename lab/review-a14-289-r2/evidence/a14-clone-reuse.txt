@@ -1,0 +1,4 @@
+REFUSED: /workspace/lab/review-a14-289-r2/scratch/probes/reuse-dest already exists. This runbook never reuses a folder.
+reuse-existing exit 3
+missing dest accepted (would clone here)
+reuse-missing exit 0
