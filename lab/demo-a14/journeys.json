@@ -1,0 +1,334 @@
+{
+  "schema": "demo-a14.journeys/v1",
+  "mapping": "The M1 sheet is not in this repository. Which test stands for which M1 check is this demo's reading of A1, A2, A8 and C1-C7; Sash confirms it before A14 is booked.",
+  "checks": {
+    "A1": "WASM admission",
+    "A2": "journal",
+    "A8": "host-secret refusal",
+    "C1": "provider read outside its storage root is refused",
+    "C2": "provider write outside its storage root is refused",
+    "C3": "provider file beside its root, under the parent, is refused",
+    "C4": "a program other than the bound provider binary is refused",
+    "C5": "provider network is refused",
+    "C6": "provider start is refused when its profile cannot be applied",
+    "C7": "a refused provider start names its reason"
+  },
+  "suites": {
+    "runtime-compute": {
+      "label": "Runtime compute crate (elastos-compute)",
+      "cwd": "elastos",
+      "cargo": ["test", "--locked", "-p", "elastos-compute", "--lib"],
+      "libtest": ["--exact", "--include-ignored", "--show-output"],
+      "macos_reason": "",
+      "identities": []
+    },
+    "runtime-server": {
+      "label": "Runtime server crate (elastos-server)",
+      "cwd": "elastos",
+      "cargo": ["test", "--locked", "-p", "elastos-server", "--lib"],
+      "libtest": ["--exact", "--include-ignored", "--show-output"],
+      "macos_reason": "",
+      "identities": []
+    },
+    "agent-conformance": {
+      "label": "real elastos binary through lab/agent-conformance",
+      "cwd": ".",
+      "cargo": ["test", "--locked", "--manifest-path", "lab/agent-conformance/Cargo.toml", "--test", "effects"],
+      "libtest": ["--exact", "--show-output"],
+      "env": {"CARGO_NET_OFFLINE": "true", "RUST_TEST_THREADS": "2", "CARGO_INCREMENTAL": "0"},
+      "env_paths": {
+        "CARGO_TARGET_DIR": "lab/agent-conformance/target/host",
+        "CARGO_BUILD_BUILD_DIR": "lab/agent-conformance/target/host-build"
+      },
+      "macos_reason": "lab/agent-conformance supports the Mac data path and darwin component platforms only",
+      "identities": ["native:elastos", "native:localhost-provider", "launched:host-key-read"]
+    },
+    "did-provider": {
+      "label": "did-provider under its confine.sb",
+      "cwd": ".",
+      "cargo": ["test", "--locked", "--manifest-path", "capsules/did-provider/Cargo.toml", "--test", "confine"],
+      "libtest": ["--exact", "--show-output"],
+      "macos_reason": "the provider profile runs under /usr/bin/sandbox-exec, which only macOS has",
+      "identities": []
+    },
+    "wallet-provider": {
+      "label": "wallet-provider under its confine.sb",
+      "cwd": ".",
+      "cargo": ["test", "--locked", "--manifest-path", "capsules/wallet-provider/Cargo.toml", "--test", "confine"],
+      "libtest": ["--exact", "--show-output"],
+      "macos_reason": "the provider profile runs under /usr/bin/sandbox-exec, which only macOS has",
+      "identities": []
+    },
+    "model-provider": {
+      "label": "model-provider under its confine.sb",
+      "cwd": ".",
+      "cargo": ["test", "--locked", "--manifest-path", "capsules/model-provider/Cargo.toml", "--test", "confine"],
+      "libtest": ["--exact", "--show-output"],
+      "macos_reason": "the provider profile runs under /usr/bin/sandbox-exec, which only macOS has",
+      "identities": []
+    }
+  },
+  "steps": [
+    {
+      "id": "A1.1",
+      "check": "A1",
+      "title": "The Runtime's Wasmtime admits the real agent-host component",
+      "expect": "pass",
+      "suite": "runtime-compute",
+      "test": "providers::component::tests::agent_host_example_keeps_the_head_across_a_compaction",
+      "platform": "any",
+      "reason": "it compiles in the Runtime's own Wasmtime, imports only the five elastos:bus@1.0.0 interfaces, loads twice as separate instances and keeps its journal head across a compaction"
+    },
+    {
+      "id": "A1.2",
+      "check": "A1",
+      "title": "A component with an import outside the Bus is refused",
+      "expect": "refusal",
+      "suite": "runtime-server",
+      "test": "runtime::tests::component_import_validation_fails_before_provider_load",
+      "platform": "any",
+      "reason": "component import \"...\" is not allowed; the Runtime refuses it before the compute provider loads anything"
+    },
+    {
+      "id": "A1.3",
+      "check": "A1",
+      "title": "An unsigned or untrusted capsule is refused at launch",
+      "expect": "refusal",
+      "suite": "runtime-server",
+      "test": "runtime::tests::launch_refuses_untrusted_signers_before_the_provider_loads",
+      "platform": "any",
+      "reason": "\"is unsigned\" for no signature, \"verification failed\" for another key or a changed entrypoint; nothing loads, and the trusted key's capsule then loads once"
+    },
+    {
+      "id": "A2.1",
+      "check": "A2",
+      "title": "With both grants, the agent host writes and reads its journal",
+      "expect": "pass",
+      "suite": "runtime-server",
+      "test": "runtime::tests::the_agent_host_writes_and_reads_its_journal_through_the_real_bridge",
+      "platform": "any",
+      "reason": "it asks to write, then read, its own journal under the person's .AppData/Agents/agent-host folder; the real bridge stores it encrypted and the guest reads back journal format 2"
+    },
+    {
+      "id": "A2.2",
+      "check": "A2",
+      "title": "With both grants denied, the agent host stores nothing",
+      "expect": "refusal",
+      "suite": "runtime-server",
+      "test": "runtime::tests::the_agent_host_stores_nothing_when_its_journal_grants_are_denied",
+      "platform": "any",
+      "reason": "the shell answers both journal requests with \"not now\"; the guest finishes, makes no provider call, and no journal file exists"
+    },
+    {
+      "id": "A2.3",
+      "check": "A2",
+      "title": "An old-format journal is refused with its reason",
+      "expect": "refusal",
+      "suite": "runtime-server",
+      "test": "runtime::tests::the_agent_host_refuses_a_format_1_journal_with_its_reason",
+      "platform": "any",
+      "reason": "\"journal format 1 not supported; start a new task\"; the stored journal is not changed"
+    },
+    {
+      "id": "A8",
+      "check": "A8",
+      "title": "A capsule cannot read a host SSH key",
+      "expect": "refusal",
+      "suite": "agent-conformance",
+      "test": "host_key_read_is_refused",
+      "platform": "macos",
+      "reason": "Internal(\"capsule manifest does not declare authority for localhost://Public/../../../../.ssh/id_ed25519\") from the real elastos binary; the fake key bytes stay unchanged and never reach the output, and the operator makes no decision",
+      "show": ["probe refusal effect:", "host key read:"]
+    },
+    {
+      "id": "C1.did",
+      "check": "C1",
+      "title": "did-provider cannot read outside its storage root",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "outside_read_denied",
+      "platform": "macos",
+      "reason": "the provider answers storage_error and returns none of the outside file's bytes"
+    },
+    {
+      "id": "C1.wallet",
+      "check": "C1",
+      "title": "wallet-provider cannot read a key in another wallet",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "confined_outside_read_is_denied",
+      "platform": "macos",
+      "reason": "opening the planted key is the refused step; the provider answers storage_error"
+    },
+    {
+      "id": "C1.model",
+      "check": "C1",
+      "title": "model-provider cannot read a run record outside its root",
+      "expect": "refusal",
+      "suite": "model-provider",
+      "test": "model_outside_read_denied",
+      "platform": "macos",
+      "reason": "the outside run record is neither read nor returned, and the provider stays in service"
+    },
+    {
+      "id": "C2.did",
+      "check": "C2",
+      "title": "did-provider cannot write outside its storage root",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "outside_write_denied",
+      "platform": "macos",
+      "reason": "the provider answers storage_error and nothing appears outside the root"
+    },
+    {
+      "id": "C2.wallet",
+      "check": "C2",
+      "title": "wallet-provider cannot create a wallet outside its root",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "confined_outside_write_is_denied",
+      "platform": "macos",
+      "reason": "Init for an unrelated base answers storage_error and no wallet directory appears"
+    },
+    {
+      "id": "C2.model",
+      "check": "C2",
+      "title": "model-provider cannot use a journal root outside its own",
+      "expect": "refusal",
+      "suite": "model-provider",
+      "test": "model_outside_write_denied",
+      "platform": "macos",
+      "reason": "the outside journal root cannot even be inspected; init answers journal_corrupt"
+    },
+    {
+      "id": "C3.did",
+      "check": "C3",
+      "title": "did-provider ignores a file planted beside its root",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "planted_file_beneath_storage_parent_is_neither_read_nor_written",
+      "platform": "macos",
+      "reason": "the planted file under the storage parent is neither read nor written; the provider answers storage_error"
+    },
+    {
+      "id": "C3.wallet",
+      "check": "C3",
+      "title": "wallet-provider ignores a key planted beside its root",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "planted_key_beneath_storage_parent_is_not_read",
+      "platform": "macos",
+      "reason": "the planted key is not read or adopted; the provider answers storage_error"
+    },
+    {
+      "id": "C4.did",
+      "check": "C4",
+      "title": "did-provider profile refuses a copy of the provider binary",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "unbound_copy_is_refused_under_profile",
+      "platform": "macos",
+      "reason": "sandbox-exec exits 71 and logs the refused execvp() with \"Operation not permitted\""
+    },
+    {
+      "id": "C4.wallet",
+      "check": "C4",
+      "title": "wallet-provider profile refuses a copy of the provider binary",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "unbound_copy_is_refused_under_profile",
+      "platform": "macos",
+      "reason": "sandbox-exec exits 71 and logs the refused execvp() with \"Operation not permitted\""
+    },
+    {
+      "id": "C4.model",
+      "check": "C4",
+      "title": "model-provider profile refuses a copy of the provider binary",
+      "expect": "refusal",
+      "suite": "model-provider",
+      "test": "model_unbound_program_refused_under_profile",
+      "platform": "macos",
+      "reason": "the copy never answers init; sandbox-exec exits 71 with \"Operation not permitted\" and nothing is written"
+    },
+    {
+      "id": "C5.did",
+      "check": "C5",
+      "title": "did-provider profile denies every network operation",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "profile_denies_network",
+      "platform": "any",
+      "reason": "the profile starts (version 1) and (deny default), denies network* and holds no network allow"
+    },
+    {
+      "id": "C5.wallet",
+      "check": "C5",
+      "title": "wallet-provider profile denies every network operation",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "profile_denies_network",
+      "platform": "any",
+      "reason": "the profile starts (version 1) and (deny default), denies network* and holds no network allow"
+    },
+    {
+      "id": "C5.model",
+      "check": "C5",
+      "title": "model-provider hosted run fails closed under its profile",
+      "expect": "refusal",
+      "suite": "model-provider",
+      "test": "model_hosted_run_fails_closed_under_profile",
+      "platform": "macos",
+      "reason": "under confine.sb the hosted run cannot reach the Runtime socket, so it fails closed"
+    },
+    {
+      "id": "C6.did",
+      "check": "C6",
+      "title": "did-provider start is refused when its profile cannot be applied",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "startup_is_refused_when_the_profile_cannot_be_applied",
+      "platform": "macos",
+      "reason": "a missing, broken or unbound profile stops the start before the provider runs"
+    },
+    {
+      "id": "C6.wallet",
+      "check": "C6",
+      "title": "wallet-provider start is refused when its profile cannot be applied",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "startup_is_refused_when_the_profile_cannot_be_applied",
+      "platform": "macos",
+      "reason": "a missing, broken or unbound profile stops the start before the provider runs"
+    },
+    {
+      "id": "C6.model",
+      "check": "C6",
+      "title": "model-provider start is refused when its profile cannot be applied",
+      "expect": "refusal",
+      "suite": "model-provider",
+      "test": "startup_is_refused_when_the_profile_cannot_be_applied",
+      "platform": "macos",
+      "reason": "a missing profile, a profile with its last bracket removed, or an unbound STORAGE_ROOT each refuse the start"
+    },
+    {
+      "id": "C7.did",
+      "check": "C7",
+      "title": "A refused did-provider start names its reason",
+      "expect": "refusal",
+      "suite": "did-provider",
+      "test": "startup_denial_reports_its_reason",
+      "platform": "macos",
+      "reason": "sandbox-exec does not start the provider, and the failure names the request and the exit status"
+    },
+    {
+      "id": "C7.wallet",
+      "check": "C7",
+      "title": "A refused wallet-provider start names its reason",
+      "expect": "refusal",
+      "suite": "wallet-provider",
+      "test": "startup_denial_reports_its_reason",
+      "platform": "macos",
+      "reason": "sandbox-exec does not start the provider, and the failure names the request and the exit status"
+    }
+  ]
+}
