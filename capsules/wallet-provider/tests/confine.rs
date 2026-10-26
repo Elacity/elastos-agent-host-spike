@@ -2301,12 +2301,19 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
 /// The list holds `DID1`, `DID2` and `DID10`, and the section names `DID2`,
 /// `DID10` and the unregistered `WP9`. `DID1` is missing even though `DID10`
 /// appears, because an id counts only as a whole token. The check returns
-/// exactly those two problems. The fixtures are built in memory; no file is
-/// read and no process starts.
+/// exactly those two problems. A later case has a letter directly before the
+/// token, `XDID1`, and another has a letter or `_` directly after its digits,
+/// `DID1a` and `DID1_x`; each section names only `DID2`, so each returns
+/// exactly the one problem that own id `DID1` is not named, and neither
+/// reports its own token as unregistered. The fixtures are built in memory;
+/// no file is read and no process starts.
 ///
 /// Falsifier: WP58 drops the own-id rule, WP59 the unregistered-id rule and
 /// WP60 matches an id as a substring; this test fails on each because the
-/// corresponding problem does not come.
+/// corresponding problem does not come. WP67 drops the character-before check,
+/// so `XDID1` then names `DID1`, and WP68 drops the character-after check, so
+/// `DID1a` then names `DID1`; the test fails on the matching case because the
+/// missing-id problem does not come.
 #[test]
 fn falsifier_section_check_reports_missing_and_stale_ids() {
     let own = vec!["DID1".to_string(), "DID2".to_string()];
@@ -2321,6 +2328,26 @@ fn falsifier_section_check_reports_missing_and_stale_ids() {
                 .to_string(),
         ],
         "the check must report the missing own id and the unregistered id"
+    );
+
+    let prefixed = "## Falsifiers\n\n- DID2 is named\n- XDID1 is named\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", prefixed, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID1 is not named in ## Falsifiers"
+                .to_string(),
+        ],
+        "a token with a letter directly before it must not name its own id"
+    );
+
+    let suffixed = "## Falsifiers\n\n- DID2 is named\n- DID1a is named\n- DID1_x is named\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", suffixed, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID1 is not named in ## Falsifiers"
+                .to_string(),
+        ],
+        "a token with a letter or _ directly after its digits must not name its own id"
     );
 
     let complete = "## Tests\n\n- DID2 is named\n\n## Falsifiers\n\n- DID1\n- DID2\n- DID10\n";
