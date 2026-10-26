@@ -882,6 +882,8 @@ The lab would then measure zero pending requests after exit and identify the
 Runtime as settlement owner, with the corresponding Runtime source evidence.
 This lane changes the fixture only.
 
+Both journeys fail closed if the orphan is already settled when measured; closing AC-027-ORPHAN turns them FAIL until the lab re-measures and cites the Runtime source line.
+
 Instance-2's required sibling read names instance-1's resource. It remains the
 sole permitted new request for that resource, bound to instance-2's original
 session and a new request ID. Every other request from any session fails the
