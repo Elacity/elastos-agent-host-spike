@@ -1,11 +1,12 @@
-;; Seatbelt profile for wallet-provider; the signed bundle owns this single source.
-;; The Runtime starts this provider with /usr/bin/sandbox-exec -f confine.sb and
-;; passes resolved paths:
-;;   PROVIDER_EXECUTABLE  - the signed provider binary it starts
+;; Seatbelt profile for wallet-provider; this file is the test oracle the
+;; Runtime-generated profile must match.
+;; The generated profile binds resolved paths as parameters, and the tests pass
+;; them with /usr/bin/sandbox-exec -f confine.sb -D:
+;;   PROVIDER_EXECUTABLE  - the provider binary the launch starts
 ;;   STORAGE_ROOT         - Init.base_path/ElastOS/SystemServices/Wallet
 ;;   STORAGE_PARENT       - the existing parent of STORAGE_ROOT
-;; did-provider binds the same three parameter names, so the Runtime has one
-;; parameterized launch for both file-profile providers.
+;; did-provider binds the same three parameter names, so one generator covers
+;; both file-profile providers.
 ;; Everything else is denied, including every network operation.
 (version 1)
 
