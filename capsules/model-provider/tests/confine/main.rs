@@ -1988,13 +1988,14 @@ fn model_bound_copy_serves_under_profile() {
 /// binary's path and never in the directory that holds that binary. Its last
 /// byte is flipped, so its digest differs from the real binary. The launch
 /// binds the copy and starts it, with `bound_digest: None`, so the helper
-/// records the copy as it is. The profile's exec refusal is exit 71 and a
-/// stderr line that contains both `execvp()` and `Operation not permitted`.
-/// This test fails if that pair appears. Any other outcome, an exit that is
-/// not that pair or a process still running after 2 seconds, means the
-/// profile did not apply that refusal. The real binary's digest is unchanged
-/// at the end. The test kills and waits on the process `start` returned. It
-/// does not call `shutdown`.
+/// records the copy as it is. The show is not exit 65, because exit 65 means
+/// the profile did not apply, and it is not exit 71 with `execvp()` and
+/// `Operation not permitted`. A process still running after 2 seconds, or any
+/// other exit, including a signal exit whose `code()` is `None`, is the
+/// outcome the test allows. Before the checks, one line starting
+/// `byte-different outcome: ` prints the status and the stderr lines. The
+/// real binary's digest is unchanged at the end. The test kills and waits on
+/// the process `start` returned. It does not call `shutdown`.
 #[test]
 fn byte_different_file_at_bound_path_starts() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -2064,8 +2065,16 @@ fn byte_different_file_at_bound_path_starts() {
         bound_digest: None,
     });
     let (status, stderr) = provider.outcome_within(Duration::from_secs(2));
+    println!("byte-different outcome: {status:?} {stderr:?}");
     provider.kill_and_wait();
-    let refused = status.and_then(|status| status.code()) == Some(71)
+    let code = status.and_then(|status| status.code());
+    assert!(
+        code != Some(65),
+        "host OS {}: the profile did not apply: status {} is exit 65: {stderr:?}",
+        std::env::consts::OS,
+        describe(status)
+    );
+    let refused = code == Some(71)
         && stderr
             .iter()
             .any(|line| line.contains("execvp()") && line.contains("Operation not permitted"));
