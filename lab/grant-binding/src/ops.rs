@@ -535,6 +535,28 @@ fn model_refused_child_journal_stores_no_grant() {
 }
 
 #[test]
+fn model_forged_child_journal_does_not_remove_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    verifier
+        .operate(&call, &request, Operation::ChildJournal)
+        .expect("guest claim does not remove the child-journal right");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
