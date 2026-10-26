@@ -389,6 +389,8 @@ class RunBinding(TempCase):
         self.assertEqual(len(summaries), 1, summaries)
         self.assertIn(str(summaries[0]), out)
         self.assertIn("REFUSED:", summaries[0].read_text())
+        pointer = demo.this_run_pointer(self.fx.layout).read_text(encoding="utf-8").strip()
+        self.assertEqual(Path(pointer) / "summary.txt", summaries[0])
 
     def test_run_without_install_names_it(self):
         shutil.rmtree(self.fx.layout.install)
@@ -408,9 +410,24 @@ class RunBinding(TempCase):
         self.assertIn("versions bound after the run: yes", out)
         self.assertIn("A14: PASS.", out)
         self.assertEqual(code, demo.EXIT_PASS)
+        pointer = demo.this_run_pointer(self.fx.layout).read_text(encoding="utf-8").strip()
+        summary = Path(pointer) / "summary.txt"
+        self.assertTrue(summary.is_file(), pointer)
+        self.assertIn("A14: PASS.", summary.read_text(encoding="utf-8"))
         for step in steps:
             word = "PASS" if step.expect == "pass" else "REFUSED"
             self.assertIn(f"  {step.id:<10} {word:<8} {step.title}", out)
+
+    def test_pass_writes_a14_pass_in_this_runs_summary(self):
+        """Pins A14: PASS. to summary.txt. Removing write_summary on the PASS path fails this."""
+        code, out, _ = self.run_demo()
+        self.assertEqual(code, demo.EXIT_PASS, out)
+        pointer = demo.this_run_pointer(self.fx.layout).read_text(encoding="utf-8").strip()
+        summary = Path(pointer) / "summary.txt"
+        text = summary.read_text(encoding="utf-8")
+        self.assertIn("A14: PASS.", text)
+        self.assertTrue(text.strip().endswith("A14: PASS.") or "A14: PASS." in text)
+        self.assertEqual(summary.name, "summary.txt")
 
     def test_run_executes_the_recorded_files(self):
         code, out, runner = self.run_demo()
@@ -704,6 +721,79 @@ class InstallBinding(TempCase):
         self.assertFalse(self.fx.layout.install.exists())
         self.assertIn("REFUSED: this machine is not ready.", out)
         self.assertIn("open a native arm64 Terminal", out)
+        summaries = list((self.fx.layout.install.parent / "runs").glob("*/summary.txt"))
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertIn("this machine is not ready", summaries[0].read_text())
+        pointer = demo.this_run_pointer(self.fx.layout).read_text(encoding="utf-8").strip()
+        self.assertEqual(Path(pointer) / "summary.txt", summaries[0])
+
+    def test_install_default_ready_runs_preflight(self):
+        """Skipping step 2 still runs the full preflight list. machine_problems alone is empty here."""
+        (self.fx.layout.repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.91.0"\n')
+        rustup = self.tmp / "rustup-default-ready"
+        env = {"RUSTUP_HOME": str(rustup), "CARGO_HOME": str(self.tmp / "cargo-default-ready")}
+        root = demo.toolchain_root(self.fx.layout.repo, "Darwin", "arm64", env)
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "rustc").write_text("rustc\n")
+        (root / "bin" / "rustc").chmod(0o755)
+        (root / "lib" / "rustlib" / "wasm32-unknown-unknown").mkdir(parents=True)
+        machine_ok = demo.machine_problems(
+            self.fx.layout,
+            "Darwin",
+            env=env,
+            disk_free=lambda path: demo.NEED_FREE,
+            translated="0",
+            present=lambda path: True,
+            machine="arm64",
+        )
+        self.assertEqual(machine_ok, [], machine_ok)
+        calls = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = demo.install(
+                self.fx.layout,
+                "Darwin",
+                str(self.fx.source),
+                read=lambda repo: CLEAN,
+                runner=lambda *a, **k: calls.append(a) or (0, []),
+                sign=True,
+            )
+        self.assertEqual(code, demo.EXIT_REFUSED)
+        self.assertEqual(calls, [])
+        self.assertFalse(self.fx.layout.signing_key.exists())
+        self.assertIn("preflight.sh is missing", out.getvalue())
+        summaries = list((self.fx.layout.install.parent / "runs").glob("*/summary.txt"))
+        self.assertEqual(len(summaries), 1, summaries)
+
+    def test_failed_write_after_sign_removes_only_this_runs_key(self):
+        def boom(*args, **kwargs):
+            return ["disk full"]
+
+        with mock.patch.object(demo, "write_install", boom):
+            code, out, calls, built = self.install(sign=True)
+        self.assertEqual(code, demo.EXIT_REFUSED, out)
+        self.assertTrue(calls)
+        self.assertTrue(built)
+        self.assertFalse(self.fx.layout.signing_key.exists())
+        self.assertFalse(self.fx.layout.signing_key.parent.exists())
+        self.assertIn("Removed the signing key this run created, because the install write failed.", out)
+        self.assertIn("disk full", out)
+        summaries = list((self.fx.layout.install.parent / "runs").glob("*/summary.txt"))
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertIn("Removed the signing key this run created", summaries[0].read_text())
+
+    def test_failed_write_keeps_a_preexisting_key(self):
+        self.assertEqual(demo.make_signing_key(self.fx.layout), [])
+        self.assertTrue(self.fx.layout.signing_key.is_file())
+
+        def boom(*args, **kwargs):
+            return ["disk full"]
+
+        with mock.patch.object(demo, "write_install", boom):
+            code, out, _, _ = self.install(sign=True)
+        self.assertEqual(code, demo.EXIT_REFUSED, out)
+        self.assertTrue(self.fx.layout.signing_key.is_file())
+        self.assertNotIn("Removed the signing key this run created", out)
 
 
 class Signing(TempCase):
@@ -837,9 +927,34 @@ class MachineReady(TempCase):
         env = {**self.ready_env, "CARGO_TARGET_DIR": "target-outside-name-only"}
         self.assertEqual(self.problems(env=env), [])
 
+    def test_relative_cargo_target_dir_outside_the_repo_is_refused(self):
+        self.toolchain()
+        env = {**self.ready_env, "CARGO_TARGET_DIR": "../elsewhere"}
+        self.assertNamed(self.problems(env=env), "CARGO_TARGET_DIR=../elsewhere", "outside the repository")
+        self.assertFalse(demo.resolved_under(self.fx.layout.repo, "../elsewhere"))
+
     def test_space_in_home_is_refused(self):
         self.toolchain()
         self.assertNamed(self.problems(home=self.tmp / "User Name"), "HOME contains a space")
+
+    def test_space_in_checkout_is_refused(self):
+        self.toolchain()
+        spaced = demo.Layout(self.tmp / "my repo", self.fx.layout.install)
+        (spaced.repo / "rust-toolchain.toml").parent.mkdir(parents=True, exist_ok=True)
+        (spaced.repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.91.0"\n')
+        problems = demo.machine_problems(
+            spaced,
+            "Darwin",
+            env=self.ready_env,
+            disk_free=lambda path: demo.NEED_FREE,
+            translated="0",
+            present=lambda path: True,
+            machine="arm64",
+        )
+        self.assertTrue(
+            any("the checkout path contains a space" in problem for problem in problems),
+            problems,
+        )
 
     def test_missing_wasm_target_is_refused(self):
         self.toolchain(wasm=False)
@@ -888,18 +1003,62 @@ class RunbookMorningSteps(unittest.TestCase):
     def test_runbook_stays_on_the_demo_branch(self):
         self.assertIn("cursor/demo-a14-installed-demo-83e1", self.text)
         self.assertNotIn("git checkout spike/agent-host", self.text)
+        self.assertNotIn("git checkout cursor/demo-a14-installed-demo-83e1", self.text)
         self.assertIn("/Users/sash/code/wt-agent-host", self.text)
         self.assertIn("~/code/elastos-agent-host-spike", self.text)
         self.assertIn("lab/demo-a14/preflight.sh", self.text)
         self.assertIn("git clone", self.text)
         self.assertIn("A zip from a browser", self.text)
 
+    def test_runbook_uses_a_fresh_clone(self):
+        self.assertIn('git clone --branch "$branch" "$url" "$dest"', self.text)
+        self.assertIn("$HOME/a14-run-", self.text)
+        self.assertIn('if [ -e "$dest" ]', self.text)
+        self.assertIn("already exists", self.text)
+        self.assertIn("never reuses a folder", self.text)
+        self.assertIn("\ntest -f lab/demo-a14/install.sh\n", self.text)
+        self.assertIn("\nset -euo pipefail\n", self.text)
+        self.assertNotIn("cd /path/to/your/clone", self.text)
+        self.assertNotIn("git checkout cursor/demo-a14-installed-demo-83e1", self.text)
+        self.assertNotIn("git fetch origin cursor/demo-a14-installed-demo-83e1", self.text)
+
+    def test_existing_destination_is_refused(self):
+        dest = Path(tempfile.mkdtemp(prefix="a14-dest-"))
+        self.addCleanup(shutil.rmtree, dest, True)
+        script = (
+            "set -euo pipefail\n"
+            f'dest="{dest}"\n'
+            'if [ -e "$dest" ]; then\n'
+            "  printf 'REFUSED: %s already exists. This runbook never reuses a folder.\\n' \"$dest\" >&2\n"
+            "  exit 3\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        done = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertIn("already exists", done.stderr)
+        missing = dest / "no-such-install"
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{demo.REPO}"\n'
+            f'test -f "{missing}"\n'
+            "printf still-running\\n"
+        )
+        done = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn("still-running", done.stdout)
+
     def test_runbook_step_5_opens_only_a_real_path(self):
-        self.assertIn('test -n "$run" && test -d "$run" && open "$run"', self.text)
+        self.assertIn(
+            'test -n "$run" && test -d "$run" && test -f "$run/summary.txt" && open "$run/summary.txt"',
+            self.text,
+        )
+        self.assertIn('sed -n \'1p\' "$demo_home/this-run"', self.text)
         self.assertNotIn(
             'open "$(ls -dt ~/Library/Application\\ Support/elastos-demo-a14/runs/*/',
             self.text,
         )
+        self.assertNotIn("ls -dt", self.text)
 
 
 class PreflightScript(unittest.TestCase):
@@ -914,6 +1073,36 @@ class PreflightScript(unittest.TestCase):
         self.assertIn("operating system is Linux", done.stdout)
         self.assertIn("architecture is", done.stdout)
         self.assertNotIn("lab/demo-a14/install.sh is not in this checkout", done.stdout)
+
+    def test_preflight_refuses_relative_cargo_target_dir_outside_the_repo(self):
+        env = dict(os.environ)
+        env["CARGO_TARGET_DIR"] = "../elsewhere"
+        done = subprocess.run(
+            ["sh", str(LANE / "preflight.sh"), str(demo.REPO)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("CARGO_TARGET_DIR=../elsewhere is outside the repository", done.stdout)
+
+    def test_preflight_reports_quarantine_and_does_not_strip_it(self):
+        text = (LANE / "preflight.sh").read_text(encoding="utf-8")
+        self.assertIn('  if [ "$os" = Darwin ] && command -v xattr >/dev/null 2>&1; then\n', text)
+        self.assertIn("xattr -p com.apple.quarantine", text)
+        self.assertIn("com.apple.quarantine", text)
+        self.assertNotIn("xattr -d", text)
+        self.assertNotIn("xattr -c", text)
+        self.assertNotIn("if false &&", text)
+        for rel in (
+            "lab/demo-a14/install.sh",
+            "lab/demo-a14/run.sh",
+            "lab/demo-a14/demo.py",
+            "lab/demo-a14/preflight.sh",
+            "lab/demo-a14/journeys.json",
+            "lab/demo-a14/RUNBOOK.md",
+        ):
+            self.assertIn(rel, text)
 
 
 class CheckoutIdentity(unittest.TestCase):

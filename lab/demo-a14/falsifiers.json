@@ -1,5 +1,5 @@
 {
-  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py or journeys.json and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -B -I -m unittest discover -s lab/demo-a14/tests -k <test> (-B, so no cached bytecode outlives a restore), require FAILED, restore, require OK.",
+  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py, RUNBOOK.md, preflight.sh or journeys.json and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -B -I -m unittest discover -s lab/demo-a14/tests -k <test> (-B, so no cached bytecode outlives a restore), require FAILED, restore, require OK.",
   "falsifiers": [
     {
       "id": "F-A14a",
@@ -481,8 +481,8 @@
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "    problems = ready(layout, host_os)\n    if problems:\n        refuse(say, \"this machine is not ready.\", problems, again)\n",
-          "new": "    problems = ready(layout, host_os)\n    if False:\n        refuse(say, \"this machine is not ready.\", problems, again)\n"
+          "old": "    problems = ready(layout, host_os)\n    if problems:\n        return refuse_install(say, layout, \"this machine is not ready.\", problems, again)\n",
+          "new": "    problems = ready(layout, host_os)\n    if False:\n        return refuse_install(say, layout, \"this machine is not ready.\", problems, again)\n"
         }
       ],
       "tests": [
@@ -497,8 +497,8 @@
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "        return EXIT_REFUSED\n    problems = ready(layout, host_os)\n",
-          "new": "        return EXIT_REFUSED\n    if sign:\n        make_signing_key(layout)\n    problems = ready(layout, host_os)\n"
+          "old": "        return refuse_install(say, layout, \"the repository is not ready.\", problems, again)\n    problems = ready(layout, host_os)\n",
+          "new": "        return refuse_install(say, layout, \"the repository is not ready.\", problems, again)\n    if sign:\n        make_signing_key(layout)\n    problems = ready(layout, host_os)\n"
         }
       ],
       "tests": [
@@ -514,8 +514,8 @@
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "        say(f\"Saved: {run_dir}\")\n        write_summary(run_dir, say)\n        return EXIT_REFUSED\n",
-          "new": "        say(f\"Saved: {run_dir}\")\n        return EXIT_REFUSED\n"
+          "old": "        say(f\"Saved: {run_dir}\")\n        write_summary(run_dir, say)\n        mark_this_run(layout, run_dir)\n        return EXIT_REFUSED\n",
+          "new": "        say(f\"Saved: {run_dir}\")\n        mark_this_run(layout, run_dir)\n        return EXIT_REFUSED\n"
         }
       ],
       "tests": [
@@ -568,23 +568,25 @@
         }
       ],
       "tests": [
-        "test_space_in_home_is_refused"
+        "test_space_in_home_is_refused",
+        "test_space_in_checkout_is_refused"
       ]
     },
     {
       "id": "F-A14aj",
-      "title": "an absolute CARGO_TARGET_DIR outside the repository is accepted",
+      "title": "a CARGO_TARGET_DIR that resolves outside the repository is accepted",
       "command": "demo-a14",
       "expect": "caught",
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "        if target.is_absolute() and not inside(layout.repo, str(target)):\n",
-          "new": "        if False:\n"
+          "old": "        problem = cargo_target_problem(raw_target, layout.repo)\n        if problem:\n",
+          "new": "        problem = cargo_target_problem(raw_target, layout.repo)\n        if False:\n"
         }
       ],
       "tests": [
-        "test_outside_cargo_target_dir_is_refused"
+        "test_outside_cargo_target_dir_is_refused",
+        "test_relative_cargo_target_dir_outside_the_repo_is_refused"
       ]
     },
     {
@@ -605,17 +607,18 @@
     },
     {
       "id": "F-A14al",
-      "title": "morning step 2 checks out spike/agent-host, which has no demo",
+      "title": "morning step 1 checks out a branch in an existing clone",
       "command": "demo-a14",
       "expect": "caught",
       "edits": [
         {
           "file": "lab/demo-a14/RUNBOOK.md",
-          "old": "git checkout cursor/demo-a14-installed-demo-83e1\n",
-          "new": "git checkout spike/agent-host\n"
+          "old": "git clone --branch \"$branch\" \"$url\" \"$dest\"\n",
+          "new": "git checkout cursor/demo-a14-installed-demo-83e1\n"
         }
       ],
       "tests": [
+        "test_runbook_uses_a_fresh_clone",
         "test_runbook_stays_on_the_demo_branch"
       ]
     },
@@ -627,12 +630,158 @@
       "edits": [
         {
           "file": "lab/demo-a14/RUNBOOK.md",
-          "old": "test -n \"$run\" && test -d \"$run\" && open \"$run\"\n",
+          "old": "test -n \"$run\" && test -d \"$run\" && test -f \"$run/summary.txt\" && open \"$run/summary.txt\"\n",
           "new": "open \"$run\"\n"
         }
       ],
       "tests": [
         "test_runbook_step_5_opens_only_a_real_path"
+      ]
+    },
+    {
+      "id": "F-A14an",
+      "title": "install's early check uses machine_problems instead of the full preflight script",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    ready = preflight_problems if ready is None else ready\n",
+          "new": "    ready = machine_problems if ready is None else ready\n"
+        }
+      ],
+      "tests": [
+        "test_install_default_ready_runs_preflight"
+      ]
+    },
+    {
+      "id": "F-A14ao",
+      "title": "A14: PASS. is printed but write_summary is skipped on the PASS path",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    say(f\"Saved: {run_dir}\")\n    write_summary(run_dir, say)\n    mark_this_run(layout, run_dir)\n    return {\"PASS\": EXIT_PASS, \"NOT RUN\": EXIT_NOT_RUN}.get(verdict, EXIT_FAIL)\n",
+          "new": "    say(f\"Saved: {run_dir}\")\n    mark_this_run(layout, run_dir)\n    return {\"PASS\": EXIT_PASS, \"NOT RUN\": EXIT_NOT_RUN}.get(verdict, EXIT_FAIL)\n"
+        }
+      ],
+      "tests": [
+        "test_pass_writes_a14_pass_in_this_runs_summary",
+        "test_matching_run_walks_every_step"
+      ]
+    },
+    {
+      "id": "F-A14ap",
+      "title": "a failed write after the builds leaves the signing key this run created",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if write_problems and created_key:\n        remove_signing_key_this_run_created(layout)\n        say(\"Removed the signing key this run created, because the install write failed.\")\n",
+          "new": "    if False:\n        remove_signing_key_this_run_created(layout)\n        say(\"Removed the signing key this run created, because the install write failed.\")\n"
+        }
+      ],
+      "tests": [
+        "test_failed_write_after_sign_removes_only_this_runs_key"
+      ]
+    },
+    {
+      "id": "F-A14aq",
+      "title": "an install refusal writes no summary.txt for this run",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    say(f\"Saved: {run_dir}\")\n    write_summary(run_dir, say)\n    mark_this_run(layout, run_dir)\n    return EXIT_REFUSED\n",
+          "new": "    say(f\"Saved: {run_dir}\")\n    mark_this_run(layout, run_dir)\n    return EXIT_REFUSED\n"
+        }
+      ],
+      "tests": [
+        "test_install_refuses_before_fetch_when_the_machine_is_not_ready",
+        "test_install_default_ready_runs_preflight"
+      ]
+    },
+    {
+      "id": "F-A14ar",
+      "title": "the morning steps are not one script, so a failed line continues",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "set -euo pipefail\n",
+          "new": "# set -euo pipefail\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_uses_a_fresh_clone"
+      ]
+    },
+    {
+      "id": "F-A14as",
+      "title": "step 1 reuses a folder that already exists",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "if [ -e \"$dest\" ]; then\n  printf 'REFUSED: %s already exists. This runbook never reuses a folder.\\n' \"$dest\" >&2\n  exit 3\nfi\n",
+          "new": "# reuse dest even if it exists\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_uses_a_fresh_clone"
+      ]
+    },
+    {
+      "id": "F-A14at",
+      "title": "preflight no longer reports com.apple.quarantine",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/preflight.sh",
+          "old": "  if [ \"$os\" = Darwin ] && command -v xattr >/dev/null 2>&1; then\n",
+          "new": "  if false && [ \"$os\" = Darwin ] && command -v xattr >/dev/null 2>&1; then\n"
+        }
+      ],
+      "tests": [
+        "test_preflight_reports_quarantine_and_does_not_strip_it"
+      ]
+    },
+    {
+      "id": "F-A14au",
+      "title": "step 5 opens the newest run folder by date instead of this run's summary",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "run=$(sed -n '1p' \"$demo_home/this-run\" 2>/dev/null || true)\n",
+          "new": "run=$(ls -dt \"$HOME/Library/Application Support/elastos-demo-a14/runs/\"*/ | head -1)\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_step_5_opens_only_a_real_path"
+      ]
+    },
+    {
+      "id": "F-A14av",
+      "title": "step 1 continues when install.sh is missing",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "test -f lab/demo-a14/install.sh\n",
+          "new": "# test -f lab/demo-a14/install.sh\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_uses_a_fresh_clone"
       ]
     }
   ]

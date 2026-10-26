@@ -181,7 +181,14 @@ else
   fi
 
   if [ "$os" = Darwin ] && command -v xattr >/dev/null 2>&1; then
-    for rel in lab/demo-a14/install.sh lab/demo-a14/run.sh lab/demo-a14/demo.py; do
+    for rel in \
+      lab/demo-a14/install.sh \
+      lab/demo-a14/run.sh \
+      lab/demo-a14/demo.py \
+      lab/demo-a14/preflight.sh \
+      lab/demo-a14/journeys.json \
+      lab/demo-a14/RUNBOOK.md
+    do
       if [ -f "$repo/$rel" ] && xattr -p com.apple.quarantine "$repo/$rel" >/dev/null 2>&1; then
         missing "$rel carries com.apple.quarantine; clone the repository with git so macOS does not treat the built programs as downloaded files"
       fi
@@ -204,26 +211,38 @@ has_space "HOME" "$home_phys"
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 has_space "CARGO_HOME" "$cargo_home"
 
-if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-  target=$CARGO_TARGET_DIR
-  case $target in
-    /*) ;;
-    *)
-      if [ -n "$repo" ]; then
-        target=$repo/$target
-      fi
+target_outside_repo() {
+  # Exit 0 when the path is outside the repo, so `if cmd` / `||` can name it.
+  raw=$1
+  base=$2
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -I -c '
+import os, sys
+raw, repo = sys.argv[1], sys.argv[2]
+path = raw if os.path.isabs(raw) else os.path.join(repo, raw)
+path = os.path.normpath(path)
+repo = os.path.normpath(repo)
+ok = path == repo or path.startswith(repo + os.sep)
+raise SystemExit(0 if not ok else 1)
+' "$raw" "$base"
+    return $?
+  fi
+  case $raw in
+    /*)
+      case $raw in
+        "$base"|"$base"/*) return 1 ;;
+      esac
+      return 0
+      ;;
+    *..*)
+      return 0
       ;;
   esac
-  if [ -d "$target" ]; then
-    target=$(cd "$target" && pwd -P) || target=$CARGO_TARGET_DIR
-  fi
-  outside=1
-  if [ -n "$repo" ]; then
-    case $target in
-      "$repo"|"$repo"/*) outside=0 ;;
-    esac
-  fi
-  if [ "$outside" -eq 1 ]; then
+  return 1
+}
+
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  if [ -z "$repo" ] || target_outside_repo "$CARGO_TARGET_DIR" "$repo"; then
     missing "CARGO_TARGET_DIR=$CARGO_TARGET_DIR is outside the repository; install records test executables only from inside the checkout and refuses these"
   fi
 fi

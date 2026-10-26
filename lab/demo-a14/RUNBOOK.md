@@ -2,15 +2,29 @@
 
 ## Sash's morning steps
 
+Paste this whole block. It is one script. A failed line stops the rest.
+It clones into a **new** folder. It never runs `git checkout` in an existing
+tree. Leave `/Users/sash/code/wt-agent-host` and
+`~/code/elastos-agent-host-spike` as they are.
+
 ```bash
-# 1. Go to the clone you already have. Stop if lab/demo-a14/install.sh is missing.
-#    Examples: /Users/sash/code/wt-agent-host  or  ~/code/elastos-agent-host-spike
-cd /path/to/your/clone
-git fetch origin cursor/demo-a14-installed-demo-83e1
-git checkout cursor/demo-a14-installed-demo-83e1
-git pull --ff-only
-git status --porcelain=v1          # must print nothing
+set -euo pipefail
+
+# 1. Brand-new folder. Refuse if that path already exists. Stop if install.sh is missing.
+branch=cursor/demo-a14-installed-demo-83e1
+url=${A14_REMOTE:-https://github.com/Elacity/elastos-agent-host-spike.git}
+dest=${A14_CLONE:-"$HOME/a14-run-$(date +%Y%m%d-%H%M%S)"}
+if [ -e "$dest" ]; then
+  printf 'REFUSED: %s already exists. This runbook never reuses a folder.\n' "$dest" >&2
+  exit 3
+fi
+git clone --branch "$branch" "$url" "$dest"
+cd "$dest"
 test -f lab/demo-a14/install.sh
+if [ -n "$(git status --porcelain=v1)" ]; then
+  printf 'REFUSED: the new clone has local changes. Stop and ask an engineer.\n' >&2
+  exit 3
+fi
 
 # 2. Read-only check of this Mac. Stop on "preflight: FAIL".
 sh lab/demo-a14/preflight.sh
@@ -21,12 +35,13 @@ bash lab/demo-a14/install.sh --sign
 # 4. Run every step against the installed versions
 bash lab/demo-a14/run.sh
 
-# 5. Open the newest run folder and send its summary.txt. Book A14 only on "A14: PASS."
-run=$(ls -dt "$HOME/Library/Application Support/elastos-demo-a14/runs/"*/ | head -1)
-test -n "$run" && test -d "$run" && open "$run"
+# 5. Open only this run's summary.txt. Book A14 only on "A14: PASS."
+demo_home="$HOME/Library/Application Support/elastos-demo-a14"
+run=$(sed -n '1p' "$demo_home/this-run" 2>/dev/null || true)
+test -n "$run" && test -d "$run" && test -f "$run/summary.txt" && open "$run/summary.txt"
 ```
 
-Until this demo is on `spike/agent-host`, stay on
+Until this demo is on `spike/agent-host`, the new clone stays on
 `cursor/demo-a14-installed-demo-83e1`. That branch is the one that contains
 `lab/demo-a14`. `spike/agent-host` does not have these files yet.
 
@@ -53,9 +68,10 @@ different, the demo stops and runs nothing.
   include `git`, `python3` and `ssh-keygen`, which signs the receipts.
 - Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
   Terminal and open it again.
-- A copy of this repository on your Mac, made with `git clone` or
-  `git checkout`. A zip from a browser can make macOS refuse to run the built
-  programs.
+- A brand-new clone made by the morning block (`git clone --branch`). Do not
+  run `git checkout` in a tree you already have. A zip from a browser can make
+  macOS refuse to run the built programs. Preflight reports
+  `com.apple.quarantine` and does not strip it.
 
 The first time only, in the repository folder, add the Rust target the demo
 builds for:
@@ -66,21 +82,23 @@ rustup target add wasm32-unknown-unknown
 
 ## Lines 1 and 2: the version to test
 
-Line 1 uses the clone you already have. The two paths above are examples only.
-After the checkout, `git status --porcelain=v1` must print nothing, and
-`lab/demo-a14/install.sh` must be present. If either check fails, stop and ask
-an engineer. The demo refuses to install from a copy with local changes.
+Line 1 makes a brand-new folder named `$HOME/a14-run-<timestamp>` (or
+`$A14_CLONE` if you set it). It refuses if that path already exists. It never
+changes `/Users/sash/code/wt-agent-host` or `~/code/elastos-agent-host-spike`.
+After the clone, `lab/demo-a14/install.sh` must be present and
+`git status --porcelain=v1` must print nothing. If either check fails, the
+script stops.
 
 Line 2 is `preflight.sh`. It writes nothing. It names each gap on its own
 `missing:` line, then prints `preflight: OK` or `preflight: FAIL`. Stop on
-FAIL. The same checks run again at the start of `install.sh`, before any
-download or signing key.
+FAIL. `install.sh` runs that same script again before any download or signing
+key, so skipping line 2 cannot start the long run.
 
 ## Line 3: install
 
-The install first checks this Mac (the same list as preflight). A failure
-prints `REFUSED: this machine is not ready.` and writes no signing key. Then
-it does five things and prints each one:
+The install first runs the same `preflight.sh` as line 2. A failure prints
+`REFUSED: this machine is not ready.`, writes this run's `summary.txt`, and
+writes no signing key. Then it does five things and prints each one:
 
 1. It downloads the Rust packages that the builds need. This needs the internet.
 2. It runs the full agent conformance check (`lab/agent-conformance/run.sh`).
@@ -95,8 +113,10 @@ it does five things and prints each one:
 
 With `--sign`, the install makes the signing key only when the builds have
 finished and it is about to write the receipts (see "The signature" below). A
-failed conformance run or a missing `VERSIONS.json` leaves no new key. Keep the
-Mac awake and plugged in, and do not start other builds at the same time.
+failed conformance run or a missing `VERSIONS.json` leaves no new key. If the
+install write then fails, it removes only the key this run created and says
+so. Keep the Mac awake and plugged in, and do not start other builds at the
+same time.
 
 A good install ends like this:
 
@@ -137,9 +157,10 @@ At the end, a summary gives one line for each M1 check, then one final line:
 
 ## Line 5: what to send
 
-Line 5 opens the newest run folder only when that folder exists. A refusal
-before any journey still writes `summary.txt` there, and prints that path in
-the `Next:` line. Send that file. It holds the same text that the run printed.
+Line 5 opens only this run's `summary.txt` (the path in `this-run`). It does
+not pick the newest folder by date. Every install refusal and every run writes
+that file and points `this-run` at it. The `Next:` line names the same path.
+Send that file. Book A14 only when it ends with `A14: PASS.`
 The folder also holds the full output of each test group when journeys ran.
 
 ## When the run says the versions do not match

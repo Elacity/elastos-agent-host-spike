@@ -187,6 +187,79 @@ def space_problem(label: str, path: Path) -> Optional[str]:
     return None
 
 
+def resolved_under(repo: Path, raw: str) -> bool:
+    """True when raw, after joining to repo when relative and collapsing .., stays in repo."""
+    path = Path(raw)
+    if not path.is_absolute():
+        path = repo / path
+    repo_n = Path(os.path.normpath(str(repo)))
+    path_n = Path(os.path.normpath(str(path)))
+    try:
+        path_n.relative_to(repo_n)
+    except ValueError:
+        return False
+    return True
+
+
+def cargo_target_problem(raw_target: str, repo: Path) -> Optional[str]:
+    if resolved_under(repo, raw_target):
+        return None
+    return (
+        f"CARGO_TARGET_DIR={raw_target} is outside the repository; "
+        "install records test executables only from inside the checkout and refuses these"
+    )
+
+
+def preflight_problems(layout: Layout, host_os: str = "", env: Optional[dict] = None) -> list:
+    """The same missing: list as morning step 2. Empty when preflight would print OK."""
+    script = layout.repo / "lab" / "demo-a14" / "preflight.sh"
+    if not script.is_file():
+        return [
+            "lab/demo-a14/preflight.sh is missing; stay on cursor/demo-a14-installed-demo-83e1 "
+            "until the demo is on spike/agent-host"
+        ]
+    run_env = dict(os.environ if env is None else env)
+    try:
+        done = subprocess.run(
+            ["sh", str(script), str(layout.repo)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=run_env,
+        )
+    except OSError as error:
+        return [f"preflight.sh could not be started: {error}"]
+    missing = [line[len("missing: "):] for line in done.stdout.splitlines() if line.startswith("missing: ")]
+    if done.returncode != 0 and not missing:
+        err = (done.stderr or done.stdout or f"exit {done.returncode}").strip()
+        return [f"preflight.sh exited {done.returncode}: {err}"]
+    return missing
+
+
+def this_run_pointer(layout: Layout) -> Path:
+    return layout.install.parent / "this-run"
+
+
+def mark_this_run(layout: Layout, run_dir: Path) -> Path:
+    pointer = this_run_pointer(layout)
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(str(run_dir) + "\n", encoding="utf-8")
+    return pointer
+
+
+def remove_signing_key_this_run_created(layout: Layout) -> None:
+    """Delete only the key files. Callers use this for a key this run just made."""
+    for path in (layout.signing_key, layout.signing_pub):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        layout.signing_key.parent.rmdir()
+    except OSError:
+        pass
+
+
 def proc_translated() -> str:
     try:
         done = subprocess.run(
@@ -234,12 +307,9 @@ def machine_problems(
                 problems.append(message)
     raw_target = env.get("CARGO_TARGET_DIR")
     if raw_target:
-        target = Path(raw_target)
-        if target.is_absolute() and not inside(layout.repo, str(target)):
-            problems.append(
-                f"CARGO_TARGET_DIR={raw_target} is outside the repository; "
-                "install records test executables only from inside the checkout and refuses these"
-            )
+        problem = cargo_target_problem(raw_target, layout.repo)
+        if problem:
+            problems.append(problem)
     channel = pinned_channel(layout.repo)
     if not channel:
         problems.append("rust-toolchain.toml has no channel pin")
@@ -913,6 +983,17 @@ def refuse(say: Say, headline: str, problems: list, next_step: str) -> None:
     say(f"Next: {next_step}")
 
 
+def refuse_install(say: Say, layout: Layout, headline: str, problems: list, again: str) -> int:
+    """Every install refusal writes this run's summary.txt and points step 5 at it."""
+    run_dir = new_run_dir(layout)
+    summary = run_dir / "summary.txt"
+    refuse(say, headline, problems, f"read {summary}, then {again}")
+    say(f"Saved: {run_dir}")
+    write_summary(run_dir, say)
+    mark_this_run(layout, run_dir)
+    return EXIT_REFUSED
+
+
 def run_demo(
     layout: Layout,
     host_os: str,
@@ -938,6 +1019,7 @@ def run_demo(
         )
         say(f"Saved: {run_dir}")
         write_summary(run_dir, say)
+        mark_this_run(layout, run_dir)
         return EXIT_REFUSED
     receipt_bytes = (layout.install / "VERSIONS.json").read_bytes()
     receipt = json.loads(receipt_bytes)
@@ -1015,6 +1097,7 @@ def run_demo(
         say("A14: FAIL. See the failures above.")
     say(f"Saved: {run_dir}")
     write_summary(run_dir, say)
+    mark_this_run(layout, run_dir)
     return {"PASS": EXIT_PASS, "NOT RUN": EXIT_NOT_RUN}.get(verdict, EXIT_FAIL)
 
 
@@ -1082,31 +1165,29 @@ def install(
 ) -> int:
     say = Say()
     builder = builder or cargo_artifacts
-    ready = ready or machine_problems
+    ready = preflight_problems if ready is None else ready
     again = "fix the item above, then run `bash lab/demo-a14/install.sh` again."
     say(f"Installing the A14 demo into {layout.install}")
     checkout = read(layout.repo)
     if checkout.error or not checkout.clean:
         problems = [checkout.error or "this copy of the repository has local changes; commit or stash them"]
-        refuse(say, "the repository is not ready.", problems, again)
-        return EXIT_REFUSED
+        return refuse_install(say, layout, "the repository is not ready.", problems, again)
     problems = ready(layout, host_os)
     if problems:
-        refuse(say, "this machine is not ready.", problems, again)
-        return EXIT_REFUSED
+        return refuse_install(say, layout, "this machine is not ready.", problems, again)
     if not receipt_arg and host_os != "Darwin":
         problems = [
             "VERSIONS.json comes from lab/agent-conformance/run.sh, which runs on macOS only; "
             "on this machine give --receipt PATH"
         ]
-        refuse(say, "no VERSIONS.json for this machine.", problems, again)
-        return EXIT_REFUSED
+        return refuse_install(say, layout, "no VERSIONS.json for this machine.", problems, again)
     say("Step 1 of 5: downloading the Rust packages the builds need (this needs the internet)")
     for manifest in FETCH:
         status, _ = runner(["cargo", "fetch", "--locked", "--manifest-path", manifest], layout.repo)
         if status != 0:
-            refuse(say, "a download failed.", [f"cargo fetch for {manifest} exited {status}"], again)
-            return EXIT_REFUSED
+            return refuse_install(
+                say, layout, "a download failed.", [f"cargo fetch for {manifest} exited {status}"], again
+            )
     if receipt_arg:
         say("Step 2 of 5: reading the VERSIONS.json you named")
         receipt_path = Path(receipt_arg).expanduser().resolve()
@@ -1116,15 +1197,13 @@ def install(
         found = [line[len(RECEIPT_LINE):] for line in lines if line.startswith(RECEIPT_LINE)]
         if status != 0 or len(found) != 1:
             problems = [f"lab/agent-conformance/run.sh exited {status} and printed {len(found)} receipt paths"]
-            refuse(say, "the conformance run did not pass.", problems, again)
-            return EXIT_REFUSED
+            return refuse_install(say, layout, "the conformance run did not pass.", problems, again)
         receipt_path = (layout.conformance / found[0]).resolve()
     try:
         receipt_bytes = receipt_path.read_bytes()
         receipt = json.loads(receipt_bytes)
     except (OSError, ValueError) as error:
-        refuse(say, "VERSIONS.json cannot be used.", [f"{receipt_path}: {error}"], again)
-        return EXIT_REFUSED
+        return refuse_install(say, layout, "VERSIONS.json cannot be used.", [f"{receipt_path}: {error}"], again)
     problems = receipt_problems(receipt)
     if not problems:
         if receipt["repository"]["commit"] != checkout.commit:
@@ -1139,13 +1218,13 @@ def install(
                 f"VERSIONS.json {field}",
             )
     if problems:
-        refuse(say, f"{receipt_path} cannot bind this install.", problems, again)
-        return EXIT_REFUSED
+        return refuse_install(say, layout, f"{receipt_path} cannot bind this install.", problems, again)
     say("Step 3 of 5: building the agent-host guest from this commit")
     status, _ = runner(["bash", str(layout.repo / "examples" / "agent-host" / "build.sh")], layout.repo)
     if status != 0:
-        refuse(say, "the agent-host guest did not build.", [f"examples/agent-host/build.sh exited {status}"], again)
-        return EXIT_REFUSED
+        return refuse_install(
+            say, layout, "the agent-host guest did not build.", [f"examples/agent-host/build.sh exited {status}"], again
+        )
     say("Step 4 of 5: building the journey tests and recording the hash of each executable")
     _, suites, steps = load_journeys(journeys)
     here = suites_here(steps, host_os)
@@ -1155,25 +1234,31 @@ def install(
         args = ["cargo", *suite["cargo"], "--no-run"]
         status, artifacts = builder(args, layout.repo / suite["cwd"], suite_env(suite, layout.repo))
         if status != 0:
-            refuse(say, f"the {suite['label']} tests did not build.", [f"{' '.join(args)} exited {status}"], again)
-            return EXIT_REFUSED
+            return refuse_install(
+                say, layout, f"the {suite['label']} tests did not build.", [f"{' '.join(args)} exited {status}"], again
+            )
         recorded[name], problems = record_executables(name, artifacts, layout.repo)
         if problems:
-            refuse(say, f"the {suite['label']} executables cannot be recorded.", problems, again)
-            return EXIT_REFUSED
+            return refuse_install(
+                say, layout, f"the {suite['label']} executables cannot be recorded.", problems, again
+            )
+    created_key = False
     if sign:
+        existed = layout.signing_key.exists()
         problems = make_signing_key(layout)
         if problems:
-            refuse(say, "signing cannot be turned on.", problems, again)
-            return EXIT_REFUSED
+            return refuse_install(say, layout, "signing cannot be turned on.", problems, again)
+        created_key = (not existed) and layout.signing_key.exists()
     if layout.signing_key.exists():
         say(f"Signing is on: this machine's key is {layout.signing_key} ({SIGNATURE_SCOPE}).")
     say("Step 5 of 5: copying the pinned files")
-    problems = write_install(layout, receipt_bytes, receipt_path, checkout, recorded)
-    problems = problems or version_gate(layout, read(layout.repo), here)
+    write_problems = write_install(layout, receipt_bytes, receipt_path, checkout, recorded)
+    if write_problems and created_key:
+        remove_signing_key_this_run_created(layout)
+        say("Removed the signing key this run created, because the install write failed.")
+    problems = write_problems or version_gate(layout, read(layout.repo), here)
     if problems:
-        refuse(say, "the install does not match VERSIONS.json.", problems, again)
-        return EXIT_REFUSED
+        return refuse_install(say, layout, "the install does not match VERSIONS.json.", problems, again)
     say(f"Installed. VERSIONS.json SHA-256 {sha256_bytes(receipt_bytes)}.")
     say(f"Receipt: {receipt_path}")
     say("Next: bash lab/demo-a14/run.sh")
