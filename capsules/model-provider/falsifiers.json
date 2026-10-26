@@ -169,8 +169,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_CRATES[command])]",
-          "new": "        cargo = [\"cargo\", \"test\",\n                 \"--manifest-path\", str(manifest or PROVIDER_CRATES[command])]"
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or crate_manifest)]",
+          "new": "        cargo = [\"cargo\", \"test\",\n                 \"--manifest-path\", str(manifest or crate_manifest)]"
         }
       ],
       "tests": [
@@ -217,8 +217,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_CRATES[command])]",
-          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or PROVIDER_CRATES[command])]"
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or crate_manifest)]",
+          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or crate_manifest)]"
         }
       ],
       "tests": [
@@ -265,8 +265,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or PROVIDER_CRATES[command])]",
-          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or PROVIDER_CRATES[command]), \"--manifest-path\"]"
+          "old": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 \"--manifest-path\", str(manifest or crate_manifest)]",
+          "new": "        cargo = [\"cargo\", \"test\", \"--locked\",\n                 str(manifest or crate_manifest), \"--manifest-path\"]"
         }
       ],
       "tests": [
@@ -946,8 +946,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    \"did\": REPO / \"capsules\" / \"did-provider\" / \"Cargo.toml\",",
-          "new": "    \"did\": REPO / \"capsules\" / \"wallet-provider\" / \"Cargo.toml\","
+          "old": "    \"did\": (REPO / \"capsules\" / \"did-provider\" / \"Cargo.toml\", ()),",
+          "new": "    \"did\": (REPO / \"capsules\" / \"wallet-provider\" / \"Cargo.toml\", ()),"
         }
       ],
       "tests": [
@@ -1058,8 +1058,8 @@
       "edits": [
         {
           "file": "falsify.py",
-          "old": "    \"capsule-identity\": REPO / \"lab\" / \"capsule-identity\" / \"Cargo.toml\",",
-          "new": "    \"capsule-identity\": REPO / \"lab\" / \"wasm-capsule\" / \"Cargo.toml\","
+          "old": "    \"capsule-identity\": (REPO / \"lab\" / \"capsule-identity\" / \"Cargo.toml\", ()),",
+          "new": "    \"capsule-identity\": (REPO / \"lab\" / \"wasm-capsule\" / \"Cargo.toml\", ()),"
         }
       ],
       "tests": [
@@ -1288,6 +1288,166 @@
       ],
       "tests": [
         "the closing delimiter is an exact line"
+      ]
+    },
+    {
+      "id": "PV65",
+      "title": "the lab is not a registered command",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "COMMANDS = (\"host\", *PROVIDER_CRATES, \"e2e\", \"selftest\")",
+          "new": "COMMANDS = (\"host\", \"provider\", \"did\", \"wallet\", \"capsule-identity\", \"e2e\", \"selftest\")"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV66",
+      "title": "the lab command builds the capsule-identity manifest",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab\": (REPO / \"lab\" / \"wasm-capsule\" / \"Cargo.toml\", (\"--workspace\",)),",
+          "new": "    \"lab\": (REPO / \"lab\" / \"capsule-identity\" / \"Cargo.toml\", (\"--workspace\",)),"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV67",
+      "title": "the lab command omits its workspace selection",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab\": (REPO / \"lab\" / \"wasm-capsule\" / \"Cargo.toml\", (\"--workspace\",)),",
+          "new": "    \"lab\": (REPO / \"lab\" / \"wasm-capsule\" / \"Cargo.toml\", ()),"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV68",
+      "title": "the provider command gains the lab's workspace selection",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"provider\": (PROVIDER_MANIFEST, ()),",
+          "new": "    \"provider\": (PROVIDER_MANIFEST, (\"--workspace\",)),"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV69",
+      "title": "startup recovery skips the lab capsule's source",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/capsule-identity/fixtures/wc001-core/capsule.json\",\n    \"lab/wasm-capsule/capsule/src/lib.rs\",",
+          "new": "    \"lab/capsule-identity/fixtures/wc001-core/capsule.json\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV70",
+      "title": "startup recovery skips the lab's build script",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/wasm-capsule/capsule/src/lib.rs\",\n    \"lab/wasm-capsule/tools/build\",",
+          "new": "    \"lab/wasm-capsule/capsule/src/lib.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV71",
+      "title": "startup recovery skips the lab's name rule",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/wasm-capsule/tools/build\",\n    \"lab/wasm-capsule/tools/src/lab_name.rs\",",
+          "new": "    \"lab/wasm-capsule/tools/build\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV72",
+      "title": "startup recovery skips the audit crate's manifest",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/wasm-capsule/tools/src/lab_name.rs\",\n    \"lab/wasm-capsule/audit/Cargo.toml\",",
+          "new": "    \"lab/wasm-capsule/tools/src/lab_name.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV73",
+      "title": "startup recovery skips the audit crate's interface document",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/wasm-capsule/audit/Cargo.toml\",\n    \"lab/wasm-capsule/audit/INTERFACE.md\",",
+          "new": "    \"lab/wasm-capsule/audit/Cargo.toml\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV74",
+      "title": "startup recovery skips the audit crate's source",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/wasm-capsule/audit/INTERFACE.md\",\n    \"lab/wasm-capsule/audit/src/lib.rs\",",
+          "new": "    \"lab/wasm-capsule/audit/INTERFACE.md\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
       ]
     }
   ]
