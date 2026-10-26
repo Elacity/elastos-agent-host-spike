@@ -25,7 +25,12 @@ the same and is not built. The provider creates the final
 `Wallet` directory. Seatbelt grants recursive state access to that wallet
 directory alone. Literal read access to its existing parent lets the provider
 inspect and synchronize the directory while it creates Wallet. The parent
-receives no recursive grant.
+receives no recursive grant. The test launch refuses a second binding of a
+canonical parameter, so those three paths come only from
+`canonical_bindings`; `start_with_profile_refuses_a_canonical_parameter` holds
+that rule. The same check reads the binding name before the first `=`, as
+`sandbox-exec` does; `start_with_profile_refuses_an_encoded_canonical_parameter`
+holds that rule for encoded names.
 
 ## What the profile allows
 
@@ -383,6 +388,14 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   missing-list refusal into a skip (WP49 to WP53):
   `allow_rule_removal_check_rejects_bad_inputs` fails because the refusal does
   not come.
+- Drop the canonical-parameter refusal from `start_with_profile` (WP54):
+  `start_with_profile_refuses_a_canonical_parameter` fails because the call
+  returns a running provider on a Mac, and without `sandbox-exec` it panics
+  with the spawn message instead of naming the parameter.
+- Check the caller's whole name instead of the name before the first `=`
+  (WP55): `start_with_profile_refuses_an_encoded_canonical_parameter` fails
+  because the encoded canonical name reaches the launch instead of the
+  canonical-binding refusal.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

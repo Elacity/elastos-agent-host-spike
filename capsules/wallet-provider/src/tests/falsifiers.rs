@@ -37,8 +37,12 @@ use std::process::Command;
 /// which drop the removal check's `expect`, profile-path, `old` and `new`
 /// conditions, and WP49 to WP53, which turn its unreadable-profile,
 /// unparsable-profile, unreadable-list, not-JSON and missing-list refusals
-/// into skips.
-const EXPECTED_FALSIFIERS: usize = 51;
+/// into skips, and task 058's WP54, which drops the canonical-parameter
+/// refusal in `start_with_profile`, so
+/// `start_with_profile_refuses_a_canonical_parameter` fails, and WP55, which
+/// checks the caller's whole name instead of the name before the first `=`, so
+/// `start_with_profile_refuses_an_encoded_canonical_parameter` fails.
+const EXPECTED_FALSIFIERS: usize = 53;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
