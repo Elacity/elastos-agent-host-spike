@@ -43,7 +43,8 @@ Components and embedded modules.
 Custom-section cases cover code in the name and data, runs across their boundary,
 and runs that start in the name's length byte or the size's last byte. Both entry
 points refuse a whole module hidden from the size's last byte and accept the
-same padded size with a plain name. Component cases also cover a module header
+same padded size with a plain name. The Component test runs both padded cases
+inside an embedded core module too. Component cases also cover a module header
 in the name at all four tested depths, plus plain names and data.
 The API test pins the derives and `#[non_exhaustive]` lines in both the source
 and API document. Both refusal-order tests require the header or encoding check
@@ -104,6 +105,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA9a | Match versions while ignoring build metadata | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA9b | Match versions while ignoring the pre-release | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA10a | Add only `cm-implements` to the default features, accepting the `implements` import | `component_import_names_with_options_are_refused` |
+| F-CWA11a | Read the custom-section size's last byte only at depth 1 | `component_custom_section_carrying_code_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -118,7 +120,7 @@ Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
 the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, F-CWA5a/F-CWA5b,
 F-CWA6a, F-CWA7a/F-CWA7b, F-CWA8a (`component_refusals_follow_the_documented_order`),
-F-CWA9a/F-CWA9b, and F-CWA10a:
+F-CWA9a/F-CWA9b, F-CWA10a, and F-CWA11a:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -228,3 +230,17 @@ and the result was `Ok(["cache"])` instead of `Err(NotAComponent)`. Case (a),
 `versionsuffix`, still returned `NotAComponent` and passed its checks first.
 Case (c), `external-id`, is not reached: it needs the same feature as case (b),
 where the test stops. The source restored byte-identical, checked by SHA-256.
+
+The cwa-011 in-tree run caught F-CWA11a at `(ii) embedded core module:
+hidden_name: padded size`: it returned `Ok([])` instead of
+`Err(CodeInCustomSection)`. The top-level padded `hidden_name` case was still
+refused under this change and passed its checks first, as did all earlier
+custom-section cases. The clean test accepts the plain-name padded case in
+both layouts and refuses the hidden module with v1's variant and string.
+Including the 38 earlier entries, all 38 `caught` entries built and failed all
+48 required named checks; F-CWA0c failed before tests because `--locked`
+refused the nested workspace's missing lockfile. Every temporary edit restored
+byte-identical, checked by SHA-256. The clean format and locked-test checks
+passed all 20 tests offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+The implementation, API document, audit manifest, workspace manifest and
+workspace lockfile stayed unchanged.

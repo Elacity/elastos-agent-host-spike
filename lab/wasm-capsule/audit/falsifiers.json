@@ -641,6 +641,22 @@
       "tests": [
         "component_import_names_with_options_are_refused"
       ]
+    },
+    {
+      "id": "F-CWA11a",
+      "title": "Read the custom-section size's last byte only at depth 1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
+          "new": "let start = if depth == 1 { start.checked_sub(1).ok_or_else(|| invalid.clone())? } else { start };"
+        }
+      ],
+      "tests": [
+        "component_custom_section_carrying_code_is_refused"
+      ]
     }
   ]
 }

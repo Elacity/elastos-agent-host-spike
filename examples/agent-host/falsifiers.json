@@ -1469,858 +1469,858 @@
     "tests::an_inbox_answer_never_crosses_sessions"
    ]
   },
- {
-  "id": "F-AH3a",
-  "title": "a hosted proposal records a model resource the declaration does not cover",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    step.kind = ProposalKind::Hosted;\n    step.resource = resource.to_string();",
-    "new": "    step.kind = ProposalKind::Hosted;\n    step.resource = \"localhost://Other/hosted\".to_string();"
-   }
-  ],
-  "tests": [
-   "tests::every_resource_the_guest_proposes_is_declared"
-  ]
- },
- {
-  "id": "F-AH3c",
-  "title": "a declared ask is deleted, so a proposable resource is no longer covered",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
-    "new": ""
-   }
-  ],
-  "tests": [
-   "tests::every_proposal_kind_has_a_declared_ask",
-   "tests::every_resource_the_guest_proposes_is_declared"
-  ]
- },
- {
-  "id": "F-AH3d",
-  "title": "a declared ask has no observed resource, so the declaration is wider than the guest",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-    "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
-   }
-  ],
-  "tests": [
-   "tests::every_declared_ask_is_observed"
-  ]
- },
- {
-  "id": "F-AH3e",
-  "title": "the placeholder kind is declared as an ask",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-    "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
-   }
-  ],
-  "tests": [
-   "tests::every_proposal_kind_has_a_declared_ask",
-   "tests::every_resource_the_guest_proposes_is_declared",
-   "tests::every_declared_ask_is_observed"
-  ]
- },
- {
-  "id": "F-AH3f",
-  "title": "the stored rule is deleted from the one checked decoder, so every stored read skips it",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    stored_paths_ok(&journal).map_err(DecodeMiss::StoredRule)?;\n",
-    "new": ""
-   }
-  ],
-  "tests": [
-   "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
-   "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused"
-  ]
- },
- {
-  "id": "F-AH3l",
-  "title": "the stored read turns a bytes miss into a refusal instead of unknown",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        DecodeMiss::Bytes(_) => None,",
-    "new": "        DecodeMiss::Bytes(reason) => Some(reason),"
-   }
-  ],
-  "tests": [
-   "tests::resume_on_another_head_stays_unknown_and_holds_appends",
-   "tests::a_stored_journal_that_does_not_decode_stays_unknown"
-  ]
- },
- {
-  "id": "F-AH3g",
-  "title": "the journal ask widens to every agent's journal",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/agent-host/\"}",
-    "new": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/\"}"
-   }
-  ],
-  "tests": [
-   "tests::the_journal_ask_is_the_capsules_own_root"
-  ]
- },
- {
-  "id": "F-AH3h",
-  "title": "the principal marker matches any Users/<name> again",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        Some(tail) => format!(\"{LAUNCHING_PRINCIPAL}{tail}\"),",
-    "new": "        Some(tail) => format!(\"Users{tail}\"),"
-   }
-  ],
-  "tests": [
-   "tests::a_declared_ask_names_only_the_launching_principal"
-  ]
- },
- {
-  "id": "F-AH3i",
-  "title": "a declared pattern is matched with a plain prefix test",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))",
-    "new": "        .is_some_and(|path| path.starts_with(&ask_pattern_root(&ask.pattern)))"
-   }
-  ],
-  "tests": [
-   "tests::a_declared_pattern_covers_only_at_a_path_boundary"
-  ]
- },
- {
-  "id": "F-AH3j",
-  "title": "a declared ask may hold a host route",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.contains(':') {\n        return Some(\"asks host route\");\n    }",
-    "new": "    if false {\n        return Some(\"asks host route\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3k",
-  "title": "a marker pattern need not end at a directory boundary",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        Some(tail) if !tail.ends_with('/') => return Some(\"asks marker directory\"),",
-    "new": "        Some(tail) if false => return Some(\"asks marker directory\"),"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3v01",
-  "title": "a declared ask carries a URL",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-    "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH3v02",
-  "title": "a declared ask carries a secret-shaped value",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-    "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH3v03",
-  "title": "a declared ask carries a routed Users/ path",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-    "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH3v04",
-  "title": "a declared ask carries a host path",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
-    "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH3v05",
-  "title": "a repeated resource field hides a URL, so the discarded value is never checked",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-    "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH3p01",
-  "title": "a declaration that is not JSON is read as an empty document",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| \"asks json\")?;",
-    "new": "    let document: serde_json::Value = serde_json::from_str(text).unwrap_or_default();"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p02",
-  "title": "a repeated key is collapsed, so the discarded value is never checked",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if repeated_object_key(text).is_some() {\n        return Err(\"asks duplicate field\");\n    }",
-    "new": "    if false {\n        return Err(\"asks duplicate field\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p03",
-  "title": "a document that is not an object is read as an empty declaration",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    let document = document.as_object().ok_or(\"asks root\")?;",
-    "new": "    let Some(document) = document.as_object() else {\n        return Ok(Vec::new());\n    };"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p04",
-  "title": "an unknown top-level field is accepted",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if document.keys().any(|key| key != \"schema\" && key != \"asks\") {\n        return Err(\"asks unknown field\");\n    }",
-    "new": "    if false {\n        return Err(\"asks unknown field\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p05",
-  "title": "an unsupported schema is accepted",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if schema != ASKS_SCHEMA {\n        return Err(\"asks schema unsupported\");\n    }",
-    "new": "    if false {\n        return Err(\"asks schema unsupported\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p06",
-  "title": "a missing asks field loses its reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    let entries = document.get(\"asks\").ok_or(\"asks list missing\")?;",
-    "new": "    let entries = document.get(\"asks\").unwrap_or(&serde_json::Value::Null);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p07",
-  "title": "an empty declaration is accepted",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if entries.is_empty() {\n        return Err(\"asks empty\");\n    }",
-    "new": "    if false {\n        return Err(\"asks empty\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p08",
-  "title": "an entry that is not an object is skipped instead of refused",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        let entry = entry.as_object().ok_or(\"asks entry\")?;",
-    "new": "        let Some(entry) = entry.as_object() else {\n            continue;\n        };"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p09",
-  "title": "an unknown per-entry field is accepted",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        if entry.keys().any(|key| key != \"kind\" && key != \"resource\") {\n            return Err(\"asks entry field\");\n        }",
-    "new": "        if false {\n            return Err(\"asks entry field\");\n        }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p10",
-  "title": "an unknown kind is read as a read ask",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        let kind = proposal_kind(kind).ok_or(\"asks kind unknown\")?;",
-    "new": "        let kind = proposal_kind(kind).unwrap_or(ProposalKind::Read);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p11",
-  "title": "a missing resource loses its reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        let pattern = entry.get(\"resource\").ok_or(\"asks resource missing\")?;",
-    "new": "        let pattern = entry.get(\"resource\").unwrap_or(&serde_json::Value::Null);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p12",
-  "title": "a resource with whitespace is accepted",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        if pattern.chars().any(char::is_whitespace) {\n            return Err(\"asks whitespace\");\n        }",
-    "new": "        if false {\n            return Err(\"asks whitespace\");\n        }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p13",
-  "title": "a declared ask may carry a URL",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.contains(\"://\") {\n        return Some(\"asks url\");\n    }",
-    "new": "    if false {\n        return Some(\"asks url\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p14",
-  "title": "a declared ask may carry an absolute host path",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.starts_with('/') {\n        return Some(\"asks absolute host path\");\n    }",
-    "new": "    if false {\n        return Some(\"asks absolute host path\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p15",
-  "title": "a declared ask may route a Users/ path",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if lower.contains(\"users/\") {\n        return Some(\"asks users path\");\n    }",
-    "new": "    if false {\n        return Some(\"asks users path\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p16",
-  "title": "a declared ask may carry a secret-shaped value",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if secret_shaped(&lower) {\n        return Some(\"asks secret\");\n    }",
-    "new": "    if false {\n        return Some(\"asks secret\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p17",
-  "title": "the principal marker may sit anywhere in a pattern",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER) {\n        return Some(\"asks misplaced marker\");\n    }",
-    "new": "    if false {\n        return Some(\"asks misplaced marker\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p18",
-  "title": "a literal pattern need not end at a directory boundary",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        None if !pattern.ends_with('/') => return Some(\"asks literal directory\"),",
-    "new": "        None if false => return Some(\"asks literal directory\"),"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p19",
-  "title": "a missing schema loses its reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    let schema = document.get(\"schema\").ok_or(\"asks schema missing\")?;",
-    "new": "    let schema = document.get(\"schema\").unwrap_or(&serde_json::Value::Null);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p20",
-  "title": "a non-string schema is read as the supported schema",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    let schema = schema.as_str().ok_or(\"asks schema type\")?;",
-    "new": "    let schema = schema.as_str().unwrap_or(ASKS_SCHEMA);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p21",
-  "title": "a non-array asks field is read as an empty list",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    let entries = entries.as_array().ok_or(\"asks list type\")?;",
-    "new": "    let empty = Vec::new();\n    let entries = entries.as_array().unwrap_or(&empty);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p22",
-  "title": "a missing kind loses its reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        let kind = entry.get(\"kind\").ok_or(\"asks kind missing\")?;",
-    "new": "        let kind = entry.get(\"kind\").unwrap_or(&serde_json::Value::Null);"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p23",
-  "title": "a non-string kind is read as a read ask",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        let kind = kind.as_str().ok_or(\"asks kind type\")?;",
-    "new": "        let kind = kind.as_str().unwrap_or(\"read\");"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p24",
-  "title": "the unspecified placeholder loses its own refusal reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        if kind == \"unspecified\" {\n            return Err(\"asks kind unspecified\");\n        }",
-    "new": "        if false {\n            return Err(\"asks kind unspecified\");\n        }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p25",
-  "title": "a non-string resource is read as the shared model namespace",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        let pattern = pattern.as_str().ok_or(\"asks resource type\")?;",
-    "new": "        let pattern = pattern.as_str().unwrap_or(\"Models/\");"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p26",
-  "title": "an empty resource loses its own refusal reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        if pattern.is_empty() {\n            return Err(\"asks resource empty\");\n        }",
-    "new": "        if false {\n            return Err(\"asks resource empty\");\n        }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p27",
-  "title": "a declared ask may carry a home-relative host path",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.starts_with('~') {\n        return Some(\"asks home host path\");\n    }",
-    "new": "    if false {\n        return Some(\"asks home host path\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p28",
-  "title": "a declared ask may carry a backslash host path",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.contains('\\\\') {\n        return Some(\"asks backslash host path\");\n    }",
-    "new": "    if false {\n        return Some(\"asks backslash host path\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p29",
-  "title": "a declared ask may contain a current-directory segment",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.split('/').any(|segment| segment == \".\") {\n        return Some(\"asks current directory\");\n    }",
-    "new": "    if false {\n        return Some(\"asks current directory\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p30",
-  "title": "a declared ask may contain a parent-directory segment",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.split('/').any(|segment| segment == \"..\") {\n        return Some(\"asks parent directory\");\n    }",
-    "new": "    if false {\n        return Some(\"asks parent directory\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p31",
-  "title": "a declared ask may repeat its principal marker",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.matches(PRINCIPAL_MARKER).count() > 1 {\n        return Some(\"asks repeated marker\");\n    }",
-    "new": "    if false {\n        return Some(\"asks repeated marker\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p32",
-  "title": "a principal marker may have an invalid tail",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "        Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {\n            return Some(\"asks marker tail\");\n        }",
-    "new": "        Some(_) if false => {\n            return Some(\"asks marker tail\");\n        }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p33",
-  "title": "a declared ask may carry a URL scheme without an authority",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    if pattern.split_once(':').is_some_and(|(scheme, _)| {\n        scheme\n            .as_bytes()\n            .first()\n            .is_some_and(u8::is_ascii_alphabetic)\n            && scheme\n                .bytes()\n                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))\n    }) {\n        return Some(\"asks url scheme\");\n    }",
-    "new": "    if false {\n        return Some(\"asks url scheme\");\n    }"
-   }
-  ],
-  "tests": [
-   "tests::asks_parser_refuses_each_shape_with_its_reason"
-  ]
- },
- {
-  "id": "F-AH3p34",
-  "title": "a failed declaration reader receives an empty list instead of its parser reason",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "    parsed\n        .as_deref()\n        .unwrap_or_else(|reason| panic!(\"{reason}\"))",
-    "new": "    parsed.as_deref().unwrap_or_default()"
-   }
-  ],
-  "tests": [
-   "tests::malformed_compiled_declaration_keeps_its_parser_reason"
-  ]
- },
- {
-  "id": "F-AH3v06",
-  "title": "a declared ask carries the URL file:/tmp/",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-    "new": "    {\"kind\": \"hosted\", \"resource\": \"file:/tmp/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH3v07",
-  "title": "a declared ask carries the URL data:text/plain,x/",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "asks.json",
-    "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-    "new": "    {\"kind\": \"hosted\", \"resource\": \"data:text/plain,x/\"},"
-   }
-  ],
-  "tests": [
-   "tests::asks_declare_no_urls_secrets_or_users_paths"
-  ]
- },
- {
-  "id": "F-AH5a",
-  "title": "a test-only item sits above the export, so a test edit moves the guest hash",
-  "command": "host",
-  "expect": "caught",
-  "edits": [
-   {
-    "file": "src/lib.rs",
-    "old": "#[cfg(any(test, target_arch = \"wasm32\"))]\nfn host_path(text: &str) -> bool {",
-    "new": "#[cfg(test)]\nconst F_AH5A_PROBE: u8 = 0;\n\n#[cfg(any(test, target_arch = \"wasm32\"))]\nfn host_path(text: &str) -> bool {"
-   }
-  ],
-  "tests": [
-   "tests::no_test_only_item_sits_above_the_export"
-  ]
- }
+  {
+   "id": "F-AH3a",
+   "title": "a hosted proposal records a model resource the declaration does not cover",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    step.kind = ProposalKind::Hosted;\n    step.resource = resource.to_string();",
+     "new": "    step.kind = ProposalKind::Hosted;\n    step.resource = \"localhost://Other/hosted\".to_string();"
+    }
+   ],
+   "tests": [
+    "tests::every_resource_the_guest_proposes_is_declared"
+   ]
+  },
+  {
+   "id": "F-AH3c",
+   "title": "a declared ask is deleted, so a proposable resource is no longer covered",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::every_proposal_kind_has_a_declared_ask",
+    "tests::every_resource_the_guest_proposes_is_declared"
+   ]
+  },
+  {
+   "id": "F-AH3d",
+   "title": "a declared ask has no observed resource, so the declaration is wider than the guest",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
+    }
+   ],
+   "tests": [
+    "tests::every_declared_ask_is_observed"
+   ]
+  },
+  {
+   "id": "F-AH3e",
+   "title": "the placeholder kind is declared as an ask",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
+     "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
+    }
+   ],
+   "tests": [
+    "tests::every_proposal_kind_has_a_declared_ask",
+    "tests::every_resource_the_guest_proposes_is_declared",
+    "tests::every_declared_ask_is_observed"
+   ]
+  },
+  {
+   "id": "F-AH3f",
+   "title": "the stored rule is deleted from the one checked decoder, so every stored read skips it",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    stored_paths_ok(&journal).map_err(DecodeMiss::StoredRule)?;\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused"
+   ]
+  },
+  {
+   "id": "F-AH3l",
+   "title": "the stored read turns a bytes miss into a refusal instead of unknown",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        DecodeMiss::Bytes(_) => None,",
+     "new": "        DecodeMiss::Bytes(reason) => Some(reason),"
+    }
+   ],
+   "tests": [
+    "tests::resume_on_another_head_stays_unknown_and_holds_appends",
+    "tests::a_stored_journal_that_does_not_decode_stays_unknown"
+   ]
+  },
+  {
+   "id": "F-AH3g",
+   "title": "the journal ask widens to every agent's journal",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/agent-host/\"}",
+     "new": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/\"}"
+    }
+   ],
+   "tests": [
+    "tests::the_journal_ask_is_the_capsules_own_root"
+   ]
+  },
+  {
+   "id": "F-AH3h",
+   "title": "the principal marker matches any Users/<name> again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Some(tail) => format!(\"{LAUNCHING_PRINCIPAL}{tail}\"),",
+     "new": "        Some(tail) => format!(\"Users{tail}\"),"
+    }
+   ],
+   "tests": [
+    "tests::a_declared_ask_names_only_the_launching_principal"
+   ]
+  },
+  {
+   "id": "F-AH3i",
+   "title": "a declared pattern is matched with a plain prefix test",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))",
+     "new": "        .is_some_and(|path| path.starts_with(&ask_pattern_root(&ask.pattern)))"
+    }
+   ],
+   "tests": [
+    "tests::a_declared_pattern_covers_only_at_a_path_boundary"
+   ]
+  },
+  {
+   "id": "F-AH3j",
+   "title": "a declared ask may hold a host route",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.contains(':') {\n        return Some(\"asks host route\");\n    }",
+     "new": "    if false {\n        return Some(\"asks host route\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3k",
+   "title": "a marker pattern need not end at a directory boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Some(tail) if !tail.ends_with('/') => return Some(\"asks marker directory\"),",
+     "new": "        Some(tail) if false => return Some(\"asks marker directory\"),"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3v01",
+   "title": "a declared ask carries a URL",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3v02",
+   "title": "a declared ask carries a secret-shaped value",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3v03",
+   "title": "a declared ask carries a routed Users/ path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
+     "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3v04",
+   "title": "a declared ask carries a host path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
+     "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3v05",
+   "title": "a repeated resource field hides a URL, so the discarded value is never checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3p01",
+   "title": "a declaration that is not JSON is read as an empty document",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| \"asks json\")?;",
+     "new": "    let document: serde_json::Value = serde_json::from_str(text).unwrap_or_default();"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p02",
+   "title": "a repeated key is collapsed, so the discarded value is never checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if repeated_object_key(text).is_some() {\n        return Err(\"asks duplicate field\");\n    }",
+     "new": "    if false {\n        return Err(\"asks duplicate field\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p03",
+   "title": "a document that is not an object is read as an empty declaration",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let document = document.as_object().ok_or(\"asks root\")?;",
+     "new": "    let Some(document) = document.as_object() else {\n        return Ok(Vec::new());\n    };"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p04",
+   "title": "an unknown top-level field is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if document.keys().any(|key| key != \"schema\" && key != \"asks\") {\n        return Err(\"asks unknown field\");\n    }",
+     "new": "    if false {\n        return Err(\"asks unknown field\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p05",
+   "title": "an unsupported schema is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if schema != ASKS_SCHEMA {\n        return Err(\"asks schema unsupported\");\n    }",
+     "new": "    if false {\n        return Err(\"asks schema unsupported\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p06",
+   "title": "a missing asks field loses its reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let entries = document.get(\"asks\").ok_or(\"asks list missing\")?;",
+     "new": "    let entries = document.get(\"asks\").unwrap_or(&serde_json::Value::Null);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p07",
+   "title": "an empty declaration is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if entries.is_empty() {\n        return Err(\"asks empty\");\n    }",
+     "new": "    if false {\n        return Err(\"asks empty\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p08",
+   "title": "an entry that is not an object is skipped instead of refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let entry = entry.as_object().ok_or(\"asks entry\")?;",
+     "new": "        let Some(entry) = entry.as_object() else {\n            continue;\n        };"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p09",
+   "title": "an unknown per-entry field is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if entry.keys().any(|key| key != \"kind\" && key != \"resource\") {\n            return Err(\"asks entry field\");\n        }",
+     "new": "        if false {\n            return Err(\"asks entry field\");\n        }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p10",
+   "title": "an unknown kind is read as a read ask",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let kind = proposal_kind(kind).ok_or(\"asks kind unknown\")?;",
+     "new": "        let kind = proposal_kind(kind).unwrap_or(ProposalKind::Read);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p11",
+   "title": "a missing resource loses its reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let pattern = entry.get(\"resource\").ok_or(\"asks resource missing\")?;",
+     "new": "        let pattern = entry.get(\"resource\").unwrap_or(&serde_json::Value::Null);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p12",
+   "title": "a resource with whitespace is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if pattern.chars().any(char::is_whitespace) {\n            return Err(\"asks whitespace\");\n        }",
+     "new": "        if false {\n            return Err(\"asks whitespace\");\n        }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p13",
+   "title": "a declared ask may carry a URL",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.contains(\"://\") {\n        return Some(\"asks url\");\n    }",
+     "new": "    if false {\n        return Some(\"asks url\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p14",
+   "title": "a declared ask may carry an absolute host path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.starts_with('/') {\n        return Some(\"asks absolute host path\");\n    }",
+     "new": "    if false {\n        return Some(\"asks absolute host path\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p15",
+   "title": "a declared ask may route a Users/ path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if lower.contains(\"users/\") {\n        return Some(\"asks users path\");\n    }",
+     "new": "    if false {\n        return Some(\"asks users path\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p16",
+   "title": "a declared ask may carry a secret-shaped value",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if secret_shaped(&lower) {\n        return Some(\"asks secret\");\n    }",
+     "new": "    if false {\n        return Some(\"asks secret\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p17",
+   "title": "the principal marker may sit anywhere in a pattern",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.contains(PRINCIPAL_MARKER) && !pattern.starts_with(PRINCIPAL_MARKER) {\n        return Some(\"asks misplaced marker\");\n    }",
+     "new": "    if false {\n        return Some(\"asks misplaced marker\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p18",
+   "title": "a literal pattern need not end at a directory boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        None if !pattern.ends_with('/') => return Some(\"asks literal directory\"),",
+     "new": "        None if false => return Some(\"asks literal directory\"),"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p19",
+   "title": "a missing schema loses its reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let schema = document.get(\"schema\").ok_or(\"asks schema missing\")?;",
+     "new": "    let schema = document.get(\"schema\").unwrap_or(&serde_json::Value::Null);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p20",
+   "title": "a non-string schema is read as the supported schema",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let schema = schema.as_str().ok_or(\"asks schema type\")?;",
+     "new": "    let schema = schema.as_str().unwrap_or(ASKS_SCHEMA);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p21",
+   "title": "a non-array asks field is read as an empty list",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let entries = entries.as_array().ok_or(\"asks list type\")?;",
+     "new": "    let empty = Vec::new();\n    let entries = entries.as_array().unwrap_or(&empty);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p22",
+   "title": "a missing kind loses its reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let kind = entry.get(\"kind\").ok_or(\"asks kind missing\")?;",
+     "new": "        let kind = entry.get(\"kind\").unwrap_or(&serde_json::Value::Null);"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p23",
+   "title": "a non-string kind is read as a read ask",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let kind = kind.as_str().ok_or(\"asks kind type\")?;",
+     "new": "        let kind = kind.as_str().unwrap_or(\"read\");"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p24",
+   "title": "the unspecified placeholder loses its own refusal reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if kind == \"unspecified\" {\n            return Err(\"asks kind unspecified\");\n        }",
+     "new": "        if false {\n            return Err(\"asks kind unspecified\");\n        }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p25",
+   "title": "a non-string resource is read as the shared model namespace",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let pattern = pattern.as_str().ok_or(\"asks resource type\")?;",
+     "new": "        let pattern = pattern.as_str().unwrap_or(\"Models/\");"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p26",
+   "title": "an empty resource loses its own refusal reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if pattern.is_empty() {\n            return Err(\"asks resource empty\");\n        }",
+     "new": "        if false {\n            return Err(\"asks resource empty\");\n        }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p27",
+   "title": "a declared ask may carry a home-relative host path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.starts_with('~') {\n        return Some(\"asks home host path\");\n    }",
+     "new": "    if false {\n        return Some(\"asks home host path\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p28",
+   "title": "a declared ask may carry a backslash host path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.contains('\\\\') {\n        return Some(\"asks backslash host path\");\n    }",
+     "new": "    if false {\n        return Some(\"asks backslash host path\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p29",
+   "title": "a declared ask may contain a current-directory segment",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.split('/').any(|segment| segment == \".\") {\n        return Some(\"asks current directory\");\n    }",
+     "new": "    if false {\n        return Some(\"asks current directory\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p30",
+   "title": "a declared ask may contain a parent-directory segment",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.split('/').any(|segment| segment == \"..\") {\n        return Some(\"asks parent directory\");\n    }",
+     "new": "    if false {\n        return Some(\"asks parent directory\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p31",
+   "title": "a declared ask may repeat its principal marker",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.matches(PRINCIPAL_MARKER).count() > 1 {\n        return Some(\"asks repeated marker\");\n    }",
+     "new": "    if false {\n        return Some(\"asks repeated marker\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p32",
+   "title": "a principal marker may have an invalid tail",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Some(tail) if !tail.is_empty() && !tail.starts_with('/') => {\n            return Some(\"asks marker tail\");\n        }",
+     "new": "        Some(_) if false => {\n            return Some(\"asks marker tail\");\n        }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p33",
+   "title": "a declared ask may carry a URL scheme without an authority",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if pattern.split_once(':').is_some_and(|(scheme, _)| {\n        scheme\n            .as_bytes()\n            .first()\n            .is_some_and(u8::is_ascii_alphabetic)\n            && scheme\n                .bytes()\n                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))\n    }) {\n        return Some(\"asks url scheme\");\n    }",
+     "new": "    if false {\n        return Some(\"asks url scheme\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::asks_parser_refuses_each_shape_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-AH3p34",
+   "title": "a failed declaration reader receives an empty list instead of its parser reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    parsed\n        .as_deref()\n        .unwrap_or_else(|reason| panic!(\"{reason}\"))",
+     "new": "    parsed.as_deref().unwrap_or_default()"
+    }
+   ],
+   "tests": [
+    "tests::malformed_compiled_declaration_keeps_its_parser_reason"
+   ]
+  },
+  {
+   "id": "F-AH3v06",
+   "title": "a declared ask carries the URL file:/tmp/",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"file:/tmp/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH3v07",
+   "title": "a declared ask carries the URL data:text/plain,x/",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "asks.json",
+     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
+     "new": "    {\"kind\": \"hosted\", \"resource\": \"data:text/plain,x/\"},"
+    }
+   ],
+   "tests": [
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
+   ]
+  },
+  {
+   "id": "F-AH5a",
+   "title": "a test-only item sits above the export, so a test edit moves the guest hash",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "#[cfg(any(test, target_arch = \"wasm32\"))]\nfn host_path(text: &str) -> bool {",
+     "new": "#[cfg(test)]\nconst F_AH5A_PROBE: u8 = 0;\n\n#[cfg(any(test, target_arch = \"wasm32\"))]\nfn host_path(text: &str) -> bool {"
+    }
+   ],
+   "tests": [
+    "tests::no_test_only_item_sits_above_the_export"
+   ]
+  }
  ]
 }
