@@ -1843,7 +1843,13 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
                 claim.id
             ));
         };
-        if !justification.starts_with(&prefix) || justification[prefix.len()..].trim().is_empty() {
+        if !justification.starts_with(&prefix) {
+            return Err(format!(
+                "{name} platform baseline {} justification must start with {prefix:?}",
+                claim.id
+            ));
+        }
+        if justification[prefix.len()..].trim().is_empty() {
             return Err(format!(
                 "{name} platform baseline {} justification must start with {prefix:?} \
                  and give a reason",
@@ -2623,7 +2629,8 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// declared-rights file for each of did and wallet. The valid pair passes.
 /// Then one case for each refusal, in the check's order: a right id and a
 /// platform-baseline id the shared contract does not name, a platform-baseline
-/// entry with no justification, an entry with no rules, an id declared twice,
+/// entry with no justification, an entry whose justification names another
+/// provider or gives no reason, an entry with no rules, an id declared twice,
 /// a rule repeated inside one entry, an allow form the profile holds twice, an
 /// allow form with no claimant and one with two claimants, a declared rule that
 /// is not an allow form, a shared rule claimed by the wrong id, the two startup
@@ -2631,11 +2638,13 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// `storage`. The fixtures are built in the test and no process starts.
 ///
 /// Falsifier: WP87 drops the justification refusal, so this test fails on its
-/// missing-justification case. WP89 drops the pin table's two startup rows, so
-/// the swap and moved-root-read cases pass. WP90 drops the repeated-id refusal,
-/// WP91 the repeated-rule refusal, and WP92 the duplicate-form refusal, so the
-/// profile that holds `(allow sysctl-read)` twice reads "declared rule is not
-/// an allow rule of its profile".
+/// missing-justification case. WP93 drops the prefix refusal, so the
+/// justification that names another provider passes, and WP94 drops the
+/// empty-reason refusal, so the bare prefix passes. WP89 drops the pin table's
+/// two startup rows, so the swap and moved-root-read cases pass. WP90 drops the
+/// repeated-id refusal, WP91 the repeated-rule refusal, and WP92 the
+/// duplicate-form refusal, so the profile that holds `(allow sysctl-read)`
+/// twice reads "declared rule is not an allow rule of its profile".
 #[test]
 fn declared_rights_trace_refuses_each_bad_input() {
     let capsules = contract_fixture_capsules();
@@ -2696,6 +2705,33 @@ fn declared_rights_trace_refuses_each_bad_input() {
     assert!(
         reason.contains("startup-root-directory") && reason.contains("justification"),
         "a platform-baseline entry without a justification must be refused by id: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]["rules"][0]["justification"] = json!(format!(
+        "{}the kernel resolves every absolute path through the root directory.",
+        platform_baseline_justification("wallet-provider")
+    ));
+    let reason = check_declared_rights(name, &profile, &declared).expect_err(
+        "a justification that starts with another provider's executable prefix must be refused",
+    );
+    assert!(
+        reason.starts_with(name)
+            && reason.contains("startup-root-directory")
+            && reason.contains("must start with"),
+        "a justification with another provider's prefix must be refused by id: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]["rules"][0]["justification"] =
+        json!(platform_baseline_justification("did-provider"));
+    let reason = check_declared_rights(name, &profile, &declared)
+        .expect_err("a justification that gives no reason must be refused");
+    assert!(
+        reason.starts_with(name)
+            && reason.contains("startup-root-directory")
+            && reason.contains("must start with"),
+        "a platform-baseline justification without a reason must be refused by id: {reason}"
     );
 
     let mut declared = read();
