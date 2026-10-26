@@ -166,6 +166,16 @@ fn the_manifest_reader_refuses_what_is_not_toml() {
         ),
         ("]\n", "1: a ']' closes nothing"),
         ("x = [\n1,\n", "1: a bracket opened here is never closed"),
+        // A bracket closed by the other kind: a header that would otherwise
+        // read as `[dependencies]`, an array, and crossed nesting.
+        (
+            "[dependencies}\ncapsule-identity = { path = \"../capsule-identity\" }\n",
+            "1: a '}' closes a '['",
+        ),
+        ("x = [}\n", "1: a '}' closes a '['"),
+        ("x = {]\n", "1: a ']' closes a '{'"),
+        ("x = [{]}\n", "1: a ']' closes a '{'"),
+        ("x = [\n{ a = 1 ]\n}\n", "2: a ']' closes a '{'"),
     ] {
         assert_eq!(
             manifest_statements(path, text),

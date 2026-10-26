@@ -3493,8 +3493,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "                    depth = depth\n                        .checked_sub(1)\n                        .ok_or_else(|| refuse(lexer.line, format!(\"a {c:?} closes nothing\")))?;\n",
-          "new": "                    depth = depth.saturating_sub(1);\n"
+          "old": "                        .ok_or_else(|| refuse(lexer.line, format!(\"a {c:?} closes nothing\")))?;\n",
+          "new": "                        .unwrap_or(if c == ']' { '[' } else { '{' });\n"
         }
       ],
       "tests": [
@@ -3509,7 +3509,7 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "    if depth != 0 {\n        return Err(refuse(\n",
+          "old": "    if !open.is_empty() {\n        return Err(refuse(\n",
           "new": "    if false {\n        return Err(refuse(\n"
         }
       ],
@@ -3563,6 +3563,22 @@
       ],
       "tests": [
         "the_consumer_scan_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI22r",
+      "title": "a bracket closed by the other kind is let pass, so a header written [dependencies} reads as [dependencies]",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                    if closer != c {\n",
+          "new": "                    if false {\n"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
       ]
     }
   ]

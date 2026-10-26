@@ -834,8 +834,9 @@ pub struct Statement<'a> {
 /// The statements of the manifest `text`, at `path`, read as TOML: comments
 /// dropped, each string one token with its escapes decoded, and a statement
 /// ending only at a line end outside any string, array or inline table. A
-/// string never closed, an escape TOML does not define, and a bracket out of
-/// balance are each refused with the line and the reason.
+/// string never closed, an escape TOML does not define, a bracket out of
+/// balance, and a bracket closed by the other kind (`[}`, `{]`, or crossed
+/// nesting) are each refused with the line and the reason.
 pub fn manifest_statements<'a>(path: &str, text: &'a str) -> Result<Vec<Statement<'a>>, String> {
     let sources: Vec<&str> = text.lines().collect();
     let chars: Vec<char> = text.chars().collect();
@@ -847,7 +848,7 @@ pub fn manifest_statements<'a>(path: &str, text: &'a str) -> Result<Vec<Statemen
     let mut statements = Vec::new();
     let mut tokens = Vec::new();
     let mut start = 1;
-    let mut depth = 0usize;
+    let mut open: Vec<char> = Vec::new();
     let mut word = String::new();
     let refuse = |line: usize, reason: String| format!("{path}:{line}: {reason}");
     while let Some(c) = lexer.peek(0) {
@@ -870,7 +871,7 @@ pub fn manifest_statements<'a>(path: &str, text: &'a str) -> Result<Vec<Statemen
                     lexer.string().map_err(|why| refuse(line, why))?,
                 ));
             }
-            '\n' if depth == 0 => {
+            '\n' if open.is_empty() => {
                 lexer.next();
                 if !tokens.is_empty() {
                     let source = sources[start - 1];
@@ -884,11 +885,16 @@ pub fn manifest_statements<'a>(path: &str, text: &'a str) -> Result<Vec<Statemen
             }
             '[' | '{' | ']' | '}' | '=' | ',' | '.' => {
                 if "[{".contains(c) {
-                    depth += 1;
+                    open.push(c);
                 } else if "]}".contains(c) {
-                    depth = depth
-                        .checked_sub(1)
+                    let opener = open
+                        .pop()
                         .ok_or_else(|| refuse(lexer.line, format!("a {c:?} closes nothing")))?;
+                    let closer = if opener == '[' { ']' } else { '}' };
+                    if closer != c {
+                        let why = format!("a {c:?} closes a {opener:?}");
+                        return Err(refuse(lexer.line, why));
+                    }
                 }
                 tokens.push(Token::Mark(c));
                 lexer.next();
@@ -901,7 +907,7 @@ pub fn manifest_statements<'a>(path: &str, text: &'a str) -> Result<Vec<Statemen
     if !word.is_empty() {
         tokens.push(Token::Word(word));
     }
-    if depth != 0 {
+    if !open.is_empty() {
         return Err(refuse(
             start,
             "a bracket opened here is never closed".to_owned(),
