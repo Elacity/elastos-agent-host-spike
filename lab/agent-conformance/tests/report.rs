@@ -36,4 +36,430 @@ fn run_table_requires_cargo_results() {
         .0,
         format!("test | PASS/FAIL/BLOCKED (id)\n{name} | PASS\n")
     );
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, git) = synthetic(1, true);
+    for (index, (result, cargo_ok, expected, outcome)) in [
+        ("ok", true, true, "PASS"),
+        ("FAILED", true, false, "FAIL"),
+        ("ok", false, false, "FAIL"),
+        ("ignored, blocked: RT3 model grant", true, true, "BLOCKED"),
+        ("ignored", true, false, "FAIL"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = home.root().join(format!("combined-{index}.json"));
+        let evidence = self::output(&observations).replace(
+            &format!("test {LIVE} ... ok"),
+            &format!("test {LIVE} ... {result}"),
+        );
+        let combined = write_run(
+            &format!("{LIVE}: test\n"),
+            &evidence,
+            cargo_ok,
+            Ok(git.clone()),
+            &path,
+        );
+        assert_eq!(combined.passed, expected);
+        assert_eq!(read_receipt(&path)["suite_outcome"], outcome);
+        assert!(combined.table.contains("versions_receipt (A14) | PASS\n"));
+        assert_eq!(read_receipt(&path)["report"]["table"], combined.table);
+    }
+    let no_identity = write_run(
+        "case: test\n",
+        "test case ... ok\n",
+        true,
+        Ok(git),
+        &home.root().join("incomplete.json"),
+    );
+    assert!(!no_identity.passed);
+    assert!(no_identity.table.contains("case | PASS\n"));
+    assert!(no_identity
+        .table
+        .contains("versions_receipt (A14) | FAIL\n"));
+    home.finish().unwrap();
+}
+
+use agent_conformance::harness::ThrowawayHome;
+use agent_conformance::identity::{
+    sha256, stage_probe, Observation, ProbeIdentity, MANIFEST, PREFIX,
+};
+use agent_conformance::report::{write_run, GitIdentity};
+use serde_json::Value;
+use std::{fs, path::Path};
+
+const LIVE: &str = "default_activation_refuses_without_selector";
+
+// These synthetic hashes test report wiring only. They are never emitted as
+// this Cargo run's identities and supply zero live Runtime evidence.
+fn synthetic(seed: u8, dirty: bool) -> (Vec<Observation>, GitIdentity) {
+    (
+        vec![
+            Observation::Native {
+                role: "elastos".into(),
+                sha256: sha256(&[seed, 1]),
+            },
+            Observation::Native {
+                role: "localhost-provider".into(),
+                sha256: sha256(&[seed, 2]),
+            },
+            Observation::Launched {
+                probe: ProbeIdentity {
+                    effect: "default".into(),
+                    component_sha256: sha256(&[seed, 3]),
+                    bundle_lab_cid: format!("lab-cid:sha256:{}", sha256(&[seed, 4])),
+                },
+            },
+        ],
+        GitIdentity {
+            commit: format!("{seed:040x}"),
+            dirty,
+        },
+    )
+}
+
+fn output(observations: &[Observation]) -> String {
+    let mut output = format!("test {LIVE} ... ok\n");
+    for observation in observations {
+        output.push_str(&observation.line());
+        output.push('\n');
+    }
+    output
+}
+
+fn read_receipt(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn versions_receipt_binds_current_run() {
+    let home = ThrowawayHome::new().unwrap();
+    let mut documents = Vec::new();
+    for (seed, dirty) in [(1, false), (2, true)] {
+        let (mut observations, git) = synthetic(seed, dirty);
+        // Repeated observations from independent test binaries are permitted
+        // only when every field agrees.
+        observations.extend(observations.clone());
+        let path = home.root().join(format!("run-{seed}.json"));
+        let report = write_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git.clone()),
+            &path,
+        );
+        assert!(report.passed, "{:?}", report.failures);
+        let document = read_receipt(&path);
+        assert_eq!(document["repository"], serde_json::to_value(git).unwrap());
+        assert_eq!(document["runtime_sha256"], sha256(&[seed, 1]));
+        assert_eq!(document["localhost_provider_sha256"], sha256(&[seed, 2]));
+        assert_eq!(
+            document["probes"][0]["component_sha256"],
+            sha256(&[seed, 3])
+        );
+        assert_eq!(
+            document["probes"][0]["bundle_lab_cid"],
+            format!("lab-cid:sha256:{}", sha256(&[seed, 4]))
+        );
+        assert_eq!(document["probes"][0]["effect"], "default");
+        assert_eq!(document["probes"].as_array().unwrap().len(), 1);
+        assert_eq!(document["identity_status"], "complete");
+        assert_eq!(document["suite_outcome"], "PASS");
+        assert_eq!(document["command_success"], true);
+        assert_eq!(document["report"]["table"], report.table);
+        assert_eq!(
+            document["report"]["sha256"],
+            sha256(report.table.as_bytes())
+        );
+        assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+        documents.push(document);
+    }
+    // Exercise the actual CLI once as well: it owns the real Git query and exit.
+    let (observations, _) = synthetic(3, false);
+    let listed_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    let receipt_path = home.root().join("cli-receipt.json");
+    fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
+    fs::write(&results_path, output(&observations)).unwrap();
+    let command = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .arg(&listed_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(&receipt_path)
+            .output()
+            .unwrap()
+    };
+    let result = command();
+    assert!(result.status.success());
+    let cli = read_receipt(&receipt_path);
+    assert_eq!(
+        cli["repository"],
+        serde_json::to_value(GitIdentity::read(&agent_conformance::build::repository()).unwrap())
+            .unwrap()
+    );
+    assert_eq!(cli["runtime_sha256"], sha256(&[3, 1]));
+    let printed = String::from_utf8(result.stdout).unwrap();
+    assert!(printed.starts_with(cli["report"]["table"].as_str().unwrap()));
+    assert!(printed.contains(&format!(
+        "versions receipt: {}",
+        receipt_path
+            .strip_prefix(agent_conformance::build::lane())
+            .unwrap()
+            .display()
+    )));
+    let collision = command();
+    assert!(!collision.status.success());
+    assert_eq!(
+        String::from_utf8(collision.stderr).unwrap(),
+        "versions receipt failure: receipt write failed: AlreadyExists\n"
+    );
+    assert_eq!(read_receipt(&receipt_path), cli);
+    assert_ne!(documents[0]["repository"], documents[1]["repository"]);
+    assert_ne!(documents[0]["probes"], documents[1]["probes"]);
+    home.finish().unwrap();
+}
+
+#[test]
+fn versions_receipt_rejects_incomplete_identity() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, git) = synthetic(1, true);
+    let listed = format!("{LIVE}: test\n");
+    let mut serial = 0;
+    let mut refusal = |list: &str, out: &str, git, reason: &str| {
+        serial += 1;
+        let path = home.root().join(format!("refusal-{serial}.json"));
+        let report = write_run(list, out, true, git, &path);
+        assert!(!report.passed, "accepted: {reason}");
+        assert!(
+            report.failures.iter().any(|failure| failure == reason),
+            "expected {reason}; got {:?}",
+            report.failures
+        );
+        assert!(report.table.contains("versions_receipt (A14) | FAIL\n"));
+        let document = read_receipt(&path);
+        assert_eq!(document["identity_status"], "incomplete");
+        assert_eq!(document["command_success"], false);
+        assert!(document["missing_or_invalid"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from(reason)));
+    };
+    for (index, reason) in [
+        (0, "missing Runtime SHA-256"),
+        (1, "missing localhost-provider SHA-256"),
+        (2, "missing launched probe identity: default"),
+    ] {
+        let mut missing = observations.clone();
+        missing.remove(index);
+        refusal(&listed, &output(&missing), Ok(git.clone()), reason);
+    }
+    let mut build_only = observations.clone();
+    let Observation::Launched { probe } = &observations[2] else {
+        unreachable!()
+    };
+    build_only[2] = Observation::BuildOnly {
+        probe: probe.clone(),
+    };
+    refusal(
+        &listed,
+        &output(&build_only),
+        Ok(git.clone()),
+        "missing launched probe identity: default",
+    );
+    refusal(
+        &format!("{listed}ungranted_effect_is_refused: test\n"),
+        &format!(
+            "{}test ungranted_effect_is_refused ... ok\n",
+            output(&observations)
+        ),
+        Ok(git.clone()),
+        "missing launched probe identity: read",
+    );
+    for (field, value, reason) in [
+        ("effect", "", "malformed probe effect"),
+        (
+            "component_sha256",
+            "short",
+            "malformed component SHA-256: default",
+        ),
+        (
+            "bundle_lab_cid",
+            "sha256:wrong",
+            "malformed bundle lab CID: default",
+        ),
+    ] {
+        let mut bad = serde_json::to_value(&observations[2]).unwrap();
+        bad["probe"][field] = value.into();
+        refusal(
+            &listed,
+            &format!("{}{PREFIX}{bad}\n", output(&observations)),
+            Ok(git.clone()),
+            reason,
+        );
+    }
+    for field in ["component_sha256", "bundle_lab_cid", "effect"] {
+        let mut bad = serde_json::to_value(&observations[2]).unwrap();
+        bad["probe"].as_object_mut().unwrap().remove(field);
+        refusal(
+            &listed,
+            &format!("{}{PREFIX}{bad}\n", output(&observations)),
+            Ok(git.clone()),
+            "malformed identity observation",
+        );
+    }
+    for bad in [
+        "not-json",
+        r#"{"kind":"native","role":"elastos"}"#,
+        r#"{"kind":"native","role":"elastos","sha256":"short"}"#,
+        r#"{"kind":"native","role":"unknown","sha256":"short"}"#,
+    ] {
+        let reason = if bad.contains("unknown") {
+            "malformed native role"
+        } else if bad.contains("short") {
+            "malformed elastos SHA-256"
+        } else {
+            "malformed identity observation"
+        };
+        refusal(
+            &listed,
+            &format!("{}{PREFIX}{bad}\n", output(&observations)),
+            Ok(git.clone()),
+            reason,
+        );
+    }
+    for (index, reason) in [
+        (0, "conflicting elastos SHA-256"),
+        (1, "conflicting localhost-provider SHA-256"),
+        (2, "conflicting probe identity: default"),
+    ] {
+        let (other, _) = synthetic(2, false);
+        refusal(
+            &listed,
+            &format!("{}{}\n", output(&observations), other[index].line()),
+            Ok(git.clone()),
+            reason,
+        );
+    }
+    let mut changed_manifest = probe.clone();
+    changed_manifest.bundle_lab_cid =
+        format!("lab-cid:sha256:{}", sha256(b"changed synthetic manifest"));
+    refusal(
+        &listed,
+        &format!(
+            "{}{}\n",
+            output(&observations),
+            Observation::BuildOnly {
+                probe: changed_manifest
+            }
+            .line()
+        ),
+        Ok(git.clone()),
+        "conflicting probe identity: default",
+    );
+    for reason in ["Git commit query failed", "Git dirty-state query failed"] {
+        refusal(&listed, &output(&observations), Err(reason), reason);
+    }
+    refusal(
+        &listed,
+        &output(&observations),
+        Ok(GitIdentity {
+            commit: "short".into(),
+            dirty: true,
+        }),
+        "malformed Git commit",
+    );
+    assert_eq!(
+        GitIdentity::read(&home.root().join("absent-repository")),
+        Err("Git commit query failed")
+    );
+
+    let path = home.root().join("VERSIONS.json");
+    let first = write_run(
+        &listed,
+        &output(&observations),
+        true,
+        Ok(git.clone()),
+        &path,
+    );
+    assert!(first.passed);
+    let original = fs::read(&path).unwrap();
+    let repeated = write_run(
+        &listed,
+        &output(&observations),
+        true,
+        Ok(git.clone()),
+        &path,
+    );
+    assert!(!repeated.passed);
+    assert!(!repeated.receipt_written);
+    assert_eq!(repeated.failures, ["receipt write failed: AlreadyExists"]);
+    assert!(repeated.table.contains("versions_receipt (A14) | FAIL\n"));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let missing_parent = write_run(
+        &listed,
+        &output(&observations),
+        true,
+        Ok(git.clone()),
+        &home.root().join("absent/VERSIONS.json"),
+    );
+    assert!(!missing_parent.passed);
+    assert_eq!(missing_parent.failures, ["receipt write failed: NotFound"]);
+    let symlink = home.root().join("receipt-link");
+    std::os::unix::fs::symlink(&path, &symlink).unwrap();
+    let refused_link = write_run(&listed, &output(&observations), true, Ok(git), &symlink);
+    assert_eq!(
+        refused_link.failures,
+        ["receipt write failed: AlreadyExists"]
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    home.finish().unwrap();
+}
+
+#[test]
+fn versions_receipt_uses_the_staged_bundle_identity() {
+    let mut receipts = Vec::new();
+    for manifest in [MANIFEST.to_vec(), [MANIFEST, b"\n"].concat()] {
+        let home = ThrowawayHome::new().unwrap();
+        // Deliberately not live WASM: this checks serialization, not admission.
+        let staged =
+            stage_probe(&home, b"synthetic receipt component", &manifest, "default").unwrap();
+        let oracle = capsule_identity::checked_bundle(&staged.path).unwrap();
+        let (mut observations, git) = synthetic(1, false);
+        observations[2] = Observation::Launched {
+            probe: staged.identity.clone(),
+        };
+        observations.push(Observation::BuildOnly {
+            probe: staged.identity,
+        });
+        let path = home.root().join("VERSIONS.json");
+        let report = write_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git),
+            &path,
+        );
+        assert!(report.passed, "{:?}", report.failures);
+        let receipt = read_receipt(&path);
+        assert_eq!(
+            receipt["probes"][0]["bundle_lab_cid"],
+            oracle.cid().to_string()
+        );
+        assert_eq!(
+            receipt["probes"][0]["component_sha256"],
+            sha256(b"synthetic receipt component")
+        );
+        assert_eq!(receipt["build_only_probes"], receipt["probes"]);
+        receipts.push(receipt);
+        home.finish().unwrap();
+    }
+    assert_ne!(
+        receipts[0]["probes"][0]["bundle_lab_cid"],
+        receipts[1]["probes"][0]["bundle_lab_cid"]
+    );
+    assert_eq!(
+        receipts[0]["probes"][0]["component_sha256"],
+        receipts[1]["probes"][0]["component_sha256"]
+    );
 }

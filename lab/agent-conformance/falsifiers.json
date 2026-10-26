@@ -467,6 +467,38 @@
       "tests": [
         "parallel_collection_refuses_live_descendants"
       ]
+    },
+    {
+      "id": "F-versions-required",
+      "title": "accept a receipt without the Runtime identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        if self.identities.runtime.is_none() {",
+          "new": "        if false && self.identities.runtime.is_none() {"
+        }
+      ],
+      "tests": [
+        "versions_receipt_rejects_incomplete_identity"
+      ]
+    },
+    {
+      "id": "F-versions-bundle",
+      "title": "serialize the component hash as the complete bundle identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        \"probes\": evidence.identities.launched.values().collect::<Vec<_>>(),",
+          "new": "        \"probes\": evidence.identities.launched.values().map(|probe| { let mut probe = probe.clone(); probe.bundle_lab_cid = probe.component_sha256.clone(); probe }).collect::<Vec<_>>(),"
+        }
+      ],
+      "tests": [
+        "versions_receipt_uses_the_staged_bundle_identity"
+      ]
     }
   ]
 }
