@@ -913,3 +913,294 @@ A reported figure is not a hold, and the required account stays open. `capsules/
 The account A7 asks for is this account. Admission sets the ceiling. The Runtime reserves a bounded usage amount before each dispatch. That account covers concurrent calls, a retry, a cancellation, and an uncertain outcome. A reported figure does not lower the hold. The guest writes zeros. The journal check is room for history. The concurrency check counts non-terminal runs. The slot stores a time under one lock. The usage function refuses an empty report. A7 stays open.
 
 This section cites no lab/grant-binding test.
+
+## 6. B2 mapping
+
+This section is design input for B2. B2 stays open.
+
+The proposal is the guest's record of the step. Admission is the Runtime's grant. Allowance is the Runtime's budget.
+
+The asks file declares three file asks. Each resource pattern is `<principal>/`. `examples/agent-host/asks.json:4` declares read. `examples/agent-host/asks.json:5` declares edit. `examples/agent-host/asks.json:6` declares restore.
+
+        {"kind": "read", "resource": "<principal>/"},
+        {"kind": "edit", "resource": "<principal>/"},
+        {"kind": "restore", "resource": "<principal>/"},
+
+`examples/agent-host/src/lib.rs::ask_kind_name` names Read as `read`, Edit as `edit`, and Restore as `restore`. `examples/agent-host/src/lib.rs:8187` is the Read arm. `examples/agent-host/src/lib.rs:8188` is the Edit arm. `examples/agent-host/src/lib.rs:8190` is the Restore arm.
+
+    /// The declared name of one kind. The match has no wildcard, so a new
+    /// `ProposalKind` does not compile until it is named here or marked as the
+    /// placeholder. `Unspecified` marks a step opened without a proposal and is
+    /// not an ask.
+    #[cfg(test)]
+    fn ask_kind_name(kind: ProposalKind) -> Option<&'static str> {
+        match kind {
+            ProposalKind::Unspecified => None,
+            ProposalKind::Read => Some("read"),
+            ProposalKind::Edit => Some("edit"),
+            ProposalKind::Run => Some("run"),
+            ProposalKind::Restore => Some("restore"),
+            ProposalKind::Hosted => Some("hosted"),
+            ProposalKind::Child => Some("child"),
+            ProposalKind::Init => Some("init"),
+            ProposalKind::JournalAppend => Some("journal-append"),
+        }
+    }
+
+`examples/agent-host/src/lib.rs::declared_ask` is true when the kind matches and ask_covers is true. `examples/agent-host/src/lib.rs:8488` is that condition. ask_covers applies the declared pattern to the resource. The three patterns are `<principal>/`.
+
+    /// The declaration's answer for one proposal. `Unspecified` matches nothing.
+    #[cfg(test)]
+    fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
+        declared_asks()
+            .iter()
+            .any(|ask| ask.kind == kind && ask_covers(ask, resource))
+    }
+
+Read records a step. `examples/agent-host/src/lib.rs::propose_read` sets the kind to Read and stores the resource. The body has no bus call.
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_read(journal: &mut Journal, resource: &str) -> u64 {
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Read;
+        step.resource = resource.to_string();
+        id
+    }
+
+`examples/agent-host/src/lib.rs::observe` records text the guest already holds. `examples/agent-host/src/lib.rs:2067` ends the doc sentence. That sentence says this does not read a file.
+
+    /// Append a read. A path that `path_refusal` refuses, or the version
+    /// u64::MAX, adds nothing. A higher version is a new read. An older version is allowed only when the
+    /// text still matches that version, so a reread can make it current again
+    /// without replacing the page. This does not start a series and does not
+    /// read a file.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> bool {
+        if path_refusal(resource).is_some()
+            || version == u64::MAX
+            || version_bound_elsewhere(&journal.events, resource, version, None)
+        {
+            return false;
+        }
+        if let Some(row) = current_observation(&journal.events, resource) {
+            if version <= row.version
+                && observed_text_at(&journal.events, resource, version).as_deref() != Some(text)
+            {
+                return false;
+            }
+        }
+        let epoch = journal.epoch;
+        journal
+            .events
+            .push(observation_record(resource, version, text));
+        journal.epoch == epoch
+    }
+
+The typed localhost operation `read` maps to `Action::Read` on `elastos/crates/elastos-server/src/provider_resource.rs:189`.
+
+            "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),
+
+Edit and restore replace shown text. `examples/agent-host/src/lib.rs::propose_edit` creates no write. `examples/agent-host/src/lib.rs:2421-2422` carries that statement. The start line contains `This does not` and the end line contains `write.`
+
+    /// Record an edit proposal. An unread target, a stale version, empty old
+    /// text, old text that is not exactly once in what that version has shown
+    /// (a read that showed a window covers only that window), or a no-op edit
+    /// repeated past the limit creates no step. A path that is not canonical or
+    /// not NFC is refused. Every refusal writes one refusal record. This does not
+    /// write.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_edit(
+        journal: &mut Journal,
+        resource: &str,
+        old: &str,
+        new: &str,
+        seen: Option<u64>,
+    ) -> Result<u64, &'static str> {
+        let result = propose_edit_checked(journal, resource, old, new, seen);
+        result.map_err(|refusal| {
+            record_refusal(journal, refusal, &refused_path(resource));
+            refusal.reason()
+        })
+    }
+
+`examples/agent-host/src/lib.rs::propose_restore` records a Restore step. The body sets the kind to Restore and stores the observed text and the version. `bind_change` and `note_change_wrote` belong to later granted dispatch. The body does not call them. `examples/agent-host/src/lib.rs:3308` contains `This does not write.`
+
+    /// Propose restoring an observed version. An unknown version, or a version
+    /// that is no longer current, creates no step. The step keeps the observed
+    /// text as the text to replace and as the text to write, so a granted
+    /// dispatch sends the restore through the same `bind_change` and
+    /// `note_change_wrote` path an edit uses. This does not write.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_restore(
+        journal: &mut Journal,
+        resource: &str,
+        version: u64,
+    ) -> Result<u64, &'static str> {
+        let Some(text) = observed_text_at(&journal.events, resource, version) else {
+            return Err("unknown");
+        };
+        let Some(current) = current_observation(&journal.events, resource) else {
+            return Err("unknown");
+        };
+        if current.version != version {
+            return Err("stale");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Restore;
+        step.resource = resource.to_string();
+        step.old = text.clone();
+        step.new = text;
+        step.seen_version = Some(version);
+        Ok(id)
+    }
+
+`examples/agent-host/src/lib.rs::is_write` is true for Edit and Restore. `examples/agent-host/src/lib.rs:3290` is that match.
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn is_write(kind: ProposalKind) -> bool {
+        matches!(kind, ProposalKind::Edit | ProposalKind::Restore)
+    }
+
+`examples/agent-host/src/lib.rs::edit_request` is the one provider request for a change or a restore. `examples/agent-host/src/lib.rs:2720` says that.
+
+    /// The one provider request for a change or a restore: every file, each with
+    /// the Runtime revision it was read at (`if_revision`), the lines it may
+    /// touch, and the text to replace there. The provider applies all files or
+    /// none. A change that does not bind sends nothing and writes one refusal
+    /// record.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
+        let result = bind_change(journal, effect_id);
+        result.map(|bound| request_body(&bound)).map_err(|refusal| {
+            record_refusal(journal, refusal, &format!("change {effect_id}"));
+            refusal.reason()
+        })
+    }
+
+`examples/agent-host/src/lib.rs::request_body` sets `if_revision` to the revision the file was read at, and sets `op` to `edit` with `all_or_none` true. `examples/agent-host/src/lib.rs:2741` is the revision field. `examples/agent-host/src/lib.rs:2749` is the op field. That body replaces shown text under the revision the read carried. The constraint on that replacement is the revision the read carried.
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn request_body(bound: &[BoundEdit]) -> Vec<u8> {
+        let files: Vec<serde_json::Value> = bound
+            .iter()
+            .map(|edit| {
+                serde_json::json!({
+                    "path": edit.resource,
+                    "if_revision": edit.revision,
+                    "first_line": edit.first_line,
+                    "line_count": line_count(&edit.run),
+                    "old": edit.old,
+                    "new": edit.new,
+                })
+            })
+            .collect();
+        serde_json::json!({ "op": "edit", "all_or_none": true, "files": files })
+            .to_string()
+            .into_bytes()
+    }
+
+The typed map is the operation-to-action map. `elastos/crates/elastos-server/src/provider_resource.rs::provider_operation_action` is that map. For scheme `localhost` the arm calls `localhost_op_required_action`. The same arm names webspace. `elastos/crates/elastos-server/src/provider_resource.rs:123` is that arm.
+
+    /// Canonical capability action for provider operations where the Runtime owns
+    /// the operation-to-action contract directly.
+    pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
+        #[cfg(test)]
+        if scheme == "test" {
+            return (op == "read").then_some(Action::Read);
+        }
+
+        match scheme {
+            "localhost" | "webspace" => localhost_op_required_action(op),
+            "did" => execute_op_required_action(op),
+            "availability" => match op {
+                "status" => Some(Action::Read),
+                "ensure" => Some(Action::Write),
+                _ => None,
+            },
+            "block-graph" => match op {
+                "status" | "export_graph" => Some(Action::Read),
+                "import_graph" => Some(Action::Write),
+                _ => None,
+            },
+            "chain" => chain_op_required_action(op),
+            "content" => match op {
+                "status" | "fetch" => Some(Action::Read),
+                "publish" | "ensure" | "repair" | "unpublish" => Some(Action::Write),
+                _ => None,
+            },
+            "drm" | "rights" | "key" | "decrypt" => read_only_provider_action(op),
+            "net" => match op {
+                "status" | "resolve" => Some(Action::Read),
+                "connect" | "stream" | "http" => Some(Action::Write),
+                _ => None,
+            },
+            "exit" => match op {
+                "status" | "discover_remote_carrier_exits" | "quote" => Some(Action::Read),
+                "open_stream" | "close_stream" | "http_fetch" => Some(Action::Write),
+                _ => None,
+            },
+            "browser-engine" => match op {
+                "status" | "readiness" | "page_status" | "diagnostics" | "inspect" => {
+                    Some(Action::Read)
+                }
+                "launch" | "attach_stream" | "input" | "webrtc_signal" => Some(Action::Write),
+                "close_page" => Some(Action::Delete),
+                _ => None,
+            },
+            "wallet" => wallet_op_required_action(op),
+            "ipfs" => ipfs_op_required_action(op),
+            "model" => match op {
+                "offers_list" | "runs_get" | "runs_events" => Some(Action::Read),
+                "runs_create" | "runs_cancel" => Some(Action::Execute),
+                _ => None,
+            },
+            "object" => object_op_required_action(op),
+            "operator-drive-adapter" => match op {
+                "status" | "metadata_index" | "read_bytes" => Some(Action::Read),
+                "write_bytes" => Some(Action::Write),
+                _ => None,
+            },
+            "peer" => match op {
+                "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"
+                | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"
+                | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),
+                _ => None,
+            },
+            "tunnel" => {
+                Some(Action::Admin).filter(|_| matches!(op, "start" | "stop" | "status" | "ping"))
+            }
+            "inspect" => inspect_op_required_action(op),
+            _ => None,
+        }
+    }
+
+`elastos/crates/elastos-server/src/provider_resource.rs::localhost_op_required_action` maps the read group to `Action::Read`, `write` and `mkdir` to `Action::Write`, and `delete` to `Action::Delete`. An unmatched name maps to `None`. `elastos/crates/elastos-server/src/provider_resource.rs:190` is the write arm. `elastos/crates/elastos-server/src/provider_resource.rs:192` is the unmatched arm. The read group is the arm cited above. The delete arm, on line 191 of that file, maps `delete` to `Action::Delete`.
+
+    fn localhost_op_required_action(op: &str) -> Option<Action> {
+        match op {
+            "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),
+            "write" | "mkdir" => Some(Action::Write),
+            "delete" => Some(Action::Delete),
+            _ => None,
+        }
+    }
+
+localhost_resource holds the supported-operation list. `elastos/crates/elastos-server/src/provider_resource.rs:422` is that list: `read`, `write`, `list`, `delete`, `stat`, `mkdir`, `exists`, `resolve`, `ping`.
+
+                "read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",
+
+The extension B2 leaves open is the guest body's operation. The guest body carries `op` `edit`. A typed localhost operation for that body is a name on that list and on a match arm. B2 stays open.
+
+Run, child, init, the two hosted rows, and journal-append are not mapped in this section.
+
+This section cites no lab/grant-binding test.
