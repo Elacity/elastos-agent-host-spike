@@ -514,6 +514,26 @@ fn model_unknown_instance_is_refused() {
 }
 
 #[test]
+fn model_bind_unknown_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(instance, InstanceId(0));
+    let refusal = verifier
+        .bind_grant(InstanceId(0), "UsersAI/agent-1/notes", rights())
+        .expect_err("unknown instance");
+    assert_eq!(refusal, Refuse::UnknownInstance);
+    assert_eq!(refusal.to_string(), "unknown instance");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("a registered instance still binds");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_owned_root_under_the_agent_is_stored() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
