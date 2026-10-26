@@ -1619,7 +1619,7 @@
         {
           "file": "falsify.py",
           "old": "    base = baseline(chosen, how_for)\n",
-          "new": "    base = {}\n"
+          "new": "    base = {entry[\"command\"]: (False, {name: \"passed\"\n            for chosen_entry in chosen if chosen_entry[\"command\"] == entry[\"command\"]\n            for name in chosen_entry[\"tests\"]}) for entry in chosen}\n"
         }
       ],
       "tests": [

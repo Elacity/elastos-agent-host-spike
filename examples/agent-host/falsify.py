@@ -714,18 +714,28 @@ def judged(entry, base, how_for):
     return reported(entry, how_for(entry["command"]))
 
 
+def judged_entries(chosen, base, how_for):
+    """Yield each judgment lazily so run_chosen() can time its execution."""
+    for entry in chosen:
+        yield entry, judged(entry, base, how_for)
+
+
 def run_chosen(chosen, how_for=None, on_baseline=None):
     """The one order for a run: the unmutated baseline for the chosen
     commands, then each entry's result. main() and the self-test cases use
     this same function, so a case never rebuilds the order by hand. The
     baseline finishes before the first edit, and on_baseline(line) runs
-    between them."""
+    between them. Yield each entry, result and execution duration; baseline
+    work and time spent by the caller between entries have separate costs."""
     how_for = how_for or spec
     base = baseline(chosen, how_for)
     if on_baseline is not None:
         on_baseline(baseline_line(base, chosen))
-    for entry in chosen:
-        yield entry, judged(entry, base, how_for)
+    pending = judged_entries(chosen, base, how_for)
+    for _ in chosen:
+        start = time.monotonic()
+        entry, result = next(pending)
+        yield entry, result, time.monotonic() - start
 
 
 REAL_CRATE = {
@@ -782,7 +792,7 @@ raise SystemExit(0)
 STUB_LISTS_ONLY_WHEN_MUTATED = """import pathlib
 import sys
 mutated = pathlib.Path(__file__).with_name("mutable.txt").read_text(
-    encoding="utf-8") == "mutated bytes"
+    encoding="utf-8") == "mutated bytes\\n"
 if "--list" in sys.argv:
     if mutated:
         print("tests::planted_check: test")
@@ -1659,7 +1669,7 @@ def baseline_batches_chosen_pairs_before_edits():
                        if event.startswith("mutate")), len(events))
     last_baseline = max((at for at, event in enumerate(events)
                          if event.startswith("baseline")), default=-1)
-    words = [got[1] for _entry, got in results]
+    words = [got[1] for _entry, got, _duration in results]
     print(f"self-test: baseline batches chosen pairs: calls={calls}, lines={lines}, "
           f"baseline before edits={last_baseline < first_edit}, words={words}")
     if calls != [("one", ["x", "y", "z"]), ("two", ["x"])]:
@@ -1696,6 +1706,47 @@ def baseline_checks_free_space_before_building():
             raised = True
     print(f"self-test: baseline disk check: raised={raised}, built={built}")
     return raised and not built
+
+
+def entry_durations_include_execution():
+    """Printed durations cover each entry's work, with baseline and output
+    time excluded. A refused entry keeps its own duration too."""
+    clock = [0.0]
+    entries = [
+        {"id": "ST1", "command": "host", "expect": "caught",
+         "tests": ["ready"], "edits": [], "title": "first entry"},
+        {"id": "ST2", "command": "host", "expect": "caught",
+         "tests": ["ready"], "edits": [], "title": "second entry"},
+        {"id": "ST3", "command": "host", "expect": "caught",
+         "tests": ["blocked"], "edits": [], "title": "refused entry"},
+    ]
+
+    def fake_evaluate(_entry, _how):
+        clock[0] += 11
+        return False, {"ready": "passed", "blocked": "failed"}
+
+    def fake_reported(entry, _how):
+        clock[0] += {"ST1": 5, "ST2": 7}[entry["id"]]
+        return True, "CAUGHT", ""
+
+    class SlowOutput(io.StringIO):
+        def write(self, text):
+            clock[0] += 100
+            return super().write(text)
+
+    output = SlowOutput()
+    with mock.patch.dict(globals(), load=lambda _path: entries,
+                         evaluate=fake_evaluate, reported=fake_reported,
+                         check_disk=lambda: None), \
+            mock.patch.object(time, "monotonic", side_effect=lambda: clock[0]), \
+            contextlib.redirect_stdout(output):
+        code = main(["ST", "--keep-backups"])
+    printed = output.getvalue()
+    durations = re.findall(r"^(ST[123])\s+.+?\s+(\d+)s  ", printed, re.MULTILINE)
+    print(f"self-test: entry durations include execution: {durations}")
+    return (code == 1 and durations == [("ST1", "5"), ("ST2", "7"), ("ST3", "0")]
+            and "summary: 2 CAUGHT, 1 NOT RUN of 3\n" in printed
+            and "fails without the edit: blocked\n" in printed)
 
 
 def interruption_at_the_end_of_the_edit():
@@ -2672,6 +2723,7 @@ SELF_TEST_CASES = {
     "a survivor requires a passing baseline": a_survivor_requires_a_passing_baseline,
     "baseline batches chosen pairs before edits": baseline_batches_chosen_pairs_before_edits,
     "baseline checks free space before building": baseline_checks_free_space_before_building,
+    "entry durations include execution": entry_durations_include_execution,
     "an unterminated failure section stays checked": an_unterminated_failure_section_stays_checked,
     "the section header is an exact line": section_header_is_an_exact_line,
     "the closing delimiter is an exact line": closing_delimiter_is_an_exact_line,
@@ -2777,13 +2829,12 @@ def main(argv):
     ran_e2e = False
     stopped_for_disk = False
     try:
-        for entry, (ok, word, detail) in run_chosen(chosen, on_baseline=print):
-            start = time.monotonic()
+        for entry, (ok, word, detail), duration in run_chosen(chosen, on_baseline=print):
             ran_e2e |= entry["command"] == "e2e"
             counts[word] = counts.get(word, 0) + 1
             if not ok:
                 bad.append(entry["id"])
-            print(f"{entry['id']:6} {word:30} {time.monotonic() - start:5.0f}s  {entry['title']}"
+            print(f"{entry['id']:6} {word:30} {duration:5.0f}s  {entry['title']}"
                   + (f"\n       {detail}" if detail else ""), flush=True)
     except DiskFull as error:
         stopped_for_disk = True
