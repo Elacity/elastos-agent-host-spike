@@ -299,6 +299,26 @@ With any one of those three edits applied,
 `model_hosted_run_fails_closed_under_profile` and its control still pass, so
 these three tests are the checks that hold the count.
 
+The test's one wait loop holds the bound "it settles within
+`FIXTURE_EVENT_TIMEOUT`". It checks the deadline after every reply, terminal
+or not, before it returns the run, and it gives each `runs_get` only the time
+left until the deadline, down to the one receive of the test's request path.
+So a run that settles only after the deadline fails the test, and so does a
+`runs_get` that gets no answer before it. Two tests check the loop with no
+provider and no sandbox (see Tests):
+
+- `hosted_run_wait_fails_a_reply_after_its_deadline` fails a terminal reply
+  that comes after the deadline, and checks that the first poll is given no
+  more than the time left (F-cc16a and F-cc16b).
+- `hosted_run_wait_times_out_without_a_reply` sends the loop's `runs_get` to a
+  stand-in that never answers, and checks that the loop fails at the
+  deadline, not after `FIXTURE_EVENT_TIMEOUT` (F-cc16c).
+
+With any one of those three edits applied,
+`model_hosted_run_fails_closed_under_profile` and its control still pass,
+because their runs settle well within the bound. So these two tests are the
+checks that hold it.
+
 With this profile no model run completes, local or hosted. Only the storage
 operations work.
 
@@ -381,6 +401,17 @@ profile does not grant".
   the stand-in's whole `403` answer within half of `FIXTURE_EVENT_TIMEOUT`,
   and the final read counts both connections and the second one's request
   line. It needs no provider and no sandbox.
+- `hosted_run_wait_fails_a_reply_after_its_deadline`: the hosted run's wait
+  loop gets a deadline 50 ms ahead and a poll that records the wait it was
+  given, sleeps 100 ms and returns a terminal run. The loop fails with the
+  deadline message, and the first poll was given no more than 50 ms. It needs
+  no provider and no sandbox.
+- `hosted_run_wait_times_out_without_a_reply`: the same loop, with a deadline
+  50 ms ahead, sends its `runs_get` through the one request path to a silent
+  stand-in, `sleep` on the provider's pipes, which never answers. The loop
+  fails with the deadline message in less than half of
+  `FIXTURE_EVENT_TIMEOUT`, so the receive waited only the time left. It needs
+  no provider and no sandbox.
 - `model_unbound_program_refused_under_profile`: a byte-identical copy of the
   provider binary under `STORAGE_ROOT`, started with the real binary bound as
   `PROVIDER_EXECUTABLE`, never answers `init`. `sandbox-exec` exits 71 and logs
@@ -407,8 +438,8 @@ off macOS the provider refuses every hosted run before any socket, so that
 control prints a skip reason there and returns.
 `model_bound_copy_serves_under_profile` is a control that runs under the
 profile, so it skips without `sandbox-exec`, as the confined tests do. The
-three `runtime_socket_stand_in_*` tests start no provider and need no
-sandbox, so they run on every Unix host.
+three `runtime_socket_stand_in_*` tests and the two `hosted_run_wait_*` tests
+start no provider and need no sandbox, so they run on every Unix host.
 
 The profile shape has one check (P10):
 `both_file_profiles_bind_one_storage_parameter_contract` in
@@ -431,11 +462,12 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the five
+uses command `provider`. Each mutates `confine.sb` only, except the eight
 entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
-fixture rule, F-cc8-rm-journal removes the outside-create fixture grant, and
+fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
-stand-in counts connections.
+stand-in counts connections, and F-cc16a, F-cc16b and F-cc16c each undo one
+part of how the hosted run's wait loop holds its deadline.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -463,20 +495,23 @@ stand-in counts connections.
 | F-cc15a | In the test, the stand-in's count moves from the accept to after the request has been read | `runtime_socket_stand_in_counts_a_silent_connection` | The final read counts no connection: the silent client would be counted only once its read ends. |
 | F-cc15b | In the test, the final read no longer takes the connections still queued | `runtime_socket_stand_in_drains_queued_connections` | The final read counts neither queued client. |
 | F-cc15c | In the test, the stand-in serves each connection on its accept loop instead of on the connection's own thread | `runtime_socket_stand_in_accepts_behind_a_silent_connection` | The second client gets no answer within half of `FIXTURE_EVENT_TIMEOUT`: the accept loop waits on the silent connection's read. |
+| F-cc16a | In the test, the wait loop returns a terminal reply before it checks the deadline | `hosted_run_wait_fails_a_reply_after_its_deadline` | The loop returns the terminal run that came after the deadline instead of failing. |
+| F-cc16b | In the test, the wait loop gives each poll `FIXTURE_EVENT_TIMEOUT` instead of the time left | `hosted_run_wait_fails_a_reply_after_its_deadline` | The first poll is given more than the 50 ms left, so a poll may wait past the deadline. |
+| F-cc16c | In the test, the request path's one receive waits `FIXTURE_EVENT_TIMEOUT` instead of the wait it is given | `hosted_run_wait_times_out_without_a_reply` | The `runs_get` that gets no answer waits all of `FIXTURE_EVENT_TIMEOUT`, not the 50 ms left, before the loop fails. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
-for F-cc15a, F-cc15b and F-cc15c. Its startup recovery restores
+for the F-cc15 and F-cc16 entries. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`.
 
 The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
 skip and pass, so the runner reports each sandbox entry as SURVIVED there.
 F-cc12a needs no sandbox. Its check only reads the profile files, so it is
-CAUGHT on any host that builds the wallet crate. F-cc15a, F-cc15b and F-cc15c
-need no sandbox either: their tests start no provider.
+CAUGHT on any host that builds the wallet crate. The F-cc15 and F-cc16
+entries need no sandbox either: their tests start no provider.
 
 F-cc12a registers the removal of `(deny network*)`: the runner applies it
 with the `wallet` command and restores `confine.sb` afterwards, or at its
