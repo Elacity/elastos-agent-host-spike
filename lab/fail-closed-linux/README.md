@@ -106,9 +106,9 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 
 | Suite | Tests |
 | --- | --- |
-| `lib` (unit) | (see Tests this session) |
-| `simulated` | (see Tests this session) |
-| `real_kernel` | (see Tests this session) |
+| `lib` (unit) | 8 passed |
+| `simulated` | 18 passed |
+| `real_kernel` | 22 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -272,11 +272,11 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: recorded after `python3 falsify.py` on this tree. A skipped
-(`ignored`) test is `NOT RUN`, never a pass. F19 (skip `CLONE_NEWPID`)
-is caught because the probe's `nspid` is a host pid. F23-F26 catch the
-#338 review gaps. F27-F29, F31 and F32 catch the #355 / #357 review
-gaps.
+Result: `python3 falsify.py` on this tree: 28/28 caught, control
+SURVIVED (48 tests). A skipped (`ignored`) test is `NOT RUN`, never a
+pass. F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid`
+is a host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and
+F32 catch the #355 / #357 review gaps.
 
 ## Not covered here
 
