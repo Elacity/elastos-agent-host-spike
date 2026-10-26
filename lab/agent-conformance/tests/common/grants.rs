@@ -1,7 +1,7 @@
 //! The fixture's one shell approver. Credentials and HTTP bodies stay in memory.
 
 use agent_conformance::build::repository;
-use agent_conformance::harness::ThrowawayHome;
+use agent_conformance::harness::{RunningInstances, ThrowawayHome};
 use agent_conformance::identity::Observation;
 use agent_conformance::report::{render_run, GitIdentity};
 use serde_json::{json, Value};
@@ -19,6 +19,7 @@ type Result<T> = std::result::Result<T, &'static str>;
 pub struct Fixture {
     deny_reason: String,
     entries: Vec<Value>,
+    files: Vec<Value>,
 }
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
@@ -38,6 +39,7 @@ impl Fixture {
                 Self {
                     deny_reason: "fixture policy absent".into(),
                     entries: Vec::new(),
+                    files: Vec::new(),
                 },
                 false,
             )),
@@ -55,6 +57,10 @@ impl Fixture {
 
     pub fn committed() -> Result<Self> {
         Self::parse(include_str!("../../fixtures/grants.json"))
+    }
+
+    pub fn instances() -> Result<Self> {
+        Self::parse(include_str!("../../fixtures/instance-grants.json"))
     }
 
     fn parse(text: &str) -> Result<Self> {
@@ -76,9 +82,24 @@ impl Fixture {
                 return Err("grant fixture repeats an exact match");
             }
         }
+        let files = match value.get("files") {
+            Some(files) => files
+                .as_array()
+                .ok_or("seed fixture requires a file list")?
+                .clone(),
+            None => Vec::new(),
+        };
+        for file in &files {
+            if !field(file, "resource")?.starts_with("localhost://Public/agent-conformance-grants/")
+            {
+                return Err("seed fixture escaped its Home directory");
+            }
+            field(file, "content")?;
+        }
         Ok(Self {
             deny_reason,
             entries,
+            files,
         })
     }
 
@@ -114,6 +135,137 @@ pub struct Decisions {
     pub denied: usize,
 }
 
+const OVERLAP_BOUND: Duration = Duration::from_secs(10);
+
+// Session and request IDs stay in memory. Printed evidence uses local labels.
+struct Overlap {
+    started: Instant,
+    barrier_started: Instant,
+    both_alive_since: Option<Instant>,
+    stage: usize,
+    first: Vec<Value>,
+    waits: Vec<Duration>,
+    duration: Duration,
+}
+
+impl Overlap {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            barrier_started: Instant::now(),
+            both_alive_since: None,
+            stage: 0,
+            first: Vec::new(),
+            waits: Vec::new(),
+            duration: Duration::ZERO,
+        }
+    }
+
+    fn ready(
+        &mut self,
+        pending: &[Value],
+        fixture: &Fixture,
+        running: &mut RunningInstances<'_>,
+    ) -> Result<bool> {
+        if self.stage == 2 {
+            return if pending.is_empty() {
+                Ok(false)
+            } else {
+                Err("overlap: unexpected request after both barriers")
+            };
+        }
+        if self.barrier_started.elapsed() >= OVERLAP_BOUND {
+            return Err("overlap: barrier exceeded 10 seconds");
+        }
+        if !running.all_alive(2)? {
+            return Err("overlap: both clients must remain alive through both barriers");
+        }
+        self.both_alive_since.get_or_insert_with(Instant::now);
+        let mut ordered = Vec::new();
+        for label in ["instance-1", "instance-2"] {
+            let reason = format!(
+                "agent conformance: {label} {}",
+                if self.stage == 0 { "own" } else { "sibling" }
+            );
+            let matches: Vec<_> = pending
+                .iter()
+                .filter(|request| request["reason"] == reason)
+                .collect();
+            if matches.len() > 1 {
+                return Err("overlap: repeated instance request");
+            }
+            ordered.extend(matches);
+        }
+        if ordered.len() != pending.len() {
+            return Err("overlap: unexpected request at barrier");
+        }
+        if ordered.len() != 2 {
+            return Ok(false);
+        }
+        if field(ordered[0], "session_id")? == field(ordered[1], "session_id")? {
+            return Err("overlap: two distinct client sessions required");
+        }
+        for (index, request) in ordered.iter().enumerate() {
+            if field(request, "action")? != "read" {
+                return Err("overlap: only read requests belong to this journey");
+            }
+            if self.stage == 0 {
+                let grant = fixture
+                    .matches(request)?
+                    .ok_or("overlap: own read requires an exact fixture grant")?;
+                if fixture.entries[grant]["duration"] != "session" {
+                    return Err("overlap: own read requires a session grant");
+                }
+            } else if request["session_id"] != self.first[index]["session_id"]
+                || request["resource"] != self.first[1 - index]["resource"]
+                || self
+                    .first
+                    .iter()
+                    .any(|first| first["request_id"] == request["request_id"])
+            {
+                return Err("overlap: sibling read must be new in its original session");
+            }
+        }
+        if self.stage == 0 {
+            let parents: Vec<_> = ordered
+                .iter()
+                .map(|request| {
+                    field(request, "resource")?
+                        .rsplit_once('/')
+                        .map(|(parent, _)| parent)
+                        .ok_or("separate-directory check: missing file parent")
+                })
+                .collect::<Result<_>>()?;
+            if parents[0] == parents[1] {
+                return Err("separate-directory check: instance files share a directory");
+            }
+            self.first = ordered.into_iter().cloned().collect();
+        }
+        // The listing and both alive observations must fit the same monotonic bound.
+        if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {
+            return Err("overlap: clients left the barrier before its decision");
+        }
+        self.waits.push(self.barrier_started.elapsed());
+        self.duration = self.both_alive_since.unwrap().elapsed();
+        if self.duration.is_zero() {
+            return Err("overlap: zero measured duration");
+        }
+        Ok(true)
+    }
+
+    fn advance(&mut self) {
+        self.stage += 1;
+        self.barrier_started = Instant::now();
+    }
+
+    fn line(&self) -> String {
+        format!("instance overlap: instance-1 instance-2 barriers:{} first:{:.6}s second:{:.6}s overlap:{:.6}s elapsed:{:.6}s; process-isolation lab half of A3, A6 and A9",
+            self.stage, self.waits.first().copied().unwrap_or_default().as_secs_f64(),
+            self.waits.get(1).copied().unwrap_or_default().as_secs_f64(),
+            self.duration.as_secs_f64(), self.started.elapsed().as_secs_f64())
+    }
+}
+
 // Deliberately no Debug/Display: these values must never enter assertion output.
 pub struct Controller {
     port: u16,
@@ -122,6 +274,7 @@ pub struct Controller {
     fixture: Fixture,
     used: BTreeSet<usize>,
     pub decisions: Decisions,
+    overlap: Option<Overlap>,
 }
 
 impl Controller {
@@ -143,6 +296,7 @@ impl Controller {
             fixture,
             used: BTreeSet::new(),
             decisions: Decisions::default(),
+            overlap: None,
         })
     }
 
@@ -153,13 +307,28 @@ impl Controller {
     /// Seed through the production Runtime provider route. Runtime owns the
     /// stored representation; the guest later reads it using its own grant.
     pub fn seed_read_files(&self) -> Result<()> {
-        for name in ["granted.txt", "sibling.txt"] {
+        let mut files: Vec<_> = ["granted.txt", "sibling.txt"]
+            .iter()
+            .map(|name| {
+                (
+                    format!("localhost://Public/agent-conformance-grants/{name}"),
+                    include_bytes!("../../fixtures/granted-bytes.txt").to_vec(),
+                )
+            })
+            .collect();
+        for file in &self.fixture.files {
+            files.push((
+                field(file, "resource")?.to_owned(),
+                field(file, "content")?.as_bytes().to_vec(),
+            ));
+        }
+        for (resource, content) in files {
             let response = self.call(
                 "POST",
                 "/api/provider/localhost/write",
                 &json!({
-                    "path": format!("localhost://Public/agent-conformance-grants/{name}"),
-                    "content": include_bytes!("../../fixtures/granted-bytes.txt").as_slice(),
+                    "path": resource,
+                    "content": content,
                     "append": false
                 }),
             )?;
@@ -170,7 +339,23 @@ impl Controller {
         Ok(())
     }
 
-    pub fn poll(&mut self) -> Result<()> {
+    pub fn require_overlap(&mut self) {
+        self.overlap = Some(Overlap::new());
+    }
+
+    pub fn check_overlap(&self) -> Result<()> {
+        let overlap = self
+            .overlap
+            .as_ref()
+            .ok_or("overlap: evidence is missing")?;
+        self.print_checked(&overlap.line())?;
+        if overlap.stage != 2 || overlap.duration.is_zero() {
+            return Err("overlap: both measured barriers are required");
+        }
+        Ok(())
+    }
+
+    pub fn poll(&mut self, running: &mut RunningInstances<'_>) -> Result<()> {
         let response = self.call("GET", "/api/capability/pending", &Value::Null)?;
         let pending = response["requests"]
             .as_array()
@@ -181,6 +366,11 @@ impl Controller {
                 return Err("pending response repeats a request id");
             }
             field(request, "session_id")?;
+        }
+        if let Some(overlap) = &mut self.overlap {
+            if !overlap.ready(pending, &self.fixture, running)? {
+                return Ok(());
+            }
         }
         let decisions = match self.fixture.decisions(pending, &self.used) {
             Ok(decisions) => decisions,
@@ -213,6 +403,9 @@ impl Controller {
                 let reason = self.fixture.deny_reason.clone();
                 self.deny(request, &reason)?;
             }
+        }
+        if let Some(overlap) = &mut self.overlap {
+            overlap.advance();
         }
         Ok(())
     }
@@ -288,6 +481,18 @@ impl Controller {
         // Use the exact lines printed by this controller, including decisions
         // made before a grant token arrived. Recheck with all credentials known.
         let printed = self.printed.borrow();
+        if self.overlap.is_some() {
+            for prefix in [
+                "instance overlap:",
+                "fixture controller:",
+                "fixture read: instance-1",
+                "fixture read: instance-2",
+            ] {
+                if !printed.lines().any(|line| line.starts_with(prefix)) {
+                    return Err("required instance journey evidence is missing");
+                }
+            }
+        }
         self.check_inventory(
             &report_inventory(name, observations, &printed, passed)?,
             &[Surface::Printed, Surface::Report, Surface::Receipt],
@@ -476,6 +681,7 @@ pub fn assert_memory_surfaces() {
         fixture: Fixture::committed().unwrap(),
         used: BTreeSet::new(),
         decisions: Decisions::default(),
+        overlap: None,
     };
     let home = ThrowawayHome::new().unwrap();
     assert_eq!(
@@ -836,6 +1042,38 @@ mod tests {
     }
 
     #[test]
+    fn instance_journey_requires_all_printed_surfaces() {
+        let controller = Controller {
+            port: 0,
+            credentials: vec!["synthetic-canary".into()],
+            printed: RefCell::default(),
+            fixture: Fixture::instances().unwrap(),
+            used: BTreeSet::new(),
+            decisions: Decisions::default(),
+            overlap: Some(Overlap::new()),
+        };
+        let lines = [
+            "instance overlap: synthetic",
+            "fixture controller: synthetic",
+            "fixture read: instance-1",
+            "fixture read: instance-2",
+        ];
+        for missing in 0..lines.len() {
+            *controller.printed.borrow_mut() = lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != missing)
+                .map(|(_, line)| *line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                controller.check_journey("two_instances_overlap_with_separate_grants", &[], true),
+                Err("required instance journey evidence is missing")
+            );
+        }
+    }
+
+    #[test]
     fn controller_detects_credentials_without_disclosing_them() {
         // Synthetic canaries exist only in memory, even when testing detection.
         let controller = Controller {
@@ -845,6 +1083,7 @@ mod tests {
             fixture: fixture(),
             used: BTreeSet::new(),
             decisions: Decisions::default(),
+            overlap: None,
         };
         assert!(controller
             .check_bytes(b"ordinary output", Surface::Stdout)

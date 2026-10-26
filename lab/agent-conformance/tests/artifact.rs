@@ -13,8 +13,8 @@ use wasmparser::{Encoding, Parser, Payload, Validator};
 
 static PROBE_BUILD: Mutex<()> = Mutex::new(());
 
-fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 13] {
-    static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 13]> = OnceLock::new();
+fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 15] {
+    static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 15]> = OnceLock::new();
     BUILDS.get_or_init(|| {
         let _serial = PROBE_BUILD.lock().unwrap();
         [
@@ -26,6 +26,8 @@ fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 13] {
             Effect::GrantedRead,
             Effect::SiblingRead,
             Effect::HostKeyRead,
+            Effect::Instance1,
+            Effect::Instance2,
             Effect::Task(0),
             Effect::Task(1),
             Effect::Task(2),
@@ -217,5 +219,24 @@ fn probe_effects_are_exclusive() {
                 String::from_utf8_lossy(&output.stderr).contains("select exactly one probe effect")
             );
         }
+    }
+}
+
+#[test]
+fn instance_subselectors_require_one_granted_read() {
+    let _serial = PROBE_BUILD.lock().unwrap();
+    for (flags, reason) in [
+        ("--cfg feature=\"instance-1\"", "instance requires granted-read"),
+        ("--cfg feature=\"instance-2\"", "instance requires granted-read"),
+        ("--cfg feature=\"granted-read\" --cfg feature=\"instance-1\" --cfg feature=\"instance-2\"", "select exactly one instance"),
+    ] {
+        let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+            .unwrap()
+            .args(["check", "--locked", "--offline", "--manifest-path", "lab/agent-conformance/probe/Cargo.toml"])
+            .env("RUSTFLAGS", flags)
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .output().unwrap();
+        assert!(!output.status.success(), "invalid instance selector must be refused");
+        assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
     }
 }

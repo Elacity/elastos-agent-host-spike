@@ -516,10 +516,23 @@ impl<'a> RunningInstances<'a> {
         Ok(group)
     }
 
+    /// Observe the actual children, including exits before collection starts.
+    pub fn all_alive(&mut self, expected: usize) -> Result<bool> {
+        if self.children.len() != expected {
+            return Ok(false);
+        }
+        for child in &mut self.children {
+            if !child.is_alive()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// One deadline from before the first spawn. Poll all children so a slow
     /// member cannot hide a sibling's result. Drop kills any unfinished groups.
     pub fn collect(self, bound: Duration) -> Result<Vec<Completion>> {
-        self.collect_with(bound, || Ok(()))
+        self.collect_with(bound, |_| Ok(()))
     }
 
     /// Service fixture approvals while the existing children wait. A controller
@@ -527,11 +540,11 @@ impl<'a> RunningInstances<'a> {
     pub fn collect_with(
         mut self,
         bound: Duration,
-        mut service: impl FnMut() -> Result<()>,
+        mut service: impl FnMut(&mut Self) -> Result<()>,
     ) -> Result<Vec<Completion>> {
         let mut results: Vec<_> = self.children.iter().map(|_| None).collect();
         while results.iter().any(Option::is_none) {
-            service()?;
+            service(&mut self)?;
             for (child, result) in self.children.iter_mut().zip(&mut results) {
                 if result.is_none() {
                     if let Some(output) = child.try_output()? {
