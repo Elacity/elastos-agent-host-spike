@@ -2,8 +2,10 @@
 
 This workspace builds the lab component through the repository's existing
 `scripts/build-component-capsule.sh`. Runtime owns launch, identity and grants.
-The component currently returns an explicit unavailable result at activation;
-[GAPS.md](GAPS.md) describes the missing selector and result channel.
+The default component returns an explicit unavailable result at activation.
+The `read` and `network` builds request one ungranted resource and return the
+Runtime refusal through the Bus. [GAPS.md](GAPS.md) records the remaining
+selector, model-call and storage-containment blockers.
 
 From the repository root, run:
 
@@ -35,12 +37,13 @@ path and a SHA-256 computed from its bytes by macOS `shasum`. This identifies
 the Runtime tested on this machine; it is separate from capsule bundle identity.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
-imports against the task's three-interface Bus subset. `probe_hash_is_stable` makes two
-fresh builds, compares their SHA-256 values and prints the result. These checks
-share the two builds within one test process. Each build directory is removed
-after its artifact has been read; after an interrupted run, the next test
-recreates those directories. Host build outputs and the final component are
-rebuildable files under this lane.
+imports against the five-interface Bus v1 subset. `probe_hash_is_stable` makes two
+fresh builds for each selector, compares their SHA-256 values and requires
+distinct bytes across selectors. These checks share the builds within one test
+process through `tests/common/probe.rs`. Each build directory and the shared
+entrypoint are removed after the artifact bytes have been copied into memory; after an interrupted run, the next test
+recreates those directories. Host build outputs are rebuildable files under this lane. Live effect tests
+copy component bytes into a hash-named directory inside their fresh Home.
 
 The artifact hash is specific to the machine and toolchain. Cargo symbol hashes
 can differ across hosts. Publication and admission must bind the complete
@@ -62,7 +65,7 @@ not count. Restore the source bytes before running the normal suite again.
 
 The [runbook](RUNBOOK.md) gives the one-command table: `lab/agent-conformance/run.sh`.
 The `harness` module owns fresh Homes and the one bounded launch primitive.
-The Runtime checks launch the probe directory without an operator and require
-the Runtime's own refusal reason. A decoy coordinates file proves which data
+The no-operator Runtime checks require the operator-lookup refusal. The effect
+checks use the ready operator recipe and require the guest lifecycle refusal. A decoy coordinates file proves which data
 directory the Runtime reads. Passing tests remove their Homes, and failing tests retain their
 roots inside this lane's ignored `target/` and print their paths.

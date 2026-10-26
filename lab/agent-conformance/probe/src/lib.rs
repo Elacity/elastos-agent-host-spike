@@ -1,8 +1,11 @@
 //! Intended selector: one of `read:<path>`, `net:<resource>`, `model:<resource>`,
 //! or `address:<instance>`, with one Bus attempt and one result per activation.
 //! Bus v1's lifecycle.run() has neither arguments nor a result payload or stdout.
-//! Until Runtime supplies that channel, activation explicitly refuses. A build
-//! is evidence of a valid component, not evidence that an effect was attempted.
+//! The default activation explicitly refuses. Effect builds request exactly one
+//! capability; Runtime owns the decision and the guest returns its Bus error.
+
+#[cfg(all(feature = "read", feature = "network"))]
+compile_error!("select exactly one probe effect: read or network");
 
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
@@ -21,7 +24,39 @@ struct Probe;
 #[cfg(target_arch = "wasm32")]
 impl exports::elastos::bus::lifecycle::Guest for Probe {
     fn run() -> Result<(), elastos::bus::types::BusError> {
-        run_probe().map_err(|reason| elastos::bus::types::BusError::Unavailable(reason.into()))
+        #[cfg(any(feature = "read", feature = "network"))]
+        {
+            request_effect()
+        }
+        #[cfg(not(any(feature = "read", feature = "network")))]
+        {
+            run_probe().map_err(|reason| elastos::bus::types::BusError::Unavailable(reason.into()))
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", any(feature = "read", feature = "network")))]
+fn request_effect() -> Result<(), elastos::bus::types::BusError> {
+    use elastos::bus::{capabilities, types::CapabilityRequest};
+    #[cfg(feature = "read")]
+    let (resource, action) = (
+        include_str!("../../fixtures/ungranted-read.txt").trim(),
+        "read",
+    );
+    #[cfg(feature = "network")]
+    let (resource, action) = (
+        include_str!("../../fixtures/ungranted-network.txt").trim(),
+        "execute",
+    );
+    match capabilities::request(&CapabilityRequest {
+        resource: resource.into(),
+        actions: vec![action.into()],
+        reason: "agent conformance: ungranted effect".into(),
+    }) {
+        // Success is observable by the host test, but this deny-only probe
+        // stops here even if a grant arrives. It never reads or dials a target.
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

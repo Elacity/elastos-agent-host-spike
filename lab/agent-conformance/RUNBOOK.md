@@ -115,3 +115,41 @@ launch. F-census-a removes the API visibility requirement. F-managed-stop omits
 SIGTERM and checks the timeout failure and forced cleanup. F-managed-drop omits
 the retained-root marker. Their exact edits and named tests are in
 `falsifiers.json`; each named test must fail planted and pass restored.
+
+
+Task 003 adds these rows to the same table:
+
+- `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
+- `ungranted_network_is_refused`: requires the same refusal for `elastos://net/stream`. This proves the network capability request is refused; provider execution is outside this check.
+- `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
+- `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
+- `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
+- `probe_effects_are_exclusive`: building with both effect features must fail with the exact selector-conflict reason.
+
+The artifact rows now cover default, read and network builds. Each selector has
+two fresh builds, matching hashes within its pair, and a distinct hash from the
+other selectors. `run.sh` prints `probe component sha256:<hex> effect:<selector>`
+for the built bytes and live copies. The existing component build script uses
+`RUSTFLAGS` cfg selectors for the declared Cargo features. Every build's bytes
+are saved before that script can replace the shared entrypoint. The live tests
+serialize build preparation and place the component in a SHA-256 directory
+inside the throwaway root. The directory locates the artifact; its hash names
+the bytes. Bundle-CID admission stays separate.
+
+The earlier no-operator rows stop before the storage constructor. The new live
+rows reach the existing AC-006-STORAGE exception, recorded in GAPS.md. Their
+requests fall outside the manifest bound. The guest returns the Bus error,
+and the harness requires both the nonzero exit and the exact reason. An
+unexpected grant returns success without any provider invoke, causing the
+refusal test to fail while keeping the probe free of real effects. Every live
+row uses 013's ready operator, two socket samples and process-group stop.
+
+F-ac1h discards the read build's Bus refusal; F-ac1n does the same for the
+network build. Each named test must fail with exit zero and
+`reason_present:false`, then pass after restoring the probe. F-probe-exclusive
+removes the selector-conflict guard; `probe_effects_are_exclusive` must fail
+because the conflicting build succeeds. F-probe-a now names the default live
+test as well as its original host test; both must fail under that mutation.
+F-probe-e follows the shared builder to `tests/common/probe.rs`. The remaining
+artifact falsifiers retain their named checks. Commands and measured outputs
+are recorded in LOG.md for the supervisor's PR and review.

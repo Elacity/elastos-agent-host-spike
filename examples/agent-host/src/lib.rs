@@ -890,13 +890,39 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     Ok((journal, prev_head, link))
 }
 
+/// Which stage refused a stored journal: the bytes (`decode_bytes`) or a
+/// stored rule (`stored_paths_ok`).
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug)]
+enum DecodeMiss {
+    Bytes(&'static str),
+    StoredRule(&'static str),
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl DecodeMiss {
+    fn reason(self) -> &'static str {
+        match self {
+            DecodeMiss::Bytes(reason) | DecodeMiss::StoredRule(reason) => reason,
+        }
+    }
+}
+
 /// Decode format 2 (see `decode_bytes`), then check the stored paths (see
-/// `stored_paths_ok`). Every stored journal loads through here.
+/// `stored_paths_ok`), and say which stage refused. Every stored journal
+/// loads through here.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_checked(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), DecodeMiss> {
+    let (journal, prev_head, head) = decode_bytes(bytes).map_err(DecodeMiss::Bytes)?;
+    stored_paths_ok(&journal).map_err(DecodeMiss::StoredRule)?;
+    Ok((journal, prev_head, head))
+}
+
+/// The checked decoder (`decode_checked`) as one reason, for a journal
+/// already in memory.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
-    let (journal, prev_head, head) = decode_bytes(bytes)?;
-    stored_paths_ok(&journal)?;
-    Ok((journal, prev_head, head))
+    decode_checked(bytes).map_err(DecodeMiss::reason)
 }
 
 /// A stored journal, of any age, passes the path rule a live one does. Every
@@ -4470,9 +4496,12 @@ fn read_stored_journal(
         .and_then(|content| serde_json::from_value(content.clone()).ok())
         .ok_or(None)?;
     let revision = reply_revision(&data).ok_or(None)?;
-    let (stored, _, head) =
-        decode_bytes(&content).map_err(|reason| (reason == FORMAT_1_REASON).then_some(reason))?;
-    stored_paths_ok(&stored).map_err(Some)?;
+    // The checked decoder is the one decode path for a stored journal.
+    let (stored, _, head) = decode_checked(&content).map_err(|miss| match miss {
+        DecodeMiss::Bytes(FORMAT_1_REASON) => Some(FORMAT_1_REASON),
+        DecodeMiss::Bytes(_) => None,
+        DecodeMiss::StoredRule(reason) => Some(reason),
+    })?;
     Ok((stored, head, revision))
 }
 
@@ -18220,6 +18249,52 @@ mod tests {
         assert_eq!(
             resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
             ResumeOutcome::Refused("path not canonical")
+        );
+        assert_eq!(cursor, waiting);
+    }
+
+    /// Bytes that do not decode stay unknown for a person: a reread has no
+    /// reply, a task shows no refusal, and a resume appends nothing and keeps
+    /// the cursor. Only format 1 carries a reason.
+    #[test]
+    fn a_stored_journal_that_does_not_decode_stays_unknown() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        let mut flipped = runtime.stored.clone().unwrap();
+        flipped[JOURNAL_HEADER + 9] ^= 1;
+        runtime.stored = Some(flipped);
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+            Err("no reply")
+        );
+        assert_eq!(
+            stored_task_refusal(&mut runtime, &mut cursor, Some(&read_grant())),
+            None
+        );
+        runtime.drop_write = true;
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        let waiting = cursor.clone();
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Unknown
         );
         assert_eq!(cursor, waiting);
     }
