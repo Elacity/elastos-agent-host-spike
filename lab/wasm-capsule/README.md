@@ -3,8 +3,8 @@
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
 byte for byte on this one Mac. A lab bundle of it is named by
 cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
-over that name and audits its module, and a later task runs it on two engines
-(wc-005). This is lab tooling Anders may adopt; it is not
+over that name and audits its module; wc-005a runs it on one engine and
+wc-005b (task 015) on two. This is lab tooling Anders may adopt; it is not
 a second Runtime.
 
 ## What the capsule is
@@ -36,7 +36,8 @@ tools/Cargo.toml      the `wasm-capsule-tools` crate: the lab's host-side librar
 tools/src/lib.rs      `bundle_identity` (the shared lab CID, one re-export) + the manifest bytes
 tools/src/bundle.rs   `tools/bundle`'s rules: `parse_args` and `run`
 tools/src/verify.rs   wc-004's one verify path: `verify_checked` and `verify_bundle`
-tools/src/run.rs      wc-005a's runner: `run_engine`, one host engine on the verified entrypoint
+tools/src/run.rs      wc-005a's `run_engine` (one host engine on the verified entrypoint) and
+                      wc-005b's `run` (verify once, then wasmtime, then wasmer, same stdout)
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
@@ -464,8 +465,61 @@ open; the folder and file writes are path-based too. This runner does not
 defend against that. Binding launch to verified bytes is the Runtime's launch
 path, not lab tooling. The runner makes no admission or launch decision.
 
-Out of this task: the two-engine comparison with `verify_bundle` (task 015)
-and the receipt with engine versions (task 016).
+The two-engine comparison with `verify_bundle` is the next section (task 015);
+the receipt with engine versions is task 016.
+
+## Same output on two engines (wc-005b)
+
+```rust
+wasm_capsule_tools::run::run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal>
+
+pub struct RunInput<'a> {
+    pub bundle: &'a Path,                       // the bundle folder
+    pub signature: Option<&'a NameSignature>,   // in memory only
+    pub accepted: &'a [String],                 // accepted signer DIDs
+    pub wasmtime: &'a Path,                     // absolute program paths
+    pub wasmer: &'a Path,
+    pub work_root: &'a Path,
+}
+```
+
+A library function; there is no command, no binary and no signature file. Every
+input is in the struct; nothing is read from the environment. In order, the
+first refusal is the answer:
+
+1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, &[])`
+   is called once, with no grants. A refusal comes back unchanged as
+   `TwoEngineRefusal::Verify`, printing exactly as the verifier prints it;
+   nothing is written and no engine is started;
+2. `run_engine` (above) runs `wasmtime` on the verified value and returns;
+3. only then `run_engine` runs `wasmer` on the same value. The two are separate
+   processes, one after the other, never nested or overlapping. `run` starts no
+   process of its own; `run_engine` is the one run path;
+4. both stdouts must be byte-identical (never trimmed).
+
+**Wasmer is not started after Wasmtime is refused.** A refusal of either engine
+(a failed exit, a program that does not start, a run folder already there, any
+of `run_engine`'s reasons) comes back unchanged as `TwoEngineRefusal::Engine`,
+with its own path and cause. So two engines that would fail the same way are
+refused with the first failure's own reason
+(`<path>: wasmtime failed (exit status: <n>): <stderr>`), never as equal
+outputs. Two successful runs with different stdout are refused with
+`the engines' outputs differ: wasmtime printed "<stdout>", wasmer printed "<stdout>"`.
+
+On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
+was checked against, taken from the verified value, never by naming the folder
+again) and both raw stdouts, `wasmtime()` and `wasmer()`. Its fields are
+private, so only `run` makes one. Task 016 adds the receipt; `run` writes none.
+
+**The claim.** On this Mac, the capsule `tools/build` makes, bundled, signed
+with a fresh test key and verified, printed `230101071268130872`
+(`FIXED_OUTPUT`) for `1592590337` (`FIXED_INPUT`) on both `wasmtime` 45.0.1 and
+`wasmer` 7.5.0, byte for byte (`same_name_same_output_on_wasmtime_and_wasmer`).
+This is a behaviour proof on one **core module** on this one Mac, not the
+Component ABI. Both engines are test-only host engines; neither is endorsed.
+This is separate from Wasmer's role inside a capsule as the POSIX RTOS PoC. The
+run makes no admission or launch decision, and its lab CID is not the Runtime's
+CID. The known limit of `run_engine` above holds for both runs.
 
 ## Runtime ABI for a bare capsule (wc-008)
 
@@ -661,16 +715,49 @@ puts it under the `/var` link):
   An engine not found prints `SKIPPED` and gives no result, never a PASS.
 - `runner_uses_only_explicit_inputs` — the runner's source, comments
   stripped: no environment read, no file read, no manifest or module parse, no
-  second verify, and `entrypoint()` is its one source of module bytes.
+  walk or lower-level verify call, exactly one `verify_bundle` call (task 015's
+  `run`, with no grants), and `entrypoint()` is its one source of module bytes.
 - `runner_reuses_shared_writer` — the runner writes through
   `bundle::write_new_file` once and has no writer of its own (`OpenOptions`,
   `fs::write`, `create_new` and the like).
 
+The two-engine runner (task 015), in `tests/run.rs`. Each test signs its bundle
+in memory with a fresh key; stand-in engines are shell scripts as above:
+
+- `same_name_same_output_on_wasmtime_and_wasmer` — the capsule `tools/build`
+  makes, bundled, signed and run through `run` on the real `wasmtime` and
+  `wasmer` found on PATH: both stdouts are exactly `230101071268130872\n`
+  (`FIXED_OUTPUT` for `FIXED_INPUT`), the returned `cid()` is the bundle's lab
+  CID, and the work root holds the two run folders. If either engine is not
+  found it prints `SKIPPED` and gives no result, never a PASS.
+- `runner_refuses_an_unverified_bundle` — an unsigned bundle and a bundle
+  signed by a key not on the accepted list: each is refused with exactly the
+  verifier's own refusal and text, the work root stays empty, and marking
+  stand-ins prove no engine started.
+- `differing_engine_outputs_are_reported_as_a_failure` — `1\n` against `2\n`,
+  and `7\n` against `7`: each is refused, naming both outputs, with both raw
+  outputs kept.
+- `matching_engine_failures_are_refused` — both stand-ins fail the same way
+  (exit 3, the same stderr, empty stdout): the run is refused with
+  `wasmtime`'s own failure, path and cause, and `wasmer` is not started.
+- `runner_preserves_engine_refusals` — `wasmtime` fails, `wasmtime` is missing,
+  `wasmer` fails, `wasmer` is missing, and a folder planted at `wasmer`'s run
+  folder name: each comes back as `run_engine`'s refusal, unchanged, and
+  nothing starts after it.
+- `runner_calls_engines_in_order` — recording stand-ins log their start (with
+  the module path they were given), wait, and log their end: the log is
+  `wasmtime` start and end, then `wasmer` start and end, each with its own
+  `<work root>/<engine>/module.wasm`, and both run folders hold the verified
+  bytes.
+- `run_returns_the_verified_name_and_both_outputs` — the `wasmtime` stand-in
+  changes the bundle's `capsule.wasm` while it runs; `run` still returns the
+  lab CID it verified, not the changed folder's, and both raw outputs.
+
 ## Falsifiers
 
 `falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, one task-012,
-one task-017, 21 wc-004, four wc-008 and 20 wc-005a (task 014) planted bugs in
-the provider format (`command: "lab"`). Each requires
+one task-017, 21 wc-004, four wc-008, 20 wc-005a (task 014) and 11 wc-005b
+(task 015) planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -851,3 +938,33 @@ Task 014 also re-anchored six wc-004 entries to the moved verifier code, each
 the same bug as before: F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
 -ORDER-AUDIT-FIRST, -SEALED-FIELD, -SEALED-NEW (now with the `entrypoint`
 field) and -SECOND-AUDIT. All six are in the 44 above.
+
+wc-005b's 11 (task 015), runner-caught. The canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`
+reported `summary: 55 CAUGHT of 55` (these 11, wc-005a's 21 F-WC5 entries and
+the 23 F-WC4 entries), exit 0, with every named test passing unmutated first
+(its baseline line) and no backup left. Both engines were found on PATH, so
+F-WC5-BOTH-ARGS ran; on a machine without both, the real-engine test prints
+`SKIPPED` and passes, so leave F-WC5-BOTH-ARGS out of the run and report it
+NOT RUN. `tools/src/run.rs` is still not a recovery target (ask R2):
+
+- F-WC5a — `run` skips `verify_bundle` and starts both engines on the bundle's
+  `capsule.wasm` from disk (`runner_refuses_an_unverified_bundle` sees the
+  engines start; `runner_uses_only_explicit_inputs` sees no verify call).
+- F-WC5b — `run` compares only exit statuses, not stdout
+  (`differing_engine_outputs_are_reported_as_a_failure`).
+- F-WC5-EQUAL-FAILURES — a failed exit is taken as an empty stdout, so two
+  equal failures compare equal and pass (`matching_engine_failures_are_refused`).
+- F-WC5-BOTH-ARGS — the fixed argument becomes `1` for both engines: equal but
+  wrong output (`same_name_same_output_on_wasmtime_and_wasmer`, at its
+  `FIXED_OUTPUT` assertion).
+- F-WC5-VERIFY-TWICE — `run` calls `verify_bundle` a second time
+  (`runner_uses_only_explicit_inputs`).
+- F-WC5-WASMTIME-REFUSAL-DROPPED and -WASMER-REFUSAL-DROPPED — an engine's
+  refusal is discarded and its stdout taken as empty
+  (`runner_preserves_engine_refusals`).
+- F-WC5-ENGINES-REVERSED, -ENGINES-OVERLAP and -BYPASS-RUN-ENGINE — `wasmer`
+  runs first, both run at once on two threads, or `wasmer` is started on the
+  bundle's module path without `run_engine` (`runner_calls_engines_in_order`).
+- F-WC5-OTHER-CID — the returned name is the folder named again after the run,
+  not the verified value's (`run_returns_the_verified_name_and_both_outputs`).

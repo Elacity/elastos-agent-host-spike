@@ -34,9 +34,31 @@
 //! the file between the write and the engine's open; this runner does not
 //! defend against that. Binding launch to verified bytes is the Runtime's
 //! launch path, not lab tooling. It is no admission or launch decision.
+//!
+//! wc-005b: [`run`] is the two-engine runner. It takes a [`RunInput`]: the
+//! bundle path, its in-memory name signature, the accepted signer DIDs, both
+//! engine program paths and a work root. In order:
+//!
+//! 1. wc-004's [`verify_bundle`] is called once, with no grants. A refusal is
+//!    returned unchanged; nothing is written and no engine is started;
+//! 2. [`run_engine`] runs `wasmtime` on the verified value, and returns;
+//! 3. only then [`run_engine`] runs `wasmer` on the same value. The two are
+//!    separate processes, one after the other, never nested or overlapping;
+//! 4. both stdouts must be byte-identical.
+//!
+//! The first refusal is the answer, as in [`run_engine`]: a refusal of either
+//! engine is returned unchanged, with its own path and cause, and `wasmer` is
+//! not started after `wasmtime` is refused. So two engines that fail the same
+//! way are refused with the first failure's own reason, never as equal
+//! outputs. Success returns the verified lab CID and both stdouts.
+//!
+//! The two-engine result is a behaviour proof on one core module on this
+//! machine, not the Component ABI. Both engines are test-only; neither is
+//! endorsed.
 
 use crate::bundle::{write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal};
-use crate::verify::VerifiedBundle;
+use crate::verify::{verify_bundle, VerifiedBundle, VerifyRefusal};
+use capsule_identity::{LabCid, NameSignature};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, DirBuilder};
@@ -287,4 +309,100 @@ fn start_engine(engine: Engine, program: &Path, module: &Path) -> Result<Vec<u8>
         ));
     }
     Ok(output.stdout)
+}
+
+/// The two-engine runner's inputs, all explicit: nothing is read from the
+/// environment.
+#[derive(Clone, Copy, Debug)]
+pub struct RunInput<'a> {
+    /// The bundle folder to verify.
+    pub bundle: &'a Path,
+    /// Its in-memory name signature, if any.
+    pub signature: Option<&'a NameSignature>,
+    /// The accepted signer DIDs.
+    pub accepted: &'a [String],
+    /// The absolute path of the `wasmtime` program.
+    pub wasmtime: &'a Path,
+    /// The absolute path of the `wasmer` program.
+    pub wasmer: &'a Path,
+    /// The work root both run folders are made in.
+    pub work_root: &'a Path,
+}
+
+/// A two-engine run that passed: the verified lab CID and both stdouts.
+///
+/// Its fields are private and it has no public constructor, so a value exists
+/// only as [`run`] made it. It is no admission or launch value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TwoEngineRun {
+    cid: LabCid,
+    wasmtime: Vec<u8>,
+    wasmer: Vec<u8>,
+}
+
+impl TwoEngineRun {
+    /// The lab CID the verifier checked the signature against.
+    pub fn cid(&self) -> LabCid {
+        self.cid
+    }
+
+    /// What `wasmtime` printed.
+    pub fn wasmtime(&self) -> &[u8] {
+        &self.wasmtime
+    }
+
+    /// What `wasmer` printed.
+    pub fn wasmer(&self) -> &[u8] {
+        &self.wasmer
+    }
+}
+
+/// Why a two-engine run was refused. Each reason has its own variant and its
+/// own text; the verifier's and the engine runner's refusals are carried
+/// unchanged and print exactly as they print them.
+#[derive(Debug)]
+pub enum TwoEngineRefusal {
+    /// The verifier refused the bundle; no engine was started.
+    Verify(VerifyRefusal),
+    /// [`run_engine`] refused, for either engine.
+    Engine(Refusal),
+    /// Both engines exited successfully, with different stdouts.
+    OutputsDiffer { wasmtime: Vec<u8>, wasmer: Vec<u8> },
+}
+
+impl fmt::Display for TwoEngineRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TwoEngineRefusal::Verify(refusal) => write!(f, "{refusal}"),
+            TwoEngineRefusal::Engine(refusal) => write!(f, "{refusal}"),
+            TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer } => write!(
+                f,
+                "the engines' outputs differ: wasmtime printed {:?}, wasmer printed {:?}",
+                String::from_utf8_lossy(wasmtime),
+                String::from_utf8_lossy(wasmer)
+            ),
+        }
+    }
+}
+
+impl Error for TwoEngineRefusal {}
+
+/// Verify `input.bundle` once, then run it on `wasmtime` and then on
+/// `wasmer`, and require byte-identical stdout. The steps and their order are
+/// in the module docs; the first refusal is the answer.
+pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
+    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])
+        .map_err(TwoEngineRefusal::Verify)?;
+    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)
+        .map_err(TwoEngineRefusal::Engine)?;
+    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)
+        .map_err(TwoEngineRefusal::Engine)?;
+    if wasmtime != wasmer {
+        return Err(TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer });
+    }
+    Ok(TwoEngineRun {
+        cid: bundle.cid(),
+        wasmtime,
+        wasmer,
+    })
 }
