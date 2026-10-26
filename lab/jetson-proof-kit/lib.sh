@@ -75,52 +75,45 @@ jpk_require_unprivileged() {
 }
 
 # Assembled at runtime so the source never contains these host names.
-jpk_host_surface_tokens() {
-    printf '%s\n' \
-        "su""do" \
-        "a""pt" \
-        "pm""2" \
-        "PM""2" \
-        "pc2.""net" \
-        "42""00"
+# Word tokens use a boundary so "capture" does not count as the package tool.
+jpk_host_surface_word_re() {
+    printf '%s\n' '(^|[[:space:]])(su''do|a''pt|pm''2|PM''2)([[:space:]]|$)'
 }
 
 jpk_command_touches_host_surface() {
     local text="$1"
-    local token
-    while IFS= read -r token; do
-        [ -n "$token" ] || continue
-        case "$text" in
-            *"$token"*) return 0 ;;
-        esac
-    done <<EOF
-$(jpk_host_surface_tokens)
-EOF
-    return 1
+    case "$text" in
+        *"pc2.""net"* | *"42""00"*) return 0 ;;
+    esac
+    printf '%s\n' "$text" | grep -Eq -- "$(jpk_host_surface_word_re)"
 }
 
 jpk_require_kit_omits_host_surfaces() {
     local kit_dir="${1:-${JPK_KIT:?JPK_KIT is required}}"
-    local file token
-    while IFS= read -r token; do
-        [ -n "$token" ] || continue
-        for file in \
-            "$kit_dir/run-on-jetson.sh" \
-            "$kit_dir/lib.sh" \
-            "$kit_dir/prep-offline.sh" \
-            "$kit_dir/probe_host.py" \
-            "$kit_dir/decide.py" \
-            "$kit_dir/standin.rs"
-        do
-            [ -f "$file" ] || continue
-            if grep -F -- "$token" "$file" >/dev/null 2>&1; then
-                printf 'REFUSED kit names a host surface\n' >&2
-                return 2
-            fi
-        done
-    done <<EOF
-$(jpk_host_surface_tokens)
-EOF
+    local file word_re
+    word_re=$(jpk_host_surface_word_re)
+    for file in \
+        "$kit_dir/run-on-jetson.sh" \
+        "$kit_dir/lib.sh" \
+        "$kit_dir/prep-offline.sh" \
+        "$kit_dir/probe_host.py" \
+        "$kit_dir/decide.py" \
+        "$kit_dir/standin.rs"
+    do
+        [ -f "$file" ] || continue
+        if grep -E -- "$word_re" "$file" >/dev/null 2>&1; then
+            printf 'REFUSED kit names a host surface\n' >&2
+            return 2
+        fi
+        if grep -F -- "pc2.""net" "$file" >/dev/null 2>&1; then
+            printf 'REFUSED kit names a host surface\n' >&2
+            return 2
+        fi
+        if grep -F -- "42""00" "$file" >/dev/null 2>&1; then
+            printf 'REFUSED kit names a host surface\n' >&2
+            return 2
+        fi
+    done
 }
 
 jpk_offline_mode() {

@@ -366,7 +366,7 @@ out=$(run_guard_tests "$scratch/surfaces" 2>&1)
 rc=$?
 set -e
 printf '%s\n' "$out"
-if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL scripts_leave_pc2_unnamed'; then
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL scripts_name_pc2_net'; then
     printf 'F-JPK-SURFACES CAUGHT\n'
     caught=$((caught + 1))
 else
