@@ -71,6 +71,9 @@ when that tool is absent. The gate test
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks that rule: a
 missing tool on `macos` is an error that names the OS and the path, a missing
 one on `linux` is a skip, and a present one on `macos` runs the test.
+The one caller, `sandbox_available`, fails the test on that
+error; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls
+it with `macos` and a missing path and expects the failure.
 This contract has no Linux enforcement or tests yet. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
 document records `did-provider` or `wallet-provider` as confined on Linux until
@@ -192,6 +195,11 @@ error that names the OS and the path, a missing one on `linux` is a skip, and
 a present one on `macos` runs the test. It runs on every supported build
 target.
 
+`sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` checks the
+one caller without starting a process: with `macos` and a missing
+`sandbox-exec` it fails the test with the gate's reason, and with `macos` and
+a present one it returns `true`. It runs on every supported build target.
+
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
 the repository root. When `/usr/bin/sandbox-exec` is absent on a host OS other
 than macOS the native tests print a skip reason; on macOS a missing
@@ -207,7 +215,10 @@ A run of the list is evidence only where the sandbox tests run: on macOS
 without `/usr/bin/sandbox-exec` each sandbox test fails at the gate whatever
 the edit, and the runner runs no unmutated baseline, so a `CAUGHT` there proves
 nothing, while where the sandbox tests skip an entry that names one reads
-`SURVIVED`.
+`SURVIVED`. A call site that passes a fixed `"linux"` for the OS is not caught
+by a run on a Mac where `/usr/bin/sandbox-exec` exists, because a present tool
+runs the test before the OS is read, so that run is no evidence for the OS
+argument.
 
 ## Falsifiers
 
@@ -277,6 +288,9 @@ nothing, while where the sandbox tests skip an entry that names one reads
   (DID21): `startup_is_refused_when_the_profile_cannot_be_applied` fails on
   its missing-profile case because the provider starts and stays alive instead
   of being refused.
+- Return `false` from the error arm of `sandbox_available` instead of failing
+  the test (DID22): `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing`
+  fails because a missing `sandbox-exec` on `macos` returns instead of failing.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

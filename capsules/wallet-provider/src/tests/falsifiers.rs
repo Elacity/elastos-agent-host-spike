@@ -17,8 +17,11 @@ use std::process::Command;
 /// from the sandbox gate's declared-OS branch, so a missing
 /// `/usr/bin/sandbox-exec` on macOS skips and passes, and task 029's WP28,
 /// which starts the provider directly when its profile file is missing, and
-/// WP29, which drops the child's standard error from the one failure message.
-const EXPECTED_FALSIFIERS: usize = 27;
+/// WP29, which drops the child's standard error from the one failure message,
+/// and task 050's WP30, which returns `false` from the error arm of
+/// `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns
+/// and `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails.
+const EXPECTED_FALSIFIERS: usize = 28;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
