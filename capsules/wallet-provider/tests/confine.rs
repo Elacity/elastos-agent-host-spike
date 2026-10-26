@@ -1893,9 +1893,10 @@ fn rust_source_without_comments(source: &str) -> String {
 ///
 /// The tiny-crate list is the claim when `source` compiles alone. When that
 /// command cannot run, a cited test counts only if the real provider command
-/// `cargo test -p <crate> --test confine -- --list` names it, with the same
-/// features as the owner suite. Those list lines are split on the last `: `.
-/// There is no source-walk fallback: if no list command can run, the citation
+/// `cargo test -p <crate> -- --list` names it, with the same features as the
+/// owner suite. That list covers `--test confine` and the lib tests
+/// CONFINEMENT.md cites. Those list lines are split on the last `: `. There
+/// is no source-walk fallback: if no list command can run, the citation
 /// fails. That drops `#[cfg(feature = "never")]` and `#[cfg(false)]`.
 fn rust_holds_cited_test(source: &str, function: &str) -> bool {
     match rust_cargo_lists_test(source, function) {
@@ -1939,9 +1940,7 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
                     ("did-provider", "did-provider"),
                 ] {
                     let listed = std::process::Command::new("cargo")
-                        .args([
-                            "test", "-p", crate_name, "--test", "confine", "--", "--list",
-                        ])
+                        .args(["test", "-p", crate_name, "--", "--list"])
                         .current_dir(capsules.join(dir_name))
                         .env("CARGO_TERM_COLOR", "never")
                         .output();
@@ -1978,8 +1977,8 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
 
 /// `cargo test -- --list` on a tiny crate whose only test file is `source`.
 /// `None` when cargo cannot compile that snippet alone. The citation then
-/// uses the real `cargo test -p <crate> --test confine -- --list` list, or
-/// fails if that command cannot run. There is no source-walk fallback.
+/// uses the real `cargo test -p <crate> -- --list` list, or fails if that
+/// command cannot run. There is no source-walk fallback.
 fn rust_cargo_lists_test(source: &str, function: &str) -> Option<bool> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6049,7 +6048,7 @@ fn profile_holds_scheme_comment(profile: &str) -> bool {
 }
 
 /// Fail-closed SBPL reader. It accepts only ASCII printable characters plus
-/// tab and newline, `;` line comments at token boundaries, balanced parens
+/// tab and newline, `;` line comments outside strings, balanced parens
 /// (checked by `profile_forms`), double-quoted strings with the escape set
 /// `\\`, `\"`, `\n`, `\t`, and symbols from the SBPL token class the file
 /// profiles use: a letter, `*`, or `%`, then letters, digits, `* _ - + . / %`.
@@ -6093,7 +6092,7 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
             characters.push((ch, true));
             continue;
         }
-        if ch == ';' && at_token_boundary {
+        if ch == ';' {
             loop {
                 match chars.peek().copied() {
                     None => break,

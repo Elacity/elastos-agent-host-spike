@@ -44,7 +44,7 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
             characters.push((ch, true));
             continue;
         }
-        if ch == ';' && at_token_boundary {
+        if ch == ';' {
             loop {
                 match chars.peek().copied() {
                     None => break,
