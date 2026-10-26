@@ -21,7 +21,7 @@ use elastos_server::auth::{
 };
 use elastos_server::resource_bridge::{handle_component_resource_request, BridgeContext};
 use elastos_server::runtime::Runtime;
-use elastos_storage::LocalFSProvider;
+use elastos_storage::providers::LocalFSProvider;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 
@@ -160,14 +160,14 @@ async fn second(store: &Path) -> Result<()> {
             write_again(&host, &after, &after_rev).await?;
         }
         Err(error) => {
-            let (after, after_rev) = read_journal(&host).await.unwrap_or((before.clone(), expected_rev.clone()));
+            let (after, after_rev) = read_journal(&host)
+                .await
+                .unwrap_or((before.clone(), expected_rev.clone()));
             let kept = sha256_hex(&after) == expected_sha && after_rev == expected_rev;
             row(
                 "RESUME",
                 "FAIL",
-                &format!(
-                    "guest launch on the fresh process: {error:#}; stored kept={kept}"
-                ),
+                &format!("guest launch on the fresh process: {error:#}; stored kept={kept}"),
             );
         }
     }
@@ -176,7 +176,12 @@ async fn second(store: &Path) -> Result<()> {
 
 async fn stale_write(host: &Host, latest: &[u8], revision: &str) -> Result<()> {
     let forged = b"stale if_revision replay";
-    let reply = bridge_write(host, forged, serde_json::json!({ "if_revision": "stale-not-current" })).await?;
+    let reply = bridge_write(
+        host,
+        forged,
+        serde_json::json!({ "if_revision": "stale-not-current" }),
+    )
+    .await?;
     let code = reply
         .pointer("/response/result/code")
         .or_else(|| reply.pointer("/response/code"))
@@ -189,7 +194,10 @@ async fn stale_write(host: &Host, latest: &[u8], revision: &str) -> Result<()> {
         row(
             "STALE",
             "PASS",
-            &format!("stale if_revision refused with revision_conflict; stored sha256={}", sha256_hex(&kept)),
+            &format!(
+                "stale if_revision refused with revision_conflict; stored sha256={}",
+                sha256_hex(&kept)
+            ),
         );
     } else {
         row(
@@ -275,9 +283,8 @@ async fn setup(store: &Path, create_protection: bool) -> Result<Host> {
         audit_log.clone(),
         Arc::new(MetricsManager::new()),
     ));
-    let pending_store = Arc::new(
-        elastos_runtime::capability::pending::PendingRequestStore::new(audit_log),
-    );
+    let pending_store =
+        Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
     runtime
         .set_provider_registry(
             Arc::new(ProviderRegistry::new()),
@@ -393,8 +400,14 @@ async fn read_journal(host: &Host) -> Result<(Vec<u8>, String)> {
         bail!("bridge read returned no revision");
     }
     let path = journal_path(host);
-    let disk = read_principal_root_object(&host.data_dir, PERSON, &principal_localhost_root(PERSON), &host.object_uri, &path)
-        .context("disk read")?;
+    let disk = read_principal_root_object(
+        &host.data_dir,
+        PERSON,
+        &principal_localhost_root(PERSON),
+        &host.object_uri,
+        &path,
+    )
+    .context("disk read")?;
     if disk != content {
         bail!("bridge read and disk bytes differ");
     }
@@ -443,8 +456,7 @@ fn bridge_token(host: &Host, action: Action) -> Result<String> {
 }
 
 fn journal_path(host: &Host) -> PathBuf {
-    rooted_localhost_fs_path(&host.data_dir, &host.object_uri)
-        .expect("journal path")
+    rooted_localhost_fs_path(&host.data_dir, &host.object_uri).expect("journal path")
 }
 
 fn agent_host_dir() -> Result<PathBuf> {
