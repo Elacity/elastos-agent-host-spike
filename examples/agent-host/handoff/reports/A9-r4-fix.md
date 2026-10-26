@@ -36,8 +36,17 @@ cargo test --locked --offline --manifest-path lab/owned-storage/Cargo.toml
 # 25 passed; 0 failed; 0 ignored
 # bind-mount unshare child: CAUGHT
 # inode-reuse journey CAUGHT
-# race two-store iters=5000 escaped=0
+# race two-store iters=5000 denied=4906 escaped=0
 # NOT RUN: APFS case/Unicode (not a Mac)
+
+python3 -I lab/owned-storage/r2-mutants.py
+# mutants=14 caught=14 surviving=0
+```
+
+```text
+lib.rs    sha256 76b4458f3f1fabeb632cbe85f66a9a991ecebf66104186c3e86ace464c00109a
+walk.rs   sha256 4af2844f495a591606f801c740757ba95e06f3728d4351b109fa541a7b3a0b92
+launch.rs sha256 d3ed87a9acfe22eab892fa13083a9ea6dabbdbbc37ac9501610f027a6c2c267c
 ```
 
 The previous official bar still holds: those 23 names pass, the original 10 plants still catch, the original 12 mutants still catch, race `escaped=0`, bind-mount CAUGHT.
