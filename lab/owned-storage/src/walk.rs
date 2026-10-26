@@ -12,7 +12,10 @@ use std::fs;
 use std::os::fd::AsFd;
 use std::path::Path;
 
-use rustix::fs::{mkdirat, openat, openat2, readlinkat, renameat, Dir, Mode, OFlags, ResolveFlags};
+use rustix::fs::{
+    mkdirat, openat, openat2, readlinkat, renameat, unlinkat, AtFlags, Dir, Mode, OFlags,
+    ResolveFlags,
+};
 use rustix::io::Errno;
 
 use crate::Refuse;
@@ -138,6 +141,11 @@ pub(crate) fn rename_rel(
     let (src_parent, src_name) = walk_parent(root, from, false)?;
     let (dst_parent, dst_name) = walk_parent(root, to, true)?;
     renameat(src_parent, src_name, dst_parent, dst_name).map_err(map_io)
+}
+
+pub(crate) fn unlink_rel(root: &fs::File, parts: &[impl AsRef<OsStr>]) -> Result<(), Refuse> {
+    let (parent, name) = walk_parent(root, parts, false)?;
+    unlinkat(parent, name, AtFlags::empty()).map_err(map_io)
 }
 
 fn walk_parent<'a>(

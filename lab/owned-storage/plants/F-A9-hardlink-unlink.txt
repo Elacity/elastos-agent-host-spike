@@ -2,11 +2,23 @@ id: F-A9-hardlink-unlink
 file: src/lib.rs
 test: tests::agent_b_is_denied_a_hard_linked_inode_after_a_unlinks
 --- old
-fn require_in_agent_record(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
-    must_be_in_own_record(agent_root, meta)
+fn require_in_agent_record(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
+    must_be_in_own_record(agent_root, owner, relpath, meta, stamp)
 }
 --- new
-fn require_in_agent_record(_agent_root: &Path, _meta: &fs::Metadata) -> Result<(), Refuse> {
+fn require_in_agent_record(
+    _agent_root: &Path,
+    _owner: &str,
+    _relpath: &str,
+    _meta: &fs::Metadata,
+    _stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     Ok(())
 }
 --- end

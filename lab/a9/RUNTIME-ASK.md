@@ -82,7 +82,11 @@ store that opens by string after a check):
    so a hard-link then unlink across two bases still returns A's bytes
    on B's `read` after `nlink` drops to 1. Host-created files renamed
    into B have `nlink` 1 and no record, and must be refused the same way.
-   Do not expose `link` / `linkat`.
+   A persisted `(dev, ino)` set that never forgets an unlinked inode
+   grants after reuse. Bind each entry to the owning agent, the exact
+   relative path, and a generation stamp (ctime, birth time, and a nonce
+   on the inode). Forget or replace on store unlink and create. Do not
+   expose `link` / `linkat`.
 5. Last-component open must keep `O_NOFOLLOW` (or `RESOLVE_NO_SYMLINKS`).
    A unit test must fail when that flag is dropped. The test must mutate
    the live walk, not a dead helper.

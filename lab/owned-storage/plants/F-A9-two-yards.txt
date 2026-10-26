@@ -2,19 +2,51 @@ id: F-A9-two-yards
 file: src/lib.rs
 test: tests::two_yards_link_unlink_is_refused
 --- old
-fn must_be_in_own_record(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+fn must_be_in_own_record(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     if !require_positive_ownership() {
         return Ok(());
     }
-    let set = load_owned(agent_root)?;
-    if set.contains(&(meta.dev(), meta.ino())) {
-        Ok(())
-    } else {
-        Err(Refuse::HardLink)
+    let map = load_owned(agent_root)?;
+    let Some(entry) = map.get(&(meta.dev(), meta.ino())) else {
+        return Err(Refuse::HardLink);
+    };
+    if !require_generation_bind() {
+        return Ok(());
     }
+    if entry.owner != owner {
+        return Err(Refuse::HardLink);
+    }
+    if require_path_match() && entry.path != relpath {
+        return Err(Refuse::HardLink);
+    }
+    if require_stamp_match() {
+        let Some(stamp) = stamp else {
+            return Err(Refuse::HardLink);
+        };
+        if meta.is_file() {
+            if entry.stamp != *stamp {
+                return Err(Refuse::HardLink);
+            }
+        } else if entry.stamp.nonce != stamp.nonce {
+            return Err(Refuse::HardLink);
+        }
+    }
+    Ok(())
 }
 --- new
-fn must_be_in_own_record(_agent_root: &Path, _meta: &fs::Metadata) -> Result<(), Refuse> {
+fn must_be_in_own_record(
+    _agent_root: &Path,
+    _owner: &str,
+    _relpath: &str,
+    _meta: &fs::Metadata,
+    _stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     Ok(())
 }
 --- end

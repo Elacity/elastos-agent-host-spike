@@ -18,7 +18,7 @@
 //! root. The real-Runtime rows stay BLOCKED. The exact change is in
 //! `PROPOSED-LAUNCHER-CHANGE.md`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
@@ -202,8 +202,10 @@ impl Store {
         }
         let owned_root = a5_owned_root(identity, &format!("{session}/{instance}"))?;
         let root = walk::open_root(&canon)?;
-        let root_meta = fs::symlink_metadata(&canon).map_err(|_| Refuse::OutsideRoot)?;
-        record_owned(&canon, &root_meta)?;
+        write_nonce(&root)?;
+        let stamp = stamp_from_fd(&root)?;
+        let root_meta = root.metadata().map_err(|_| Refuse::OutsideRoot)?;
+        record_owned(&canon, identity, ".", &root_meta, &stamp)?;
         self.agents.push(OpenAgent {
             identity: identity.to_owned(),
             session: session.to_owned(),
@@ -229,14 +231,16 @@ impl Store {
     /// Reads one file inside the grant's root.
     pub fn read(&self, grant: &Grant, path: &str) -> Result<Vec<u8>, Refuse> {
         let full = self.resolve(grant, path)?;
-        let root = self.live_root_for(grant)?;
-        let parts = io_components(path, root, &full)?;
+        let root = self.live_root_for(grant)?.to_path_buf();
+        let parts = io_components(path, &root, &full)?;
+        let relpath = relpath_from_parts(&parts)?;
         let mut file = walk::open_existing_file(&self.agent(grant)?.root, &parts)?;
         let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
         if meta.file_type().is_symlink() || !meta.is_file() {
             return Err(Refuse::OutsideRoot);
         }
-        require_owned(root, &meta)?;
+        let stamp = stamp_from_fd(&file)?;
+        require_owned(&root, grant.identity(), &relpath, &meta, Some(&stamp))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|_| Refuse::OutsideRoot)?;
@@ -246,8 +250,9 @@ impl Store {
     /// Writes one file inside the grant's root.
     pub fn write(&self, grant: &Grant, path: &str, bytes: &[u8]) -> Result<(), Refuse> {
         let full = self.resolve(grant, path)?;
-        let root = self.live_root_for(grant)?;
-        let parts = io_components(path, root, &full)?;
+        let root = self.live_root_for(grant)?.to_path_buf();
+        let parts = io_components(path, &root, &full)?;
+        let relpath = relpath_from_parts(&parts)?;
         if let Ok(meta) = fs::symlink_metadata(&full) {
             if meta.file_type().is_symlink() {
                 return Err(Refuse::Symlink);
@@ -255,7 +260,8 @@ impl Store {
             if !meta.is_file() {
                 return Err(Refuse::OutsideRoot);
             }
-            require_owned(root, &meta)?;
+            let stamp = stamp_from_path(&full).ok();
+            require_owned(&root, grant.identity(), &relpath, &meta, stamp.as_ref())?;
         }
         let opened = walk::open_or_create_file(&self.agent(grant)?.root, &parts)?;
         let created = matches!(opened, walk::OpenedFile::Created(_));
@@ -269,13 +275,23 @@ impl Store {
         }
         if created {
             refuse_hard_link(&meta)?;
-            record_owned(root, &meta)?;
-            record_path_components(root, &parts)?;
         } else {
-            require_owned(root, &meta)?;
+            let stamp = stamp_from_fd(&file)?;
+            require_owned(&root, grant.identity(), &relpath, &meta, Some(&stamp))?;
         }
         file.set_len(0).map_err(|_| Refuse::OutsideRoot)?;
-        file.write_all(bytes).map_err(|_| Refuse::OutsideRoot)
+        file.write_all(bytes).map_err(|_| Refuse::OutsideRoot)?;
+        if created {
+            write_nonce(&file)?;
+            let stamp = stamp_from_fd(&file)?;
+            let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+            record_owned(&root, grant.identity(), &relpath, &meta, &stamp)?;
+            record_path_components(&root, grant.identity(), &self.agent(grant)?.root, &parts)?;
+        } else {
+            let stamp = stamp_from_fd(&file)?;
+            refresh_owned_ctime(&root, &meta, &stamp)?;
+        }
+        Ok(())
     }
 
     /// Lists names inside a directory in the grant's root.
@@ -303,7 +319,13 @@ impl Store {
         if !meta.is_dir() {
             return Err(Refuse::OutsideRoot);
         }
-        require_owned(&root, &meta)?;
+        let dir_rel = if path.is_empty() {
+            ".".to_owned()
+        } else {
+            relpath_from_parts(&io_components(path, &root, &confirmed)?)?
+        };
+        let dir_stamp = stamp_from_path(&confirmed).ok();
+        require_owned(&root, grant.identity(), &dir_rel, &meta, dir_stamp.as_ref())?;
         let parts = if path.is_empty() {
             Vec::new()
         } else {
@@ -317,7 +339,21 @@ impl Store {
                 Ok(meta) => meta,
                 Err(_) => continue,
             };
-            if require_in_agent_record(&root, &child_meta).is_ok() {
+            let child_rel = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            };
+            let child_stamp = stamp_from_path(&child).ok();
+            if require_in_agent_record(
+                &root,
+                grant.identity(),
+                &child_rel,
+                &child_meta,
+                child_stamp.as_ref(),
+            )
+            .is_ok()
+            {
                 owned_names.push(name);
             }
         }
@@ -329,8 +365,21 @@ impl Store {
         let root = self.live_root_for(grant)?.to_path_buf();
         let src = confirm_resolved(&root, &self.resolve(grant, from)?)?;
         let dst = self.resolve(grant, to)?;
-        let src_meta = fs::symlink_metadata(&src).map_err(|_| Refuse::NotFound)?;
-        require_owned(&root, &src_meta)?;
+        let from_parts = io_components(from, &root, &src)?;
+        let to_parts = io_components(to, &root, &dst)?;
+        let from_rel = relpath_from_parts(&from_parts)?;
+        let to_rel = relpath_from_parts(&to_parts)?;
+        let src_file = walk::open_existing_file(&self.agent(grant)?.root, &from_parts)?;
+        let src_meta = src_file.metadata().map_err(|_| Refuse::NotFound)?;
+        let src_stamp = stamp_from_fd(&src_file)?;
+        require_owned(
+            &root,
+            grant.identity(),
+            &from_rel,
+            &src_meta,
+            Some(&src_stamp),
+        )?;
+        drop(src_file);
         if let Some(parent) = dst.parent() {
             if parent != root.as_path() && !contained(&root, parent) {
                 return Err(Refuse::OutsideRoot);
@@ -338,13 +387,45 @@ impl Store {
             confirm_resolved(&root, parent)?;
         }
         confirm_resolved(&root, &dst)?;
-        if let Ok(dst_meta) = fs::symlink_metadata(&dst) {
-            require_owned(&root, &dst_meta)?;
+        if let Ok(dst_file) = walk::open_existing_file(&self.agent(grant)?.root, &to_parts) {
+            let dst_meta = dst_file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+            let dst_stamp = stamp_from_fd(&dst_file)?;
+            require_owned(
+                &root,
+                grant.identity(),
+                &to_rel,
+                &dst_meta,
+                Some(&dst_stamp),
+            )?;
+            drop(dst_file);
+            forget_owned(&root, &dst_meta)?;
         }
-        let from_parts = io_components(from, &root, &src)?;
-        let to_parts = io_components(to, &root, &dst)?;
         walk::rename_rel(&self.agent(grant)?.root, &from_parts, &to_parts)?;
+        update_owned_path(&root, &src_meta, grant.identity(), &to_rel)?;
+        let dest_file = walk::open_existing_file(&self.agent(grant)?.root, &to_parts)?;
+        let dest_meta = dest_file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+        let dest_stamp = stamp_from_fd(&dest_file)?;
+        refresh_owned_ctime(&root, &dest_meta, &dest_stamp)?;
         assert_root_is_real_dir(&root)?;
+        Ok(())
+    }
+
+    /// Removes one file inside the grant's root and forgets its ownership entry.
+    pub fn unlink(&self, grant: &Grant, path: &str) -> Result<(), Refuse> {
+        let full = self.resolve(grant, path)?;
+        let root = self.live_root_for(grant)?.to_path_buf();
+        let parts = io_components(path, &root, &full)?;
+        let relpath = relpath_from_parts(&parts)?;
+        let file = walk::open_existing_file(&self.agent(grant)?.root, &parts)?;
+        let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(Refuse::OutsideRoot);
+        }
+        let stamp = stamp_from_fd(&file)?;
+        require_owned(&root, grant.identity(), &relpath, &meta, Some(&stamp))?;
+        drop(file);
+        walk::unlink_rel(&self.agent(grant)?.root, &parts)?;
+        forget_owned(&root, &meta)?;
         Ok(())
     }
 
@@ -659,6 +740,8 @@ fn refuse_hard_link(meta: &fs::Metadata) -> Result<(), Refuse> {
     Ok(())
 }
 
+const NONCE_XATTR: &str = "user.owned-storage.nonce";
+
 /// Sibling of the agent root. Two Store handles share this file.
 fn ownership_path(agent_root: &Path) -> PathBuf {
     let mut name = agent_root.as_os_str().to_os_string();
@@ -666,24 +749,40 @@ fn ownership_path(agent_root: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    ctime_sec: i64,
+    ctime_nsec: u32,
+    btime_sec: i64,
+    btime_nsec: u32,
+    nonce: [u8; 16],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedEntry {
+    owner: String,
+    path: String,
+    stamp: FileStamp,
+}
+
 fn ownership_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn load_owned(agent_root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
+fn load_owned(agent_root: &Path) -> Result<HashMap<(u64, u64), OwnedEntry>, Refuse> {
     let _guard = ownership_lock();
     load_owned_locked(agent_root)
 }
 
-fn load_owned_locked(agent_root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
+fn load_owned_locked(agent_root: &Path) -> Result<HashMap<(u64, u64), OwnedEntry>, Refuse> {
     let path = ownership_path(agent_root);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(_) => return Err(Refuse::OutsideRoot),
     };
-    let mut set = HashSet::new();
+    let mut map = HashMap::new();
     for line in text.lines() {
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -695,62 +794,381 @@ fn load_owned_locked(agent_root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
         let Some(ino) = parts.next().and_then(|part| part.parse().ok()) else {
             return Err(Refuse::OutsideRoot);
         };
-        set.insert((dev, ino));
+        let Some(owner) = parts.next() else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(relpath) = parts.next() else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(ctime_sec) = parts.next().and_then(|part| part.parse().ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(ctime_nsec) = parts.next().and_then(|part| part.parse().ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(btime_sec) = parts.next().and_then(|part| part.parse().ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(btime_nsec) = parts.next().and_then(|part| part.parse().ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(nonce) = parts.next().and_then(|part| hex_decode(part).ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        if parts.next().is_some() {
+            return Err(Refuse::OutsideRoot);
+        }
+        map.insert(
+            (dev, ino),
+            OwnedEntry {
+                owner: owner.to_owned(),
+                path: relpath.to_owned(),
+                stamp: FileStamp {
+                    ctime_sec,
+                    ctime_nsec,
+                    btime_sec,
+                    btime_nsec,
+                    nonce,
+                },
+            },
+        );
     }
-    Ok(set)
+    Ok(map)
 }
 
-fn save_owned_locked(agent_root: &Path, set: &HashSet<(u64, u64)>) -> Result<(), Refuse> {
+fn save_owned_locked(
+    agent_root: &Path,
+    map: &HashMap<(u64, u64), OwnedEntry>,
+) -> Result<(), Refuse> {
     let path = ownership_path(agent_root);
-    let mut out = String::from("# owned-storage v1\n");
-    let mut keys: Vec<(u64, u64)> = set.iter().copied().collect();
+    let mut out = String::from("# owned-storage v2\n");
+    let mut keys: Vec<(u64, u64)> = map.keys().copied().collect();
     keys.sort_unstable();
     for (dev, ino) in keys {
-        out.push_str(&format!("{dev} {ino}\n"));
+        let entry = &map[&(dev, ino)];
+        out.push_str(&format!(
+            "{dev} {ino} {} {} {} {} {} {} {}\n",
+            entry.owner,
+            entry.path,
+            entry.stamp.ctime_sec,
+            entry.stamp.ctime_nsec,
+            entry.stamp.btime_sec,
+            entry.stamp.btime_nsec,
+            hex_encode(&entry.stamp.nonce)
+        ));
     }
     fs::write(&path, out).map_err(|_| Refuse::OutsideRoot)
 }
 
-fn record_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+fn record_owned(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: &FileStamp,
+) -> Result<(), Refuse> {
     let _guard = ownership_lock();
-    let mut set = load_owned_locked(agent_root)?;
-    set.insert((meta.dev(), meta.ino()));
-    save_owned_locked(agent_root, &set)
+    let mut map = load_owned_locked(agent_root)?;
+    map.insert(
+        (meta.dev(), meta.ino()),
+        OwnedEntry {
+            owner: owner.to_owned(),
+            path: relpath.to_owned(),
+            stamp: stamp.clone(),
+        },
+    );
+    save_owned_locked(agent_root, &map)
 }
 
-fn record_path_components(agent_root: &Path, parts: &[OsString]) -> Result<(), Refuse> {
-    let mut acc = agent_root.to_path_buf();
-    for part in parts {
-        acc.push(part);
-        let meta = fs::symlink_metadata(&acc).map_err(|_| Refuse::OutsideRoot)?;
-        record_owned(agent_root, &meta)?;
+fn record_path_components(
+    agent_root: &Path,
+    owner: &str,
+    root: &fs::File,
+    parts: &[OsString],
+) -> Result<(), Refuse> {
+    let mut rel = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        let name = part.to_str().ok_or(Refuse::HostPath)?;
+        if !rel.is_empty() {
+            rel.push('/');
+        }
+        rel.push_str(name);
+        if index + 1 == parts.len() {
+            continue;
+        }
+        let dir = walk::open_dir(root, &parts[..=index])?;
+        let meta = dir.metadata().map_err(|_| Refuse::OutsideRoot)?;
+        let map = load_owned(agent_root)?;
+        if let Some(existing) = map.get(&(meta.dev(), meta.ino())) {
+            if existing.owner == owner && existing.path == rel {
+                continue;
+            }
+        }
+        write_nonce(&dir)?;
+        let stamp = stamp_from_fd(&dir)?;
+        record_owned(agent_root, owner, &rel, &meta, &stamp)?;
     }
     Ok(())
+}
+
+fn forget_on_unlink() -> bool {
+    true
+}
+
+fn forget_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    if !forget_on_unlink() {
+        return Ok(());
+    }
+    let _guard = ownership_lock();
+    let mut map = load_owned_locked(agent_root)?;
+    map.remove(&(meta.dev(), meta.ino()));
+    save_owned_locked(agent_root, &map)
+}
+
+fn update_owned_path(
+    agent_root: &Path,
+    meta: &fs::Metadata,
+    owner: &str,
+    relpath: &str,
+) -> Result<(), Refuse> {
+    let _guard = ownership_lock();
+    let mut map = load_owned_locked(agent_root)?;
+    let Some(entry) = map.get_mut(&(meta.dev(), meta.ino())) else {
+        return Err(Refuse::HardLink);
+    };
+    if entry.owner != owner {
+        return Err(Refuse::HardLink);
+    }
+    entry.path = relpath.to_owned();
+    save_owned_locked(agent_root, &map)
+}
+
+fn refresh_owned_ctime(
+    agent_root: &Path,
+    meta: &fs::Metadata,
+    stamp: &FileStamp,
+) -> Result<(), Refuse> {
+    let _guard = ownership_lock();
+    let mut map = load_owned_locked(agent_root)?;
+    let Some(entry) = map.get_mut(&(meta.dev(), meta.ino())) else {
+        return Err(Refuse::HardLink);
+    };
+    entry.stamp.ctime_sec = stamp.ctime_sec;
+    entry.stamp.ctime_nsec = stamp.ctime_nsec;
+    save_owned_locked(agent_root, &map)
 }
 
 fn require_positive_ownership() -> bool {
     true
 }
 
-fn must_be_in_own_record(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+fn require_generation_bind() -> bool {
+    true
+}
+
+fn require_path_match() -> bool {
+    true
+}
+
+fn require_stamp_match() -> bool {
+    true
+}
+
+fn must_be_in_own_record(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     if !require_positive_ownership() {
         return Ok(());
     }
-    let set = load_owned(agent_root)?;
-    if set.contains(&(meta.dev(), meta.ino())) {
-        Ok(())
-    } else {
-        Err(Refuse::HardLink)
+    let map = load_owned(agent_root)?;
+    let Some(entry) = map.get(&(meta.dev(), meta.ino())) else {
+        return Err(Refuse::HardLink);
+    };
+    if !require_generation_bind() {
+        return Ok(());
     }
+    if entry.owner != owner {
+        return Err(Refuse::HardLink);
+    }
+    if require_path_match() && entry.path != relpath {
+        return Err(Refuse::HardLink);
+    }
+    if require_stamp_match() {
+        let Some(stamp) = stamp else {
+            return Err(Refuse::HardLink);
+        };
+        if meta.is_file() {
+            if entry.stamp != *stamp {
+                return Err(Refuse::HardLink);
+            }
+        } else if entry.stamp.nonce != stamp.nonce {
+            return Err(Refuse::HardLink);
+        }
+    }
+    Ok(())
 }
 
-fn require_in_agent_record(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
-    must_be_in_own_record(agent_root, meta)
+fn require_in_agent_record(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
+    must_be_in_own_record(agent_root, owner, relpath, meta, stamp)
 }
 
-fn require_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+fn require_owned(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     refuse_hard_link(meta)?;
-    require_in_agent_record(agent_root, meta)
+    require_in_agent_record(agent_root, owner, relpath, meta, stamp)
+}
+
+fn relpath_from_parts(parts: &[OsString]) -> Result<String, Refuse> {
+    let mut rel = String::new();
+    for part in parts {
+        let name = part.to_str().ok_or(Refuse::HostPath)?;
+        if !rel.is_empty() {
+            rel.push('/');
+        }
+        rel.push_str(name);
+    }
+    if rel.is_empty() {
+        return Err(Refuse::HostPath);
+    }
+    Ok(rel)
+}
+
+fn hex_encode(bytes: &[u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(32);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(text: &str) -> Result<[u8; 16], Refuse> {
+    if text.len() != 32 {
+        return Err(Refuse::OutsideRoot);
+    }
+    let mut out = [0u8; 16];
+    for (index, chunk) in text.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).map_err(|_| Refuse::OutsideRoot)?;
+        out[index] = u8::from_str_radix(hex, 16).map_err(|_| Refuse::OutsideRoot)?;
+    }
+    Ok(out)
+}
+
+fn random_nonce() -> Result<[u8; 16], Refuse> {
+    let mut nonce = [0u8; 16];
+    let mut file = fs::File::open("/dev/urandom").map_err(|_| Refuse::OutsideRoot)?;
+    file.read_exact(&mut nonce)
+        .map_err(|_| Refuse::OutsideRoot)?;
+    Ok(nonce)
+}
+
+fn write_nonce(file: &fs::File) -> Result<[u8; 16], Refuse> {
+    let nonce = random_nonce()?;
+    rustix::fs::fsetxattr(file, NONCE_XATTR, &nonce, rustix::fs::XattrFlags::empty())
+        .map_err(|_| Refuse::OutsideRoot)?;
+    Ok(nonce)
+}
+
+fn read_nonce_from_xattr(bytes: &[u8]) -> Result<[u8; 16], Refuse> {
+    if bytes.len() != 16 {
+        return Err(Refuse::HardLink);
+    }
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(bytes);
+    Ok(nonce)
+}
+
+fn stamp_from_fd(file: &fs::File) -> Result<FileStamp, Refuse> {
+    let (ctime_sec, ctime_nsec, btime_sec, btime_nsec) = times_from_fd(file)?;
+    let mut buf = [0u8; 16];
+    let got = rustix::fs::fgetxattr(file, NONCE_XATTR, &mut buf).map_err(|_| Refuse::HardLink)?;
+    Ok(FileStamp {
+        ctime_sec,
+        ctime_nsec,
+        btime_sec,
+        btime_nsec,
+        nonce: read_nonce_from_xattr(&buf[..got])?,
+    })
+}
+
+fn stamp_from_path(path: &Path) -> Result<FileStamp, Refuse> {
+    let (ctime_sec, ctime_nsec, btime_sec, btime_nsec) = times_from_path(path)?;
+    let mut buf = [0u8; 16];
+    let got = rustix::fs::lgetxattr(path, NONCE_XATTR, &mut buf).map_err(|_| Refuse::HardLink)?;
+    Ok(FileStamp {
+        ctime_sec,
+        ctime_nsec,
+        btime_sec,
+        btime_nsec,
+        nonce: read_nonce_from_xattr(&buf[..got])?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn times_from_fd(file: &fs::File) -> Result<(i64, u32, i64, u32), Refuse> {
+    let stx = rustix::fs::statx(
+        file,
+        "",
+        rustix::fs::AtFlags::EMPTY_PATH,
+        rustix::fs::StatxFlags::BASIC_STATS.union(rustix::fs::StatxFlags::BTIME),
+    )
+    .map_err(|_| Refuse::OutsideRoot)?;
+    times_from_statx(&stx)
+}
+
+#[cfg(target_os = "linux")]
+fn times_from_path(path: &Path) -> Result<(i64, u32, i64, u32), Refuse> {
+    let stx = rustix::fs::statx(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        rustix::fs::StatxFlags::BASIC_STATS.union(rustix::fs::StatxFlags::BTIME),
+    )
+    .map_err(|_| Refuse::HardLink)?;
+    times_from_statx(&stx)
+}
+
+#[cfg(target_os = "linux")]
+fn times_from_statx(stx: &rustix::fs::Statx) -> Result<(i64, u32, i64, u32), Refuse> {
+    let (btime_sec, btime_nsec) = if stx.stx_mask & rustix::fs::StatxFlags::BTIME.bits() != 0 {
+        (stx.stx_btime.tv_sec, stx.stx_btime.tv_nsec)
+    } else {
+        (0, 0)
+    };
+    Ok((
+        stx.stx_ctime.tv_sec,
+        stx.stx_ctime.tv_nsec,
+        btime_sec,
+        btime_nsec,
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn times_from_fd(file: &fs::File) -> Result<(i64, u32, i64, u32), Refuse> {
+    let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+    Ok((meta.ctime(), meta.ctime_nsec() as u32, 0, 0))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn times_from_path(path: &Path) -> Result<(i64, u32, i64, u32), Refuse> {
+    let meta = fs::symlink_metadata(path).map_err(|_| Refuse::HardLink)?;
+    Ok((meta.ctime(), meta.ctime_nsec() as u32, 0, 0))
 }
 
 fn io_components(path: &str, root: &Path, full: &Path) -> Result<Vec<OsString>, Refuse> {
@@ -1012,7 +1430,8 @@ mod tests {
         let a_root = store.host_root(&a).unwrap();
         let foreign_meta = fs::symlink_metadata(&outside).unwrap();
         assert_eq!(
-            require_owned(a_root, &foreign_meta).expect_err("foreign inode"),
+            require_owned(a_root, "agent-a", "foreign.txt", &foreign_meta, None)
+                .expect_err("foreign inode"),
             Refuse::HardLink
         );
     }
@@ -1387,6 +1806,100 @@ mod tests {
                 .expect_err("store-created rename"),
             Refuse::HardLink
         );
+    }
+
+    fn create_until_inode_reuse(store: &Store, grant: &Grant, dev: u64, ino: u64) -> String {
+        let start = std::time::Instant::now();
+        let mut index = 0u32;
+        while start.elapsed() < std::time::Duration::from_secs(15) {
+            let name = format!("new-{index}.txt");
+            index += 1;
+            store.write(grant, &name, b"from-b").unwrap();
+            let path = store.host_root(grant).unwrap().join(&name);
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.dev() == dev && meta.ino() == ino {
+                return name;
+            }
+            store.unlink(grant, &name).unwrap();
+        }
+        panic!("kernel did not reuse inode after {index} creates");
+    }
+
+    #[test]
+    fn inode_reuse_after_unlink_is_refused() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let a_note = store.host_root(&a).unwrap().join("note.txt");
+        let old = fs::symlink_metadata(&a_note).unwrap();
+        let old_dev = old.dev();
+        let old_ino = old.ino();
+        fs::remove_file(&a_note).unwrap();
+
+        let reused = create_until_inode_reuse(&store, &b, old_dev, old_ino);
+        let b_file = store.host_root(&b).unwrap().join(&reused);
+        let stolen = store.host_root(&a).unwrap().join("stolen.txt");
+        fs::rename(&b_file, &stolen).unwrap();
+        assert_eq!(
+            store
+                .read(&a, "stolen.txt")
+                .expect_err("r4 reuse plus host rename"),
+            Refuse::HardLink
+        );
+        assert_eq!(fs::read(&stolen).unwrap(), b"from-b");
+
+        store.write(&a, "same.txt", b"hello-a").unwrap();
+        let a_same = store.host_root(&a).unwrap().join("same.txt");
+        let same_meta = fs::symlink_metadata(&a_same).unwrap();
+        fs::remove_file(&a_same).unwrap();
+        let reused_same = create_until_inode_reuse(&store, &b, same_meta.dev(), same_meta.ino());
+        let b_same = store.host_root(&b).unwrap().join(&reused_same);
+        fs::rename(&b_same, &a_same).unwrap();
+        assert_eq!(
+            store
+                .read(&a, "same.txt")
+                .expect_err("reuse with the same relative path"),
+            Refuse::HardLink
+        );
+
+        store.write(&a, "gone.txt", b"forget-me").unwrap();
+        let gone = store.host_root(&a).unwrap().join("gone.txt");
+        let gone_meta = fs::symlink_metadata(&gone).unwrap();
+        store.unlink(&a, "gone.txt").unwrap();
+        assert!(!gone.exists());
+        let map = load_owned(store.host_root(&a).unwrap()).unwrap();
+        assert!(
+            !map.contains_key(&(gone_meta.dev(), gone_meta.ino())),
+            "unlink left the inode in the ownership record"
+        );
+        println!("inode-reuse journey CAUGHT");
+    }
+
+    #[test]
+    fn host_rename_within_a_is_refused() {
+        let parent = Parent::new();
+        let (store, a, _b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let host = store.host_root(&a).unwrap();
+        fs::rename(host.join("note.txt"), host.join("moved.txt")).unwrap();
+        assert_eq!(
+            store
+                .read(&a, "moved.txt")
+                .expect_err("host rename inside A"),
+            Refuse::HardLink
+        );
+        assert_eq!(
+            store
+                .read(&a, "note.txt")
+                .expect_err("old name after host rename"),
+            Refuse::NotFound
+        );
+        let names = store.list(&a, "").unwrap();
+        assert!(
+            !names.iter().any(|name| name == "moved.txt"),
+            "list showed a host-renamed name: {names:?}"
+        );
+        assert_eq!(fs::read(host.join("moved.txt")).unwrap(), b"hello-a");
     }
 
     #[test]

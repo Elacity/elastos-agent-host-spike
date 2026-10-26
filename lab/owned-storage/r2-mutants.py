@@ -47,13 +47,25 @@ LIB_MUTANTS = [
     },
     {
         "id": "M-inode-noop",
-        "old": """fn require_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+        "old": """fn require_owned(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     refuse_hard_link(meta)?;
-    require_in_agent_record(agent_root, meta)
+    require_in_agent_record(agent_root, owner, relpath, meta, stamp)
 }""",
-        "new": """fn require_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+        "new": """fn require_owned(
+    agent_root: &Path,
+    owner: &str,
+    relpath: &str,
+    meta: &fs::Metadata,
+    stamp: Option<&FileStamp>,
+) -> Result<(), Refuse> {
     refuse_hard_link(meta)?;
-    let _ = (agent_root, meta);
+    let _ = (agent_root, owner, relpath, stamp);
     Ok(())
 }""",
         "tests": ["tests::agent_b_is_denied_a_hard_linked_inode"],
@@ -63,6 +75,18 @@ LIB_MUTANTS = [
         "old": "fn require_positive_ownership() -> bool {\n    true\n}",
         "new": "fn require_positive_ownership() -> bool {\n    false\n}",
         "tests": ["tests::host_rename_into_b_is_refused"],
+    },
+    {
+        "id": "M-stamp-skip",
+        "old": "fn require_stamp_match() -> bool {\n    true\n}",
+        "new": "fn require_stamp_match() -> bool {\n    false\n}",
+        "tests": ["tests::inode_reuse_after_unlink_is_refused"],
+    },
+    {
+        "id": "M-unlink-keep",
+        "old": "fn forget_on_unlink() -> bool {\n    true\n}",
+        "new": "fn forget_on_unlink() -> bool {\n    false\n}",
+        "tests": ["tests::inode_reuse_after_unlink_is_refused"],
     },
 ]
 

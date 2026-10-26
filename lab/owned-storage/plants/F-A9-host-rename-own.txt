@@ -1,0 +1,12 @@
+id: F-A9-host-rename-own
+file: src/lib.rs
+test: tests::host_rename_within_a_is_refused
+--- old
+fn require_path_match() -> bool {
+    true
+}
+--- new
+fn require_path_match() -> bool {
+    false
+}
+--- end
