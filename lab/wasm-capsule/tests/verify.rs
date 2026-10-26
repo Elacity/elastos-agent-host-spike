@@ -390,6 +390,14 @@ fn verifier_uses_manifest_entrypoint() {
     assert_eq!(refusal.to_string(), "undeclared import env.f");
     let value = verified(verify_bundle(&bundle, Some(&sig), &accepted, &[env_f()]));
     assert_eq!(value.imports(), [env_f()].as_slice());
+    assert_eq!(
+        value.entrypoint(),
+        &BundleEntry {
+            path: "main.wasm".into(),
+            content: IMPORTING_MODULE.to_vec(),
+        },
+        "the verified value's entrypoint is not the audited module"
+    );
 }
 
 #[test]
@@ -648,7 +656,7 @@ fn verifier_has_one_check_path() {
     let wrapper = item(&code, "pub fn verify_bundle(");
     assert_eq!(calls(wrapper, "checked_bundle"), 1, "the walk");
     assert_eq!(calls(wrapper, "verify_checked"), 1, "the delegation");
-    for own in ["verify_checked_signature", "audit", "entrypoint_module"] {
+    for own in ["verify_checked_signature", "audit", "entrypoint_index"] {
         assert_eq!(calls(wrapper, own), 0, "verify_bundle calls {own} itself");
     }
 }
@@ -677,6 +685,7 @@ fn verified_bundle_is_sealed() {
         [
             "cid",
             "entries",
+            "entrypoint",
             "imports",
             "verify_bundle",
             "verify_checked"
@@ -704,12 +713,15 @@ fn verified_bundle_is_sealed() {
         "pub fn cid(&self) -> LabCid {",
         "pub fn entries(&self) -> &[BundleEntry] {",
         "pub fn imports(&self) -> &[DeclaredImport] {",
+        "pub fn entrypoint(&self) -> &BundleEntry {",
     ] {
         assert!(accessors.contains(signature), "missing {signature}");
     }
     let literal = item(&code, "pub fn verify_checked(");
     assert!(
-        literal.contains("Ok(VerifiedBundle { checked, imports })"),
+        literal.contains(
+            "Ok(VerifiedBundle {\n        checked,\n        imports,\n        entrypoint,\n    })"
+        ),
         "verify_checked does not make the value"
     );
 }

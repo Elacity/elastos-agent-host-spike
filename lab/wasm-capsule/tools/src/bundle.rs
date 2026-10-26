@@ -261,8 +261,9 @@ fn run_build(build_script: &Path, out_dir: &Path) -> Result<(), RunRefusal> {
 }
 
 /// `path` as a program to run by its path: a bare name gets `./`, so the
-/// system never looks it up on PATH.
-fn path_to_run(path: &Path) -> PathBuf {
+/// system never looks it up on PATH. The two-engine runner starts each engine
+/// through it too.
+pub(crate) fn path_to_run(path: &Path) -> PathBuf {
     if path.as_os_str().as_bytes().contains(&b'/') {
         path.to_path_buf()
     } else {

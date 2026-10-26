@@ -1,10 +1,10 @@
-# wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009) and the verifier (wc-004)
+# wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009), the verifier (wc-004) and the two-engine runner (wc-005)
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
 byte for byte on this one Mac. A lab bundle of it is named by
 cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
-over that name and audits its module, and a later task runs it on two engines
-(wc-005). This is lab tooling Anders may adopt; it is not
+over that name and audits its module, and wc-005 runs the verified module on
+two test-only host engines. This is lab tooling Anders may adopt; it is not
 a second Runtime.
 
 ## What the capsule is
@@ -353,11 +353,13 @@ capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
 walk runs the same parse and refuses first. It is kept so the verifier fails
 closed with a reason rather than a panic, and no test can reach it.
 
-**The value.** `VerifiedBundle` holds the checked bundle and the audit's own
-import list, read through `cid()`, `entries()` and `imports()`. Its fields are
+**The value.** `VerifiedBundle` holds the checked bundle, which entry is the
+entrypoint module the audit read, and the audit's own import list, read
+through `cid()`, `entries()`, `entrypoint()` and `imports()`. Its fields are
 private, and it has no public constructor, no `&mut` access and no
 `Deserialize`, so a value exists only as `verify_checked` made it. wc-005
-(task 006) stages its `entries()`.
+(task 006) stages its `entries()` and runs its `entrypoint()`, so it never
+reads the manifest again.
 
 **The checked bytes, never the folder again.** The audit reads the module
 bytes the signed name covers, from the checked value. The verifier reads no
@@ -385,6 +387,92 @@ it, and that every import of its entrypoint module is granted. It answers
 nothing about "may this run": it makes no admission, launch or
 publisher-trust decision and sits in no admission or launch path. The signed
 name is a lab CID, not the Runtime's CID.
+
+## Two engines (wc-005)
+
+```rust
+wasm_capsule_tools::run::run(bundle: &Path, signature: Option<&NameSignature>, accepted: &[String],
+    engines: Engines<'_>, out_dir: &Path) -> Result<TwoEngineRun, RunRefusal>
+```
+
+**What it does, in order.** The first refusal is the answer.
+
+1. wc-004's `verify_bundle` with no grants: the one verify path (P10). A
+   refusal is the verifier's own, unchanged, and no engine starts (not even
+   `--version`) and no OUT_DIR is made.
+2. A new OUT_DIR (anything already there is refused), and inside it a new
+   `staged/` holding every entry of the verified value's `entries()`, nested
+   folders included, each written new from the checked bytes. The bundle is
+   never read again.
+3. `wasm_capsule_tools::bundle_identity` of `staged/`, compared as an opaque
+   value with the verified `cid()`. A mismatch stops the run before either
+   engine starts.
+4. Each engine's `--version`, recorded exactly as the engine printed it.
+5. `wasmtime run --invoke digest <staged entrypoint> 1592590337`, then
+   `wasmer run --invoke digest <staged entrypoint> 1592590337`: two separate
+   processes, one after the other, neither inside the other. `1592590337` is
+   the capsule's `FIXED_INPUT`, `0x5EED_0001`. Neither engine gets `--dir`,
+   `--mapdir`, `--env`, `--net` or any other directory, environment or network
+   flag. The entrypoint is the verified value's `entrypoint()`: the module the
+   audit read.
+6. Both engines must exit successfully (two equal failures are still a
+   failure), and their stdout must match byte for byte.
+7. A new `OUT_DIR/receipt.txt`, in wc-001's `key: value` shape:
+
+```text
+schema: wc-005.run-receipt/v1
+bundle: lab-cid:sha256:<hex>
+entrypoint: capsule.wasm
+function: digest
+arguments: 1592590337
+wasmtime_version: wasmtime 45.0.1 (83166ba31 2026-06-05)
+wasmer_version: wasmer 7.5.0
+wasmtime_exit: 0
+wasmtime_stdout: "230101071268130872\n"
+wasmer_exit: 0
+wasmer_stdout: "230101071268130872\n"
+```
+
+The versions are what each engine printed for `--version` on this run, never
+a fixed string, so an engine upgrade shows in the receipt. The `bundle` line is
+the lab CID alone: no engine version is part of the name. `230101071268130872`
+is `FIXED_OUTPUT`, `0x0331_7BB4_875F_B038`.
+
+**The reasons.** Each step has its own, with the path it stopped at and, for
+a system failure, the system's cause: the verifier's refusal; OUT_DIR already
+exists; OUT_DIR, a staged folder or a staged entry cannot be made; the staged
+copy gets no lab CID; the staged copy's lab CID is not the verified one; an
+engine's `--version` does not start or fails; an engine does not start; an
+engine exits unsuccessfully (with its status and stderr); the two stdouts
+differ (both shown); the receipt cannot be written.
+
+**The engine seam.** The two engine programs are inputs (`Engines`), by path,
+never read from the environment: the runner reads no environment variable,
+and a bare name is run as `./name`, never looked up on PATH. Tests pass small
+stand-in scripts they write into their own temp dir (a stand-in logs its
+arguments and prints what the test told it to), so only one test starts the
+real engines. There is one run path: the input picks which program starts,
+not what the runner does. `run_observed` is `run` with an observer told about
+`staged/` at two moments (made, and filled); tests use it to change the folder
+as another process could. `run` is `run_observed` with an observer that does
+nothing.
+
+**Engines, and the claim.** Homebrew `wasmtime` 45.0.1 and `wasmer` 7.5.0 are
+both **test-only host engines; neither is endorsed**. This is separate from
+Wasmer's role inside a capsule as the POSIX RTOS PoC. The two-engine result is
+a behaviour proof on one **core module**, on this one Mac: the same verified
+bytes give the same `digest` output on both. It is not a claim about the
+Component ABI and no claim of Component portability. Never read it as "Wasmer
+supported" or "runs anywhere". The runner makes no admission, launch or
+publisher-trust decision and sits in no admission or launch path.
+
+**Not covered.** Links in OUT_DIR's own parent folders are not checked. The
+staged folders are made with `create_dir_all`, so a link another process
+plants inside `staged/` during the run would be followed for that write; the
+staged copy's name check then refuses the run (the walk refuses links), but
+the write has happened. The engines' own caches and files (for example
+Wasmer's cache under the user's home) are the engines' business, not the
+capsule's: the capsule gets no directory, environment or network.
 
 ## Named tests
 
@@ -468,7 +556,7 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   reason; `capsule.wasm` beside it does not stand in.
 - `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
   importing module) beside the 8-byte `capsule.wasm`, the audit reads
-  `main.wasm`.
+  `main.wasm`, and `entrypoint()` is that entry.
 - `verifier_preserves_upstream_refusals` — the walk's (no manifest, a link),
   the signature check's (a malformed DID, a name that is not a lab CID, a
   signature that does not verify) and the audit's (a malformed module, code in
@@ -478,8 +566,8 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   before unsigned, unsigned before the audit, the signature before the
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
-  field, exactly five public functions (`verify_checked`, `verify_bundle` and
-  the three accessors), no `&mut self`, no `Deserialize`, `Default` or trait
+  field, exactly six public functions (`verify_checked`, `verify_bundle` and
+  the four accessors), no `&mut self`, no `Deserialize`, `Default` or trait
   impl for the value, and one literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
   `verify_checked_signature` once and `audit` once, uses neither
@@ -504,19 +592,64 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   `.gitignore`'s rule; `*.seed` is this lane's (`.gitignore`). If git cannot
   run, it fails.
 
+The two-engine runner, in `tests/run.rs`. "The fixture" is this capsule's
+manifest and the 8-byte module; "stand-ins" are the test's own engine
+scripts; every key is fresh in memory:
+
+- `same_name_same_output_on_wasmtime_and_wasmer` — a behaviour proof on the
+  two real engines (found on the test's PATH, passed in by path): the capsule
+  `tools/build` makes, bundled, signed and run, prints `FIXED_OUTPUT` for
+  `FIXED_INPUT` on both. The receipt names the lab CID, `wasmtime 45.0.1` and
+  `wasmer 7.5.0` as observed, the function, the argument and both outputs, and
+  the name holds no engine version.
+- `runner_refuses_an_unverified_bundle` — unsigned, an unlisted signer, and
+  bytes changed after signing: each is the verifier's own refusal, no OUT_DIR
+  is made, and neither stand-in is called at all.
+- `runner_passes_no_directory_env_or_network_flags` — an **argv proof**, not
+  behaviour: each stand-in got exactly `--version`, then `run --invoke digest
+  <staged module> 1592590337`; no argument is a directory, environment or
+  network flag, and wasmer's carry neither `--env` nor `--dir`.
+- `differing_engine_outputs_are_reported_as_a_failure` — stand-ins print `1`
+  and `2`: refused, both outputs named, no receipt.
+- `matching_engine_failures_are_refused` — both stand-ins exit 3 with the same
+  stdout: refused as wasmtime's failure; only wasmer failing names wasmer.
+- `runner_executes_audited_entrypoint` — the manifest names `main.wasm` beside
+  another `capsule.wasm`: both engines get the staged `main.wasm`, whose bytes
+  are the verified `entrypoint()`.
+- `runner_stages_all_verified_entries` — a bundle with nested entries: the
+  staged folder holds exactly the verified entries (four), and has the verified
+  lab CID, even though the source module changes once `staged/` is made; the
+  engines get the staged module, not the bundle's.
+- `runner_refuses_staged_name_mismatch` — a file planted in `staged/` before
+  it is named: refused with both lab CIDs, and no stand-in is called.
+- `receipt_records_observed_engine_versions` — stand-ins print other versions;
+  the result and the receipt carry those, not fixed ones.
+- `runner_operation_failures_keep_their_cause` — OUT_DIR already there, its
+  parent missing, a file where a staged folder or entry goes, a version query
+  that cannot start or fails, an engine gone after `--version`, and a file
+  already at the receipt's path: each has its own reason, path and system
+  cause.
+- `runner_has_one_verify_path_and_reads_no_environment` — the runner, comments
+  stripped: one `verify_bundle` call, no verify, walk, audit or manifest code
+  of its own, no environment read, and one `Command::new`.
+
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009 and 21
-wc-004 planted bugs in the provider format (`command: "lab"`). Each requires
+`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, 22
+wc-004 and 18 wc-005 planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
 still name the retired `tools/src/lab_name.rs` and none of `tools/src/lib.rs`,
 `tools/src/bundle.rs`, `tools/src/verify.rs`, `capsule/capsule.json`,
 `tests/common/build.rs`, `.gitignore` or `README.md`, so a killed run cannot
-restore those files (ask **R1**, pending). So each falsifier is proved by the
-repo's break → named test fails → revert method with `cargo test` in this
-workspace, and is listed as hand-proven, pending R1. Runner-caught: none.
+restore those files (ask **R1**, pending). So the falsifiers up to wc-004 were
+proved by the repo's break → named test fails → revert method with `cargo
+test` in this workspace, and are listed as hand-proven, pending R1. wc-005's
+18, wc-004's new F-WC4-ENTRYPOINT-ACCESSOR, and the five wc-004 entries whose
+anchor text wc-005 moved were run by the canonical runner
+(`falsify.py --from lab/wasm-capsule/falsifiers.json`) and are runner-caught
+(LOG.md has the run).
 
 Task 010's seven, each hand-proven, pending R1:
 
@@ -590,3 +723,33 @@ updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
   constructor, or mutable access to the verified value.
 - F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT — a second signature check or a
   second audit call in the tools crate.
+
+wc-005's 18, runner-caught. wc-004 gains F-WC4-ENTRYPOINT-ACCESSOR (the
+verified value's `entrypoint()` returns the first entry), also runner-caught.
+wc-005 moved the anchor text of F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
+-ORDER-AUDIT-FIRST, -SEALED-NEW and -SECOND-AUDIT (the verifier now finds the
+entrypoint's index); each plants the same bug as before and was runner-caught
+again.
+
+- F-WC5a — the runner skips verification and runs the bundle's checked bytes
+  unverified.
+- F-WC5b — the runner compares only the exit status, not stdout.
+- F-WC5c — wasmtime gets `--dir .` (ambient filesystem authority).
+- F-WC5d — wasmer gets `--env` and `--dir .`.
+- F-WC5-EQUAL-FAILURES — two engines failing with the same status pass.
+- F-WC5-ARGUMENT — both engines invoke `digest` with another argument, so they
+  agree on a wrong result.
+- F-WC5-ENTRY-SUBSTITUTE — the engines run staged `capsule.wasm`, whatever the
+  verified entrypoint is.
+- F-WC5-SOURCE-MODULE — the engines run the source bundle's module, not the
+  staged copy.
+- F-WC5-STAGE-OMIT-NESTED — staging leaves out the nested entries.
+- F-WC5-NAME-BYPASS — the staged copy's name check is ignored.
+- F-WC5-VERSION-HARDCODED — the receipt records a fixed wasmtime version.
+- F-WC5-CAUSE-STAGE, -CAUSE-VERSION, -CAUSE-START and -CAUSE-RECEIPT — a
+  staging, version-query, engine-start or receipt-write failure is reported
+  under another step's reason.
+- F-WC5-SECOND-VERIFY — the runner verifies a second time.
+- F-WC5-ENGINE-ENV — an environment variable can replace the wasmer program.
+- F-WC5-SECOND-SPAWN — the module run starts its engine outside the one start
+  function.

@@ -38,9 +38,9 @@ use capsule_identity::{
 use elastos_common::CapsuleManifest;
 use wasm_capsule_audit::{audit, DeclaredImport, Refusal as AuditRefusal};
 
-/// A bundle the verifier passed: the checked bundle and the import list the
-/// audit returned for its entrypoint module (exactly the module's imports, in
-/// order).
+/// A bundle the verifier passed: the checked bundle, which of its entries is
+/// the entrypoint module the audit read, and the import list the audit
+/// returned for it (exactly the module's imports, in order).
 ///
 /// Its fields are private, it has no public constructor and no `&mut`
 /// access, and it cannot be deserialized, so a value exists only as
@@ -50,6 +50,7 @@ use wasm_capsule_audit::{audit, DeclaredImport, Refusal as AuditRefusal};
 pub struct VerifiedBundle {
     checked: CheckedBundle,
     imports: Vec<DeclaredImport>,
+    entrypoint: usize,
 }
 
 impl VerifiedBundle {
@@ -66,6 +67,12 @@ impl VerifiedBundle {
     /// The audit's own import list for the entrypoint module.
     pub fn imports(&self) -> &[DeclaredImport] {
         &self.imports
+    }
+
+    /// The checked entry the manifest's `entrypoint` names: the module the
+    /// audit read, so a caller runs it without reading the manifest again.
+    pub fn entrypoint(&self) -> &BundleEntry {
+        &self.checked.entries()[self.entrypoint]
     }
 }
 
@@ -125,9 +132,14 @@ pub fn verify_checked(
 ) -> Result<VerifiedBundle, VerifyRefusal> {
     let signature = signature.ok_or(VerifyRefusal::Unsigned)?;
     verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;
-    let module = entrypoint_module(&checked)?;
+    let entrypoint = entrypoint_index(&checked)?;
+    let module = &checked.entries()[entrypoint].content;
     let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;
-    Ok(VerifiedBundle { checked, imports })
+    Ok(VerifiedBundle {
+        checked,
+        imports,
+        entrypoint,
+    })
 }
 
 /// Verify the bundle at `bundle`: cc-capsule-identity's `checked_bundle`, the
@@ -144,16 +156,16 @@ pub fn verify_bundle(
     verify_checked(checked, signature, accepted, granted)
 }
 
-/// The checked bytes of the module the manifest's `entrypoint` names. No
-/// other entry stands in for it.
-fn entrypoint_module(checked: &CheckedBundle) -> Result<&[u8], VerifyRefusal> {
+/// Where, among the checked entries, the module the manifest's `entrypoint`
+/// names is. No other entry stands in for it.
+fn entrypoint_index(checked: &CheckedBundle) -> Result<usize, VerifyRefusal> {
     let entrypoint = manifest_entrypoint(checked)?;
     let module = checked
         .entries()
         .iter()
-        .find(|entry| entry.path == entrypoint);
+        .position(|entry| entry.path == entrypoint);
     match module {
-        Some(entry) => Ok(&entry.content),
+        Some(index) => Ok(index),
         None => Err(VerifyRefusal::EntrypointMissing { entrypoint }),
     }
 }

@@ -2,7 +2,8 @@
 
 This lane is falsifiable lab tooling, not a second Runtime. It claims no
 Agent-Host grade row (Rong spec, section 3). wc-001 gives a reproducible
-zero-import core-Wasm capsule and a receipt; wc-003..005 build on it. wc-002,
+zero-import core-Wasm capsule and a receipt; wc-003..005 build on it (wc-005,
+the two-engine runner, is below). wc-002,
 the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 
 ## What you can take
@@ -45,9 +46,21 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   `CapsuleManifest`), and runs `wasm_capsule_audit::audit` on those checked
   bytes with the granted imports, unchanged. `verify_bundle(bundle, ...)` is
   `checked_bundle` and then `verify_checked`. It returns a sealed
-  `VerifiedBundle` (`cid()`, `entries()`, `imports()`) for wc-005 to stage.
+  `VerifiedBundle` (`cid()`, `entries()`, `entrypoint()`, `imports()`) that
+  wc-005 stages and runs.
   It is a lab check of name, signer and imports; it is no admission or launch
   decision (README.md, "Verify (wc-004)").
+- `wasm_capsule_tools::run` — wc-005's runner, a library function (no
+  command: the signature is in memory only). `run(bundle, signature,
+  accepted, engines, out_dir)` calls `verify_bundle` with no grants, stages
+  the verified `entries()` into a new `OUT_DIR/staged/`, checks the copy's lab
+  CID against the verified `cid()`, then runs the verified `entrypoint()` with
+  `wasmtime run --invoke digest` and `wasmer run --invoke digest` and the fixed
+  argument, as two separate processes with no directory, environment or network
+  flag. Both must exit successfully with byte-identical stdout; a receipt
+  records the lab CID, both observed engine versions, the argument and both
+  outputs. The engine programs are inputs by path (README.md, "Two engines
+  (wc-005)").
 - `capsule/capsule.json` — this capsule's `elastos.capsule/v1` manifest, with
   only fields of the Runtime's `CapsuleManifest`. The tools crate compiles its
   bytes in (`CAPSULE_MANIFEST`). It lists no Wasm imports: the module's own
@@ -98,6 +111,14 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 - What the walk covers, and what it does not, is cc-capsule-identity's claim
   (`lab/capsule-identity/README.md`); this lane claims only that it names
   bundles through that one function.
+- wc-005's two-engine result is a behaviour proof on one **core module**, on
+  this one Mac: the same verified bytes print the same `digest` output under
+  `wasmtime` 45.0.1 and `wasmer` 7.5.0. Both are **test-only host engines,
+  neither endorsed** — separate from Wasmer's role inside a capsule as the
+  POSIX RTOS PoC. It is not about the Component ABI and claims no Component
+  portability. Never call Wasmer "supported", and never say the capsule "runs
+  anywhere". Engine upgrades can change behaviour, so every receipt records the
+  versions the engines printed, and never puts them in the lab CID.
 - `digest` is a placeholder pure function to anchor identity and portability
   work. It is not a product capability.
 
@@ -231,8 +252,9 @@ The canonical falsifier runner (`examples/agent-host/falsify.py`) now has a
 `lab` command for this workspace (`cargo test --workspace`). Its recovery
 targets (`PROVIDER_TARGETS`) still name the retired `tools/src/lab_name.rs` and
 not this lane's current edit files (`tools/src/lib.rs`, `tools/src/bundle.rs`,
-`tools/src/verify.rs`, `capsule/capsule.json`, `tests/common/build.rs`,
-`.gitignore`, `README.md`), so a killed run cannot restore them (ask **R1**,
-pending, owned by the model-provider lane). Until that lands, the lane's
-falsifiers are proved by hand (break → named test fails → revert); do not add
-a second runner or edit `falsify.py`.
+`tools/src/verify.rs`, `tools/src/run.rs`, `capsule/capsule.json`,
+`tests/common/build.rs`, `.gitignore`, `README.md`), so a killed run cannot
+restore them (ask **R1**, pending, owned by the model-provider lane). The
+falsifiers up to wc-004 were proved by hand (break → named test fails →
+revert); wc-005's were run by the canonical runner. Do not add a second runner
+or edit `falsify.py`.

@@ -97,7 +97,7 @@
     `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13` (the pinned-sha256 tests pass).
   - `cargo test --locked --manifest-path lab/capsule-identity/Cargo.toml`: 67 passed, 0 failed.
     `cargo test -p wasm-capsule-audit --locked` (from `lab/wasm-capsule/`): 20 passed, 0 failed.
-  - Both `lab-sha256` greps: empty output, exit 1.
+  - Both retired-label greps (Acceptance, the merge gate): empty output, exit 1.
   - Each wc-004 falsifier, planted alone, then the named tests run with `--exact`, then the files restored byte for
     byte (the `git diff` sha256 was the same before and after). Every named test failed at an assertion with no build
     error. The failing line is in `tests/verify.rs`:
@@ -120,3 +120,24 @@
     "the verifier's public functions");
     F-WC4-SECOND-SIG, -SECOND-AUDIT: `verifier_has_one_check_path` (:630, :635).
   - All 21: hand-proven, pending R1 (runner-caught: none). The `falsify.py --from` run is pending R1, not a PASS.
+- wc-005 (task 006): `wasm_capsule_tools::run::run` / `run_observed` (`tools/src/run.rs`), a library function, no
+  command. It calls wc-004's `verify_bundle` once with no grants (a refusal starts no engine and makes no OUT_DIR),
+  stages every verified `entries()` entry new into `OUT_DIR/staged/` from the checked bytes, checks the copy's lab CID
+  with `bundle_identity` against the verified `cid()`, queries each engine's `--version`, runs the verified
+  `entrypoint()` with `wasmtime run --invoke digest <module> 1592590337` and `wasmer run --invoke digest <module>
+  1592590337` (two separate processes, no `--dir`/`--mapdir`/`--env`/`--net`), requires both to exit 0 with
+  byte-identical stdout, and writes `OUT_DIR/receipt.txt` (`wc-005.run-receipt/v1`: lab CID, observed versions,
+  function, argument, both exits and outputs). Engines are inputs by path, never the environment; one `Command::new`.
+  Each step has its own refusal with path and cause. Spec-check FIX: `VerifiedBundle::entrypoint()` added (the
+  verifier stores the audited entry's index), `verified_bundle_is_sealed` updated, `path_to_run` shared with
+  `bundle.rs`. 11 named tests in `tests/run.rs` (stand-in engine scripts written into each test's temp dir; one test
+  starts the real engines). Real run: `wasmtime 45.0.1 (83166ba31 2026-06-05)` and `wasmer 7.5.0`, argument
+  `1592590337` (`FIXED_INPUT`), both stdout `"230101071268130872\n"` (`FIXED_OUTPUT`), exit 0. A behaviour proof on one
+  core module on this Mac; both engines test-only, neither endorsed; not the Component ABI. Falsifiers: 18 new F-WC5
+  (F-WC5a to F-WC5d and 14 more) and F-WC4-ENTRYPOINT-ACCESSOR; F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
+  -ORDER-AUDIT-FIRST, -SEALED-NEW and -SECOND-AUDIT re-anchored (same bug). All 24 run by the canonical runner,
+  `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4-ENTRY-SUBSTITUTE
+  F-WC4-ENTRY-HARDCODED F-WC4-ENTRYPOINT-ACCESSOR F-WC4-ORDER-AUDIT-FIRST F-WC4-SEALED-NEW F-WC4-SECOND-AUDIT`:
+  "summary: 24 CAUGHT of 24", exit 0 (runner-caught). F-WC5a and F-WC5-ENGINE-ENV also checked by hand: each named
+  test built and failed at its assertion (`tests/run.rs` "the runner ran lab-cid:…", "the runner reads the
+  environment: env::"). `LOG.md`'s gate line reworded so both retired-label greps give empty output, exit 1.

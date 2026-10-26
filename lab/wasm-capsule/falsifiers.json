@@ -1,5 +1,5 @@
 {
-  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001, task 010, task 009, wc-004 and wc-005 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice; or the verified value's entrypoint() returns another entry. wc-005 (the two-engine runner, tools/src/run.rs): verification is skipped; only the exit status is compared; wasmtime gets --dir . or wasmer gets --env and --dir .; two equal failures pass; both engines get another argument; the engines run staged capsule.wasm or the source bundle's module instead of the verified entrypoint's staged copy; staging leaves out nested entries; the staged name check is ignored; the receipt records a fixed engine version; a staging, version-query, engine-start or receipt-write failure takes another step's reason; the runner verifies twice, reads the environment for an engine or starts an engine outside its one start function. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so the entries up to wc-004 are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace. wc-005's entries, F-WC4-ENTRYPOINT-ACCESSOR and the five wc-004 entries whose anchors wc-005 moved were run by the canonical runner (falsify.py --from lab/wasm-capsule/falsifiers.json) and are runner-caught.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -792,8 +792,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        .find(|entry| entry.path == entrypoint);\n",
-          "new": "        .find(|entry| entry.path == entrypoint)\n        .or_else(|| checked.entries().iter().find(|entry| entry.path.ends_with(\".wasm\")));\n"
+          "old": "        .position(|entry| entry.path == entrypoint);\n",
+          "new": "        .position(|entry| entry.path == entrypoint)\n        .or_else(|| checked.entries().iter().position(|entry| entry.path.ends_with(\".wasm\")));\n"
         }
       ],
       "tests": [
@@ -808,8 +808,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        .find(|entry| entry.path == entrypoint);\n",
-          "new": "        .find(|entry| entry.path == \"capsule.wasm\");\n"
+          "old": "        .position(|entry| entry.path == entrypoint);\n",
+          "new": "        .position(|entry| entry.path == \"capsule.wasm\");\n"
         }
       ],
       "tests": [
@@ -872,8 +872,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    let module = entrypoint_module(&checked)?;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    let module = entrypoint_module(&checked)?;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n"
+          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    let entrypoint = entrypoint_index(&checked)?;\n    let module = &checked.entries()[entrypoint].content;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let entrypoint = entrypoint_index(&checked)?;\n    let module = &checked.entries()[entrypoint].content;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n"
         }
       ],
       "tests": [
@@ -921,7 +921,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
           "old": "impl VerifiedBundle {\n",
-          "new": "impl VerifiedBundle {\n    pub fn new(checked: CheckedBundle, imports: Vec<DeclaredImport>) -> Self {\n        VerifiedBundle { checked, imports }\n    }\n\n"
+          "new": "impl VerifiedBundle {\n    pub fn new(checked: CheckedBundle, imports: Vec<DeclaredImport>) -> Self {\n        VerifiedBundle { checked, imports, entrypoint: 0 }\n    }\n\n"
         }
       ],
       "tests": [
@@ -968,12 +968,316 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    Ok(VerifiedBundle { checked, imports })\n",
-          "new": "    audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    Ok(VerifiedBundle { checked, imports })\n"
+          "old": "    Ok(VerifiedBundle {\n        checked,\n",
+          "new": "    audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    Ok(VerifiedBundle {\n        checked,\n"
         }
       ],
       "tests": [
         "verifier_has_one_check_path"
+      ]
+    },
+    {
+      "id": "F-WC4-ENTRYPOINT-ACCESSOR",
+      "title": "the verified value's entrypoint() returns the first entry, not the audited module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        &self.checked.entries()[self.entrypoint]\n",
+          "new": "        &self.checked.entries()[0]\n"
+        }
+      ],
+      "tests": [
+        "verifier_uses_manifest_entrypoint"
+      ]
+    },
+    {
+      "id": "F-WC5a",
+      "title": "the runner skips verification and runs the bundle's checked bytes unverified",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let verified = verify_bundle(bundle, signature, accepted, &[])\n        .map_err(|refusal| RunRefusal::new(bundle, Reason::Verify(refusal)))?;\n    let (cid, entries, entrypoint) = (verified.cid(), verified.entries(), verified.entrypoint());\n",
+          "new": "    let _ = (signature, accepted, verify_bundle);\n    let checked = capsule_identity::checked_bundle(bundle).expect(\"the planted bypass reads the bundle\");\n    let (cid, entries) = (checked.cid(), checked.entries());\n    let entrypoint = entries.iter().find(|entry| entry.path == \"capsule.wasm\").expect(\"a module\");\n"
+        }
+      ],
+      "tests": [
+        "runner_refuses_an_unverified_bundle"
+      ]
+    },
+    {
+      "id": "F-WC5b",
+      "title": "the runner compares only the exit status, not stdout",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    if wasmtime.output.stdout != wasmer.output.stdout {\n",
+          "new": "    if wasmtime.output.status != wasmer.output.status {\n"
+        }
+      ],
+      "tests": [
+        "differing_engine_outputs_are_reported_as_a_failure"
+      ]
+    },
+    {
+      "id": "F-WC5c",
+      "title": "the runner gives wasmtime --dir . (ambient filesystem authority)",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "            Engine::Wasmtime => &[\"run\", \"--invoke\", INVOKE_FUNCTION],\n",
+          "new": "            Engine::Wasmtime => &[\"run\", \"--dir\", \".\", \"--invoke\", INVOKE_FUNCTION],\n"
+        }
+      ],
+      "tests": [
+        "runner_passes_no_directory_env_or_network_flags"
+      ]
+    },
+    {
+      "id": "F-WC5d",
+      "title": "the runner gives wasmer --env and --dir .",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "            Engine::Wasmer => &[\"run\", \"--invoke\", INVOKE_FUNCTION],\n",
+          "new": "            Engine::Wasmer => &[\"run\", \"--env\", \"LAB=1\", \"--dir\", \".\", \"--invoke\", INVOKE_FUNCTION],\n"
+        }
+      ],
+      "tests": [
+        "runner_passes_no_directory_env_or_network_flags"
+      ]
+    },
+    {
+      "id": "F-WC5-EQUAL-FAILURES",
+      "title": "the runner accepts two engines that fail with the same status",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        if !run.output.status.success() {\n",
+          "new": "        if wasmtime.output.status != wasmer.output.status {\n"
+        }
+      ],
+      "tests": [
+        "matching_engine_failures_are_refused"
+      ]
+    },
+    {
+      "id": "F-WC5-ARGUMENT",
+      "title": "both engines invoke digest with another argument, so they agree on a wrong result",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "pub const INVOKE_ARGUMENTS: &[&str] = &[\"1592590337\"];\n",
+          "new": "pub const INVOKE_ARGUMENTS: &[&str] = &[\"1\"];\n"
+        }
+      ],
+      "tests": [
+        "same_name_same_output_on_wasmtime_and_wasmer"
+      ]
+    },
+    {
+      "id": "F-WC5-ENTRY-SUBSTITUTE",
+      "title": "the engines run staged capsule.wasm whatever the verified entrypoint is",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let module = staged.join(&entrypoint.path);\n",
+          "new": "    let module = staged.join(\"capsule.wasm\");\n"
+        }
+      ],
+      "tests": [
+        "runner_executes_audited_entrypoint"
+      ]
+    },
+    {
+      "id": "F-WC5-SOURCE-MODULE",
+      "title": "the engines run the source bundle's module, not the staged copy",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let module = staged.join(&entrypoint.path);\n",
+          "new": "    let module = bundle.join(&entrypoint.path);\n"
+        }
+      ],
+      "tests": [
+        "runner_stages_all_verified_entries"
+      ]
+    },
+    {
+      "id": "F-WC5-STAGE-OMIT-NESTED",
+      "title": "staging leaves out the nested entries",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    for entry in entries {\n",
+          "new": "    for entry in entries.iter().filter(|entry| !entry.path.contains('/')) {\n"
+        }
+      ],
+      "tests": [
+        "runner_stages_all_verified_entries"
+      ]
+    },
+    {
+      "id": "F-WC5-NAME-BYPASS",
+      "title": "the runner ignores the staged copy's name check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    check_staged_name(&staged, cid)?;\n",
+          "new": "    let _ = check_staged_name(&staged, cid);\n"
+        }
+      ],
+      "tests": [
+        "runner_refuses_staged_name_mismatch"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-HARDCODED",
+      "title": "the receipt records a fixed wasmtime version, not the observed one",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime_version = query_version(Engine::Wasmtime, engines.wasmtime)?;\n",
+          "new": "    query_version(Engine::Wasmtime, engines.wasmtime)?;\n    let wasmtime_version = String::from(\"wasmtime 45.0.1\");\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-CAUSE-STAGE",
+      "title": "a staging write failure is reported as an OUT_DIR failure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    write_new_file(&path, &entry.content, Reason::EntryNotStaged)\n",
+          "new": "    write_new_file(&path, &entry.content, Reason::OutDirNotCreated)\n"
+        }
+      ],
+      "tests": [
+        "runner_operation_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-CAUSE-VERSION",
+      "title": "a version query that cannot start is reported as an engine start failure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        .map_err(|cause| RunRefusal::new(path, Reason::VersionNotQueried { engine, cause }))?;\n",
+          "new": "        .map_err(|cause| RunRefusal::new(path, Reason::EngineNotStarted { engine, cause }))?;\n"
+        }
+      ],
+      "tests": [
+        "runner_operation_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-CAUSE-START",
+      "title": "an engine that cannot start is reported as a version query failure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let output = start(path, &engine_args(engine, module))\n        .map_err(|cause| RunRefusal::new(path, Reason::EngineNotStarted { engine, cause }))?;\n",
+          "new": "    let output = start(path, &engine_args(engine, module))\n        .map_err(|cause| RunRefusal::new(path, Reason::VersionNotQueried { engine, cause }))?;\n"
+        }
+      ],
+      "tests": [
+        "runner_operation_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-CAUSE-RECEIPT",
+      "title": "a receipt write failure is reported as a staging failure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    write_new_file(&receipt, text.as_bytes(), Reason::ReceiptNotWritten)?;\n",
+          "new": "    write_new_file(&receipt, text.as_bytes(), Reason::EntryNotStaged)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_operation_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-SECOND-VERIFY",
+      "title": "the runner verifies the bundle a second time",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    compare(&wasmtime, &wasmer, &module)?;\n",
+          "new": "    compare(&wasmtime, &wasmer, &module)?;\n    verify_bundle(bundle, signature, accepted, &[]).map_err(|refusal| RunRefusal::new(bundle, Reason::Verify(refusal)))?;\n"
+        }
+      ],
+      "tests": [
+        "runner_has_one_verify_path_and_reads_no_environment"
+      ]
+    },
+    {
+      "id": "F-WC5-ENGINE-ENV",
+      "title": "an environment variable can replace the wasmer program",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmer = run_engine(Engine::Wasmer, engines.wasmer, &module)?;\n",
+          "new": "    let wasmer_override = std::env::var_os(\"LAB_WASMER\").map(PathBuf::from);\n    let wasmer = run_engine(Engine::Wasmer, wasmer_override.as_deref().unwrap_or(engines.wasmer), &module)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_has_one_verify_path_and_reads_no_environment"
+      ]
+    },
+    {
+      "id": "F-WC5-SECOND-SPAWN",
+      "title": "the module run starts its engine outside the one start function",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let output = start(path, &engine_args(engine, module))\n",
+          "new": "    let output = Command::new(path).args(engine_args(engine, module)).output()\n"
+        }
+      ],
+      "tests": [
+        "runner_has_one_verify_path_and_reads_no_environment"
       ]
     }
   ]
