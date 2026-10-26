@@ -6,7 +6,7 @@ test: tests::a12_leftover_without_marker_is_found
             found.insert(path.to_path_buf());
         }
 --- new
-        if keep_created_path(before, path, ino) && allow_moved_away(path) {
+        if keep_created_path(before, path, &id) && allow_moved_away(path) {
             match fs::read(path) {
                 Ok(bytes) if bytes == LEFTOVER_MARKER => {
                     found.insert(path.to_path_buf());
