@@ -5,7 +5,7 @@ Draft only. Do not merge. This folder reviews draft PR #296 at
 
 ```text
 Lane:         lab/review-c9-296-r3
-Branch / PR:  cursor/review-c9-296-r3-2982
+Branch / PR:  cursor/review-c9-296-r3-2982  https://github.com/Elacity/elastos-agent-host-spike/pull/361
 Reviewed:     Elacity/elastos-agent-host-spike#296
 Head:         9a769ad109164c8e40b080d63144d8138141baf0
 Tree:         /tmp/wt/linux-confine-296-r3
@@ -13,8 +13,8 @@ Machine:      Linux 6.12.94+ x86_64, rustc 1.91.0, Landlock ABI 6
 ```
 
 Prior reviews: draft PR #326 (`lab/review-c9-296/`) and draft PR #349
-(`lab/review-c9-296-v2/`). This folder re-runs the claimed suite on the
-fix head and plants new mutants for the three WEAK items in #349.
+(`lab/review-c9-296-v2/`). This folder re-ran the claimed suite on the
+fix head and planted new mutants for the three WEAK items in #349.
 
 ```bash
 git fetch origin cursor/linux-confine-e156

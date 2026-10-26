@@ -53,7 +53,7 @@ CLONE_ASSERT_EITHER = """    assert!(
         clone
     );"""
 RND_OLD = "#define RNDGETENTCNT 0x80045200"
-RND_NEW = "#define RNDGETENTCNT 0"
+RND_NEW = "#define RNDGETENTCNT 0x00000000"
 BIND_OLD = """        if (mount("/dev/urandom", devpath, NULL, MS_BIND, NULL) != 0) {
             refuse_errno("linux confinement refused: the ioctl-dev fixture cannot be planted", errno);
         }"""
@@ -63,10 +63,12 @@ ABI5_OLD = """    if (abi < 5) {
     }
 """
 HANDLED_OLD = (
-    "           LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE |\n"
+    "           LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE |\n"
     "           LANDLOCK_ACCESS_FS_IOCTL_DEV;"
 )
-HANDLED_NEW = "           LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE;"
+HANDLED_NEW = (
+    "           LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE;"
+)
 ABI_FN_OLD = """static int landlock_abi(void) {
     long n = syscall(SYS_landlock_create_ruleset, NULL, (size_t)0, LANDLOCK_CREATE_RULESET_VERSION);
     if (n < 0) {
@@ -230,7 +232,7 @@ CHECKS = [
             }
         ],
         "test": "a_low_landlock_abi_refuses_the_start",
-        "caught": ["device ioctl"],
+        "caught": ["abi-ok"],
     },
 ]
 
@@ -244,7 +246,7 @@ def one(root: pathlib.Path, check: dict) -> int:
         if original.count(edit["old"]) != 1:
             print(f"{name} NOT RUN: {edit['file']} standing line count={original.count(edit['old'])}")
             return 1
-        if edit["new"] and edit["new"] in original:
+        if edit["new"] and original.count(edit["new"]) and edit["old"] not in original:
             print(f"{name} NOT RUN: mutant text already present in {edit['file']}")
             return 1
         originals.append((source, original))
@@ -310,10 +312,14 @@ def no_landlock(root: pathlib.Path) -> int:
 
 def main() -> int:
     root = tree()
+    wanted = set(sys.argv[1:])
     failed = 0
     for check in CHECKS:
+        if wanted and check["id"] not in wanted:
+            continue
         failed |= one(root, check)
-    failed |= no_landlock(root)
+    if not wanted or "M-R3-NO-LANDLOCK" in wanted:
+        failed |= no_landlock(root)
     dirty = subprocess.check_output(["git", "status", "--short"], cwd=root, text=True)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     print(f"worktree HEAD {head}")
