@@ -1723,7 +1723,7 @@ const OPERATIONS_HEADING: &str = "## Operations and the rights they need";
 
 /// The providers whose `CONFINEMENT.md` operations table names the tests it
 /// cites.
-const OPERATIONS_TABLES: &[&str] = &["did-provider"];
+const OPERATIONS_TABLES: &[&str] = &["did-provider", "wallet-provider"];
 
 /// Whether `character` can sit directly beside a falsifier id token.
 fn falsifier_id_character(character: char) -> bool {
@@ -2178,7 +2178,9 @@ fn every_falsifier_id_is_named_in_its_confinement_document() {
 ///
 /// Falsifier: WP78 renames `outside_write_denied` in did's `tests/confine.rs`,
 /// so the did table's citation names a function that file does not hold and
-/// this test fails.
+/// this test fails. WP83 renames `confined_outside_write_is_denied` in this
+/// provider's `tests/confine.rs`, so the wallet table's citation names a
+/// function that file does not hold and this test fails.
 #[test]
 fn every_operations_table_cites_existing_tests() {
     let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))

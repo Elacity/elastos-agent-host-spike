@@ -394,6 +394,7 @@ Task 004 adds the agent-memory rows to the same Cargo-derived table:
 - `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
 - `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
+- `real_agent_host_journal_under_usersai_principal`: BLOCKED (UsersAI binding), the P7 gap in the default table. Forced with `--ignored`, it reads the real manifest and requires every capability under `UsersAI/self`; agent-host moves its journal when the Runtime binding lands.
 
 F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
 instances the same principal. Both are retired under `UsersAI binding;
@@ -650,8 +651,9 @@ Sasha can select the additional real-capsule journey with:
 bash lab/agent-conformance/run.sh --agent-host
 ```
 
-The plain command keeps its existing test selection. The opt-in target copies
-only `Cargo.toml`, `Cargo.lock`, `capsule.json` and `src/` under the lane target,
+The plain command includes the P7 manifest gap row. The opt-in journey, when
+forced with Cargo's `--ignored`, copies only `Cargo.toml`, `Cargo.lock`,
+`capsule.json` and `src/` under the lane target,
 places the read-only Bus contract beside that build tree, and uses the shared
 offline builder, bundle stager, operator, controller and cleanup census.
 A passing row requires exactly the journal write and read requests in that
@@ -660,8 +662,16 @@ launched component SHA-256 and bundle lab CID belong to the same-run receipt.
 Model calls (RT3), UsersAI principal binding, parallel isolation and CID launch
 remain separate acceptance work.
 
-The current candidate fails the two-request assertion: `Users/self` requires
-a principal before the request reaches the shell, and this CLI launch supplies
-none. See the UsersAI binding section in GAPS.md. F-agent-host-grant is defined
-but awaits a passing baseline; its failure alone would supply zero mutation
-proof while the baseline already fails.
+`real_agent_host_gets_no_ungranted_authority` is BLOCKED (UsersAI binding): a
+principal-scoped CLI launch must let the journal requests reach the shell.
+Its exact two-request assertion and label are preserved. See the UsersAI
+binding table in GAPS.md. F-agent-host-grant is retired under that blocker,
+with its exact mutation bytes kept until the live baseline can pass.
+The active agent-host checks under `--agent-host` include
+`agent_host_journal_census_detects_planted_paths`,
+`agent_host_grants::request_sequence_requires_exact_order_and_one_session`,
+`agent_host_copy_takes_only_listed_files`,
+`agent_host_row_requires_its_launched_identity`, and
+`staging_uses_manifest_entrypoint_and_refuses_escape`. The shared
+`agent_host_grants::tests` also run. These exercise the harness with fixtures;
+the real capsule's shell-denial journey stays BLOCKED.

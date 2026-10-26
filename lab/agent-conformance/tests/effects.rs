@@ -722,6 +722,31 @@ fn agent_memory_under_own_principal() {
 }
 
 #[test]
+#[ignore = "blocked: UsersAI binding"]
+fn real_agent_host_journal_under_usersai_principal() {
+    let path = agent_conformance::build::repository().join("examples/agent-host/capsule.json");
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .expect("agent-host manifest metadata")
+            .is_file(),
+        "agent-host manifest must be a regular file without symlinks"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read agent-host manifest"))
+            .expect("agent-host manifest JSON");
+    for entry in manifest["capabilities"]
+        .as_array()
+        .expect("agent-host manifest capabilities array")
+    {
+        let entry = entry.as_str().expect("agent-host capability string");
+        assert!(
+            entry.starts_with("localhost://UsersAI/self/"),
+            "P7 gap: agent-host journal bound {entry} is not under UsersAI/self"
+        );
+    }
+}
+
+#[test]
 #[ignore = "blocked: UsersAI binding; AC-002-ARGS"]
 fn agent_cannot_read_other_agent_memory() {
     panic!("blocked: UsersAI binding; AC-002-ARGS — Runtime must enforce agent roots and carry the target selector and result");

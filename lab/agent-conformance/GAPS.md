@@ -605,14 +605,16 @@ guest environment variables or receives a runtime selector.
 ### UsersAI binding — principal-scoped agent launches
 
 Task 028's real capsule also keeps its journal under
-`localhost://Users/self/.AppData/Agents/agent-host/`. The
-`agent_memory_under_own_principal` row stays BLOCKED for that capsule too.
-The opt-in deny journey currently fails before shell decisions: the CLI uses
-`Runtime::run_local`, which supplies no principal, and the bridge requires a
-principal for `Users/self` before it posts a pending capability request.
-The live controller observed zero requests. A principal-scoped CLI launch
-contract is needed before the required two shell denials can be measured.
-The task keeps its exact two-request assertion and adds no ignored row.
+`localhost://Users/self/.AppData/Agents/agent-host/`.
+`real_agent_host_journal_under_usersai_principal` records this P7 gap as
+BLOCKED (UsersAI binding) in the default table. When forced with `--ignored`,
+it reads the real manifest and requires every capability to use `UsersAI/self`.
+The opt-in `real_agent_host_gets_no_ungranted_authority` journey has the same
+blocker and keeps its exact two-request assertion. The CLI uses
+`Runtime::run_local` with an unbound principal; the bridge requires a principal
+for `Users/self` before it posts a pending capability request. The live
+controller observed zero requests. A principal-scoped CLI launch will let the
+two journal requests reach the shell for the required denials.
 
 Anders must bind the existing component launch to a verified agent principal,
 resolve `UsersAI/self` to that principal's root, and enforce the principal and
@@ -627,12 +629,19 @@ a separate Home supplies zero principal evidence.
 | Ignored test | Blocker IDs | Acceptance after the Runtime change |
 | --- | --- | --- |
 | `agent_memory_under_own_principal` | UsersAI binding; AC-002-ARGS | Launch the two identities in `fixtures/agent-principals.json` through the existing primitive, write one memory object each, and compare the Runtime's resolved owners and distinct roots. |
+| `real_agent_host_journal_under_usersai_principal` | UsersAI binding | The Runtime binds the launch to a verified agent principal and scopes `UsersAI/self`; agent-host then moves its journal as `examples/agent-host/handoff/USERSAI-JOURNAL.md:21-23` says. |
+| `real_agent_host_gets_no_ungranted_authority` | UsersAI binding | A principal-scoped CLI launch lets the two journal requests reach the shell. |
 | `agent_cannot_read_other_agent_memory` | UsersAI binding; AC-002-ARGS | Launch agent-b with its verified context, request agent-a's exact memory path, and require a reason with zero returned bytes. F-ac2a then explicitly grants that read. |
 | `agent_can_read_human_space_with_grant` | UsersAI binding; AC-002-ARGS | Reuse `Controller` to seed the human object and grant the verified agent its exact read; compare the complete bytes inside the existing probe read path. |
 
-These tests are explicit failing placeholders when forced with `--ignored`.
-They remain BLOCKED until the verified launch and typed selector/result seam
-can be wired into the existing helpers. AC-002-ARGS requires the WIT,
+The two real agent-host rows remain BLOCKED until the verified launch binding
+lands. F-agent-host-grant is retired under `UsersAI binding` with its exact
+mutation bytes preserved; a passing live baseline is required before it returns.
+F-agent-host-p7 removes only the manifest test's ignore: the current journal
+bound must fail with the fixed P7 reason, then return to ignored after restore.
+The three probe principal tests are explicit failing placeholders when forced
+with `--ignored`. They also require the typed selector/result seam in the
+existing helpers. AC-002-ARGS requires the WIT,
 ComponentProvider and CLI forwarding change described above, including the
 resolved ownership result. Merely removing an ignore or changing a fixture
 cannot establish acceptance. F-ac2a and F-ac2b are retired in `falsifiers.json`

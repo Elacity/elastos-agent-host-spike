@@ -5534,3 +5534,185 @@ this lane. The current branch is zero commits ahead and zero behind the
 cached `spike/spike/agent-host` ref; remote state was left unfetched under the
 builder's network rule. The builder made zero Git-state changes. The current
 worktree remains protected for supervisor review and publication.
+
+
+## 032 — agent-host journal P7 gap and principal-bound deny journey
+
+The default table now records the real agent-host journal as BLOCKED (UsersAI binding); the opt-in deny journey uses the same blocker and keeps its complete body, exact two-request assertion and label.
+
+`tests/effects.rs::real_agent_host_journal_under_usersai_principal` reads the
+real manifest through `build::repository()`, refuses a symlink, parses it with
+`serde_json`, and requires each capability under `localhost://UsersAI/self/`.
+The ignored body only reads the manifest. Runtime owns the verified launch
+principal and `UsersAI/self` scope; agent-host owns the later journal move.
+The existing report renderer supplies the P7 label, tested by
+`tests/report.rs::p7_gap_row_is_blocked_with_label`. Both tests have rows in
+the UsersAI table in `GAPS.md`; `RUNBOOK.md` names the active harness checks.
+
+### Three-step F-agent-host-p7 run
+
+All commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, the lane's `target/host` and `target/host-build`, and
+the shared heavy-build lease. Each invocation had a 600-second bound.
+The hand-run command for all three steps was:
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects real_agent_host_journal_under_usersai_principal -- --exact
+```
+
+The planted edit is exactly the F-agent-host-p7 edit in `falsifiers.json`:
+remove only `#[ignore = "blocked: UsersAI binding"]` immediately before
+`fn real_agent_host_journal_under_usersai_principal()`. The named function
+makes the anchor unique. The original bytes were restored in a `finally`
+block before the third step.
+
+| Step | Exit | Seconds | Result |
+| --- | --- | --- | --- |
+| Baseline | 0 | 1.746 | ignored |
+| Planted | 101 | 1.735 | FAILED, fixed P7 reason |
+| Restored | 0 | 0.988 | ignored |
+
+Exact libtest lines and failing assertion, in step order:
+
+```text
+test real_agent_host_journal_under_usersai_principal ... ignored, blocked: UsersAI binding
+test real_agent_host_journal_under_usersai_principal ... FAILED
+P7 gap: agent-host journal bound localhost://Users/self/.AppData/Agents/agent-host/* is not under UsersAI/self
+test real_agent_host_journal_under_usersai_principal ... ignored, blocked: UsersAI binding
+```
+
+This catches premature activation of the placeholder. It supplies zero
+principal-binding or live shell-denial acceptance. F-agent-host-grant is
+retired under UsersAI binding until its real journey has a passing baseline.
+A comparison against the base entry proved that its retired `file`, `old`
+and `new` bytes match exactly; every other existing list entry is unchanged.
+
+### Hand-run report-label falsifier
+
+Command:
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report p7_gap_row_is_blocked_with_label -- --exact
+```
+
+The extra label falsifier is recorded here without a new list ID. Its exact
+edit bytes, including the indentation, are:
+
+```json
+{
+  "file": "src/report.rs",
+  "old": "                text.push_str(\" | P7 gap: real agent-host journal under Users/self, not UsersAI/self; moves when the UsersAI binding lands\");",
+  "new": "                text.push_str(\"\");"
+}
+```
+
+| Step | Exit | Seconds | Result |
+| --- | --- | --- | --- |
+| Baseline | 0 | 0.828 | PASS |
+| Planted | 101 | 1.557 | FAILED, exact table assertion |
+| Restored | 0 | 1.408 | PASS |
+
+```text
+test p7_gap_row_is_blocked_with_label ... ok
+test p7_gap_row_is_blocked_with_label ... FAILED
+assertion `left == right` failed
+test p7_gap_row_is_blocked_with_label ... ok
+```
+
+The restored source retains the exact label. The grader still owns blocker
+validation and receipt grading; this task adds a label in that existing path.
+
+### Principles check
+
+Paths are relative to `lab/agent-conformance/`.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `tests/effects.rs:727` selects read-only source input; `src/identity.rs:91` retains the checked bundle CID for launches. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/effects.rs:726` only reads the repository manifest; `tests/agent_host.rs:85` adds a blocker to the unchanged grant journey. |
+| 3. A second path or rule copy for one operation? | No | `src/report.rs:218` adds the label to the existing table renderer; the existing grader validates both GAPS rows. |
+| 4. Runtime core grows? | No | `tests/effects.rs:726` keeps the new check in this lab lane; Runtime, provider and capsule source bytes remain unchanged. |
+| 5. New refusals fail closed with a clear reason? | Yes | `tests/effects.rs:728` refuses a non-regular manifest; `tests/effects.rs:742` refuses a capability outside UsersAI/self with the fixed P7 reason. |
+| 6. Capsule logic stays inside and calls through granted Bus operations? | Yes | `probe/src/lib.rs:138` retains the grant request and `probe/src/lib.rs:146` retains the provider call; the real capsule and probe keep their base bytes. |
+| 7. Named tests and caught falsifiers prove each new rule? | Yes | `tests/effects.rs:726` fails under F-agent-host-p7; `tests/report.rs:278` fails under the label mutation. All named tests failed while planted and returned to their required states after restore. |
+| 8. Identity, admission and allowance remain separate decisions? | Yes | `src/report.rs:521` retains the separate identity, admission and session-grant statement; a manifest namespace check supplies zero execution or budget authority. |
+
+The repository has no humanizer skill source. This record uses direct
+statements of behavior and ownership. The supervisor owns review and publication.
+
+### Required gates and real table runs
+
+The restored candidate passed the lane formatting gate in 0.132 seconds
+(exit 0) and `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml` in 267.476 seconds (exit 0): 84 passed,
+zero failed, 11 ignored with blockers. Both gates stayed within 600 seconds.
+The first sandboxed locked run exited 101 in 3.087 seconds because
+`earlier_run_check_refuses_live_owner` could not inspect its child process
+group. The unchanged host-access run supplied the passing gate above.
+
+The real `./run.sh` run exited 1 in 249.559 seconds. Its P7 row was:
+
+```text
+real_agent_host_journal_under_usersai_principal | BLOCKED (UsersAI binding) | P7 gap: real agent-host journal under Users/self, not UsersAI/self; moves when the UsersAI binding lands
+```
+
+That table's unrelated `cleanup_census_refuses_each_leftover` row read FAIL
+at its final cleanup check (`tests/runtime.rs:394`):
+
+```text
+process leftover; processes:3 paths:["stderr-27", "stdout-25", "stdout-27"] API sockets:0 temp:0 paths:[]
+```
+
+The same test passed in the full locked gate. Its source and assertions retain
+their base bytes. The default table's version receipt passed A14; the failed
+run remains recorded as a failure, separate from the P7 BLOCKED evidence.
+
+The real `./run.sh --agent-host` run exited 0 in 254.303 seconds: 102 PASS
+test rows, 12 BLOCKED rows, zero FAIL and zero SKIPPED rows. Its version
+receipt passed A14. Both requested rows came from that real table:
+
+```text
+real_agent_host_gets_no_ungranted_authority | BLOCKED (UsersAI binding) | real agent-host capsule, deny half; no model call (RT3)
+real_agent_host_journal_under_usersai_principal | BLOCKED (UsersAI binding) | P7 gap: real agent-host journal under Users/self, not UsersAI/self; moves when the UsersAI binding lands
+```
+
+The unchanged cleanup test also passed in the opt-in run. A final isolated
+recheck used:
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact
+```
+
+It exited 0 in 2.019 seconds:
+
+```text
+test cleanup_census_refuses_each_leftover ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.75s
+```
+
+This passing recheck supports a transient cleanup-census failure in the plain
+table run; it preserves that earlier failure record. The code for that test
+and the census is unchanged. Final lane formatting passed again in 0.179
+seconds. `git diff --check`, product-data validation (42 capsules, two
+profiles, 28 method contracts), all 99 product-data Node tests, Runtime and
+chain-provider formatting, and `bash -n lab/agent-conformance/run.sh` passed.
+
+The Mac had 45.27 GiB free before the full gate and table runs, above the
+12 GiB build estimate plus 2 GiB reserve. The same shared heavy-build lease
+covered each heavy command and is now released. The final report
+`--check-earlier-runs` check exited 0 in 1.359 seconds; test Home processes
+have ended. `Cargo.toml` and `Cargo.lock` retain their initial SHA-256 values.
+Seventeen existing falsifier anchors in the changed files retain their base
+match counts. The only new active list ID is F-agent-host-p7; its manual run
+above supplies the mutation evidence while shared-runner routing stays with
+its owner.
+
+The candidate is the uncommitted eight-file lane diff. Evidence and the local
+lifecycle inventory are private, uncommitted files in `target/task-032/`.
+The inventory retains this task's test roots and table receipts for supervisor
+review, with removal when that review ends; the supervisor owns that cleanup.
+The current branch is zero commits ahead and 11 commits behind the cached
+`spike/spike/agent-host` ref at handoff. The cached ref advanced during testing;
+this worktree's HEAD remains the tested base `04f1e93b4789d3f86474abe77d89aeadf12e35a0`.
+The builder made zero fetches or Git-state changes under the network rule.
+The supervisor owns current-base integration, review and publication.
