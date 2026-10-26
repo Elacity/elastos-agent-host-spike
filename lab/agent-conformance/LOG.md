@@ -2280,3 +2280,299 @@ cached upstream divergence zero ahead / zero behind. Network access remains
 disabled, so this is cached-ref evidence. The builder made source edits only
 inside this lane and left Git history and refs unchanged. The supervisor owns
 independent review, commits and integration.
+
+
+## 019 — grant integration, bounded preparation and memory-only credentials (2026-10-26)
+
+Carried 015's fixture grant controller onto the current base, preserved 005's
+collector and 018's receipt, and added bounded probe preparation and the named
+attach-secret check. All edits stay in this lane; the supervisor owns Git state.
+
+Read the supplied Mission, BACKLOG item 12, integration note and 10:40 admission
+clarification, then the current lane implementation and handoff records. The
+external Mission/inbox/review files are outside builder scope. The repository
+has no humanizer skill; this entry uses direct statements of behavior and ownership.
+Read 015's author delta from `cb2ff327f27a3e12a5cac30cce4971905c57adcc` to
+`91cb1a3296bafc551a7bda350a4d34d50a816a60` and compared the integrated
+`2e304d1d6611750cea62dade95a3db051d892309` candidate. The supplied Claude PASS
+belongs to that earlier author candidate. This change requires fresh independent
+review. The earlier timeout remains a complete-gate timeout, without an inferred
+hung test.
+
+`Controller` and `Fixture` retain exact resource/action/reason matching,
+ambiguity refusal, fixture-selected duration and production loopback approval.
+The probe retains its narrow manifest bound and guest byte comparison.
+`RunningInstances::collect_with` extends the existing collector and spawn site.
+`Operator::begin_check` / `finish_check` share readiness, both census samples and
+group stop across effects, parallel checks and the census test. Both refusal
+journeys use `assert_output_refusal`. Package identity and admission supply zero
+fixture grants; Runtime owns each permission decision.
+
+`build_probe` now cleans only the probe package in each selector's WASM release
+cache, then uses the existing repository component script. It requires a fresh
+probe compilation on every call. Dependencies and the componentizer are reused;
+all ten variants still have two actual compilations, both import checks, stable
+pair hashes and distinct variant hashes. Selector exclusivity remains intact.
+
+`attach_secret_stays_in_memory` first checks synthetic in-memory canaries on
+stdout, stderr, report, receipt, committed source and candidate source surfaces,
+then exercises both real fixture journeys. Every granted/sibling journey uses
+the same credential checker for its actual attach secret and returned tokens.
+The spawn site supplies the complete expected capture inventory; empty or missing
+evidence fails. Git lists only lane source files. Runtime owns its coordinates
+input; harness credential copies remain in memory. `render_run` is extracted
+from the existing writer so both the report and receipt are checked before a
+file write. The existing writer consumes those same serialized bytes.
+
+The carried report test preserves SKIPPED for pre-probe setup failure and FAIL
+for an `ok` result beside SKIPPED, Runtime failures and failed assertions.
+`skipped_report_keeps_a_nonzero_exit` also exercises the real report CLI and its
+receipt. Safe prerequisite causes are retained, including the OS bind refusal.
+The five existing BLOCKED rows retain their acceptance boundaries in GAPS.md.
+
+### Author checks and cache conditions
+
+Commands ran from the repository root under the shared exclusive `fcntl.flock`
+heavy-build lease. Each build command checked the 12 GiB estimate plus 2 GiB
+reserve. Build inputs were offline. The initial full gate started with 26.818 GiB
+free. Host/native dependencies and selector-conflict checks were warm; only the
+granted-read selector cache had been prepared. The other nine selector caches
+were initially absent. Every probe package was cleaned before compilation.
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-019"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+The first complete locked gate returned exit 0 in **223.680 s**, inside the
+unchanged 600-second bound: **42 passed, zero failed, five ignored**. Artifact
+checks took 139.56 s; effects took 68.39 s. Granted read, sibling denial and the
+attach-secret test all passed. A prior focused run in the restricted sandbox
+returned exit 101 in 18.612 s with SKIPPED: loopback bind `Operation not permitted`
+before Runtime startup. That result supplies zero Runtime acceptance evidence.
+
+The basic repository gate passed: `git diff --check`,
+`node scripts/check-product-data.mjs` (42 capsules, two profiles, 28 contracts),
+`node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`,
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, and
+`bash -n lab/agent-conformance/run.sh`.
+
+### Falsifiers, planted and restored
+
+The entries remain in the one `falsifiers.json`, with `command: lab`. Mutations
+were applied one at a time and exact source bytes restored in a `finally` block.
+F-grant-capture uses its original checker-bypass anchor and now names both tests.
+Its mutated runs use synthetic in-memory canaries only. Its older control now
+has a fixed assertion message; retained diagnostics exclude the canary values.
+The new F-capture-inventory and F-output-inventory cover missing evidence;
+F-probe-rebuild covers the independent-compilation requirement. Each of the ten
+named checks failed planted with exit 101 and passed restored with exit 0.
+An initial command-result filter mistook assertion text for a SKIPPED marker;
+it was corrected to recognize marker lines and the affected tests were rerun.
+
+Each table row supplies `target` and `test` for both executions of this command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml \
+  --test "$target" "$test" -- --exact --show-output
+```
+
+| Falsifier | Target / named test | Planted exit / elapsed | Restored exit / elapsed | Safe caught reason |
+| --- | --- | --- | --- | --- |
+| F-ac1a | `effects` / `ungranted_sibling_read_is_refused` | 101 / 9.708 s | 0 / 9.522 s | Sibling exited 0 after its explicit matching grant; denial assertion failed. |
+| F-ac1b | `effects` / `granted_read_succeeds` | 101 / 9.372 s | 0 / 10.321 s | Guest content check failed after one observed grant. |
+| F-grant-capture | `effects` / `grants::tests::controller_detects_credentials_without_disclosing_them` | 101 / 1.184 s | 0 / 0.731 s | Checker accepted an in-memory canary; fixed reason assertions failed. |
+| F-grant-capture | `effects` / `attach_secret_stays_in_memory` | 101 / 0.445 s | 0 / 17.489 s | Checker accepted an in-memory canary; fixed reason assertions failed. |
+| F-report-b | `report` / `run_table_grades_skipped_only_with_failed_test` | 101 / 0.595 s | 0 / 0.595 s | SKIPPED row changed to PASS; both report assertions failed. |
+| F-report-b | `report` / `skipped_report_keeps_a_nonzero_exit` | 101 / 0.054 s | 0 / 0.245 s | SKIPPED row changed to PASS; both report assertions failed. |
+| F-probe-e | `artifact` / `probe_hash_is_stable` | 101 / 17.487 s | 0 / 17.600 s | Independent default component hashes differed. |
+| F-probe-rebuild | `artifact` / `probe_hash_is_stable` | 101 / 1.278 s | 0 / 19.194 s | Probe compilation message was absent after the package clean was omitted. |
+| F-capture-inventory | `effects` / `attach_secret_stays_in_memory` | 101 / 1.103 s | 0 / 19.863 s | Empty expected capture inventory returned success. |
+| F-output-inventory | `effects` / `attach_secret_stays_in_memory` | 101 / 1.428 s | 0 / 18.578 s | Missing required source/report surface returned success. |
+
+The retained grant-match, ambiguity, attach, HTTP, callback, guest-content and
+older artifact falsifiers keep matching anchors. The required integration
+falsifiers above have fresh results. Source tests, live grant acceptance and
+independent review remain separate evidence classes.
+
+### Principles check
+
+Answers follow the task's question wording. Paths are relative to this lane.
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name/URL instead of a code/content hash? | No | `src/identity.rs:62` retains complete bundle identity; `tests/effects.rs:34` uses the same staging path. |
+| 2. New capsule or UI ambient authority? | No | `probe/src/lib.rs:69` requests a Runtime grant before the provider read; the import checks remain in `tests/artifact.rs:82`. |
+| 3. A second path or copy of an operation rule? | No | `tests/common/operator.rs:65` shares census/stop; `src/report.rs:325` supplies the existing writer and credential check with one renderer. |
+| 4. Does the Runtime core grow? | No | `src/harness.rs:501` extends the lane's collector; every candidate path is under `lab/agent-conformance/`. |
+| 5. Do refusals fail closed with a clear reason? | Yes | `tests/common/grants.rs:71` refuses ambiguity; `src/harness.rs:321` refuses empty capture evidence. |
+| 6. Does the capsule keep its logic and granted Bus calls? | Yes | `probe/src/lib.rs:69` keeps request, provider call and file-byte verification inside the guest. |
+| 7. Do named tests and caught falsifiers prove the rules? | Yes | `tests/effects.rs:252` and `tests/report.rs:511` exercise credential/report rules; all ten planted checks above failed and passed restored. |
+| 8. Are identity, admission and allowance separate decisions? | Yes | `tests/common/grants.rs:146` decides only from explicit pending requests and fixture entries; `src/report.rs:360` retains the receipt's authority boundary. |
+
+
+### Final restored gates, receipt and handoff
+
+After all mutations were restored and the synthetic control's assertion message
+was fixed, formatting returned exit 0 in 0.134 s. The exact full locked command
+above returned exit 0 in **110.842 s**: **42 passed, zero failed,
+five ignored**. Its artifact group took 20.90 s and its effects group 73.59 s.
+Dependencies and native/host tools were warm; each probe call still cleaned and
+compiled its package. It began with 24.172 GiB free.
+
+`lab/agent-conformance/run.sh` returned exit 0 in **112.104 s**, starting
+with 24.146 GiB free. Its table has 42 passing Cargo tests, the five
+unchanged BLOCKED rows, and the separate A14 PASS. Granted reads observed
+matched:1, granted:1, denied:0 and exit 0 after the guest content check. Sibling
+reads observed matched:0, granted:0, denied:1 and exit 1 with the exact fixture
+reason. Each operator census saw two loopback sockets in both samples and
+completed group stop. Both journeys passed their actual credential checks.
+
+The verified receipt is [`target/run-table.IxQgVV/VERSIONS.json`](target/run-table.IxQgVV/VERSIONS.json),
+8,447 bytes. Its native hashes match the built Runtime/provider, all ten
+launched identities equal their same-run build observations, and its table and
+table SHA-256 match stdout. The receipt has complete identity, command success,
+and BLOCKED suite scope. Its repository commit matches HEAD with `dirty: true`.
+All code, manifests, fixtures and falsifier bytes were unchanged across the final
+gates. The final diff check passed; generated evidence remains ignored.
+
+The final census found **0 task-owned processes**, and the shared probe WASM
+entrypoint is absent. Passing runs removed their Homes. The **8** retained
+failed-prerequisite/mutation roots each have an empty open-file census and an
+explicit supervisor-review-then-remove condition in `target/task-019/lifecycle.json`.
+That private inventory also names the exact selector cache, proof and receipt
+paths and their removal conditions. Earlier owners retain their existing roots.
+
+Branch/worktree inventory was rerun. The current branch holds this uncommitted
+candidate for supervisor review; cached upstream divergence is zero ahead and
+eight behind, with zero lane paths changed between the two committed heads.
+This builder used no network fetch and changed no Git history or refs. The
+supervisor owns independent development/adversarial review, commits, publication
+and integration. These are successful author checks and live fixture results;
+the earlier 015 review is not a review of this candidate.
+
+
+## 020 — Carry 019 and refresh the consumer lockfile (2026-10-26)
+
+Carried all 21 task-019 files from reviewed head `af77062ac` byte for byte.
+The task began on `0f5660ed8`, which contains `181626722`; the initial guard
+against `801da55ed` passed and HEAD contained no `tests/common/grants.rs`.
+The controller, grant decisions, probe preparation, report, tests and falsifier
+entries retain 019's reviewed behavior. Identity and admission supply zero
+resource grants; Runtime still decides each explicit pending request.
+
+cc-capsule-identity 004 added `ed25519-dalek` and `elastos-identity` to this
+lane's path dependency. This consumer lockfile now includes their dependency
+graph. Offline resolution added 85 packages: all match the versions and
+checksums in `lab/capsule-identity/Cargo.lock`. All 57 original package versions
+and checksums remain unchanged. Cargo also records the newly enabled dependency
+edges of `crypto-common`, `digest` and `generic-array`. The lock diff has 824
+added lines. The lane's root Cargo.toml stays unchanged; the probe manifest is
+019's exact file.
+
+Resolution used these commands with `CARGO_NET_OFFLINE=true`:
+
+```sh
+cargo update --offline --manifest-path lab/agent-conformance/Cargo.toml -p capsule-identity
+cargo update --offline --manifest-path lab/agent-conformance/Cargo.toml -p zerocopy --precise 0.8.62
+```
+
+The second command pins the two newly added zerocopy packages to the sibling
+lockfile's 0.8.62. The first command had selected 0.8.63 for those additions.
+A package-key/version/source/checksum comparison confirmed the final graph.
+
+F-lock-stale ran by hand and stays outside `falsifiers.json`. The test replaced
+this lane's lock with `git show 181626722:lab/agent-conformance/Cargo.lock`, then
+ran the full locked command below. It returned **101 in 0.066 s**, with
+`needs to be updated but --locked was passed`. A finally block restored the
+refreshed bytes. The same full command then returned **0 in 115.101 s**.
+This task adds zero test-code rules beyond the carry. The eleven tests carried
+from 019 cover the three live grant/memory journeys, five controller checks,
+two SKIPPED-report checks and the guest's complete-file comparison. Carried
+falsifiers retain their exact declarations; this task's new planted check is
+F-lock-stale. The earlier section retains 019's separate falsifier evidence.
+
+All build commands held the shared exclusive `fcntl.flock` heavy-build lease.
+Each gate checked the 12 GiB build estimate plus 2 GiB reserve. The full locked
+gate began with 23.681 GiB free; run.sh began with 23.437 GiB free. Host and
+native outputs and all ten selector caches already existed. Cargo's initial
+host test preparation took 8.58 s. Each probe invocation still cleaned and
+compiled its package. Builds used offline inputs and these settings:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-020/tmp"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+| Check | Exit | Elapsed | Result |
+| --- | --- | --- | --- |
+| Lane formatting | 0 | 0.142 s | Clean |
+| Full locked suite, without filters | 0 | 115.101 s | 42 passed, zero failed, five ignored |
+| run.sh | 0 | 95.480 s | 42 passing test rows, five BLOCKED rows, A14 PASS |
+
+Both complete gates stayed within the unchanged 600-second bound. Counts equal
+019's 42 passed and five ignored. Its recorded times were 223.680 s with
+partly cold selector caches and 110.842 s warm. This run used existing caches.
+`attach_secret_stays_in_memory`, `granted_read_succeeds` and
+`ungranted_sibling_read_is_refused` passed in both full journeys. A sandbox
+preflight refused a loopback bind; the full gates ran with local fixture
+process/socket access. That preflight is environment evidence only.
+
+The basic gate passed: `git diff --check`, `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 contracts), `node --test
+scripts/check-product-data.test.mjs` (99 passed), Runtime workspace formatting,
+chain-provider formatting, and `bash -n lab/agent-conformance/run.sh`.
+
+The same-run receipt is
+[`target/run-table.RwPg2E/VERSIONS.json`](target/run-table.RwPg2E/VERSIONS.json),
+8,447 bytes. Its Runtime/provider hashes match the built binaries; its ten
+launched probe identities and build-only identities match this run's emitted
+observations. Its table matches stdout and its table SHA-256. Identity is
+complete, command success is true, and suite scope remains BLOCKED for the five
+existing gaps. The receipt names the tested HEAD with `dirty: true`.
+
+All 37 candidate source files retained their bytes through the gates. After
+this append, LOG.md equals 019's file plus this section, and every other carried
+file still equals 019. The specified `git diff --quiet af77062ac` comparison
+returns 1 solely because the three restored new files remain outside the
+index: `fixtures/granted-bytes.txt`, `fixtures/grants.json` and
+`tests/common/grants.rs`. Direct blob-to-file byte comparisons include all three
+and pass. The supervisor owns staging and the final indexed comparison; this
+builder kept Git history, refs and index unchanged.
+
+The final executable-path process census found **zero lane-owned processes**.
+Passing fixtures retained **zero new Homes**; the shared probe entrypoint is
+absent. The build lease was released. Generated evidence and cache lifecycle
+entries remain ignored, with supervisor-review-then-remove conditions in the
+existing local inventory. Earlier task roots retain their owners.
+
+At the final cached upstream snapshot `e95d93cdf`, this checkout is zero ahead
+and eleven behind. Those commits change zero files in this lane. Four changed
+capsule-identity paths are documentation, falsifiers and its new test file;
+its source, manifests and lockfile match this tested checkout. Network access
+stayed disabled. The supervisor owns current-base review and integration of
+this uncommitted candidate; these results are author checks.
+
+| Principles question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name/URL replacing a code/content hash? | No | `src/identity.rs:62` retains checked bundle identity; Cargo.lock pins registry packages by checksum. |
+| 2. New capsule or UI ambient authority? | No | `probe/src/lib.rs:75` requests a Runtime grant; `tests/artifact.rs:82` checks Bus-only imports. |
+| 3. Second operation path or copy of a rule? | No | `tests/common/grants.rs:146` retains one pending-request controller, unchanged from 019. |
+| 4. Does the trusted Runtime core grow? | No | `src/harness.rs:501` keeps collection in this lane; all candidate paths are lane-owned. |
+| 5. Do refusals fail closed with a clear reason? | Yes | `tests/common/grants.rs:71` refuses ambiguous grants; F-lock-stale records Cargo's explicit locked-resolution refusal above. |
+| 6. Does the capsule keep its logic and granted Bus calls? | Yes | `probe/src/lib.rs:69` keeps the grant request, provider invocation and byte check inside the capsule. |
+| 7. Do named tests and caught falsifiers prove the rules? | Yes | `tests/effects.rs:252` carries the live checks; F-lock-stale above returned 101 planted and 0 restored. |
+| 8. Are identity, admission and allowance separate? | Yes | `src/report.rs:360` retains the receipt's boundary; `tests/common/grants.rs:146` requires an explicit pending decision. |

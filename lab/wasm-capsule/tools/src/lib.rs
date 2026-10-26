@@ -8,6 +8,11 @@
 //! they compare it and print it, and leave its encoding to that lane.
 //!
 //! [`CAPSULE_MANIFEST`] is this capsule's own `elastos.capsule/v1` manifest.
+//!
+//! [`bundle`] holds the rules of the `tools/bundle` command, which writes a
+//! new bundle of the two and prints its lab CID.
+
+pub mod bundle;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 

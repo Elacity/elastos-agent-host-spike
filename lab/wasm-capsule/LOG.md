@@ -55,3 +55,23 @@
   F-WC1-SPACED-PATH still caught by hand with the new layout. `capsule.wasm`
   unchanged (`6dd9af1a…`). Finding C4: a copy of `lab/wasm-capsule/` alone no
   longer builds (cc-redteam's probe; its fix).
+- wc-003c (task 009): `tools/bundle OUT_DIR` makes a new OUT_DIR (`create_dir`),
+  runs `tools/build` by its path (its stdout to stderr), makes `bundle/`
+  (`create_dir`) and `capsule.json` (`create_new`, `CAPSULE_MANIFEST`), moves
+  the module in with `rename`, and prints `bundle_identity(OUT_DIR/bundle)`;
+  `--name BUNDLE_DIR` prints an existing bundle's lab CID. Rules in
+  `tools/src/bundle.rs` (`parse_args`, `run` with the build script's path as the
+  test seam), a thin `bundle` binary and a bash wrapper; stand-in build scripts
+  in `tests/bundle_builds/`. 8 named tests in `tests/bundle.rs`, one of which
+  spawns the wrapper (its child cargo uses its own target and build folder
+  under that test's temp dir). Reference lab CID on this Mac
+  `lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930`
+  (also recomputed with Python `hashlib`). 23 falsifiers (F-WC3-CMD-BYPASS,
+  -REUSE-OUT, -FOLLOW-WRITE, -MODULE-COPY, five -ARGS-*, -ARGS-UTF8,
+  -BUILD-CAUSE, -BUILD-STDOUT, -IO-PATH, -IO-MOVE-PATH, five -IO-CAUSE-*,
+  -CMD-REASON, -CMD-STATUS, -CMD-STDOUT, -ARTIFACT-PIN): hand-proven, pending R1
+  (runner-caught: none). `Cargo.lock` and `capsule.wasm` (`6dd9af1a…`)
+  unchanged; both of 010's retirement greps give empty output, exit 1.
+- wc-003c round 2: the wrapper test's child `CARGO_TARGET_DIR`/`CARGO_BUILD_BUILD_DIR`
+  moved from the lane's `target/tools-bundle-test` to that test's own temp dir
+  (`tools_bundle(child_target, args)`), so the test writes nothing in the checkout.

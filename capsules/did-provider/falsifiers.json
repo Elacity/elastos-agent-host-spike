@@ -327,7 +327,7 @@
       "edits": [
         {
           "file": "../../capsules/did-provider/tests/confine.rs",
-          "old": "    if DECLARED_CONFINED_OS.contains(&os) {\n        return Err(format!(\n            \"{os} is declared confined in CONFINEMENT.md, so a confinement test on this OS \\\n             must run, not skip: {} is absent\",\n            sandbox_exec.display()\n        ));\n    }\n    Ok(false)",
+          "old": "    if DECLARED_CONFINED_OS.contains(&os) {\n        return Err(format!(\n            \"CONFINEMENT.md says the confinement tests exercise these profiles on {os}, \\\n             so a test there must run, not skip: {} is absent\",\n            sandbox_exec.display()\n        ));\n    }\n    Ok(false)",
           "new": "    if DECLARED_CONFINED_OS.contains(&os) {\n        return Ok(false);\n    }\n    Ok(false)"
         }
       ],

@@ -8,6 +8,8 @@ pub enum Effect {
     Default,
     Read,
     Network,
+    GrantedRead,
+    SiblingRead,
     Task(u8),
     Runaway,
 }
@@ -18,6 +20,8 @@ impl Effect {
             Self::Default => "default",
             Self::Read => "read",
             Self::Network => "network",
+            Self::GrantedRead => "granted-read",
+            Self::SiblingRead => "sibling-read",
             Self::Task(0) => "task-a",
             Self::Task(1) => "task-b",
             Self::Task(2) => "task-c",
@@ -34,6 +38,8 @@ impl Effect {
             Self::Default => "-Dwarnings",
             Self::Read => "-Dwarnings --cfg feature=\"read\"",
             Self::Network => "-Dwarnings --cfg feature=\"network\"",
+            Self::GrantedRead => "-Dwarnings --cfg feature=\"granted-read\"",
+            Self::SiblingRead => "-Dwarnings --cfg feature=\"sibling-read\"",
             Self::Task(_) => "-Dwarnings --cfg feature=\"task\"",
             Self::Runaway => "-Dwarnings --cfg feature=\"runaway\"",
         }
@@ -43,14 +49,32 @@ impl Effect {
 pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
     let lane = lane();
     let root = repository();
-    let target = lane.join(format!("target/probe-build-{}-{round}", effect.name()));
-    // Each round starts from an empty build directory: two cached reads are
-    // insufficient evidence of reproducibility. All generated files are local.
-    if target.exists() {
-        fs::remove_dir_all(&target).unwrap();
+    // Reuse dependencies and the componentizer for each selector. Remove only
+    // the probe package before EVERY call, including both reproducibility rounds.
+    let target = lane.join(format!("target/probe-build-{}", effect.name()));
+    let cleaned = offline_build("cargo", &target)
+        .unwrap_or_else(|error| skipped(&format!("prepare probe clean: {error}")))
+        .args(["clean", "--manifest-path"])
+        .arg(lane.join("probe/Cargo.toml"))
+        .args([
+            "--locked",
+            "--offline",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+            "-p",
+            "agent-conformance-probe",
+        ])
+        .output()
+        .unwrap_or_else(|error| skipped(&format!("start probe clean: {error}")));
+    if !cleaned.status.success() {
+        skipped(&format!(
+            "probe clean failed before launch: {}",
+            cleaned.status
+        ));
     }
     let output = offline_build("bash", &target)
-        .expect("prepare the probe build")
+        .unwrap_or_else(|error| skipped(&format!("prepare probe build: {error}")))
         .arg(root.join("scripts/build-component-capsule.sh"))
         .arg(lane.join("probe"))
         .env("RUSTFLAGS", effect.rustflags())
@@ -64,16 +88,27 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
         )
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()
-        .expect("start the existing component build script");
+        .unwrap_or_else(|error| skipped(&format!("start probe build: {error}")));
+    if !output.status.success() {
+        skipped(&format!(
+            "probe build failed before launch: {}",
+            output.status
+        ));
+    }
     assert!(
-        output.status.success(),
-        "component build {round} failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr).contains("Compiling agent-conformance-probe v"),
+        "probe round {round} must compile the package independently"
     );
     let artifact = fs::read(lane.join("probe/agent-conformance-probe.component.wasm"))
         .expect("the build script must produce the component");
     fs::remove_file(lane.join("probe/agent-conformance-probe.component.wasm")).unwrap();
-    fs::remove_dir_all(target).unwrap();
     artifact
+}
+
+/// Only pre-probe setup calls this. Runtime refusals and assertions stay FAIL.
+pub fn skipped(reason: &str) -> ! {
+    let thread = std::thread::current();
+    let name = thread.name().expect("libtest names each test thread");
+    println!("SKIPPED {name}: {reason}");
+    panic!("probe could not run");
 }
