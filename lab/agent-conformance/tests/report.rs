@@ -594,3 +594,24 @@ fn host_key_receipt_requires_this_launched_bundle() {
         .unwrap();
     assert_eq!(*recorded, serde_json::to_value(probe).unwrap());
 }
+
+#[test]
+fn cleanup_report_keeps_scope_and_grant_blocker() {
+    let listed = "granted_read_succeeds: test\nrun_leaves_no_live_grant: test\n";
+    let results = "test granted_read_succeeds ... ok\ntest run_leaves_no_live_grant ... ignored, blocked: AC-021-GRANTS\n";
+    let (text, passed) = table(listed, results, true);
+    assert!(passed);
+    assert!(text.contains("granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included"));
+    assert!(text.contains("run_leaves_no_live_grant | BLOCKED (AC-021-GRANTS) | cleanup census"));
+    let (text, passed) = table(listed, &results.replace("... ok", "... FAILED"), false);
+    assert!(!passed);
+    assert!(text.contains("granted_read_succeeds | FAIL | cleanup census"));
+    let skipped = format!(
+        "SKIPPED granted_read_succeeds: prerequisite unavailable\n{}",
+        results.replace("... ok", "... FAILED")
+    );
+    let (text, passed) = table(listed, &skipped, false);
+    assert!(!passed);
+    assert!(text
+        .contains("granted_read_succeeds | SKIPPED (prerequisite unavailable) | cleanup census"));
+}

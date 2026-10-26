@@ -336,6 +336,32 @@ impl ThrowawayHome {
             .collect())
     }
 
+    /// Collect a completed census tool's captures before removing its scratch
+    /// Home. The same inventory and credential checker then cover both tools
+    /// and Runtime children. A census tool runs outside the root it inspects.
+    pub fn collect_captures_from(&self, other: &Self) -> Result<()> {
+        self.guard(self.home(), self.data())?;
+        other.guard(other.home(), other.data())?;
+        for serial in other.captures.borrow().iter() {
+            for prefix in ["stdout", "stderr"] {
+                let name = format!("{prefix}-{serial}");
+                if self
+                    .root
+                    .join(&name)
+                    .try_exists()
+                    .map_err(|_| "could not inspect capture destination")?
+                {
+                    return Err("census capture destination already exists");
+                }
+                fs::rename(other.root.join(&name), self.root.join(&name))
+                    .map_err(|_| "could not collect census capture")?;
+            }
+            self.captures.borrow_mut().push(*serial);
+        }
+        other.captures.borrow_mut().clear();
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<()> {
         if self.keep.get() {
             return Err("keep the root after an unstopped child or failed stop");

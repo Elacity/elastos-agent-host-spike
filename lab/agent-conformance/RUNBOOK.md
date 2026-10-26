@@ -435,3 +435,52 @@ journey supplies its observed pass/fail result to the existing renderer, so a
 planted-grant failure has a failed report with complete version evidence.
 F-output-inventory and F-capture-inventory continue to test missing surfaces.
 LOG.md records commands, results and local receipt hashes for supervisor review.
+
+## Cleanup census and earlier runs
+
+Run `lab/agent-conformance/run.sh` as before. Before any test, the report tool
+checks existing `target/home-*` directories for live holders. For example:
+
+```text
+earlier run: PID 12345 root "home-12300-example"
+earlier-run check: FAIL; live processes hold earlier Homes; inspect and stop their owners by hand before retrying
+```
+
+The PID names a live process. The root name selects a directory under this
+lane's `target/`. Inspect that PID's owner and command locally with
+`ps -p 12345 -o pid=,ppid=,pgid=,comm=`. Use the process's normal stop control.
+If that control is unavailable, confirm the PID still belongs to this test
+before sending `kill -TERM 12345`. Let it exit, then run the suite again. The
+checker only reports processes; it never signals an earlier owner. Keep the
+failed Home for review. Remove its data by hand only after its owner approves
+cleanup. Keep Runtime-owned credentials inside the Home out of reports.
+
+The pre-test root selection takes at most two seconds and lsof at most five
+seconds. A timeout, warning or unreadable listing stops the run with a reason.
+The scanner stays within Home roots and does not walk native or probe builds.
+The report-build step runs before this bounded check.
+
+After a fixture read, `cleanup census:` appears beside `operator census:`.
+Read its process count and root-relative paths, API socket count, TMPDIR entry
+count and paths, pending count and grant grade. Physical leftovers are FAIL;
+the line names the retained `target/home-*`. Passing journeys remove their own
+Homes after capture, source and report checks. The census tool's scratch Home
+is removed after its captures join the existing credential-check inventory.
+
+The grant result is currently `BLOCKED(AC-021-GRANTS)`: the fixture shell sees
+its own grants. `run_leaves_no_live_grant` stays an ignored table row until
+Runtime supplies the global live-grant contract in GAPS.md. F-cleanup-grant
+waits for that contract. F-cleanup-temp and F-cleanup-process run the existing
+`granted_read_succeeds` test; both must fail for their planted reason, then
+pass after restoration. Other cleanup falsifiers exercise the port check,
+pending and scope grading, capture inventory, earlier-run detection and table
+scope. Exact edits and named tests are in `falsifiers.json`; LOG.md records the
+measured commands.
+
+Read these rows with the VERSIONS.json path printed by the same invocation:
+“cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet
+included”. The receipt identifies the Runtime, provider and launched probe
+from that run. The census proves the root, API port and TMPDIR checks only.
+The known `/tmp/elastos/storage` leftover stays under AC-006-STORAGE; this
+command leaves its contents untouched. The earlier absent-policy refusal row
+keeps its existing grade and labels pending/grant cleanup as unmeasured.
