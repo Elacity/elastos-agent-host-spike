@@ -10,11 +10,13 @@ The command uses cached dependencies, the pinned Rust toolchain and its
 `wasm32-unknown-unknown` target and the macOS `shasum` tool. Reserve 12 GiB for
 builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
-The command prints `elastos sha256:<hex>` and `localhost-provider sha256:<hex>`
-above one table from Cargo's test inventory and result lines. Each hash identifies
-the binary built for the tests. It is computed for this machine and toolchain, as with the probe
-hash; it is an identifier, rather than a graded rule. Successful test output
-supplies the hash through Cargo's `--show-output`, which preserves result lines.
+The command prints typed `version identity: {...}` observations above one table
+from Cargo's test inventory and result lines. Native records identify `elastos`
+and `localhost-provider` by SHA-256. Probe records carry the component SHA-256
+and complete bundle lab CID, with separate `build_only` and `launched` kinds.
+Cargo's `--show-output` supplies these records from this invocation. The existing
+build helpers hash the native binaries; the staging path names the exact probe
+manifest and payload through `capsule_identity::checked_bundle`.
 `ok` becomes PASS. `ignored, blocked: <id> …` becomes BLOCKED with that ID.
 A failure, missing result, repeated result, ignored test without a blocker ID,
 or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
@@ -126,10 +128,10 @@ Task 003 adds these rows to the same table:
 - `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
 - `probe_effects_are_exclusive`: building with both effect features must fail with the exact selector-conflict reason.
 
-The artifact rows now cover default, read and network builds. Each selector has
+The artifact rows cover default, read, network, four finite tasks and runaway builds. Each selector has
 two fresh builds, matching hashes within its pair, and a distinct hash from the
-other selectors. `run.sh` prints `probe component sha256:<hex> effect:<selector>`
-for the built bytes and live copies. The existing component build script uses
+other selectors. `run.sh` prints the shared typed identity records for built
+bundles and live copies. The existing component build script uses
 `RUSTFLAGS` cfg selectors for the declared Cargo features. Every build's bytes
 are saved before that script can replace the shared entrypoint. The live tests
 serialize build preparation and place the component in a SHA-256 directory
@@ -192,3 +194,66 @@ F-parallel-bound, F-parallel-operator-guard, F-parallel-coordinates,
 F-parallel-start and F-parallel-drain plant errors in the harness rules and each must fail its named harness test. Apply the exact edits from
 `falsifiers.json` by hand and restore them before the normal gate. LOG.md holds
 the commands and measured outcomes; this adds no second runner.
+
+
+## Version receipt for each run
+
+The existing report command writes `VERSIONS.json` into the fresh ignored
+`target/run-table.*` directory and prints its lane-relative path. Reviewers cite
+that path for the tested candidate. The report reads the full repository commit
+and dirty state for this invocation; local edits set `dirty: true`.
+
+The receipt contains native hashes, every observed probe's effect, component
+SHA-256 and complete bundle `lab-cid:sha256:...`, the suite outcome, and the
+exact graded table plus its SHA-256. The sibling identity library owns the bundle
+walk, manifest validation and encoding. The staging path uses its checked entries
+for the component bytes. The lab CID covers `capsule.json` and the payload;
+Runtime CID launch remains BACKLOG item 13. Identity, admission and resource
+allowance remain separate decisions. The receipt's description gives the lab
+CID and any separate signed record zero admission or permission credit.
+Runtime decides admission. Resource authority requires a Runtime grant for the
+requesting session; only the corresponding observed Runtime journey supplies
+that evidence. The signed-record contract stays with its owner.
+
+Artifact observations stay in `build_only_probes`. Successful live launches
+supply `probes`. The report checks the required variants for each active journey
+in Cargo's results; artifact observations supply zero missing-launch credit.
+Identical observations can repeat across test processes. A different identity
+for the same native role or effect fails the receipt. New live journeys must
+extend the report's identity requirements when they add a required variant.
+The no-operator tests exercise manifest dispatch before payload loading; their
+default component identity comes from the live default journey.
+
+`versions_receipt (A14)` passes only with complete, valid, consistent identities
+and a successful exclusive write. Missing or malformed values and Git query
+failures produce an incomplete receipt with explicit reasons and a failing
+command. A write refusal names its cause, including `AlreadyExists` or
+`NotFound`, and fails the command. Exclusive creation preserves prior receipts
+and symlink targets. A report-build failure stops before suite execution and
+retains its build output; the command cannot issue a receipt without its writer.
+
+`identity_status` describes identity coverage. `suite_outcome` describes the
+Cargo rows, including FAIL and BLOCKED; `command_success` combines both gates.
+A complete identity record preserves each journey's grade. The parser accepts
+only typed identity fields and graded test rows for the receipt. Child captures,
+HTTP bodies and environment dumps stay outside that data model. Synthetic
+receipt fixtures stay inside ignored throwaway roots and supply zero live proof.
+
+After a successful command, only the small receipt remains in its run directory.
+The table is inside that receipt. Keep it through candidate review, then remove
+the receipt and its empty directory. Failed commands retain Cargo output and
+failed Homes under the existing review-and-remove rule. Generated native
+binaries, WASM, receipts and synthetic fixtures remain ignored.
+
+`versions_receipt_binds_current_run` checks two distinct synthetic runs and the
+actual report CLI. `versions_receipt_rejects_incomplete_identity` checks missing,
+malformed, conflicting and omitted launch identities, Git failure, exclusive
+creation and write failure. `versions_receipt_uses_the_staged_bundle_identity`
+checks the library's lab CID as an oracle: a manifest-only byte change changes
+the bundle field while the component hash stays fixed. The extended
+`run_table_requires_cargo_results` checks the combined command outcome.
+F-versions-required bypasses the Runtime-identity requirement;
+F-versions-bundle writes the component hash into the receipt's bundle field.
+Each runs only its named synthetic report test, then passes after restoration.
+F-versions-boundary removes the receipt's authority description; the same
+current-run test must fail under that mutation and pass after restoration.
