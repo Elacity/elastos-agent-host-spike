@@ -1,0 +1,8 @@
+# Guard (e): any test key or seed is generated in a temp dir inside the test and
+# is never committed. These patterns are a backstop if one is ever written here.
+*.key
+*.seed
+
+# Python scratch.
+__pycache__/
+*.pyc

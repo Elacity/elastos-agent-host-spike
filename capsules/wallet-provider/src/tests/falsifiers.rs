@@ -10,11 +10,13 @@ use std::process::Command;
 /// five wallet allow-rule removals, task 020's allow-default check removal
 /// and appended profile rule, task 021's canonical-token check removal
 /// with the wallet rename, the did rename and the sibling-read allowance,
-/// WP25, which resolves edit paths from the repository root again, and
-/// task 026's re-anchored WP07 on the one required list with WP26's missing
-/// model profile skip. Task 026 also retires WP08 and WP10, whose model-only
-/// branch is gone.
-const EXPECTED_FALSIFIERS: usize = 24;
+/// WP25, which resolves edit paths from the repository root again, task
+/// 018's re-anchored WP07 on the one required list with WP26's missing
+/// model profile skip, task 018's retirement of WP08 and WP10, whose
+/// model-only branch is gone, and task 027's WP27, which returns `Ok(false)`
+/// from the sandbox gate's declared-OS branch, so a missing
+/// `/usr/bin/sandbox-exec` on macOS skips and passes.
+const EXPECTED_FALSIFIERS: usize = 25;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -292,7 +294,7 @@ fn falsifiers_list_rejects_invalid_integration_test() {
 /// refused for WP01, the first entry, in the runner's own words.
 ///
 /// Falsifier: resolve edits from `repo_root()` again (WP25); this test fails
-/// because the repository-relative list is accepted.
+/// because the WP01 refusal does not come.
 #[test]
 fn falsifiers_list_rejects_a_repository_relative_path() {
     let mut doc = read_falsifiers_list();
@@ -312,7 +314,7 @@ fn falsifiers_list_rejects_a_repository_relative_path() {
                 .as_str()
                 .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
             let repository_relative = file.strip_prefix("../../").unwrap_or_else(|| {
-                panic!("{id}: {file} must name a path under examples/agent-host")
+                panic!("{id}: {file} must start with ../../ (relative to examples/agent-host)")
             });
             edit["file"] = Value::String(repository_relative.to_owned());
         }

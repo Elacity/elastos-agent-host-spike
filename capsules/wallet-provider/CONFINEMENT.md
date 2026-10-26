@@ -72,13 +72,15 @@ from its inline policy to that file is part of the same bridge change.
 
 ## Host-OS status
 
-These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On Linux
-the providers are not confined yet; the `sandbox-exec` integration tests print
-a skip reason and do not run. The rule for provider-status documents is that a
-provider is marked "confined" only for a host OS where a test proves its
-profile, so no status document records `did-provider` or `wallet-provider` as
-confined on Linux until that test exists (P10, P11). The status change lands
-when the Runtime side does.
+These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On macOS
+a confinement test that cannot run because `/usr/bin/sandbox-exec` is missing
+fails the gate; it never passes by skipping. On Linux the providers are not
+confined yet; there, and on any host OS other than macOS, the `sandbox-exec`
+integration tests print a skip reason and do not run. The rule for
+provider-status documents is that a provider is marked "confined" only for a
+host OS where a test proves its profile, so no status document records
+`did-provider` or `wallet-provider` as confined on Linux until that test
+exists (P10, P11). The status change lands when the Runtime side does.
 
 ## Tests
 
@@ -137,7 +139,14 @@ when the Runtime side does.
   that is a directory fails as a read error naming its path; and a missing did
   profile fails, naming did-provider.
 
-The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent.
+The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent on
+a host OS other than macOS.
+
+`sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
+itself without starting a process: a missing `sandbox-exec` on `macos` is an
+error that names the OS and the path, a missing one on `linux` is a skip, and
+a present one on `macos` runs the test. It runs on every supported build
+target.
 
 Falsifier procedure (run against a temporary edit, then restore the profile):
 
