@@ -275,6 +275,22 @@ fn unreadable_gaps_fails_the_run() {
 }
 
 #[test]
+fn p7_gap_row_is_blocked_with_label() {
+    assert_eq!(
+        table(
+            "real_agent_host_journal_under_usersai_principal: test\n",
+            "test real_agent_host_journal_under_usersai_principal ... ignored, blocked: UsersAI binding\n",
+            true,
+            Some(include_str!("../GAPS.md")),
+        ),
+        (
+            "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\nreal_agent_host_journal_under_usersai_principal | BLOCKED (UsersAI binding) | P7 gap: real agent-host journal under Users/self, not UsersAI/self; moves when the UsersAI binding lands\n".into(),
+            true,
+        )
+    );
+}
+
+#[test]
 fn agent_host_row_requires_its_launched_identity() {
     use agent_conformance::report::render_run;
     let name = "real_agent_host_gets_no_ungranted_authority";
