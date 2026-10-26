@@ -2495,6 +2495,25 @@ fn model_profile_forms(profile: &str) -> Vec<String> {
     profile_forms(profile)
 }
 
+/// Mutating `sbpl_reader.rs` alone fails this crate's confine suite.
+///
+/// Falsifier: change only wallet `tests/sbpl_reader.rs`; this test fails.
+#[test]
+fn shared_sbpl_reader_mutation_fails_this_suite() {
+    let shared = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../wallet-provider/tests/sbpl_reader.rs"),
+    )
+    .expect("shared sbpl_reader.rs");
+    assert!(
+        shared.contains("the profile must refuse a Scheme character literal #\\"),
+        "model confine must keep the one shared reader refuse"
+    );
+    assert!(
+        profile_holds_scheme_comment(r"#\; x (allow file*)"),
+        "the shared reader copy must refuse every #\\ character literal"
+    );
+}
+
 /// A storage right may not claim a root-wide read: an unfiltered file-read,
 /// a regex or prefix on `/`, or a path that normalises to `/`.
 fn model_is_root_wide_read(form: &str) -> bool {
