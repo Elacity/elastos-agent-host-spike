@@ -10,6 +10,7 @@
 mod common;
 
 use common::build::{lane_dir, TempDir};
+use common::MODULE_BUNDLE_LAB_CID;
 use elastos_common::{CapsuleManifest, CapsuleType};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,13 +19,6 @@ use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
 /// The smallest core Wasm module: the magic and version 1, no sections.
 const MODULE: &[u8] = b"\0asm\x01\0\0\0";
-
-/// The lab CID of a bundle holding this capsule's manifest and [`MODULE`].
-/// Computed once outside the lab code, with Python's `hashlib` over the
-/// encoding in `lab/capsule-identity/README.md` ("The encoding"), and pinned.
-/// It is also this lane's guard that the shared rule did not change under it.
-const PINNED_LAB_CID: &str =
-    "lab-cid:sha256:dd6673dafaf1a3180310d3207cccc59b3e414b584b2d93002bb81c8d293a3c47";
 
 /// A bundle folder holding this capsule's manifest and [`MODULE`].
 fn this_capsule_bundle(tmp: &TempDir) -> PathBuf {
@@ -75,7 +69,9 @@ fn this_capsule_bundle_has_the_pinned_lab_cid() {
     let named = bundle_identity(&bundle).unwrap_or_else(|refusal| {
         panic!("bundle_identity refused this capsule's bundle: {refusal}")
     });
-    assert_eq!(named.to_string(), PINNED_LAB_CID);
+    // The pin was recomputed outside the lab code, so it is also this lane's
+    // guard that the shared rule did not change under it.
+    assert_eq!(named.to_string(), MODULE_BUNDLE_LAB_CID);
 }
 
 /// The lane's own files, as git lists them (tracked, or new and not ignored),

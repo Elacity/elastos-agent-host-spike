@@ -21,7 +21,7 @@
 mod common;
 
 use capsule::{FIXED_INPUT, FIXED_OUTPUT};
-use capsule_identity::{sign_bundle, NameSignature};
+use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -1399,7 +1399,15 @@ fn receipt_records_observed_engine_versions() {
     // on the same bundle give the same name.
     assert_eq!(runs[0].0.cid(), runs[1].0.cid());
     let cid = name.to_string();
-    assert!(cid.starts_with("lab-cid:sha256:"), "{cid}");
+    // The printed form is cc-capsule-identity's to check: its one parse.
+    let parsed: LabCid = cid
+        .parse()
+        .unwrap_or_else(|refusal| panic!("{cid} does not parse as a lab CID: {refusal}"));
+    assert_eq!(
+        parsed.to_string(),
+        cid,
+        "the parse does not print back {cid}"
+    );
     for (_, versions) in &runs {
         for version in versions {
             let number = version.split(' ').nth(1).expect("a version number");

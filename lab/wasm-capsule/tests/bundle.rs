@@ -11,6 +11,7 @@
 mod common;
 
 use common::build::{lane_dir, sha256_file, Receipt, TempDir};
+use common::MODULE_BUNDLE_LAB_CID;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -26,19 +27,17 @@ use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 /// The smallest core Wasm module: the magic and version 1, no sections.
 const MODULE: &[u8] = b"\0asm\x01\0\0\0";
 
-/// The lab CID of this capsule's manifest beside [`MODULE`]: 010's pinned
-/// vector (`this_capsule_bundle_has_the_pinned_lab_cid`).
-const MODULE_BUNDLE_LAB_CID: &str =
-    "lab-cid:sha256:dd6673dafaf1a3180310d3207cccc59b3e414b584b2d93002bb81c8d293a3c47";
-
 /// wc-001's pinned `capsule.wasm` (README, "Claim scope").
 const PINNED_ARTIFACT_SHA256: &str =
     "6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13";
 
 /// The lab CID `tools/bundle` prints on this Mac: this capsule's manifest
-/// beside the pinned `capsule.wasm` (README, "tools/bundle").
-const REFERENCE_LAB_CID: &str =
-    "lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930";
+/// beside the pinned `capsule.wasm` (README, "tools/bundle"). Task 024
+/// recomputed it outside the lab code, with the `python3 -I` script quoted in
+/// LOG (written from cc-capsule-identity's README rules), over the bundle
+/// `tools/bundle` wrote, and pinned it only because it equals what
+/// `bundle_identity` prints for the same folder.
+const REFERENCE_LAB_CID: &str = "bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse";
 
 /// The reasons the run refusals give, after `<path>: `.
 const OUT_DIR_EXISTS: &str = "OUT_DIR already exists: tools/bundle makes a new OUT_DIR and never writes into or through what is already there";
