@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,17 +118,41 @@ pub fn run_build(lane: &Path, out_dir: &Path) {
     run_build_with_env(lane, out_dir, &[]);
 }
 
-/// Like [`run_build`], but with extra environment variables set on the build
-/// process, used to pass an explicit `RUSTC` override. There is one build path
-/// (PRINCIPLES P10): `run_build` is this with no extra environment.
-pub fn run_build_with_env(lane: &Path, out_dir: &Path, env: &[(&str, &str)]) {
+/// The bash every build runs under: the first `bash` on PATH.
+pub const PATH_BASH: &str = "bash";
+
+/// This Mac's system bash, 3.2.57. There a `set -u` error after the cleanup
+/// trap reaches the trap with `$?` 0 (LOG.md, task 035), so task 035's status
+/// test runs the script under it; every other build uses [`PATH_BASH`].
+pub const SYSTEM_BASH: &str = "/bin/bash";
+
+/// Spawn `lane`'s `tools/build` under `bash` for `out_dir`, with `env` set and
+/// `unset` removed from its environment, and return its raw output. This is
+/// the one place a test spawns the script (PRINCIPLES P10).
+pub fn spawn_build(
+    bash: &str,
+    lane: &Path,
+    out_dir: &Path,
+    env: &[(&str, &str)],
+    unset: &[&str],
+) -> Output {
     let script = lane.join("tools").join("build");
-    let mut command = Command::new("bash");
+    let mut command = Command::new(bash);
     command.arg(&script).arg(out_dir);
     for (key, value) in env {
         command.env(key, value);
     }
-    let output = command.output().expect("spawn tools/build");
+    for key in unset {
+        command.env_remove(key);
+    }
+    command.output().expect("spawn tools/build")
+}
+
+/// Like [`run_build`], but with extra environment variables set on the build
+/// process, used to pass an explicit `RUSTC` override. There is one build path
+/// (PRINCIPLES P10): `run_build` is this with no extra environment.
+pub fn run_build_with_env(lane: &Path, out_dir: &Path, env: &[(&str, &str)]) {
+    let output = spawn_build(PATH_BASH, lane, out_dir, env, &[]);
     assert!(
         output.status.success(),
         "tools/build failed ({}):\n--- stdout ---\n{}\n--- stderr ---\n{}",

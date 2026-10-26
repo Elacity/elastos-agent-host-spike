@@ -35,7 +35,10 @@ export CARGO_INCREMENTAL=0
 # any path that differs between runs. It is removed on exit.
 TARGET_DIR="$(mktemp -d)"
 export CARGO_TARGET_DIR="$TARGET_DIR"
-trap 'rm -rf "$TARGET_DIR"' EXIT
+# Until the last line re-arms it, an exit through this trap is a failure that
+# keeps its status: on /bin/bash 3.2.57 a `set -u` error reaches the trap with
+# $? 0, so 0 becomes 1 here (task 035). Reverting it is F-WC1-TRAP-STATUS.
+trap 'status=$?; rm -rf "$TARGET_DIR"; exit "$((status == 0 ? 1 : status))"' EXIT
 
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
 
@@ -95,3 +98,6 @@ source_date_epoch: ${SOURCE_DATE_EPOCH}
 EOF
 
 echo "built ${OUT_DIR}/capsule.wasm ${ARTIFACT_SHA}"
+
+# The build is done: from here the trap only cleans up, so the script exits 0.
+trap 'rm -rf "$TARGET_DIR"' EXIT
