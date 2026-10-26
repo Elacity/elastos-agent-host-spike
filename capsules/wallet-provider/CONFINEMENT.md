@@ -260,12 +260,27 @@ binding is the only difference between the two runs.
   `(allow process-exec)`, `(allow process*)` and
   `(allow file-read* process*)`. The check refuses each profile with a reason
   that names `fixture-provider`, quotes the extra rule and holds
-  `more than one process-exec allow`. The unfiltered forms put the operation
-  name directly before the closing parenthesis, so the predicate reads `)`
-  as a token boundary. The narrower exec rule keeps its own removal for the
-  055 removal check, and the 056 and 059 copy tests still refuse a copy of the
-  provider binary, so neither sees this second exec path. The test reads no
-  file and starts no process.
+  `more than one process-exec allow`. A fixture that puts
+  `(allow process-exec (literal "/bin/sh"))` before the shared exec rule is
+  refused with a reason that quotes the `/bin/sh` rule and not the shared one,
+  and a fixture with two extra exec rules and no shared exec rule is refused
+  with both rules quoted. The profile that appends
+  `(allow file-read* (literal "/x") process-exec)` is refused with that rule
+  quoted, because an operation name after a filter still names an operation.
+  `/usr/bin/sandbox-exec` loads `(version 1)(deny default)(allow file-read*
+  (literal "/x") process-exec)`; it starts `/usr/bin/true`, which fails with
+  `execvp() of '/usr/bin/true' failed: Operation not permitted` and exit 71,
+  and the check refuses that form either way. Fixtures that append
+  `(allow file-read* (literal "/process-exec"))`,
+  `(allow file-read* (process-exec "/x"))`,
+  `(allow file-read* (require-all (process*)))` and
+  `(allow "process-exec")` still pass, because a token inside a string or a
+  nested filter names text or a filter argument, not an operation. The
+  unfiltered forms put the operation name directly before the closing
+  parenthesis, so the predicate reads `)` as a token boundary. The narrower
+  exec rule keeps its own removal for the 055 removal check, and the 056 and
+  059 copy tests still refuse a copy of the provider binary, so neither sees
+  this second exec path. The test reads no file and starts no process.
 - `file_profile_contract_rejects_a_non_canonical_token` builds the same
   passing fixture and appends
   `(allow file-read* (literal (param "READ_FIXTURE_KEY")))`. The check refuses
@@ -531,10 +546,23 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Remove the second-exec-allow refusal from the shared contract check (WP69):
   `file_profile_contract_rejects_a_second_exec_allow` fails because the
   `/bin/sh` fixture passes.
-- Take the exec predicate's operation list only up to the first `(` (WP70):
+- Read no `)` as a token boundary in the exec predicate (WP70):
   `file_profile_contract_rejects_a_second_exec_allow` fails on its
   `(allow process*)` case because the token reads `process*)` and the profile
   passes the check.
+- Quote every exec allow after the first one again (WP71): the same test fails
+  on its `/bin/sh`-before-the-shared-rule case because the refusal quotes the
+  shared rule and not the extra one.
+- Read the exec predicate's operation names only before the first filter
+  (WP72): the same test fails on its after-filter `process-exec` case because
+  the profile passes the check.
+- Quote only the first extra exec rule (WP73): the same test fails on its
+  two-extra-rules case because the second quote is missing.
+- Count a token inside a nested filter as an operation name (WP74): the same
+  test fails because the passing `(allow file-read* (process-exec "/x"))`
+  fixture is refused.
+- Count text inside a string as an operation name (WP75): the same test fails
+  because the passing `(allow "process-exec")` fixture is refused.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
