@@ -263,29 +263,40 @@ def load(path=DATA):
     return entries
 
 
-# The files the committed falsifier lists mutate, relative to REPO. Each
-# exact target is restored on startup; every other file stays with the runner
-# its list belongs to. The lists and their targets:
+# The files the lists this runner loads mutate, relative to REPO. Each exact
+# target is restored on startup; a file under examples/agent-host is already
+# covered by this runner's own search. The lists and their targets:
 # - capsules/model-provider/falsifiers.json: the model provider's
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/local_llama.rs
 #   and src/adapters.rs. Its `selftest` entries edit falsify.py, which
 #   recovery finds under examples/agent-host.
 # - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`
-#   and tests/confine/main.rs (cc-model-confine's F-cc1e).
-# - capsules/did-provider/falsifiers.json: did's src/main.rs, confine.sb and
-#   tests/confine.rs (DID12 and later).
-# - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs,
-#   confine.sb, tests/confine.rs and src/tests/falsifiers.rs (WP25), and did's
-#   confine.sb.
-# - lab/capsule-identity/falsifiers.json: capsule-identity's src/lib.rs,
-#   tests/common/mod.rs and fixtures/wc001-core/capsule.json.
+#   and tests/confine/main.rs.
+# - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
+#   confine.sb and did's tests/confine.rs.
+# - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs, wallet's
+#   confine.sb, wallet's tests/confine.rs and src/tests/falsifiers.rs, and
+#   did's confine.sb.
+# - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
+#   README.md, src/lib.rs, tests/common/mod.rs and
+#   fixtures/wc001-core/capsule.json.
 # - lab/wasm-capsule/falsifiers.json and lab/wasm-capsule/audit/falsifiers.json:
 #   the lab capsule's .gitignore, README.md, capsule/capsule.json,
-#   capsule/src/lib.rs, tests/common/build.rs, tests/verify.rs, tools/build,
-#   tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs and
-#   tools/src/verify.rs, the lab's run log LOG.md, and the audit crate's
-#   Cargo.toml, INTERFACE.md and src/lib.rs. tools/src/lab_name.rs stays here
-#   and guards no current entry.
+#   capsule/src/lib.rs, tests/common/build.rs, tests/lab_cid.rs,
+#   tests/verify.rs, tools/build, tools/src/bin/bundle.rs,
+#   tools/src/bundle.rs, tools/src/lib.rs, tools/src/receipt.rs,
+#   tools/src/run.rs and tools/src/verify.rs, the lab's run log LOG.md, and
+#   the audit crate's Cargo.toml, INTERFACE.md and src/lib.rs.
+#   tests/lab_cid.rs is named here ahead of the wasm lab's planned entry that
+#   edits it; no list edits it at this base. tools/src/lab_name.rs is gone
+#   from the tree and keeps its line because two entries of the model list
+#   anchor on it.
+# - examples/agent-host/falsifiers.json: asks.json, falsify.py and src/lib.rs,
+#   all under examples/agent-host, which this runner's own search restores, so
+#   the tuple needs no line for it.
+# - lab/agent-conformance/falsifiers.json has no line here: it names its
+#   files relative to its own folder, so from examples/agent-host they
+#   resolve under it, and this runner's search already covers them.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -320,6 +331,11 @@ PROVIDER_TARGETS = (
     "lab/wasm-capsule/tools/src/lib.rs",
     "lab/wasm-capsule/tools/src/verify.rs",
     "lab/wasm-capsule/LOG.md",
+    "lab/capsule-identity/.gitignore",
+    "lab/capsule-identity/README.md",
+    "lab/wasm-capsule/tools/src/run.rs",
+    "lab/wasm-capsule/tools/src/receipt.rs",
+    "lab/wasm-capsule/tests/lab_cid.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -1893,29 +1909,29 @@ def a_killed_provider_edit_is_recovered():
     through main(), and repeat the edit. This lane's model-provider targets,
     the model provider's confinement test harness, the confine lane's five
     did/wallet targets plus its did confinement test harness and wallet's
-    falsifier honesty test, capsule-identity's src/lib.rs,
-    tests/common/mod.rs and fixtures/wc001-core/capsule.json, and the wasm
-    lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
-    capsule/src/lib.rs, tests/common/build.rs, tests/verify.rs, tools/build,
-    tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs,
-    tools/src/verify.rs, tools/src/lab_name.rs and audit Cargo.toml,
-    INTERFACE.md and src/lib.rs all come back in either startup mode
-    (PV51-PV53, PV69-PV74, PV75-PV84). Foreign backups, including both
-    providers' confinement documents, each harness's support neighbour,
-    wallet's test support neighbour, the labs' adoption note and web-app
-    fixture, the lab's tools manifest and a tools/src neighbour, stay with
-    their owners."""
+    falsifier honesty test, capsule-identity's .gitignore, README.md,
+    src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json, and
+    the wasm lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
+    capsule/src/lib.rs, tests/common/build.rs, tests/lab_cid.rs,
+    tests/verify.rs, tools/build, tools/src/bin/bundle.rs,
+    tools/src/bundle.rs, tools/src/lib.rs, tools/src/receipt.rs,
+    tools/src/run.rs, tools/src/verify.rs, tools/src/lab_name.rs and audit
+    Cargo.toml, INTERFACE.md and src/lib.rs all come back in either startup
+    mode. Foreign backups, including both providers' confinement documents,
+    each harness's support neighbour, wallet's test support neighbour, the
+    labs' adoption note, gap report and web-app fixture, the lab's tools
+    manifest and a tools/src neighbour, stay with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
     profile = "../../capsules/model-provider/confine.sb"
     # The did and wallet targets, both confinement test harnesses, wallet's
-    # falsifier honesty test, capsule-identity's src/lib.rs,
-    # tests/common/mod.rs and fixtures/wc001-core/capsule.json, and the wasm
-    # lab's sixteen edit and run-log files are named here, not read from the
-    # table, so a target dropped from PROVIDER_TARGETS is caught (PV44, PV45,
-    # PV47-PV49, PV51-PV53, PV69-PV74, PV75-PV84). Their original bytes are
-    # written in the isolated tree, never read from the real lab or crates.
+    # falsifier honesty test, capsule-identity's .gitignore, README.md,
+    # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
+    # and the wasm lab's edit and run-log files are named here, not read from
+    # the table, so a target dropped from PROVIDER_TARGETS is caught. Their
+    # original bytes are written in the isolated tree, never read from the
+    # real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/did-provider/src/main.rs",
                  "../../capsules/did-provider/confine.sb",
@@ -1942,7 +1958,12 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/wasm-capsule/tools/src/bundle.rs",
                  "../../lab/wasm-capsule/tools/src/lib.rs",
                  "../../lab/wasm-capsule/tools/src/verify.rs",
-                 "../../lab/wasm-capsule/LOG.md")
+                 "../../lab/wasm-capsule/LOG.md",
+                 "../../lab/capsule-identity/.gitignore",
+                 "../../lab/capsule-identity/README.md",
+                 "../../lab/wasm-capsule/tools/src/run.rs",
+                 "../../lab/wasm-capsule/tools/src/receipt.rs",
+                 "../../lab/wasm-capsule/tests/lab_cid.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -1985,7 +2006,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                                repo / "capsules/model-provider/tests/confine/support.rs",
                                repo / "capsules/did-provider/tests/support.rs",
                                repo / "capsules/wallet-provider/src/tests/support.rs",
-                               repo / "lab/capsule-identity/README.md",
+                               repo / "lab/capsule-identity/GAP-REPORT.md",
                                repo / "lab/capsule-identity/fixtures/web-app/capsule.json",
                                repo / "lab/wasm-capsule/ADOPTION.md",
                                repo / "lab/wasm-capsule/tools/Cargo.toml",
