@@ -75,11 +75,21 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: recorded after the suite run on this head.
-`planted_bugs_are_caught` prints CAUGHT lines from the plants table.
-After the suite, `ls /tmp/elastos` must be `No such file or directory`.
-Runtime `manager.rs` sha256 stays
+Result: `test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 50.64s`.
+`planted_bugs_are_caught` printed **22 CAUGHT lines** from **19 plants**
+(F-A12-DROP-ROOTS, M-A12-TMP-DOTDOT, and M-A6-COMMENT-STEP4 each name two
+tests). After the suite, `ls /tmp/elastos` was `No such file or directory`.
+Runtime `manager.rs` sha256 stayed
 `cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
+r3 `lab/review-a6-a12-343-r3/run.sh` refuses this head (it pins
+`87b974a1`). `tools/new-hunts.sh` on this head: `..` and live-Home
+symlink guards **CAUGHT**; inode reuse **CAUGHT**. The r3
+`leftovers_created(watch)` probes for a late snapshot and a sibling
+folder still print SURVIVED; those cases are CAUGHT by
+`snapshot_before_runtime` and `leftovers_in_run_window`. The r3
+`ra6-stub-ok` script prints SURVIVED because the named test FAILED;
+the panic text is FAIL on empty `ResidentPair`, not PASS. Plant
+M-A6-STUB-OK is CAUGHT.
 
 | Check | Verdict | Notes |
 | --- | --- | --- |
