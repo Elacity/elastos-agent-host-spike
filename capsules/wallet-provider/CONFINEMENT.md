@@ -132,6 +132,24 @@ oracles and supplies contract evidence, not Linux execution evidence.
   neither file-content reads nor writes outside the wallet grant.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
+- `startup_denial_reports_its_reason` covers the failure path. It starts the
+  provider under a fixture profile that holds `(version 1)` and `(deny default)`,
+  so `sandbox-exec` cannot exec it, waits for that child to exit, and sends
+  `init`. The one harness failure names the request, the child's exit status and
+  `sandbox-exec`'s own `execvp()` denial of the provider binary, `Operation not
+  permitted`, from standard error, so another denial cannot stand in for the exec
+  denial. A second fixture child reads one request and exits without answering,
+  so the response-stream branch reports the same three facts. An answer that is
+  not JSON fails with its own message, which names the request, the parse error
+  and the answer, and does not say the provider did not answer;
+  `invalid_json_answer_names_the_request_and_the_parse_error` checks it. The
+  harness drains standard error on its own thread while the child runs, so a
+  child that fills the pipe still reaches its own exit.
+  `stderr_is_drained_before_wait` writes 128 KiB to standard error and expects
+  every byte plus the child's own exit status; it fails when the drainer starts
+  only after the wait, because the child then never exits within the deadline.
+  The startup case skips with its printed reason when `sandbox-exec` is absent on
+  a host OS other than macOS.
 - `startup_is_refused_when_the_profile_cannot_be_applied` starts the provider
   under a profile that cannot be applied: a path that does not exist, a copy of
   `confine.sb` with its last `)` removed, and the real profile with every
@@ -325,6 +343,15 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Add the separator space after an opening parenthesis (WP40):
   `a_space_after_the_opening_parenthesis_still_names_its_rule` fails because
   `( allow default)` reads as its own form and passes the check.
+- Start the drainer only after `wait_for_exit` has returned (WP41):
+  `stderr_is_drained_before_wait` fails on its exit assertion because the
+  child blocks on a full pipe and never exits within the deadline.
+- Use a fixed `Operation not permitted` instead of the child's standard error
+  in `unanswered` (WP42): `startup_denial_reports_its_reason` fails on its
+  `execvp()` assertion because the fixed text names no exec denial.
+- Return the shared unanswered message from the invalid-JSON branch (WP43):
+  `invalid_json_answer_names_the_request_and_the_parse_error` fails because the
+  answer loses its parse error and says the provider did not answer.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
