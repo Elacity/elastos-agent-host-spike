@@ -191,8 +191,16 @@ impl ThrowawayHome {
     }
 
     /// The only spawn site, shared by bounded launches and managed operators.
-    fn spawn(&self, program: &Path, args: &[&str]) -> Result<CapturedChild> {
+    fn spawn(
+        &self,
+        program: &Path,
+        args: &[&str],
+        operator: Option<&ThrowawayHome>,
+    ) -> Result<CapturedChild> {
         self.guard(&self.home, &self.data)?;
+        if let Some(operator) = operator {
+            operator.guard(operator.home(), operator.data())?;
+        }
         // Files avoid pipe backpressure and inherited-pipe EOF hangs. They are
         // created exclusively inside the guarded root and retained on failure.
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
@@ -200,7 +208,8 @@ impl ThrowawayHome {
             .map_err(|_| "could not create child stdout capture")?;
         let stderr = File::create_new(self.root.join(format!("stderr-{serial}")))
             .map_err(|_| "could not create child stderr capture")?;
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .current_dir(&self.home)
             .env_clear()
@@ -219,7 +228,16 @@ impl ThrowawayHome {
                 stderr
                     .try_clone()
                     .map_err(|_| "could not attach child stderr")?,
-            )
+            );
+        if let Some(operator) = operator {
+            // Runtime alone reads its fixture coordinates. The harness only
+            // supplies a path derived from another guarded, borrowed Home.
+            command.env(
+                "ELASTOS_RUNTIME_COORDS_FILE",
+                operator.data().join("runtime-coords.json"),
+            );
+        }
+        let child = command
             .spawn()
             .map_err(|_| "could not start child process")?;
         Ok(CapturedChild {
@@ -231,7 +249,7 @@ impl ThrowawayHome {
 
     pub fn launch(&self, program: &Path, args: &[&str], bound: Duration) -> Result<Output> {
         let started = Instant::now();
-        let mut spawned = self.spawn(program, args)?;
+        let mut spawned = self.spawn(program, args, None)?;
         let child = &mut spawned.child;
         let status = loop {
             match child.try_wait() {
@@ -264,7 +282,7 @@ impl ThrowawayHome {
     pub fn start(&self, program: &Path, args: &[&str]) -> Result<RunningChild<'_>> {
         Ok(RunningChild {
             home: self,
-            spawned: self.spawn(program, args)?,
+            spawned: self.spawn(program, args, None)?,
             stopped: false,
         })
     }
@@ -334,6 +352,29 @@ impl RunningChild<'_> {
             .map_err(|_| "could not inspect managed child")
     }
 
+    /// Observe exit without signalling the child. Preserve its OS status so
+    /// callers can reject signal exits. A surviving descendant fails cleanup.
+    fn try_output(&mut self) -> Result<Option<Output>> {
+        let Some(status) = self
+            .spawned
+            .child
+            .try_wait()
+            .map_err(|_| "could not collect managed child status")?
+        else {
+            return Ok(None);
+        };
+        if self.home.group_is_alive(self.pgid())? {
+            return Err("completed child left a live process group");
+        }
+        let output = Output {
+            status,
+            stdout: capture(&mut self.spawned.stdout)?,
+            stderr: capture(&mut self.spawned.stderr)?,
+        };
+        self.stopped = true;
+        Ok(Some(output))
+    }
+
     fn signal(&self, signal: &str, group: bool) -> Result<()> {
         let target = if group {
             format!("-{}", self.pgid())
@@ -389,6 +430,67 @@ impl RunningChild<'_> {
             std::thread::sleep(Duration::from_millis(20));
         }
         Err("managed child or its group exceeded the 10 second stop bound")
+    }
+}
+
+/// Start every client before collecting any result, through the same spawn
+/// site as launch/start. Borrow the operator until all clients have settled.
+pub struct Launch<'a> {
+    pub home: &'a ThrowawayHome,
+    pub program: &'a Path,
+    pub args: Vec<&'a str>,
+}
+
+pub struct RunningInstances<'a> {
+    children: Vec<RunningChild<'a>>,
+    started: Instant,
+}
+
+pub struct Completion {
+    pub output: Output,
+    /// Includes all launches, polling, capture and group-drain checks.
+    pub elapsed: Duration,
+}
+
+impl<'a> RunningInstances<'a> {
+    pub fn start(launches: &[Launch<'a>], operator: Option<&'a ThrowawayHome>) -> Result<Self> {
+        let mut group = Self {
+            children: Vec::new(),
+            started: Instant::now(),
+        };
+        for launch in launches {
+            group.children.push(RunningChild {
+                home: launch.home,
+                spawned: launch.home.spawn(launch.program, &launch.args, operator)?,
+                stopped: false,
+            });
+        }
+        Ok(group)
+    }
+
+    /// One deadline from before the first spawn. Poll all children so a slow
+    /// member cannot hide a sibling's result. Drop kills any unfinished groups.
+    pub fn collect(mut self, bound: Duration) -> Result<Vec<Completion>> {
+        let mut results: Vec<_> = self.children.iter().map(|_| None).collect();
+        while results.iter().any(Option::is_none) {
+            for (child, result) in self.children.iter_mut().zip(&mut results) {
+                if result.is_none() {
+                    if let Some(output) = child.try_output()? {
+                        *result = Some(Completion {
+                            output,
+                            elapsed: self.started.elapsed(),
+                        });
+                    }
+                }
+            }
+            if self.started.elapsed() >= bound {
+                return Err("instances exceeded their shared time bound; harness cleanup is not a Runtime stop");
+            }
+            if results.iter().any(Option::is_none) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Ok(results.into_iter().map(Option::unwrap).collect())
     }
 }
 

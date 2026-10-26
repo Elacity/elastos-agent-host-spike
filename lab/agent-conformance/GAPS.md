@@ -445,3 +445,61 @@ acceptance checks. AC-010-OFFLINE remains closed by 013's measured operator
 recipe. The positive-grant controller remains with task 015; launch by bundle
 CID remains a separate task. Artifact SHA-256 identifies the exact local
 component bytes used here and is separate from signed-bundle admission.
+
+
+## 005 — parallel activation scope
+
+Runtime owns activation and its resource limits. The harness starts four
+`elastos run` clients against one fixture operator, with a different guarded
+Home for each client. `RunningInstances` extends the existing spawn primitive
+and collects natural exits under one wall-clock deadline. The fixed
+`ELASTOS_RUNTIME_COORDS_FILE` entry points to the borrowed operator Home; only
+Runtime reads that file. The harness handles its path and checks both Homes.
+Inherited coordinate overrides remain cleared.
+
+The client path constructs a ComponentProvider in each `run` process
+(`run_cmd.rs:236-269`). Attaching four client sessions to one operator therefore
+proves **process isolation, not capsule isolation**. RT4 remains open: Anders
+supplies Bus v2 resident component instances with independent lifecycle and
+resource ownership inside one Runtime before that claim can pass.
+
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `parallel_capsules_complete_independently` | RT4 | Resident component lifecycle and concurrent instances hosted by one Runtime. |
+| `parallel_instances_return_success_payloads` | AC-002-ARGS | Typed lifecycle success payload and CLI result forwarding, through the existing Bus path. |
+
+Both tests fail explicitly when forced with `--ignored` and remain BLOCKED in
+the table. The finite process fallback performs four different additions
+inside the same probe source. A build-time `task` feature and fixture index
+select the task; the guest receives neither launch arguments nor an environment.
+Each completed computation returns its distinct diagnostic through
+`BusError::Unavailable`, which reaches CLI stderr with exit 1. The live test
+requires the expected computed value and excludes every sibling result from
+both captures. This is diagnostic completion only. It supplies no evidence for
+success payloads, grants, principal separation, or shared-scratch isolation.
+AC-006-STORAGE retains its existing scope and blocker.
+
+### AC-005-REASON — resource-stop cause on the CLI
+
+`process_isolation::runaway_is_stopped_with_reason` is
+`#[ignore = "blocked: AC-005-REASON"]`. Runtime must preserve the resource-stop
+cause from Wasmtime through ComponentProvider and `elastos run` stderr (for
+example the fuel-exhaustion cause). The strict test still requires that cause,
+a natural exit with code 1 inside ten seconds, and three completed siblings.
+It remains BLOCKED and is excluded from passing acceptance.
+
+The measured runaway returned naturally after 0.053 seconds, with the
+`Component lifecycle run failed: error while executing at wasm backtrace:`
+context. The CLI omitted the fuel cause. Source inspection finds a fuel budget
+of 100,000,000 and a 128 MiB memory limit in
+`elastos/crates/elastos-compute/src/providers/component.rs:28-29,80-97,121`;
+the error conversion at line 134 formats only the outer error. These constants
+are Runtime-owned and have no fixture override. Source presence alone does
+not supply the missing CLI reason.
+
+`process_isolation::runaway_trap_is_bounded_while_siblings_finish` is the narrower
+live check: it requires a natural lifecycle trap within ten seconds and all
+three diagnostic completions. A harness timeout or signal exit fails. F-ac3a
+changes the runaway probe loop to a short finite loop; it tests this live
+bounded-trap evidence only. Its result does not close AC-005-REASON. The strict
+reason test remains available with `--ignored` for the future Runtime fix.
