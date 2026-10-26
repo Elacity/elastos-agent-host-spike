@@ -542,3 +542,36 @@ F-ac3b grants instance 2 the sibling read; F-ac3c moves its own file into
 instance 1's directory; F-ac3d starts the second client after the first exits.
 Run each entry's named tests at baseline, with its exact edits, and after byte
 restoration. LOG.md records the commands and libtest results.
+
+
+## Pending-request cancellation
+
+`cancelled_instance_settles_with_reason_sibling_completes` runs the two cached
+instance builds against one operator. Read its table row as **cancel at the
+pending-request point, lab half of A10 (A12 census)** and use the VERSIONS.json
+printed by that same `run.sh` invocation. Both launched bundle identities are
+required for the receipt. The report's existing grader retains every row's
+grade; this journey adds a label and identity requirements.
+
+The checked `cancel settlement:` line names local instance labels, the fixed
+cancel reason, both exit statuses, the first barrier wait, measured overlap,
+and elapsed times. Instance-1 exits with its exact denial. Instance-2 first
+checks its own file bytes in the guest, then exits with the expected sibling
+read denial, as in the two-instance journey. A nonzero sibling exit alone
+supplies zero completion evidence. The two older instance rows each run the
+same shared journey.
+
+After collection, the controller checks pending requests while the operator
+is alive. Its shell-owned pending control proves the live census call can
+refuse a leftover and is then denied. The final empty-pending check precedes
+operator group stop, root census, API-port closure and the empty `tmp/` check.
+Cross-session live grants remain `BLOCKED(AC-021-GRANTS)` and give zero passing
+credit. Resident cancellation stays RT4; this row covers the pending-request
+point only. GAPS.md defines the cleanup visibility limits.
+
+F-cancel-sibling cancels both first requests and must fail the sibling check.
+F-cancel-reason changes the delivered reason. F-cancel-retry bypasses later
+request validation. F-cleanup-live-wiring replaces the actual cleanup call
+with a fixed success while a control is pending. F-cancel-receipt drops the
+cancel row's launched identities. Each uses `command: lab` and its named test
+must pass before planting, fail with the edit and pass after restoration.

@@ -3942,3 +3942,329 @@ inventory was refreshed at handoff. Cached upstream divergence was zero
 commits ahead and nine behind; this offline builder made zero network
 requests and zero Git mutations. The supervisor owns the remote refresh,
 base compatibility, commit, review and publication.
+
+
+## 026 — Cancel one pending instance; sibling completes
+
+026: Added cancellation in the existing controller/read journey, cached the two instance builds per test process, checked cancel evidence and receipt identities, exercised live cleanup wiring, and measured the Unix-socket census limit.
+
+The builder read task 026, the supplied 023/backlog handoff, the landed 023
+code and LOG record, and the named read-only Runtime seams. The queue itself
+is outside this repository and stayed outside the file reads. This repository
+has no humanizer skill; this record uses direct statements of behavior and
+ownership. All source edits stay inside this lane. Git refs, the index, dependencies
+and the probe source remain unchanged.
+
+`Controller::poll` uses the existing first overlap barrier: two pending first
+reads in distinct sessions, with both clients alive. In that decision pass,
+instance-2 gets its own session grant and instance-1 gets the fixed cancel
+reason. The same collector starts each client once and observes later pending
+requests until both clients exit. The expected instance-2 sibling read is the
+sole later request allowed for instance-1's resource. This resolves the task's
+wording about that resource against its required sibling read; every request
+from the cancelled session is refused by the harness.
+
+`instance_read_result` checks the sibling first, then requires instance-1's
+nonzero exit and the exact delivered denial status/reason. A checked
+`cancel settlement:` line records local labels, statuses, the reason and
+measured times. Captures, printed lines, report, receipt and candidate/committed
+lane sources use the existing credential checker. Missing cancel evidence uses
+the existing fixed evidence refusal. The report changes add only the row label
+and its two launched-identity requirements; its grader and lab CID parser keep
+their behavior.
+
+The completed journey takes the existing live pending/grant census before
+operator stop. `check_cleanup_wiring` also plants one shell-owned request,
+requires the same caller's census to refuse it, denies that control and repeats
+the empty-pending check. The control has zero granted allowance. The ordinary
+journey counters retain their original meaning. Cross-session live grants
+stay `BLOCKED(AC-021-GRANTS)`.
+
+### Unix socket control and permitted scope fallback
+
+`cleanup_census_refuses_each_leftover` starts a bounded Python child through
+`ThrowawayHome::start`, the existing spawn site. It binds `cleanup.sock` in
+its in-root cwd, signals readiness by a file and holds the socket for at most
+20 seconds. A relative socket path is needed because the absolute worktree
+path exceeds macOS's Unix-address limit. The child is stopped before checking
+the captured census result, and both control files are removed.
+
+The first discovery run failed its socket-reason assertion:
+
+```text
+test cleanup_census_refuses_each_leftover ... FAILED
+process leftover; processes:1 paths:["home", "stderr-10", "stdout-10"] API sockets:0 temp:0 paths:[]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.09s
+```
+
+The current `lsof +D` census omits this bound Unix socket. Per acceptance 4,
+GAPS.md now limits the claim to selected file/directory handles, the API port
+and tmp entries. Unix socket absence is unmeasured. The retained control
+checks the process refusal and explicitly checks the observed omission, so a
+change in visibility requests a scope review. The original API, temp, process
+and final-empty assertions remain. The physical census source retains its
+original bytes. The narrowed control passed in 3.180 seconds including Cargo;
+this is zero proof of Unix-socket absence. Resident cancellation remains RT4.
+
+### Falsifiers run by hand
+
+All commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, the lane-local `target/host` and `target/host-build`,
+and the existing shared exclusive heavy-build lease. The first acquisition
+waited for another owner; no build overlapped it. The volume had 49.01 GiB
+free, above the 12 GiB build estimate plus 2 GiB reserve. Local fixture loopback
+and process inspection access were enabled. Every command kept a 600-second
+limit. The per-command times below include Cargo. Each edit used the exact
+JSON anchor and was restored byte for byte in `finally` before the restored
+run. Proof files under `target/task-026-current/` are local and uncommitted.
+
+Each command was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test <effects-or-report> <named-test> -- --exact --show-output
+```
+
+F-cleanup-live-wiring replaces the actual `controller.cleanup_state()` call in
+`exercise_read` with a fixed success. Its shell control remains pending at the
+call. The test fails with `live cleanup wiring accepted a planted pending
+request`, then the fixture settles the control before operator cleanup.
+F-cancel-sibling fails on the sibling check, as required. Both are **CAUGHT**.
+The three additional new falsifiers cover post-cancel requests, the delivered
+reason and both receipt identities. F-instance-receipt's anchor was updated
+for the expanded identity arm, and the two retained controls below were rerun.
+Each falsifier has one named test, and every named test failed when planted.
+
+F-cancel-sibling — **CAUGHT**.
+
+Baseline: exit 0, 12.846 seconds.
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 12.72s
+```
+Planted: exit 101, 13.065 seconds.
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 11.48s
+instance read acceptance failed: "sibling check: instance-2 must finish its own read and receive its sibling denial"
+```
+Restored: exit 0, 14.278 seconds.
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 12.93s
+```
+
+F-cleanup-live-wiring — **CAUGHT**.
+
+Baseline: exit 0, 11.528 seconds.
+
+```text
+test granted_read_succeeds ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 10.68s
+```
+Planted: exit 101, 11.189 seconds.
+
+```text
+test granted_read_succeeds ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 10.06s
+cleanup grant census failed; see checked reason
+```
+Restored: exit 0, 10.787 seconds.
+
+```text
+test granted_read_succeeds ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 10.06s
+```
+
+F-cancel-retry — **CAUGHT**.
+
+Baseline: exit 0, 1.036 seconds.
+
+```text
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+```
+Planted: exit 101, 1.685 seconds.
+
+```text
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+assertion `left == right` failed
+  left: Ok(true)
+ right: Err("cancel: cancelled instance made a further request")
+```
+Restored: exit 0, 0.617 seconds.
+
+```text
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+```
+
+F-cancel-reason — **CAUGHT**.
+
+Baseline: exit 0, 11.909 seconds.
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 10.93s
+```
+Planted: exit 101, 12.179 seconds.
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 11.21s
+instance read acceptance failed: "instance-1 must receive its exact denial status and reason"
+```
+Restored: exit 0, 20.599 seconds.
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 14.62s
+```
+
+F-cancel-receipt — **CAUGHT**.
+
+Baseline: exit 0, 1.467 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+Planted: exit 101, 1.207 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+each launched instance identity is required
+```
+Restored: exit 0, 1.351 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+F-instance-receipt — **CAUGHT**.
+
+Baseline: exit 0, 0.770 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+Planted: exit 101, 1.195 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+each launched instance identity is required
+```
+Restored: exit 0, 1.084 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+F-instance-evidence — **CAUGHT**.
+
+Baseline: exit 0, 1.321 seconds.
+
+```text
+test grants::tests::instance_journey_requires_all_printed_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+```
+Planted: exit 101, 1.459 seconds.
+
+```text
+test grants::tests::instance_journey_requires_all_printed_surfaces ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.03s
+assertion `left == right` failed
+  left: Err("credential check requires a complete report")
+ right: Err("required instance journey evidence is missing")
+```
+Restored: exit 0, 0.829 seconds.
+
+```text
+test grants::tests::instance_journey_requires_all_printed_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+```
+
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/effects.rs:169` reuses the existing two builds and `stage_probe`; `src/report.rs:191` requires both launched hash identities. Fixture resource names describe requests, not code identity. |
+| 2. New ambient capsule or UI authority? | No | `tests/common/grants.rs:455` makes an explicit fixture decision through the existing Runtime approval route; the capsule and UI sources retain their behavior. |
+| 3. Second path or copy of an operation rule? | No | `tests/effects.rs:279` passes the existing cleanup call into its live control; `tests/common/grants.rs:264` continues the same controller after the shared first barrier. |
+| 4. Runtime core grows? | No | `tests/common/grants.rs:381` and `tests/effects.rs:537` contain the new lab journey. Every changed path is inside this lane. |
+| 5. New refusals fail closed with clear reasons? | Yes | `tests/common/grants.rs:139` fixes the cancel reason; `:264` refuses retries and unexpected requests; `:522` refuses a bypassed cleanup call. |
+| 6. Capsule logic stays inside and calls down through granted Bus calls? | Yes | The unchanged `probe/src/lib.rs:138` requests a grant and `:146` invokes the provider; its in-guest byte check still precedes the sibling request. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/effects.rs:537`, `tests/common/grants.rs:1172`, `tests/report.rs:670` and the five entries beginning at `falsifiers.json:1137` have the baseline/planted/restored results above. Unix socket absence receives zero proof credit. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:191` requires identity evidence only; `tests/common/grants.rs:455` still requires explicit per-session grant/deny decisions. The cleanup control receives zero resource allowance. |
+
+
+### Final author checks and handoff
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`
+passed in 0.128 seconds. `bash lab/agent-conformance/run.sh` passed with exit
+0 in 234.048 seconds, within the unchanged 600-second bound.
+The script ran the complete lane test command:
+
+```sh
+cargo test --locked --no-fail-fast --manifest-path lab/agent-conformance/Cargo.toml -- --format pretty --color never --show-output
+```
+
+The table has 64 passing tests, zero failed or skipped tests, ten existing
+BLOCKED tests, and one passing A14 receipt. Earlier rows retain their grades.
+The new row and required regressions read:
+
+```text
+attach_secret_stays_in_memory | PASS
+cancelled_instance_settles_with_reason_sibling_completes | PASS | cancel at the pending-request point, lab half of A10 (A12 census)
+cleanup_census_refuses_each_leftover | PASS
+instance_grant_does_not_authorise_sibling | PASS | process-isolation lab half of A3, A6 and A9
+run_leaves_no_live_grant | BLOCKED (AC-021-GRANTS) | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included
+two_instances_overlap_with_separate_grants | PASS | process-isolation lab half of A3, A6 and A9
+```
+
+The same-run receipt is local and uncommitted at
+`lab/agent-conformance/target/run-table.y3oHkA/VERSIONS.json`;
+its SHA-256 is `aab804c695c31e5d0dbb887bb81be7e4eecd22bb97c14d1a1c68c3ee0beae457`.
+It reports complete identity, `cargo_success: true`, `command_success: true`
+and `suite_outcome: BLOCKED`. Its source is the uncommitted builder candidate
+at HEAD `f15d20535585ac2151840171d9139183ba254026`, with `dirty: true`.
+This is author evidence; review and the supervisor's committed-candidate gate
+remain separate. The report contains exactly one `cancel settlement:` line:
+
+```text
+cancel settlement: instance-1 exit:Some(1) elapsed:0.154009s; instance-2 exit:Some(1) elapsed:0.312288s; reason:fixture cancel: instance-1 cancelled mid-run; first:0.028572s overlap:0.027730s since_cancel:5.552343s; cancel at the pending-request point, lab half of A10 (A12 census)
+```
+
+Additional checks passed: `git diff --check`, `bash -n
+lab/agent-conformance/run.sh`, `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 method contracts),
+`node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+Both Cargo manifests, the lane lockfile, the probe source and physical census
+source match HEAD. The new falsifier anchors match once, and earlier anchor
+counts remain valid. The F-instance-receipt anchor moved with the identity
+arm and passed its new mutation cycle above.
+
+The eight task-owned failed fixture roots were removed after each open-holder
+check returned exit 1 with empty output. Their child groups had ended. The
+existing `report --check-earlier-runs` then returned exit 0 with empty output.
+The shared heavy-build lease is released. The local ignored lifecycle inventory
+records the active worktree, removed fixtures, proof directory, receipt and
+reusable build caches with supervisor-owned review/removal conditions. Other
+owners' roots and worktrees retain their ownership.
+
+The final branch/worktree inventory was refreshed. Cached upstream divergence
+was 0 ahead and 10 behind. This offline builder made zero network requests
+and zero Git mutations. The supervisor owns remote refresh, base compatibility,
+commit, independent review and publication. All ten changed files are inside
+`lab/agent-conformance/`.
