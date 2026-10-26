@@ -3,10 +3,9 @@ mod common;
 mod probe;
 
 use agent_conformance::harness::ThrowawayHome;
+use agent_conformance::identity::{Observation, StagedProbe, MANIFEST};
 use agent_conformance::runtime::runtime_under_test;
 use probe::{build_probe, Effect};
-use sha2::{Digest, Sha256};
-use std::fs;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -29,26 +28,9 @@ fn parallel_instances_return_success_payloads() {
     panic!("blocked: AC-002-ARGS — Bus lifecycle needs a success payload and CLI forwarding");
 }
 
-fn stage_probe(home: &ThrowawayHome, bytes: &[u8], effect: Effect) -> std::path::PathBuf {
-    let hash = format!("{:x}", Sha256::digest(bytes));
-    home.guard(home.home(), home.data()).unwrap();
-    // The hash identifies these exact bytes; the directory only locates them.
-    // Bundle-CID admission remains a separate grade point.
-    let capsule = home.root().join(format!("sha256-{hash}"));
-    fs::create_dir(&capsule).unwrap();
-    fs::write(
-        capsule.join("capsule.json"),
-        include_bytes!("../probe/capsule.json"),
-    )
-    .unwrap();
-    fs::write(
-        capsule.join("agent-conformance-probe.component.wasm"),
-        bytes,
-    )
-    .unwrap();
-    println!("probe component sha256:{hash} effect:{}", effect.name());
-
-    capsule
+fn stage_probe(home: &ThrowawayHome, bytes: &[u8], effect: Effect) -> StagedProbe {
+    agent_conformance::identity::stage_probe(home, bytes, MANIFEST, effect.name())
+        .expect("name the exact staged probe bundle")
 }
 
 fn assert_refusal(effect: Effect, bus_error: &str) {
@@ -65,10 +47,14 @@ fn assert_refusal(effect: Effect, bus_error: &str) {
     let output = home
         .launch(
             &runtime.binary,
-            &["run", capsule.to_str().unwrap()],
+            &["run", capsule.path.to_str().unwrap()],
             Duration::from_secs(10),
         )
         .expect("bounded probe launch through the existing primitive");
+    Observation::Launched {
+        probe: capsule.identity,
+    }
+    .emit();
     while sampled.elapsed() < Duration::from_secs(3) {
         operator.require_alive().expect("operator stays alive");
         std::thread::sleep(Duration::from_millis(50));

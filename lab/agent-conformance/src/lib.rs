@@ -2,5 +2,6 @@
 
 pub mod build;
 pub mod harness;
+pub mod identity;
 pub mod report;
 pub mod runtime;
