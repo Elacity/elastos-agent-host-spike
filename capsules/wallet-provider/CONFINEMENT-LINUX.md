@@ -46,7 +46,7 @@ confined on Linux.
 | `(version 1)` | The generator's policy version; no kernel primitive carries it. | Exact: the generator emits one version, and the contract check refuses any other head. | `both_file_profiles_bind_one_storage_parameter_contract` |
 | `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE`) and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock's [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) report no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so the ruleset does not restrict them. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the provider owns with ordinary permissions, in a searchable fixture directory beneath searchable parents, so the mapping is wider than the oracle for those six; the kernel's ordinary permission check still applies, so the design claims no such success for a host-owned file or a file whose permissions deny the call. The capability drop removes `CAP_CHOWN`, so `chown` to a different owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`; an owner that keeps `uid` `-1` may still change its file's group to a group of which it is a member ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)), so the drop does not refuse every `chown`. Landlock checks a new data open against the rules for its path, so a data open outside every grant fails; the rules are checked at open time, so a descriptor opened before enforcement is not checked ([filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)), and an `O_PATH` open does not open the file itself for reading or writing ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)); whether Landlock restricts it is open and unclaimed, and the probe's required success decides the row. The launch precondition is that a provider inherits no descriptor other than its stdin, stdout and stderr protocol streams, which are the harness pipes (`Stdio::piped()` in `ConfinedProvider::spawn` in `capsules/wallet-provider/tests/confine.rs`); future Runtime work proves it, for example by listing `/proc/self/fd` at provider start and allowing exactly 0, 1 and 2, and the design claims no falsifier for it. One `fcntl(F_DUPFD)` duplicates an outside `O_PATH` descriptor that the probe obtains with `openat` ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)) and gives no content read; the design claims that one call only, not every `fcntl` or `flock`, whose departures stay unclaimed. Falsifier for the duplication: add a seccomp rule that refuses `fcntl` only when its command argument is `F_DUPFD` ([fcntl(2)](https://man7.org/linux/man-pages/man2/fcntl.2.html)); the duplication fails and the test fails. The probe and the Rust runtime make other `fcntl` calls, so a rule that refuses every `fcntl` could stop the probe before its `F_DUPFD` call. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
 | `(deny default)`, processes and signals | A PID namespace; the empty capability set; a seccomp filter that refuses process creation other than the provider's own threads and every cross-process operation (`ptrace`, `process_vm_*`, `pidfd_getfd`). Landlock `EXECUTE` on `PROVIDER_EXECUTABLE` alone carries exec of any other file. | Exact for signals: a PID namespace contains no PID outside itself, so a signal to a host process cannot be expressed. Narrower for process creation because the provider's threads must start: the filter admits the thread form of `clone` and refuses a new process. The filter adds no exec rule: it sees only the syscall number and cannot read the path behind `execve`'s pointer, so it cannot separate the granted binary from another file, and a refusal by number would also refuse the provider's own launch, which the oracle permits. The Linux test decides the exact flag set. | `confined_provider_denies_process_and_signal_boundaries` |
-| `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, and the one SysV creation rule refuses every form including the private key. The `mq_open` rule refuses the `O_CREAT` form of the call, while the create also passes through the message queue filesystem ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)) that the ruleset does not grant; Landlock's default denial is the layer that would refuse it if the ruleset reaches that internal mount, and the documents do not settle that reach, so the design claims no falsifier for the `mq_open` rule. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
+| `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, and the one SysV creation rule refuses every form including the private key. The `mq_open` rule refuses the `O_CREAT` form of the call, and the create also passes through the message queue filesystem ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)). Landlock's default denial would refuse that create only if the ruleset reaches the queue's internal mount; the cited documents do not settle that reach, and if it does not, no other layer refuses the create. The outcome is open, so the design leaves the `mq_open` falsifier unclaimed: a future isolated probe that drops only the `mq_open` `O_CREAT` refusal and records the outcome would settle it. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
 | `(deny default)`, kernel facts | A private, read-only `/proc` mount limited to the provider's own PID namespace and a hidden host `/sys`; Landlock denying reads outside the granted paths, with no `/proc` or `/sys` rule; seccomp refusing syscalls that read host kernel state (`bpf`, `perf_event_open`). | No exact match: the oracle denies every kernel-fact operation except `sysctl-read`, and Linux splits kernel facts across `/proc`, `/sys` and syscalls, so the map is wider in one place and narrower in another. The Linux test decides. | `confined_provider_denies_kernel_fact_boundaries` |
 | `(deny network*)`, with no network allow | A network namespace with no interface and no route; the empty capability set; seccomp refusing every `socket` and `socketpair` call by syscall number, with no family list, and refusing `connect`, `sendmsg`, `recvmsg`, `pidfd_getfd` and `process_vm_*` so no descriptor can arrive from outside. | Exact for every family the oracle refuses: the filter refuses the whole call instead of naming families, so no family is left out, Unix-domain included, and the namespace removes every interface. macOS puts a Unix-domain connect under `network*` (cc-model-confine 010, macOS 26.5.2), so this row covers it too. | `profile_denies_network` (the oracle text) and `linux_profile_denies_every_socket_family` (the policy) |
 | no `(allow default)` | The generator emits only the rights the oracle grants; the launch adds no permissive rule. | Exact: the Linux policy has no permissive term, and the one contract check refuses one in the oracle. | `both_file_profiles_bind_one_storage_parameter_contract` and `file_profile_contract_rejects_an_allow_default` |
@@ -409,13 +409,15 @@ no macOS counterpart is named here for the first time.
   Falsifier: keep `CAP_CHOWN` in the capability set; the chown succeeds and
   the test fails.
 - `confined_provider_denies_process_and_signal_boundaries` (new) requires a
-  probe under the same policy to fail to exec the copy of `PROVIDER_EXECUTABLE`
-  that the serve probes place in `STORAGE_ROOT`, under a name other than the
-  original, where the read is granted; a copy outside every grant would also
-  fail its read, so it would not decide the exec rule. The same probe must fail
-  to fork a new process and to signal a host PID, and must fail
-  `ptrace(PTRACE_TRACEME)`, `process_vm_readv` and `pidfd_getfd` on its own
-  process; the seccomp rule refuses those three calls by number, so a
+  probe under the same policy to place its own copy of `PROVIDER_EXECUTABLE`
+  in `STORAGE_ROOT`, under a name other than the original, in the same way
+  `confined_provider_serves_did_operations_under_its_root` and
+  `confined_provider_serves_wallet_operations_under_its_root` place theirs,
+  where the read is granted, and to fail to exec it; a copy outside every
+  grant would also fail its read, so that copy would not decide the exec rule.
+  The same probe must fail to fork a new process and to signal a host PID, and
+  must fail `ptrace(PTRACE_TRACEME)`, `process_vm_readv` and `pidfd_getfd` on
+  its own process; the seccomp rule refuses those three calls by number, so a
   self-target probe observes it without the PID namespace or a Landlock scope.
   Falsifier: remove the PID namespace; the signal to the host PID succeeds and
   the test fails on that assertion. Falsifier for the creation refusal: admit
@@ -440,12 +442,14 @@ no macOS counterpart is named here for the first time.
   namespace permits a new object inside itself and Landlock's
   [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)
   restrict files and directories, not SysV objects. The POSIX queue create
-  passes through the message queue filesystem
-  ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html))
-  that the ruleset does not grant, so dropping the `mq_open` `O_CREAT` refusal
-  alone leaves the create refused; Landlock's default denial is the layer that
-  would refuse it if the ruleset reaches that internal mount, and the documents
-  do not settle that reach, so the design leaves that falsifier unclaimed.
+  also passes through the message queue filesystem
+  ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)).
+  Landlock's default denial would refuse that create only if the ruleset
+  reaches the queue's internal mount; the cited documents do not settle that
+  reach, and if it does not, no other layer refuses the create. The outcome is
+  open, so the design leaves the `mq_open` falsifier unclaimed: a future
+  isolated probe that drops only the `mq_open` `O_CREAT` refusal and records
+  the outcome would settle it.
 - `confined_provider_denies_kernel_fact_boundaries` (new) requires a probe to
   fail to read `/proc/kallsyms`, host `/proc/sys` entries outside the grant or
   `/sys` kernel state, and to fail `bpf` and `perf_event_open`. The design adds
@@ -464,17 +468,22 @@ no macOS counterpart is named here for the first time.
   it is an experiment that shows the assertion can fail, not proof of either
   rule; the design leaves a falsifier for the `/sys` read unclaimed. It claims
   no falsifier for either mount, because a mount change alone leaves Landlock's
-  default denial in place. Falsifier for the `bpf` refusal, read only after its
-  positive control passes: allow `bpf`; the probe's call succeeds and the test
-  fails. The control runs with `kernel.unprivileged_bpf_disabled` at 0
+  default denial in place. Falsifier for the `bpf` refusal, read only when
+  the host precondition check passes: allow `bpf`; the probe's call succeeds
+  and the test fails. This control is a check of the host and the probe's
+  launch, read before the mutation, and it passes only when
+  `kernel.unprivileged_bpf_disabled` reads 0
   ([unprivileged_bpf_disabled](https://docs.kernel.org/admin-guide/sysctl/kernel.html#unprivileged-bpf-disabled)),
-  the empty capability set the design drops, the same namespaces and no seccomp
-  refusal of `bpf`, and requires the probe's `bpf(BPF_MAP_CREATE, ...)` call
-  ([bpf(2)](https://man7.org/linux/man-pages/man2/bpf.2.html)) for a map an
-  unprivileged caller may create to return a valid descriptor. A value of 1 or
-  2 makes the kernel refuse the call with `EPERM` without `CAP_SYS_ADMIN` or
-  `CAP_BPF`, so the mutation is masked and the design leaves it unclaimed. The
-  design claims no falsifier for `perf_event_open`, because a
+  the probe's `bpf(BPF_MAP_CREATE, ...)` request
+  ([bpf(2)](https://man7.org/linux/man-pages/man2/bpf.2.html)) names a map
+  type an unprivileged caller may create, and the process holds a memlock or
+  memory-cgroup budget for that map; the design's empty capability set leaves
+  the probe without `CAP_BPF` or `CAP_SYS_ADMIN`, so the kernel treats it as
+  unprivileged. A value of 1 or 2 makes the kernel refuse the call with
+  `EPERM` without `CAP_SYS_ADMIN` or `CAP_BPF`, and a request outside those
+  other conditions is refused by the kernel even when the filter permits it;
+  those cases are masked, so the design leaves them unclaimed. The design
+  claims no falsifier for `perf_event_open`, because a
   `perf_event_paranoid` value that refuses the probe's event to an unprivileged
   caller can keep the refusal after the filter permits the call
   ([perf_event_paranoid](https://docs.kernel.org/admin-guide/sysctl/kernel.html#perf-event-paranoid)).
