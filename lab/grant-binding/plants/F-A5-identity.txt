@@ -1,0 +1,9 @@
+id: F-A5-identity
+file: src/lib.rs
+test: model_different_identity_is_refused
+--- old
+        if live.identity != grant.identity {
+            return Err(Refuse::Identity);
+        }
+--- new
+--- end

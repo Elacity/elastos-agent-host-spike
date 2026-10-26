@@ -1,0 +1,25 @@
+id: F-A5-root
+file: src/lib.rs
+test: model_host_path_root_is_refused
+test: model_dotdot_in_the_owned_root_is_refused
+test: model_owned_root_must_sit_under_the_agent
+--- old
+    if name.contains('\\') || name.starts_with('/') {
+        return Err(Refuse::HostPath);
+    }
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() < 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return Err(Refuse::HostPath);
+    }
+    if parts[0] != "UsersAI" || parts[1] != agent {
+        return Err(Refuse::OutsidePrincipal);
+    }
+    Ok(name.to_owned())
+--- new
+    let _ = agent;
+    Ok(name.to_owned())
+--- end
