@@ -5414,3 +5414,123 @@ ends. Seven changed files are confined to this lane. The current branch is
 zero commits ahead and zero behind its cached `spike/spike/agent-host` ref;
 remote state was not fetched. The builder made zero Git-state changes. The
 supervisor owns review, publication and the recorded cleanup decisions.
+
+
+## 035 — Kill row requires measured fixture settlement
+
+035: `Settlement::check` now requires one measured orphan and zero after settlement for both journeys; `matches_orphan` gives changed pending requests their own fixed refusal.
+
+The kill journey calls the shared check in `Controller::check_kill`; the
+absent-policy journey calls it in `exercise_read`. A zero count gives
+`orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line`.
+More than one request retains the existing unexpected-request refusal.
+`Settlement::line` prints both counts and adds `settled by the fixture` only
+when this same check passes. The report label stays unchanged.
+
+`matches_orphan` checks request and session identity and refuses any changed
+field under the original request ID with `orphan request changed while pending`.
+`poll`, `settle_orphan` and `observe_unapproved` use this one helper. New
+request IDs still reach the existing unexpected-request or retry checks.
+The existing cancellation and kill retry tests retain all their assertions.
+`GAPS.md` and `RUNBOOK.md` describe the required re-measurement when Runtime
+closes AC-027-ORPHAN.
+
+### Hand-run falsifiers
+
+There is no new list ID because the runner's `lab` command runs `lab/wasm-capsule`; BACKLOG item 7 owns the later list rewrite.
+
+Both new tests run under the effects target with
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::TEST -- --exact --nocapture`.
+Every run used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`,
+lane-local host/build directories and the shared heavy-build lease.
+JSON strings below specify exact replacement bytes; `\n` is one newline.
+Each mutation was restored before the next run. Every named test failed
+with its planted bug and passed both before and after it.
+
+| ID | File (relative to lane) | Exact old text | Exact new text | Named test | Libtest lines and results | Failing assertion |
+| --- | --- | --- | --- | --- | --- | --- |
+| F-orphan-owner | <code>tests/common/grants.rs</code> | <code>&quot;        if self.before == 0 {\n            return Err(\&quot;orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line\&quot;);\n        }\n        if self.before != 1 {&quot;</code> | <code>&quot;        if self.before &gt; 1 {&quot;</code> | <code>grants::tests::kill_requires_measured_fixture_settlement</code> | baseline: <code>test grants::tests::kill_requires_measured_fixture_settlement ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s</code> (exit 0, 1.604 s)<br>planted: <code>test grants::tests::kill_requires_measured_fixture_settlement ... FAILED / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s</code> (exit 101, 0.934 s)<br>restored: <code>test grants::tests::kill_requires_measured_fixture_settlement ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s</code> (exit 0, 0.712 s) | <code>assertion `left == right` failed: kill requires exactly one measured orphan and zero after settlement;   left: Ok(());  right: Err(&quot;orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line&quot;)</code> |
+| F-orphan-match | <code>tests/common/grants.rs</code> | <code>&quot;    let same_id = field(request, \&quot;request_id\&quot;)? == field(original, \&quot;request_id\&quot;)?;\n    if same_id &amp;&amp; request != original {\n        return Err(\&quot;orphan request changed while pending\&quot;);\n    }\n    Ok(same_id &amp;&amp; field(request, \&quot;session_id\&quot;)? == field(original, \&quot;session_id\&quot;)?)&quot;</code> | <code>&quot;    Ok(field(request, \&quot;request_id\&quot;)? == field(original, \&quot;request_id\&quot;)?)&quot;</code> | <code>grants::tests::changed_orphan_has_its_own_reason</code> | baseline: <code>test grants::tests::changed_orphan_has_its_own_reason ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s</code> (exit 0, 0.076 s)<br>planted: <code>test grants::tests::changed_orphan_has_its_own_reason ... FAILED / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s</code> (exit 101, 0.977 s)<br>restored: <code>test grants::tests::changed_orphan_has_its_own_reason ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s</code> (exit 0, 0.784 s) | <code>assertion `left == right` failed: a changed orphan needs its own reason;   left: Ok(true);  right: Err(&quot;orphan request changed while pending&quot;)</code> |
+
+`kill_requires_measured_fixture_settlement` exercises `Controller::check_kill`
+with before/after pairs 0/0, 1/0, 2/0 and 1/1. It checks the fixed refusal or
+success and the exact printed counts/owner suffix. `changed_orphan_has_its_own_reason`
+checks an unchanged orphan, a different request ID, changed session/resource/
+action/reason fields, an added field and a removed session field.
+
+All existing list anchors retain their base match counts. F-cancel-retry,
+F-kill-retry, F-kill-monitor and F-orphan-settlement still each match once;
+this task moved none of their replacement text. Thus there is no stale anchor
+from 035 to re-run or carry to BACKLOG item 7. The exact two mutations above
+remain ready for that list rewrite. `falsifiers.json` retains its base bytes.
+
+### Principles check
+
+Paths below are relative to `lab/agent-conformance/`.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `src/identity.rs:91` retains the checked bundle CID; `tests/common/grants.rs:199` matches pending request identity only. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `probe/src/lib.rs:138` retains the Runtime grant request before the provider call; this task changes fixture checks. |
+| 3. A second path or rule copy for one operation? | No | `tests/common/grants.rs:172` owns the count rule used by `check_kill` and `tests/effects.rs:518`; `tests/common/grants.rs:199` owns orphan matching for all three callers. |
+| 4. Runtime core grows? | No | `tests/common/grants.rs:172` keeps the change in the lab harness; Runtime, provider and probe sources retain their base bytes. |
+| 5. New refusals fail closed with clear reasons? | Yes | `tests/common/grants.rs:172` rejects absent, excess and remaining orphans; line 199 rejects changed requests with a fixed reason. |
+| 6. Capsule logic stays inside and calls through granted Bus operations? | Yes | `probe/src/lib.rs:138` requests the grant and line 146 passes it to the provider; this path retains its base bytes. |
+| 7. Named tests and caught falsifiers prove each rule? | Yes | `tests/common/grants.rs:1683` and `:1733` are the two named tests; both fail planted and pass restored in the table above. |
+| 8. Identity, admission and allowance remain separate decisions? | Yes | `src/report.rs:518` retains the separate identity, admission and session-grant statement; settlement counts grant zero authority. |
+
+The repository has no humanizer skill source. This record uses direct
+statements of behavior and ownership. The supervisor owns review and
+publication; the builder changes only this lane's files.
+
+### Real journeys and gates
+
+The full locked lane run exercised both real journeys once. Their checked
+lines below come from their own libtest stdout sections, separate from the
+synthetic count test's output:
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+kill settlement: instance-1 exit:None signal:Some(9) elapsed:0.055394s kill_at:0.027729s; instance-2 exit:Some(1) signal:None elapsed:0.306679s kill_at:0.000000s; first:0.027348s overlap:0.026489s since_decision:5.874556s; reason:fixture settlement: worker killed; orphan_before:1 orphan_after:0; settled by the fixture; quiet:2.002440s; kill-worker settlement, lab half of A11 (A12 census)
+test no_policy_file_does_not_mean_allow ... ok
+absent-policy settlement: instance-1 exit:Some(1) signal:None elapsed:30.706156s kill_at:0.000000s; first:0.000000s overlap:0.000000s since_decision:0.000000s; reason:fixture settlement: client wait ended; orphan_before:1 orphan_after:0; settled by the fixture
+```
+
+The gate used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`,
+lane-local `target/host` and `target/host-build`, and the shared heavy-build
+lease. The volume had 45.93 GiB free before builds,
+above the 12 GiB estimate plus 2 GiB reserve. Each gate had a 600-second limit.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  PASS, exit 0, 0.285 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -- --show-output`:
+  PASS, exit 0, 230.162 seconds; 83 passed, zero failed,
+  ten ignored with their existing blockers. The effects target passed all
+  34 active tests in 181.76 seconds; nine retained their blockers.
+- `git diff --check`, product-data validation (42 capsules, two profiles,
+  28 method contracts), its 99 Node tests, Runtime formatting from `elastos/`,
+  chain-provider formatting and `bash -n lab/agent-conformance/run.sh`: PASS.
+
+The first sandboxed gate exited 101 in 1.626 seconds:
+`earlier_run_check_refuses_live_owner` failed with
+`could not inspect child process group`, before either live journey ran.
+The unchanged suite passed with host process inspection and loopback access.
+The known kill-worker cleanup flake did not occur; its code and assertions
+retain their base behavior.
+
+`Cargo.toml`, `Cargo.lock`, `falsifiers.json`, `src/report.rs` and
+`tests/report.rs` retain their original SHA-256 values. The candidate is the
+uncommitted lane diff on base `f92fe85970ad0898be4f5247cf580b1f5eaf4bda`;
+these results describe the dirty candidate, rather than a committed change.
+Evidence and the private lifecycle inventory are local and uncommitted under
+`target/task-035/`. The ledger keeps 1 new retained test roots
+(333 bytes) for supervisor review, with removal
+when that review ends. The supervisor owns this cleanup decision.
+
+Final handoff check: `target/host/debug/report --check-earlier-runs` exited 0;
+all test Home processes have ended and the shared heavy-build lease is released.
+The final branch/worktree inventory records five changed files, all inside
+this lane. The current branch is zero commits ahead and zero behind the
+cached `spike/spike/agent-host` ref; remote state was left unfetched under the
+builder's network rule. The builder made zero Git-state changes. The current
+worktree remains protected for supervisor review and publication.
