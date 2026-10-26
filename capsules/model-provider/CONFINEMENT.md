@@ -184,12 +184,9 @@ these tests do not check it.
 
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
-exec rule word for word, so both pass the one shape check,
-`both_file_profiles_bind_one_storage_parameter_contract`: it requires the exec
-rule, but it does not refuse a second, wider exec rule. Under each, the copy
-starts and answers `init`, and of the `confine` tests only
-`model_unbound_program_refused_under_profile` fails. So this test is the check
-that holds the limit. F-cc14a, `(allow default)`, fails it the same way.
+exec rule word for word. Under each, the copy starts and answers `init`, and
+of the `confine` tests only `model_unbound_program_refused_under_profile`
+fails. F-cc14a, `(allow default)`, fails it the same way.
 
 ## When the profile cannot be applied
 
@@ -535,8 +532,12 @@ The profile shape has one check (P10):
 `../wallet-provider/tests/confine.rs` requires this file and fails when it is
 missing or unreadable.
 It requires `(version 1)` first, `(deny default)` second, `(deny network*)`,
-no network allow, only the three parameter tokens, the three shared rules
-verbatim, and no `(allow default)`. This crate adds no second shape test.
+no network allow, exactly one `process-exec` allow, the shared exec rule,
+only the three parameter tokens, the three shared rules verbatim, and no
+`(allow default)`. An exec added later, such as a model engine's, is its own
+named rule with its own falsifier and removal condition, agreed with Sasha
+and Rong like the network grant, and never widens what `PROVIDER_EXECUTABLE`
+binds. This crate adds no second shape test.
 
 Run from the repository root:
 
@@ -583,8 +584,8 @@ keeps none of the stderr lines `Provider::ended` reads.
 | F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
 | F-cc12a | Remove `(deny network*)`; nothing else changes | `both_file_profiles_bind_one_storage_parameter_contract` (wallet crate) | The one shape check refuses the model profile with "model-provider must deny the network explicitly with (deny network*)". |
 | F-cc14a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_unbound_program_refused_under_profile` | The copy under `STORAGE_ROOT` starts and answers `init`. |
-| F-cc14b | One line, `(allow process-exec)`, is added after the exec rule; the exec rule stays word for word | `model_unbound_program_refused_under_profile` | The copy starts and answers `init`. The one shape check still passes, so this test holds the exec limit. |
-| F-cc14c | One line, `(allow process-exec (subpath (param "STORAGE_ROOT")))`, is added after the exec rule; the exec rule stays word for word | `model_unbound_program_refused_under_profile` | The copy starts and answers `init`, so a program in the provider's own storage would run. The one shape check still passes. |
+| F-cc14b | One line, `(allow process-exec)`, is added after the exec rule; the exec rule stays word for word | `model_unbound_program_refused_under_profile` | The copy starts and answers `init`. |
+| F-cc14c | One line, `(allow process-exec (subpath (param "STORAGE_ROOT")))`, is added after the exec rule; the exec rule stays word for word | `model_unbound_program_refused_under_profile` | The copy starts and answers `init`, so a program in the provider's own storage would run. |
 | F-cc15a | In the test, the stand-in's count moves from the accept to after the request has been read | `runtime_socket_stand_in_counts_a_silent_connection` | The final read counts no connection: the silent client would be counted only once its read ends. |
 | F-cc15b | In the test, the final read no longer takes the connections still queued | `runtime_socket_stand_in_drains_queued_connections` | The final read counts neither queued client. |
 | F-cc15c | In the test, the stand-in serves each connection on its accept loop instead of on the connection's own thread | `runtime_socket_stand_in_accepts_behind_a_silent_connection` | The second client gets no answer within half of `FIXTURE_EVENT_TIMEOUT`: the accept loop waits on the silent connection's read. |
