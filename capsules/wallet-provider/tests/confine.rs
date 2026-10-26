@@ -12,9 +12,12 @@
 //! that fails it. On any other OS, when that tool is missing, the test prints
 //! why it did not run and returns.
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use bitcoin::hashes::Hash as _;
 use elastos_auth::ethereum_signed_message_hash;
 use elastos_wallet_contract::{
-    Erc1271ProofEvidenceV1, ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1,
+    Erc1271ProofEvidenceV1, ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1, PublicNetwork,
     VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
     WalletProviderResponseV2, WalletResultV2,
 };
@@ -1118,6 +1121,47 @@ fn erc1271_evidence(message: &str, signature: &str, contract: &str) -> Erc1271Pr
     .expect("the ERC-1271 evidence must decode as its typed value")
 }
 
+/// The fixed test key the Bitcoin proof calls sign with.
+fn bitcoin_test_signing_key() -> SigningKey {
+    SigningKey::from_bytes((&[7u8; 32]).into()).expect("deterministic test key")
+}
+
+/// The P2PKH address of `signing_key`, derived as
+/// `src/tests/support.rs::bitcoin_p2pkh_test_address` derives it.
+fn bitcoin_test_address(signing_key: &SigningKey) -> String {
+    let pubkey = signing_key
+        .verifying_key()
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+    let compressed =
+        bitcoin::CompressedPublicKey::from_slice(&pubkey).expect("deterministic test public key");
+    bitcoin::Address::p2pkh(compressed, bitcoin::Network::Bitcoin).to_string()
+}
+
+/// The compressed public key of `signing_key`, encoded as
+/// `src/tests/support.rs::bitcoin_test_public_key` encodes it.
+fn bitcoin_test_public_key(signing_key: &SigningKey) -> String {
+    hex::encode(
+        signing_key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes(),
+    )
+}
+
+/// Signs `message` as `src/tests/support.rs::sign_bitcoin_message` signs it,
+/// with the pinned `bitcoin` crate's public message hash.
+fn sign_bitcoin_test_message(signing_key: &SigningKey, message: &str) -> String {
+    let hash = bitcoin::sign_message::signed_msg_hash(message);
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(&hash.to_byte_array())
+        .expect("test Bitcoin message signature");
+    let mut bytes = vec![27 + recovery_id.to_byte()];
+    bytes.extend_from_slice(signature.to_bytes().as_ref());
+    BASE64_STANDARD.encode(bytes)
+}
+
 /// The result error of one wallet call, refusing an ok answer.
 fn result_error(result: WalletResultV2) -> (String, String) {
     match result {
@@ -1351,6 +1395,150 @@ fn evm_proofs_and_link_persist_under_storage_root() {
     provider.shutdown();
 }
 
+/// The Bitcoin proof calls answer under the profile and persist under
+/// `STORAGE_ROOT`.
+///
+/// One provider `init`s a root and asks for a challenge for a fixed P2PKH
+/// address. The answer is ok with `proof_type` `bitcoin_signed_message`, and
+/// the test signs the challenge message. A fresh confined start on the same
+/// root `init`s it and `status` shows `pending_bitcoin_challenge_count` 1, so
+/// the challenge reloaded from the store. `verify_bip322_proof` with the
+/// `bitcoin_signed_message` signature, type and public key answers ok with
+/// `proof_type` `bitcoin_signed_message` and the same address. A second
+/// restart `init`s the same root and `status` shows
+/// `pending_bitcoin_challenge_count` 0; the replayed verify answers
+/// `invalid_proof` with "already consumed"; and `read_store` shows the
+/// challenge with `consumed_at` set under the root's wallet directory. The
+/// fixed signing key, the message and the signature stay test data in the
+/// temporary root, and no assertion formats them.
+///
+/// The test signs the `bitcoin_signed_message` type on a P2PKH address, not
+/// the `bip322_simple` type: the simple type is signed through
+/// `src/crypto/bitcoin.rs`'s `bip322_message_hash`, `bip322_to_spend_tx` and
+/// `bip322_to_sign_tx`, which are `pub(crate)` in a binary crate, so an
+/// integration test cannot call them, and building them again here would be a
+/// second copy of that rule (P10). Both types reach the same handler, the same
+/// stored challenge and the same consumption.
+///
+/// Falsifier: WP18 removes the `STORAGE_ROOT` subpath grant. One grant covers
+/// every `storage` call, so no narrower profile falsifier exists: no profile
+/// edit can fail one of these calls and leave `init` working, and this test
+/// fails on its first `init`.
+#[test]
+fn bitcoin_proofs_persist_under_storage_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    let signing_key = bitcoin_test_signing_key();
+    let address = bitcoin_test_address(&signing_key);
+    let public_key = bitcoin_test_public_key(&signing_key);
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::BitcoinChallenge {
+            domain: "elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: address.clone(),
+            network: PublicNetwork::bitcoin(),
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }),
+    );
+    assert_eq!(
+        data["proof_type"], "bitcoin_signed_message",
+        "a P2PKH challenge must answer the signed-message proof type"
+    );
+    let message = data["message"]
+        .as_str()
+        .expect("a Bitcoin challenge must answer its message")
+        .to_string();
+    let challenge_id = data["challenge_id"]
+        .as_str()
+        .expect("a Bitcoin challenge must answer its id")
+        .to_string();
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined re-Init must succeed: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"]["pending_bitcoin_challenge_count"], 1,
+        "the Bitcoin challenge must reload from the store: {status}"
+    );
+
+    let signature = sign_bitcoin_test_message(&signing_key, &message);
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::VerifyBip322Proof {
+            message: message.clone(),
+            signature: signature.clone(),
+            signature_type: "bitcoin_signed_message".to_string(),
+            public_key: Some(public_key.clone()),
+        }),
+    );
+    assert_eq!(
+        data["proof_type"], "bitcoin_signed_message",
+        "verify_bip322_proof must answer its proof type"
+    );
+    assert_eq!(data["address"], address);
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined second re-Init must succeed: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"]["pending_bitcoin_challenge_count"], 0,
+        "the consumed Bitcoin challenge must reload from the store: {status}"
+    );
+
+    let (code, refusal) = result_error(provider.wallet(
+        WalletProviderOperationV2::VerifyBip322Proof {
+            message: message.clone(),
+            signature,
+            signature_type: "bitcoin_signed_message".to_string(),
+            public_key: Some(public_key),
+        },
+    ));
+    assert_eq!(
+        code, "invalid_proof",
+        "a replayed verify must be refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("already consumed"),
+        "a replay must name the consumed challenge: {refusal}"
+    );
+
+    let store = read_store(&root);
+    let stored = store["bitcoin_challenges"]
+        .as_array()
+        .expect("the store under the wallet directory must hold its Bitcoin challenges");
+    assert_eq!(
+        stored.len(),
+        1,
+        "the store under the wallet directory must hold the challenge"
+    );
+    assert_eq!(
+        stored[0]["challenge"]["challenge_id"].as_str(),
+        Some(challenge_id.as_str())
+    );
+    assert!(
+        stored[0]["consumed_at"].as_u64().is_some(),
+        "the store under the wallet directory must hold the consumed challenge"
+    );
+    provider.shutdown();
+}
+
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
@@ -1578,7 +1766,8 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// `export_managed_recovery_key`, `import_managed_recovery_key`,
 /// `export_managed_recovery_set` and `import_managed_recovery_set` calls, then
 /// the `challenge`, `verify_proof`, `verify_contract_proof` and
-/// `link_verified_account` calls of task 082, and the `create_managed_account`
+/// `link_verified_account` calls of task 082, the `bitcoin_challenge` and
+/// `verify_bip322_proof` calls of task 083, and the `create_managed_account`
 /// and `list_accounts` calls that 072 named come last. The array runs before
 /// the `storage_error` check, so a grant on the parent fails this test on one
 /// of those calls rather than only on `init`. `list_accounts` is sent only to
@@ -1610,8 +1799,9 @@ fn account_operations_beneath_storage_parent_are_refused() {
     let denied = provider.init(&sibling);
 
     // The four account edits of task 080, the four managed-recovery calls of
-    // task 081 and the four EVM proof and link calls of task 082 come first,
-    // so a grant on `STORAGE_PARENT` fails the first call of the loop.
+    // task 081, the four EVM proof and link calls of task 082 and the two
+    // Bitcoin proof calls of task 083 come first, so a grant on
+    // `STORAGE_PARENT` fails the first call of the loop.
     let operations = [
         WalletProviderOperationV2::RenameAccount {
             account_id: "wallet:eip155:20:0xabc".to_string(),
@@ -1671,6 +1861,21 @@ fn account_operations_beneath_storage_parent_are_refused() {
             address: "0xabc".to_string(),
             proof_type: "siwe".to_string(),
             label: Some("Outside".to_string()),
+        },
+        WalletProviderOperationV2::BitcoinChallenge {
+            domain: "elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2".to_string(),
+            network: PublicNetwork::bitcoin(),
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        },
+        WalletProviderOperationV2::VerifyBip322Proof {
+            message: "Outside Bitcoin proof".to_string(),
+            signature: "signature".to_string(),
+            signature_type: "bitcoin_signed_message".to_string(),
+            public_key: Some(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
+            ),
         },
         WalletProviderOperationV2::CreateManagedAccount {
             chain_namespace: "eip155:20".to_string(),
