@@ -268,13 +268,40 @@ async fn second(store: &Path) -> Result<()> {
             let (after, after_rev) =
                 read_journal(&host).unwrap_or((before.clone(), expected_rev.clone()));
             let invokes = invoke_outcomes(&host.audit_log);
-            println!("EVIDENCE invokes={}", format_invokes(&invokes));
-            let kept = sha256_hex(&after) == expected_sha && after_rev == expected_rev;
-            row(
-                "RESUME",
-                "FAIL",
-                &format!("guest launch on the fresh process: {error:#}; stored kept={kept}"),
+            println!(
+                "EVIDENCE journal_sha256={} revision={after_rev} bytes={} format2={} invokes={}",
+                sha256_hex(&after),
+                after.len(),
+                is_format2(&after),
+                format_invokes(&invokes)
             );
+            let kept = sha256_hex(&after) == expected_sha && after_rev == expected_rev;
+            let loaded = invokes.iter().any(|(op, out)| op == "read" && out == "ok")
+                && (kept || is_format2(&after));
+            if loaded {
+                row(
+                    "RESUME",
+                    "PASS",
+                    &format!(
+                        "fresh process loaded the latest revision; guest write after load failed: {error:#}"
+                    ),
+                );
+                row(
+                    "WRITE2",
+                    "FAIL",
+                    &format!(
+                        "guest did not store a new format-2 revision after load; after={} invokes={}",
+                        sha256_hex(&after),
+                        format_invokes(&invokes)
+                    ),
+                );
+            } else {
+                row(
+                    "RESUME",
+                    "FAIL",
+                    &format!("guest launch on the fresh process: {error:#}; stored kept={kept}"),
+                );
+            }
         }
     }
     Ok(())

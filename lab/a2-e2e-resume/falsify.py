@@ -228,9 +228,8 @@ def plant_hardcoded_row_pass() -> int:
 
 def plant_skipped_stale() -> int:
     old = (
-        "                probe_stale_write(&mut WasmBus, &cursor, grants.write.as_ref()).map_err(|reason| {\n"
-        "                    elastos::bus::types::BusError::Invalid(reason.to_string())\n"
-        "                })?;"
+        "                probe_stale_write(&mut WasmBus, &cursor, grants.write.as_ref())\n"
+        "                    .map_err(|reason| elastos::bus::types::BusError::Invalid(reason.to_string()))?;"
     )
     new = "                // skipped probe_stale_write plant"
     original, before = plant_text(GUEST_SRC, old, new)
