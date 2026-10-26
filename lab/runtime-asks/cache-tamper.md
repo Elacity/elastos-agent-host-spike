@@ -84,7 +84,26 @@ sha256sum \
   elastos/crates/elastos-server/src/setup/browser_vm_image.rs
 ```
 
-Results of the run that wrote this note are at the end.
+Results of the run that wrote this note:
+
+- Machine: Linux 6.12 x86_64, rustc 1.91.0. `CLOCK_REALTIME_COARSE` is 4 ms.
+- Ownership: Runtime. Files match Elacity `develop` `92aeea44` (`6aad02e3`, `93c908cd`) before and after the trial.
+- Repro (unpatched Runtime): `cargo test --locked` in this crate → 4 passed, 20 of 20 runs.
+  (`browser_image_check_admits_a_same_size_rootfs_rewrite_from_the_same_tick`,
+  `published_release_check_reports_a_same_size_artifact_rewrite_from_the_same_tick_unchanged`,
+  `trial_rule_refuses_a_racy_same_size_rewrite`,
+  `trial_rule_trusts_an_old_matching_stamp`).
+- Four Runtime tests with `trial.patch` applied: 20 of 20 passed
+  (`published_cache_refuses_same_size_in_place_metadata_and_artifact_changes`,
+  `browser_image_cache_reuses_unchanged_set_and_invalidates_release_receipt_and_replacement`,
+  `browser_image_cache_rejects_same_size_mutation_with_restored_mtime_and_keeps_failures_uncached`,
+  `browser_image_cache_rejects_mutation_between_verification_and_admission`).
+- Same four tests after restore (no patch): `published_cache_refuses_same_size_in_place…`
+  failed 10 of 10 at `release_publication.rs:1260`.
+- Falsifier: `TRUST_RACY_STAMP = true` → `trial_rule_refuses_a_racy_same_size_rewrite`
+  panicked `a racy same-size rewrite must not be a cache generation`. Constant
+  restored to `false`.
+- Runtime files restored: `git hash-object` matches `HEAD` (`6aad02e3`, `93c908cd`).
 
 ## Lab rule
 

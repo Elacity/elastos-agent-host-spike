@@ -1,8 +1,31 @@
 diff --git a/elastos/crates/elastos-server/src/release_publication.rs b/elastos/crates/elastos-server/src/release_publication.rs
-index 6aad02e3..89e8bbe6 100644
+index 6aad02e3..a1098a69 100644
 --- a/elastos/crates/elastos-server/src/release_publication.rs
 +++ b/elastos/crates/elastos-server/src/release_publication.rs
-@@ -322,17 +322,20 @@ impl Publication {
+@@ -60,6 +60,9 @@ pub struct Publication {
+     installer: Vec<u8>,
+     descriptors: Vec<ArtifactDescriptor>,
+     artifacts: BTreeMap<String, Artifact>,
++    /// Coarse clock when this generation was recorded. A stamp whose ctime is
++    /// not older than this tick is racy (git's racy-git rule).
++    recorded_at: (i64, i64),
+ }
+ 
+ impl Publication {
+@@ -276,6 +279,12 @@ impl Publication {
+             installer,
+             descriptors,
+             artifacts,
++            recorded_at: (0, 0),
++        };
++        let recorded_at = wait_until_stamps_older_than_now(&publication)?;
++        let publication = Self {
++            recorded_at,
++            ..publication
+         };
+         publication.unchanged()?;
+         if !published {
+@@ -322,17 +331,26 @@ impl Publication {
                  && directory_stamp(&self._artifact_directory)? == self.artifact_directory_stamp,
              "publication directory changed"
          );
@@ -17,7 +40,12 @@ index 6aad02e3..89e8bbe6 100644
 +            digest(&self.installer),
 +        ];
 +        for (metadata, expected) in self.metadata_files.iter().zip(metadata_sha) {
-+            ensure_same_generation(&metadata.file, &metadata.admitted, expected)?;
++            ensure_same_generation(
++                &metadata.file,
++                &metadata.admitted,
++                &expected,
++                self.recorded_at,
++            )?;
          }
          for artifact in self.artifacts.values() {
 -            ensure!(
@@ -28,11 +56,12 @@ index 6aad02e3..89e8bbe6 100644
 +                &artifact.file,
 +                &artifact.admitted,
 +                &artifact.descriptor.sha256,
++                self.recorded_at,
 +            )?;
          }
          Ok(())
      }
-@@ -353,17 +356,30 @@ impl Publication {
+@@ -353,17 +371,32 @@ impl Publication {
              directory_stamp(&artifacts)? == self.artifact_directory_stamp,
              "publication artifact directory changed"
          );
@@ -54,7 +83,8 @@ index 6aad02e3..89e8bbe6 100644
 +            ensure_same_generation(
 +                &regular(&root, name, metadata.admitted.size)?,
 +                &metadata.admitted,
-+                expected,
++                &expected,
++                self.recorded_at,
 +            )
 +            .with_context(|| format!("publication metadata path changed: {name}"))?;
          }
@@ -67,12 +97,13 @@ index 6aad02e3..89e8bbe6 100644
 +                &regular(&artifacts, name, artifact.descriptor.size)?,
 +                &artifact.admitted,
 +                &artifact.descriptor.sha256,
++                self.recorded_at,
 +            )
 +            .with_context(|| format!("publication artifact path changed: {name}"))?;
          }
          self.held_unchanged()?;
          let root = directory(&self.root_path)?;
-@@ -837,6 +853,38 @@ fn stamp(file: &File) -> Result<StatStamp> {
+@@ -837,6 +870,62 @@ fn stamp(file: &File) -> Result<StatStamp> {
      Ok(StatStamp::from_metadata(&m))
  }
  
@@ -91,15 +122,39 @@ index 6aad02e3..89e8bbe6 100644
 +}
 +
 +/// Git racy-git: a stamp is not a generation if its ctime is not older than
-+/// the current coarse clock. Another same-size write can still share it.
-+fn stamp_is_racy(stamp: &StatStamp) -> bool {
-+    (stamp.ctime, stamp.ctime_nsec) >= coarse_now()
++/// the time we recorded it. A later same-tick rewrite keeps that ctime.
++fn stamp_is_racy(stamp: &StatStamp, recorded_at: (i64, i64)) -> bool {
++    (stamp.ctime, stamp.ctime_nsec) >= recorded_at
 +}
 +
-+fn ensure_same_generation(file: &File, admitted: &StatStamp, expected_sha: &str) -> Result<()> {
++fn wait_until_stamps_older_than_now(publication: &Publication) -> Result<(i64, i64)> {
++    loop {
++        let now = coarse_now();
++        let mut newest = (i64::MIN, 0);
++        for metadata in &publication.metadata_files {
++            let c = stamp(&metadata.file)?;
++            newest = newest.max((c.ctime, c.ctime_nsec));
++        }
++        for artifact in publication.artifacts.values() {
++            let c = stamp(&artifact.file)?;
++            newest = newest.max((c.ctime, c.ctime_nsec));
++        }
++        if newest < now {
++            return Ok(now);
++        }
++        std::hint::spin_loop();
++    }
++}
++
++fn ensure_same_generation(
++    file: &File,
++    admitted: &StatStamp,
++    expected_sha: &str,
++    recorded_at: (i64, i64),
++) -> Result<()> {
 +    let now = stamp(file)?;
 +    ensure!(now == *admitted, "publication file changed");
-+    if stamp_is_racy(&now) {
++    if stamp_is_racy(&now, recorded_at) {
 +        ensure!(
 +            stream_file(file, admitted.size, |_| Ok(()))? == expected_sha,
 +            "publication file changed"
@@ -111,7 +166,7 @@ index 6aad02e3..89e8bbe6 100644
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  struct DirectoryStamp {
      dev: u64,
-@@ -1192,12 +1240,24 @@ mod tests {
+@@ -1192,12 +1281,24 @@ mod tests {
          assert!(!fixture.input.join("candidate-executed").exists());
      }
  
