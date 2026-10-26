@@ -13,9 +13,13 @@
 //! says "not endorsed". And task 022's hosting discovery is not the lab's
 //! import path (P10, P18): README says so before its per-engine answers, and
 //! ADOPTION says the same.
+//!
+//! Task 031: README lists each entry of `LAB_OPERATIONS`, the one table of
+//! typed lab operations, on one line, and the list and the table agree.
 
 use std::fs;
 use std::path::Path;
+use wasm_capsule_tools::verify::{LabOperation, LAB_OPERATIONS};
 
 /// The words before and after the total in README's summary sentence.
 const TOTAL_BEFORE: &str = "`falsifiers.json` holds ";
@@ -48,6 +52,12 @@ const RUN_SOURCE: &str = "tools/src/run.rs";
 
 /// The label both engine doc comments in `tools/src/run.rs` carry.
 const ENGINE_LABEL: &str = "test-only, not endorsed";
+
+/// README's subsection that lists the typed lab operations.
+const OPERATIONS_SECTION: &str = "### Typed lab operations (M1 B4 lab half)";
+
+/// How each operation line of that subsection starts.
+const OPERATION_LINE_START: &str = "- `";
 
 /// The lane file `name`, as text.
 fn lane_file(name: &str) -> String {
@@ -278,5 +288,45 @@ fn readme_falsifier_total_matches_falsifiers_json() {
         stated[0], held,
         "README says falsifiers.json holds {} planted bugs, but it holds {held}",
         stated[0]
+    );
+}
+
+/// The one README line for `operation`: its import, its inputs and outputs as
+/// Wasm value type lists, its right and its effect.
+fn operation_line(operation: &LabOperation) -> String {
+    format!(
+        "- `{}.{}`: inputs `({})`, outputs `({})`, right `{}`, effect `{}`",
+        operation.module,
+        operation.name,
+        operation.inputs.join(", "),
+        operation.outputs.join(", "),
+        operation.right,
+        operation.effect
+    )
+}
+
+#[test]
+fn readme_lists_each_typed_lab_operation() {
+    let readme = lane_file("README.md");
+    let held = readme
+        .lines()
+        .filter(|line| *line == OPERATIONS_SECTION)
+        .count();
+    assert_eq!(
+        held, 1,
+        "README.md has the heading {OPERATIONS_SECTION:?} {held} times, not once"
+    );
+    let listed: Vec<&str> = readme
+        .lines()
+        .skip_while(|line| *line != OPERATIONS_SECTION)
+        .skip(1)
+        .take_while(|line| !line.starts_with('#'))
+        .filter(|line| line.starts_with(OPERATION_LINE_START))
+        .collect();
+    let table: Vec<String> = LAB_OPERATIONS.iter().map(operation_line).collect();
+    assert!(!table.is_empty(), "LAB_OPERATIONS is empty");
+    assert_eq!(
+        listed, table,
+        "README.md's {OPERATIONS_SECTION:?} list and LAB_OPERATIONS differ"
     );
 }
