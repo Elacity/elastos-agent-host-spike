@@ -29,6 +29,13 @@ fn run_table_requires_cargo_results() {
     assert!(!table("", "test unlisted ... ok\n", true).1);
     assert!(!table("", "", true).1);
     assert!(!table("case: test\ncase: test\n", "test case ... ok\n", true).1);
+    let (blocked, passed) = table(
+        "memory: test\n",
+        "test memory ... ignored, blocked: UsersAI binding; AC-002-ARGS\n",
+        true,
+    );
+    assert!(passed);
+    assert!(blocked.contains("memory | BLOCKED (UsersAI binding; AC-002-ARGS)\n"));
     let name = "process_isolation::parallel_instances_complete_independently";
     assert_eq!(
         table(

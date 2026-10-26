@@ -11,6 +11,7 @@ const _: () = assert!(
         + cfg!(feature = "runaway") as u8
         + cfg!(feature = "granted-read") as u8
         + cfg!(feature = "sibling-read") as u8
+        + cfg!(feature = "memory-write") as u8
         <= 1,
     "select exactly one probe effect"
 );
@@ -44,6 +45,10 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
         {
             run_runaway()
         }
+        #[cfg(feature = "memory-write")]
+        {
+            write_memory()
+        }
         #[cfg(any(feature = "granted-read", feature = "sibling-read"))]
         {
             read_granted_file()
@@ -54,7 +59,8 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
             feature = "task",
             feature = "runaway",
             feature = "granted-read",
-            feature = "sibling-read"
+            feature = "sibling-read",
+            feature = "memory-write"
         )))]
         {
             run_probe().map_err(|reason| elastos::bus::types::BusError::Unavailable(reason.into()))
@@ -151,7 +157,8 @@ fn request_effect() -> Result<(), elastos::bus::types::BusError> {
     use elastos::bus::{capabilities, types::CapabilityRequest};
     #[cfg(feature = "read")]
     let (resource, action) = (
-        include_str!("../../fixtures/ungranted-read.txt").trim(),
+        option_env!("AC_PROBE_READ_RESOURCE")
+            .unwrap_or(include_str!("../../fixtures/ungranted-read.txt").trim()),
         "read",
     );
     #[cfg(feature = "network")]
@@ -169,6 +176,30 @@ fn request_effect() -> Result<(), elastos::bus::types::BusError> {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "memory-write"))]
+fn write_memory() -> Result<(), elastos::bus::types::BusError> {
+    use elastos::bus::{capabilities, providers, types::*};
+    let resource = include_str!("../../fixtures/memory-write.txt").trim();
+    let grant = capabilities::request(&CapabilityRequest {
+        resource: resource.into(),
+        actions: vec!["write".into()],
+        reason: "agent conformance: memory write".into(),
+    })?;
+    if grant.resource != resource || grant.actions != ["write"] {
+        return Err(BusError::Denied("memory grant scope differs".into()));
+    }
+    let response = providers::invoke(&InvokeRequest {
+        resource: resource.into(),
+        operation: "write".into(),
+        body: br#"{"content":[109,101,109,111,114,121],"create_only":true}"#.to_vec(),
+        grant: Some(grant.id),
+    })?;
+    if response.status != "ok" {
+        return Err(BusError::Unavailable("memory write failed".into()));
+    }
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
