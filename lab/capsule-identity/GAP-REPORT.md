@@ -11,6 +11,18 @@
   is kept: it already holds the lab harness (`git cat-file -e c641bcff21d9ceaad769b1ed89529d541ffd8766:lab/capsule-identity/src/lib.rs`
   succeeds), so no citation moved and the table below is unchanged. Claim scope: a document read at one commit,
   plus the four issue texts read with `gh`; nothing was run. Each check is listed under "Open Runtime issues".
+- **Revision (task 021, 2026-10-26):** records Anders's answers to Q2, Q3, Q4, Q6, Q7 and Q10, as Flint relayed
+  them, with the lab work that answers each (new section "Anders's answers and the lab prototypes"), and rewrites
+  "What the lab harness shows and does not show". It names a second commit read, for the lab files only:
+  `f1f627250eefe58548fccb821e5b0f2499087732` (`spike/agent-host`, from `git rev-parse HEAD`). The Runtime part
+  keeps `c641bcff21d9ceaad769b1ed89529d541ffd8766` and every Runtime citation as it is. Each of the 17 cited files
+  under `elastos/` or `scripts/` (the table below) was checked with
+  `git diff --quiet c641bcff21d9ceaad769b1ed89529d541ffd8766 f1f627250eefe58548fccb821e5b0f2499087732 -- <file>`:
+  all 17 are unchanged, so no file is listed as changed and no Runtime citation needed re-reading. The same check
+  finds `PRINCIPLES.md`, `components.json` and the four cited files under `docs/` unchanged too. A lab citation
+  added by this revision is at `f1f627250` unless it names `c641bcff2`. Claim scope: read at two commits, plus
+  five issue texts read with `gh`; only `git` and read-only `gh` were run. The citation count is under "Open
+  Runtime issues".
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -83,6 +95,30 @@ How the "Runtime issue:" lines were made:
 - Not run: no Runtime code, test or build was run for this report. The `git diff --stat` re-check of cited files
   was not needed: the commit read was kept (see the header). Each `path:line` citation, old and new, was checked
   against `git show c641bcff21d9ceaad769b1ed89529d541ffd8766:<path>`: 172 found, 172 match.
+
+Read again for task 021 on 2026-10-26 with
+`gh issue view <n> --repo Elacity/elastos-runtime --json number,title,state` for `<n>` = 465, 274, 285, 213 and
+464 (read only; nothing was written to that repo). All five ran. 465 and 464 are as above, still OPEN. The three
+new to this report:
+
+- https://github.com/Elacity/elastos-runtime/issues/274 — "update: every capsule signed independently; updates
+  replace only changed capsules", OPEN, read 2026-10-26 (title and state only). 13.2, point 2, quotes 465 on it
+  and still says "not read"; that entry is a Runtime citation and stays as it was.
+- https://github.com/Elacity/elastos-runtime/issues/285 — "World Computer after 0.8.0: capsules that run
+  anywhere, WebSpaces as data stores, tradable capsules", OPEN, read 2026-10-26. Its body says heavy native
+  engines "ship one native payload per platform under one capsule identity, built from one pinned recipe".
+- https://github.com/Elacity/elastos-runtime/issues/213 — "Publisher key rotation without reinstalling: a root
+  key delegates release signing keys", OPEN, read 2026-10-26. Its acceptance asks for a delegated signing key,
+  signing-key rotation and root rotation, each with tests.
+
+Citations of task 021: each new or changed `path:line` citation (in the header, in "Anders's answers and the lab
+prototypes" and in the rewritten lab section) was checked against
+`git show f1f627250eefe58548fccb821e5b0f2499087732:<path>`, or against `c641bcff2` where it says so, by its line
+number and its quoted text: 60 found, 60 match (a citation used twice is counted twice). The header adds no
+`path:line` citation. Of 008's 172, the rewritten lab section drops five (`lab/capsule-identity/README.md:9`,
+`:11`, `:158` and `:165`, and `lab/capsule-identity/src/lib.rs:423`, all at `c641bcff2`) and keeps one,
+`lab/capsule-identity/src/lib.rs:73` at `c641bcff2`, which is counted again in the 60. The other 166 are not
+changed and keep 008's check.
 
 ## PRINCIPLES 13
 
@@ -538,7 +574,8 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
 ## Questions
 
 Q1 to Q10 are for Anders, each from the entry named. Each says which of the four issues read (see "Open Runtime
-issues") already asks or answers it. The last line is for Sasha.
+issues") already asks or answers it. The last line is for Sasha. Anders's relayed answers to Q2, Q3, Q4, Q6, Q7
+and Q10 are in the next section; the questions below stay as they were asked.
 
 - Q1 (13.2): Is the next release still the one that sets `REQUIRED` to true?
   465 answers it: issue 274 "owns the switch that requires them, one release after 0.8.0". The report adds the
@@ -570,18 +607,174 @@ issues") already asks or answers it. The last line is for Sasha.
   No issue read asks it.
 - security finding, details for Sasha: `elastos/crates/elastos-runtime/src/signature/verifier.rs`, `elastos/crates/elastos-server/src/runtime.rs` and `elastos/crates/elastos-server/src/trust_cmd.rs`.
 
+## Anders's answers and the lab prototypes
+
+Added by task 021. Flint relayed Anders's answers to this lane on 2026-10-26 at 10:40. They are quoted here as
+relayed; the lane's inbox is not in this repo. His summary: "The package CID identifies complete contents; a
+separate signed record names the publisher and its claims; Runtime decides admission." Rong's note of 10:45 adds
+that "shared capsule identity" is still undefined, so the lab does not define it, and that grants and tokens bind
+to a CID, never a name. The lab's record has no name field:
+`lab/capsule-identity/README.md:712` `record binds a CID and never a capsule name, and a grant or a token built on`
+
+Each entry is lab evidence for one answer: a prototype, not the Runtime's format, and no admission decision.
+README sections are cited by their heading line and tests by their `fn` line, at `f1f627250`. This report did
+not run the tests.
+
+### Q2: the CID covers the exact bytes, and a signed record binds it
+
+- Answer: "yes, the CID covers exact capsule.json + payload bytes and a signed record binds that CID, with the
+  record encoding and signature domain specified and versioned and cross-implementation tests."
+- Lab tasks: 005, 003 and 018 (the name covers every byte), and 011 (the record).
+- README: `lab/capsule-identity/README.md:29` `## The encoding`
+  and `lab/capsule-identity/README.md:690` `## Lab package record (outside the bundle)`
+- Tests: `lab/capsule-identity/tests/bytes.rs:41` `fn one_byte_change_in_the_manifest_changes_the_lab_cid() {`,
+  `lab/capsule-identity/tests/bytes.rs:65` `fn one_byte_change_in_any_payload_file_changes_the_lab_cid() {`,
+  `lab/capsule-identity/tests/package_record.rs:93` `fn package_record_binds_the_cid_and_verifies() {`
+  and `lab/capsule-identity/tests/package_record.rs:160` `fn record_signed_under_the_wrong_domain_is_refused() {`
+- The schema and the domain each carry a version:
+  `lab/capsule-identity/src/lib.rs:171` `pub const PACKAGE_RECORD_SCHEMA: &str = "lab.capsule-identity.record/v1";`
+  and `lab/capsule-identity/src/lib.rs:175` `pub const PACKAGE_RECORD_DOMAIN: &str = "lab.capsule-identity.package-record/v1";`
+- Not shown: a committed cross-implementation test. At `f1f627250`, README gives the record digest in Python,
+  `lab/capsule-identity/README.md:730` `digest = hashlib.sha256(b"lab.capsule-identity.package-record/v1" + b"\x00" + payload).hexdigest()`,
+  but no test runs it, and the CID pins are checked by an uncommitted script:
+  `lab/capsule-identity/README.md:154` ``the pins are checked against an uncommitted `python3 -I` recomputation written``
+  Lane tasks 019 and 020 (queued, not merged at `f1f627250`) are to put those checks under test. The record is
+  the lab's own schema, not the Runtime's `elastos.capsule.record/v1`, and nothing here changes what the Runtime's
+  manifest signature covers (13.2, point 3).
+- Runtime issue: 465 (https://github.com/Elacity/elastos-runtime/issues/465) for what a signature covers; 274
+  (https://github.com/Elacity/elastos-runtime/issues/274) for each capsule signed on its own.
+
+### Q3: a CIDv1 SHA-256 UnixFS directory root, model package profile
+
+- Answer: "prototype CIDv1 SHA-256 UnixFS directory root using the existing model package profile; freeze
+  construction rules only after reproducibility tests; archive hashes stay delivery checks."
+- Lab tasks: 018 (the carry of blocked task 010), with 013 (one parse of a printed lab CID).
+- README: `lab/capsule-identity/README.md:29` `## The encoding`,
+  `lab/capsule-identity/README.md:190` `## Fixtures and their pinned lab CIDs`
+  and `lab/capsule-identity/README.md:1079` `## Why a lab CID and not the Runtime's CID`
+- The profile: `lab/capsule-identity/README.md:33` `profile is Kubo v0.40.1's import flags as`
+- Tests: `lab/capsule-identity/tests/fixtures.rs:42` `fn lab_cid_matches_the_pinned_value_for_each_fixture() {`,
+  `lab/capsule-identity/tests/encoding.rs:149` `fn file_over_the_chunk_limit_is_refused() {`
+  and `lab/capsule-identity/tests/encoding.rs:168` `fn directory_over_the_hamt_threshold_is_refused() {`
+- Archive hashes stay delivery checks: the lab names the bundle's files, not the Runtime's archive,
+  `lab/capsule-identity/README.md:1091` `a delivery check of those archive bytes, not this CID.`
+- Not shown: the value is not checked against Kubo, which is not on this Mac:
+  `lab/capsule-identity/README.md:39` `directories. This crate runs no Kubo, and no Kubo is installed on this Mac.`
+  Only the single-block, non-sharded subset of the profile is pinned:
+  `lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`
+  The pins are reproduced on one Mac only, so no construction rule is frozen.
+- Runtime issue: none of 463, 464, 465 or 470 names a CID form (13.4, a2). 274, 285 and 213 were not read for
+  this point.
+
+### Q4: one closure per platform variant, and a signed binding of their CIDs
+
+- Answer: "one closure per platform variant, an authenticated binding groups variant CIDs under one capsule
+  identity (+ pinned build recipe, #285)."
+- Lab tasks: 015 (the binding and the recipe), 016 (a WASM app binds one portable variant) and 017 (a label is
+  the signer's claim).
+- README: `lab/capsule-identity/README.md:869` `## Lab variant binding (outside the bundles)`
+- Tests:
+  `lab/capsule-identity/tests/variant_binding.rs:280` `fn variant_binding_binds_each_variant_cid_and_verifies() {`,
+  `lab/capsule-identity/tests/variant_binding.rs:458` `fn variant_binding_recipe_is_pinned() {`,
+  `lab/capsule-identity/tests/variant_binding.rs:1060` `fn a_wasm_app_binds_one_portable_variant() {`
+  and `lab/capsule-identity/tests/variant_binding.rs:1282` `fn a_variant_label_is_the_signers_claim() {`
+- Not shown: no shared capsule identity is defined. The binding groups CIDs and holds no group name:
+  `lab/capsule-identity/README.md:1017` `**What it does not do.** The binding groups CIDs. It defines no shared`
+  and `lab/capsule-identity/tests/variant_binding.rs:750` `fn variant_binding_has_no_group_name() {`
+  So the answer's "under one capsule identity" is not built. The recipe is a lab stand-in that is never run, so no
+  build backs a label: a label is the signer's claim.
+- Runtime issue: 285 (https://github.com/Elacity/elastos-runtime/issues/285), "one native payload per platform
+  under one capsule identity, built from one pinned recipe".
+
+### Q6: the record names the signer
+
+- Answer: "the record names the signer; verify the signature and publisher authority (#213 for
+  rotation/delegation)."
+- Lab tasks: 011 (the record), reusing 004's DID and signature checks.
+- README: `lab/capsule-identity/README.md:690` `## Lab package record (outside the bundle)`
+- Tests: `lab/capsule-identity/tests/package_record.rs:211` `fn record_by_another_signer_is_refused() {`
+  and `lab/capsule-identity/tests/package_record.rs:255` `fn record_malformed_signer_did_is_refused() {`
+- Not shown: no publisher authority, rotation or delegation (213). The signer is checked against an explicit
+  accepted list only, with test keys:
+  `lab/capsule-identity/README.md:769` `**What it does not do.** No key rotation, no delegation, no publisher policy`
+  The Runtime's manifest `signature` still names no signer (15.1, c1).
+- Runtime issue: 213 (https://github.com/Elacity/elastos-runtime/issues/213).
+
+### Q7: records live outside the package
+
+- Answer: "records live OUTSIDE the package."
+- Lab tasks: 011 (the record), 015 (the binding) and 007 (no lab signature in `capsule.json`).
+- README: `lab/capsule-identity/README.md:690` `## Lab package record (outside the bundle)`,
+  `lab/capsule-identity/README.md:869` `## Lab variant binding (outside the bundles)`
+  and `lab/capsule-identity/README.md:603` `## Verify is not admit (M1 check B1)`
+- Tests: `lab/capsule-identity/tests/package_record.rs:117` `fn package_record_stays_outside_the_bundle() {`,
+  `lab/capsule-identity/tests/variant_binding.rs:699` `fn variant_binding_stays_outside_the_bundles() {`
+  and `lab/capsule-identity/tests/not_admission.rs:56` `fn valid_signature_grants_nothing_by_itself() {`
+- Not shown: where a record is kept or how it travels. It has no file form:
+  `lab/capsule-identity/README.md:699` `no serde derive and no file form. Nothing writes it to disk.`
+  The lab does not change or retire the Runtime's manifest `signature` (scheme 1 in 15.1, d1).
+- Runtime issue: 465 (https://github.com/Elacity/elastos-runtime/issues/465), "the signature or record".
+
+### Q10: shared rules on small app, provider and model fixtures
+
+- Answer: "prove shared rules with small app, provider and model fixtures before claiming all capsule kinds."
+- Lab task: 012.
+- README: `lab/capsule-identity/README.md:804` `## Three kinds share the package rules`
+- Tests: `lab/capsule-identity/tests/kinds.rs:51` `fn three_kinds_share_the_package_rules() {`
+  and `lab/capsule-identity/tests/kinds.rs:149` `fn a_wasm_app_has_one_closure() {`
+- Not shown: every capsule kind. The claim is three small fixtures, whose payloads are stand-ins that are never
+  launched:
+  `lab/capsule-identity/README.md:866` `Claim scope: one Mac, these three fixtures. It is not a claim for every`
+- Runtime issue: none of 463, 464, 465 or 470 covers this (15.3). 274, 285 and 213 were not read for this point.
+
+### Admission stays the Runtime's
+
+Anders's summary keeps admission with the Runtime. Task 007 shows that a valid test-key signature grants nothing
+and that the library exports identity checks only:
+`lab/capsule-identity/tests/not_admission.rs:56` `fn valid_signature_grants_nothing_by_itself() {`
+and `lab/capsule-identity/tests/not_admission.rs:315` `fn the_harness_exports_only_identity_checks() {`
+Not shown: what the Runtime would decide. Grants are issue 464
+(https://github.com/Elacity/elastos-runtime/issues/464).
+
+### Questions with no answer
+
+- Q1, Q5, Q8 and Q9: no answer relayed to this lane. They stay open as asked under "Questions".
+
 ## What the lab harness shows and does not show
 
-The lab harness of task 005 is in the commit read. It checks identity apart from admission: it answers only
-whether bytes match a name (`lab/capsule-identity/README.md:9` `- It answers one question: do these bytes match this name?`)
-and sits in no admission or launch path
-(`lab/capsule-identity/README.md:11` `decision. It sits in no admission or launch path, and no Runtime code calls`).
-Its schema check is the Runtime's own manifest type
-(`lab/capsule-identity/src/lib.rs:423` `let manifest: CapsuleManifest = serde_json::from_slice(bytes)`).
-Its value is a lab CID, not the Runtime's CID
-(`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` and
-`lab/capsule-identity/README.md:158` `plain framed stream of regular files instead, so its value never equals the`).
-Its results hold for one Mac and these fixtures only
-(`lab/capsule-identity/README.md:165` `One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0`).
+Rewritten by task 021 for the lab commit read, `f1f627250`. Each citation here is at that commit, except the one
+sentence on `c641bcff2`.
+
+The lab checks identity apart from admission. It answers whether bytes match a name and whether a test key
+signed that name
+(`lab/capsule-identity/README.md:13` `- It answers two questions: do these bytes match this name, and did this test`),
+and it sits in no admission or launch path
+(`lab/capsule-identity/README.md:16` `decision. It sits in no admission or launch path, and no Runtime code calls`).
+Its schema check is still the Runtime's own manifest type
+(`lab/capsule-identity/src/lib.rs:1143` `let manifest: CapsuleManifest = serde_json::from_slice(bytes)`).
+
+Its value is a lab package CID: the 59-character CIDv1 `bafybei...` UnixFS directory root of the bundle
+(`lab/capsule-identity/README.md:19` `- Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS`
+and `lab/capsule-identity/tests/common/mod.rs:73` `assert_eq!((pin.len(), &pin[..7]), (59, "bafybei"), "{pin}");`),
+under the single-block, non-sharded subset of the model package profile
+(`lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`).
+A file or a directory block over 262144 bytes is refused, not named another way
+(`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
+and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
+(`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).
+It is not the Runtime's CID: the Runtime names a release archive, and that archive's hash and CID stay delivery
+checks (`lab/capsule-identity/README.md:1091` `a delivery check of those archive bytes, not this CID.`).
+
+Records and bindings live outside the bundle
+(`lab/capsule-identity/README.md:694` `` `PackageRecord` is that record, in the lab. It stays outside the bundle. ``
+and `lab/capsule-identity/README.md:869` `## Lab variant binding (outside the bundles)`). A record binds a CID,
+never a name (`lab/capsule-identity/README.md:712`, quoted above). The binding groups CIDs and defines no shared
+capsule identity.
+
+Its results hold for one Mac and these fixtures, with test keys only
+(`lab/capsule-identity/README.md:1108` `One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0`).
+Not checked: Linux, Kubo and the Runtime's IPFS CID
+(`lab/capsule-identity/README.md:1111` `on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and`).
 It does not show how the Runtime should name, sign, admit or publish a capsule, and this report did not run
 its tests.
