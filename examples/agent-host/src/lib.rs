@@ -16591,7 +16591,7 @@ mod tests {
             ),
             AppendOutcome::Conflict
         );
-        assert_eq!(stale_cursor.stale, true);
+        assert!(stale_cursor.stale);
         assert_eq!(runtime.stored.as_deref(), Some(latest.as_slice()));
 
         let mut launched = FakeRuntime {
