@@ -836,8 +836,9 @@ class ProbeControls(unittest.TestCase):
 
     def test_strict_json_refusals(self):
         """The one reader refuses NaN, Infinity, -Infinity, a duplicate key,
-        bytes that are not UTF-8, and broken syntax. Each case is fed to the
-        falsifiers probe and to the asks probe, and each reason is exact.
+        bytes that are not UTF-8, broken syntax, and an unpaired surrogate.
+        Each case is fed to the falsifiers probe and to the asks probe, and
+        each reason is exact.
 
         Codex's two round-3 repros are here: ``"about": NaN`` on a valid
         falsifier document, and ``"extra": NaN`` on a valid asks document.
@@ -845,6 +846,15 @@ class ProbeControls(unittest.TestCase):
         error before schema validation, including when a field is unknown.
         A duplicate key is the same shape: the default reader keeps the last
         value instead of reporting the JSON error.
+
+        An unpaired surrogate is the same shape. ``json.loads`` decodes
+        ``\\ud800`` and ``\\udc00`` into ``str``, and the asks schema then
+        accepts ``Models/\\ud800/``. The reader refuses a high surrogate and
+        a low surrogate with different reasons, in a value, a key, or a
+        nested string. A valid pair (``\\ud800\\udc00``) is one scalar and
+        stays accepted. When the committed bytes match a document that
+        contains an unpaired surrogate, the report does not say the schema
+        holds.
         """
         valid = document_with('"about": "plain"', {"falsifiers": [GOOD_HOST]})
         files = tree()
@@ -855,7 +865,18 @@ class ProbeControls(unittest.TestCase):
             return tuple(document_with(extra, document)
                          for document in ({"falsifiers": [GOOD_HOST]}, GOOD_ASKS))
 
+        def with_escape(escape):
+            """Both files, otherwise valid, with ``escape`` in a string the
+            schema accepts. ``escape`` is JSON source, such as ``\\ud800``."""
+            return (
+                document_with('"about": "' + escape + '"', {"falsifiers": [GOOD_HOST]}),
+                ('{"schema":"' + ASKS_SCHEMA
+                 + '","asks":[{"kind":"read","resource":"Models/' + escape + '/"}]}').encode(),
+            )
+
         nested = documents('"note": {"kind": "read", "kind": "read"}')
+        high = "unpaired high surrogate is not strict JSON"
+        low = "unpaired low surrogate is not strict JSON"
         cases = (
             ("about NaN", documents('"about": NaN'), "NaN is not strict JSON"),
             ("extra NaN", documents('"extra": NaN'), "NaN is not strict JSON"),
@@ -866,6 +887,20 @@ class ProbeControls(unittest.TestCase):
             ("duplicate kind", nested, "duplicate key 'kind'"),
             ("not UTF-8", (b"\xff", b"\xff"), "the file is not UTF-8"),
             ("broken syntax", (b"{", b"{"), "the file is not JSON"),
+            ("unpaired high surrogate", with_escape(r"\ud800"), high),
+            ("unpaired low surrogate", with_escape(r"\udc00"), low),
+            ("uppercase high surrogate", with_escape(r"\uD800"), high),
+            ("uppercase low surrogate", with_escape(r"\uDC00"), low),
+            ("last high surrogate", with_escape(r"\udbff"), high),
+            ("last low surrogate", with_escape(r"\udfff"), low),
+            ("two high surrogates", with_escape(r"\ud800\ud801"), high),
+            ("low surrogate then high", with_escape(r"\udc00\ud800"), low),
+            ("pair then unpaired high", with_escape(r"\ud800\udc00\ud800"), high),
+            ("high surrogate key", documents(r'"\ud800": 1'), high),
+            ("low surrogate key", documents(r'"\udc00": 1'), low),
+            ("high surrogate in a list", documents(r'"about": ["\ud800"]'), high),
+            ("low surrogate in a list", documents(r'"about": ["\udc00"]'), low),
+            ("low surrogate nested key", documents(r'"about": {"\udc00": 1}'), low),
         )
         for label, raw, reason in cases:
             with self.subTest(label):
@@ -875,6 +910,79 @@ class ProbeControls(unittest.TestCase):
                     "parse", "", "falsifiers.json", reason)])
                 self.assertEqual(problems_in(planted_files, "asks"), [Problem(
                     "asks", "", "asks.json", reason)])
+
+        reviewer_high = (
+            '{"schema":"elastos.agent-host.asks/v1",'
+            '"asks":[{"kind":"read","resource":"Models/\\ud800/"}]}'
+        ).encode()
+        reviewer_low = (
+            '{"schema":"elastos.agent-host.asks/v1",'
+            '"asks":[{"kind":"read","resource":"Models/\\udc00/"}]}'
+        ).encode()
+        self.assertEqual(with_escape(r"\ud800")[1], reviewer_high)
+        self.assertEqual(with_escape(r"\udc00")[1], reviewer_low)
+
+        for label, escape in (
+            ("a valid surrogate pair", r"\ud800\udc00"),
+            ("an uppercase surrogate pair", r"\uD800\uDC00"),
+            ("the last surrogate pair", r"\udbff\udfff"),
+        ):
+            with self.subTest(label):
+                planted_files = tree()
+                planted_files["falsifiers.json"], planted_files["asks.json"] = with_escape(escape)
+                self.assertEqual(problems_in(planted_files), [])
+
+        held = "every merged agent-host falsifier anchor and the asks schema hold on "
+        commit = "a" * 40
+
+        def report_for(asks_bytes):
+            """Probe one tree whose committed bytes match the bytes read."""
+            planted_files = tree(asks=asks_bytes)
+            prefix = "examples/agent-host/"
+            blobs = {prefix + name: data for name, data in planted_files.items()}
+
+            def run(*args):
+                if args[0] == "rev-parse":
+                    return (commit + "\n").encode()
+                if args[0] == "cat-file":
+                    _commit, _, path = args[-1].partition(":")
+                    return blobs.get(path)
+                if args[0] == "log":
+                    return (commit + " pinned\n").encode()
+                if args[0] == "rev-list":
+                    return (commit + "\n").encode()
+                return None
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve() / "repo"
+                base = root / "examples" / "agent-host"
+                for name, data in planted_files.items():
+                    path = base / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                snapshot = falsifier_data.Snapshot(root, run=run)
+                _entries, problems = probe(lambda name: snapshot.read_relative(base, name))
+                return problems, report_text(snapshot, problems)
+
+        for label, asks_bytes, reason in (
+            ("report unpaired high surrogate", reviewer_high, high),
+            ("report unpaired low surrogate", reviewer_low, low),
+        ):
+            with self.subTest(label):
+                problems, text = report_for(asks_bytes)
+                self.assertEqual(problems["parse"], [])
+                self.assertEqual(problems["asks"], [Problem(
+                    "asks", "", "asks.json", reason)])
+                self.assertNotIn(held, text)
+                self.assertIn("asks 1", text)
+                self.assertIn("files read that differ from HEAD: 0 of 4", text)
+                self.assertFalse(held in text and "0 of " in text, text)
+        with self.subTest("report a valid surrogate pair"):
+            problems, text = report_for(with_escape(r"\ud800\udc00")[1])
+            self.assertEqual(
+                problems, {"parse": [], "caught": [], "anchor": [], "asks": []})
+            self.assertIn(held + commit, text)
+            self.assertIn("files read that differ from HEAD: 0 of 4", text)
 
     def test_report_names_the_commit_it_read(self):
         """A fake git answers A, then B, to successive HEAD lookups. Only A

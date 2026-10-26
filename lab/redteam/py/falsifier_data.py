@@ -7,8 +7,10 @@ does not collect it.
 Three rules live here and nowhere else (P10):
 
 - ``load_json`` is the strict JSON reader. It refuses bytes that are not
-  UTF-8, broken syntax, a duplicate key in any object, and the constants
-  ``NaN``, ``Infinity`` and ``-Infinity``.
+  UTF-8, broken syntax, a duplicate key in any object, the constants
+  ``NaN``, ``Infinity`` and ``-Infinity``, and an unpaired surrogate.
+  A high surrogate and a low surrogate each have their own reason. A valid
+  pair is one Unicode scalar and is accepted.
 - ``Snapshot`` resolves HEAD once, to one full SHA, and every later byte,
   pin and history query for that snapshot uses that SHA. A file is recorded
   under the path the caller named. When the checkout redirects that path,
@@ -56,13 +58,52 @@ def text_of(data: bytes) -> str:
         raise LookupError("the file is not UTF-8") from None
 
 
+def _surrogate_reason(text: str):
+    """Why ``text`` is not a sequence of Unicode scalar values, or None.
+
+    ``json.loads`` joins a high surrogate (U+D800..U+DBFF) to a following
+    low surrogate (U+DC00..U+DFFF) and returns one scalar. A surrogate that
+    remains is unpaired. The first one names the reason.
+    """
+    for char in text:
+        code = ord(char)
+        if 0xD800 <= code <= 0xDBFF:
+            return "unpaired high surrogate is not strict JSON"
+        if 0xDC00 <= code <= 0xDFFF:
+            return "unpaired low surrogate is not strict JSON"
+    return None
+
+
+def _reject_unpaired_surrogates(value):
+    """Refuse any string in ``value`` that contains an unpaired surrogate.
+
+    Keys and values, at every depth. This is the one Unicode check. Every
+    probe reads JSON through ``load_json``.
+    """
+    if isinstance(value, str):
+        reason = _surrogate_reason(value)
+        if reason is not None:
+            raise StrictJsonError(reason)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_unpaired_surrogates(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _reject_unpaired_surrogates(key)
+            _reject_unpaired_surrogates(item)
+
+
 def load_json(data: bytes):
     """The one strict JSON reader.
 
-    ``json.loads`` on its own accepts ``NaN``, ``Infinity``, ``-Infinity`` and
-    a repeated key. Those are refusals here, each with a reason that names
-    the constant or the key. Broken syntax and bytes that are not UTF-8 are
-    refusals too.
+    ``json.loads`` on its own accepts ``NaN``, ``Infinity``, ``-Infinity``,
+    a repeated key, and an unpaired surrogate escape. Those are refusals
+    here, each with a reason that names the constant, the key, or the
+    surrogate. A high surrogate and a low surrogate are different refusals.
+    A valid pair is one scalar value and is accepted. Broken syntax and
+    bytes that are not UTF-8 are refusals too.
     """
     try:
         text = data.decode("utf-8")
@@ -81,11 +122,13 @@ def load_json(data: bytes):
         return obj
 
     try:
-        return json.loads(text, parse_constant=reject_constant, object_pairs_hook=object_pairs)
+        value = json.loads(text, parse_constant=reject_constant, object_pairs_hook=object_pairs)
     except StrictJsonError:
         raise
     except ValueError:
         raise StrictJsonError("the file is not JSON") from None
+    _reject_unpaired_surrogates(value)
+    return value
 
 
 def apply_edits(text: str, edits):
