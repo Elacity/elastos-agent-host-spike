@@ -413,15 +413,21 @@ class Mutation:
         for name, edits in by_file.items():
             path = self.base / name
             # One path rule: an edit names a file under examples/agent-host.
-            # An absolute path, or one whose `..` parts or symlinks resolve
-            # outside REPO, is a refusal with its reason before any link or
-            # write (P11), so a killed run can still restore every file.
+            # The file, its mutation directory and the temporary write target
+            # must all resolve inside REPO before any link or write (P11).
+            # The directory owns backup creation and replacement of the file;
+            # a temporary symlink can send write_text to a different target.
             if os.path.isabs(name):
                 raise LookupError(
                     f"{name}: the path is absolute; "
                     "edit paths are relative to examples/agent-host")
-            resolved = path.resolve()
-            if not resolved.is_relative_to(REPO):
+            destinations = (
+                path,
+                path.parent,
+                path.with_name(path.name + ".falsify-tmp"),
+            )
+            if any(not destination.resolve().is_relative_to(REPO)
+                   for destination in destinations):
                 raise LookupError(
                     f"{name}: the path leaves the repository; "
                     "edit paths are relative to examples/agent-host")
@@ -2158,6 +2164,98 @@ def an_edit_through_an_outside_symlink_is_refused():
     return ok
 
 
+def refused_without_filesystem_mutation(entry, here, tree):
+    """Observe every link, write and replacement in a refused test entry."""
+    with mock.patch.object(os, "link", wraps=os.link) as links, \
+            mock.patch.object(pathlib.Path, "write_text", autospec=True,
+                              side_effect=pathlib.Path.write_text) as writes, \
+            mock.patch.object(os, "replace", wraps=os.replace) as replacements:
+        got = refused_edit(entry, here, tree)
+    calls = (links.call_count, writes.call_count, replacements.call_count)
+    return got, calls
+
+
+def an_edit_through_an_outside_parent_with_an_inside_target_is_refused():
+    """The final file can resolve inside while backup and replacement paths
+    remain outside. Check both an absent temporary file and an inside-pointing
+    temporary symlink, so the parent directory has its own coverage."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        inside = here / "inside.txt"
+        inside.write_bytes(b"inside original\n")
+        outside_dir = SELF_TEST_DIR / "outside-directory"
+        outside_dir.mkdir()
+        portal = here / "portal"
+        portal.symlink_to(outside_dir, target_is_directory=True)
+        back = outside_dir / "back.txt"
+        back.symlink_to(inside)
+        tmp = back.with_name(back.name + ".falsify-tmp")
+        backup = back.with_name(back.name + BACKUP_SUFFIX)
+        name = "portal/back.txt"
+        want = (False, "NO MATCH", f"{name}: the path leaves the repository; "
+                "edit paths are relative to examples/agent-host")
+        assert (here / name).resolve() == inside.resolve()
+        assert not (here / name).parent.resolve().is_relative_to(tree)
+        for temporary in ("absent", "inside symlink"):
+            if temporary == "inside symlink":
+                tmp.symlink_to(inside)
+            # The valid edit comes first to check the whole entry's preflight.
+            entry = edit_entry("inside.txt", "inside original")
+            entry["edits"].extend(edit_entry(name, "inside original")["edits"])
+            got, calls = refused_without_filesystem_mutation(entry, here, tree)
+            kept = (inside.read_bytes() == b"inside original\n"
+                    and outside.read_bytes() == b"outside original\n"
+                    and portal.is_symlink() and portal.readlink() == outside_dir
+                    and back.is_symlink() and back.readlink() == inside
+                    and not os.path.lexists(backup)
+                    and (tmp.is_symlink() and tmp.readlink() == inside
+                         if temporary == "inside symlink"
+                         else not os.path.lexists(tmp))
+                    and not os.path.lexists(inside.with_name(inside.name + BACKUP_SUFFIX))
+                    and not os.path.lexists(inside.with_name(inside.name + ".falsify-tmp")))
+            print(f"self-test: an edit through an outside parent with an inside target "
+                  f"is refused: temporary={temporary}, {got[1]}, "
+                  f"links={calls[0]}, writes={calls[1]}, replacements={calls[2]}, kept={kept}")
+            if got != want or calls != (0, 0, 0) or not kept:
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_edit_with_an_outside_temporary_target_is_refused():
+    """An existing or dangling temporary symlink cannot send the write outside
+    REPO, even when the edit file and its parent both stay inside."""
+    ok = True
+    try:
+        for target_exists in (True, False):
+            tree, here, outside = refusal_tree()
+            inside = here / "inside.txt"
+            inside.write_bytes(b"inside original\n")
+            tmp = inside.with_name(inside.name + ".falsify-tmp")
+            tmp.symlink_to(outside)
+            if not target_exists:
+                outside.unlink()
+            got, calls = refused_without_filesystem_mutation(
+                edit_entry("inside.txt", "inside original"), here, tree)
+            want = (False, "NO MATCH", "inside.txt: the path leaves the repository; "
+                    "edit paths are relative to examples/agent-host")
+            kept = (inside.read_bytes() == b"inside original\n"
+                    and tmp.is_symlink() and tmp.readlink() == outside
+                    and (outside.read_bytes() == b"outside original\n" if target_exists
+                         else not os.path.lexists(outside))
+                    and not os.path.lexists(inside.with_name(inside.name + BACKUP_SUFFIX)))
+            print(f"self-test: an edit with an outside temporary target is refused: "
+                  f"target_exists={target_exists}, {got[1]}, "
+                  f"links={calls[0]}, writes={calls[1]}, replacements={calls[2]}, kept={kept}")
+            if got != want or calls != (0, 0, 0) or not kept:
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def a_mixed_entry_is_refused_before_any_mutation():
     """An entry whose inside edit comes first and whose second path climbs out
     changes no file. The one path rule checks every name before any link or
@@ -2911,6 +3009,10 @@ SELF_TEST_CASES = {
     "an absolute edit path is refused": an_absolute_edit_path_is_refused,
     "an edit path that climbs out is refused": an_edit_path_that_climbs_out_is_refused,
     "an edit through an outside symlink is refused": an_edit_through_an_outside_symlink_is_refused,
+    "an edit through an outside parent with an inside target is refused":
+        an_edit_through_an_outside_parent_with_an_inside_target_is_refused,
+    "an edit with an outside temporary target is refused":
+        an_edit_with_an_outside_temporary_target_is_refused,
     "a mixed entry is refused before any mutation": a_mixed_entry_is_refused_before_any_mutation,
     "an absent outside edit path gets the containment reason":
         an_absent_outside_edit_path_gets_the_containment_reason,
