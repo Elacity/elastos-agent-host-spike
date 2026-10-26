@@ -1,0 +1,10 @@
+[package]
+name = "owned-storage"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Lab only: one storage root per agent instance, named by the grant"
+
+# Stay out of the root ElastOS workspace.
+[workspace]
