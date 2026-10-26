@@ -13,9 +13,12 @@ use serde_json::{json, Value};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -680,4 +683,369 @@ for (const id of ['chat','responses']) {
         provider.shutdown();
     }
     assert!(matches!(sink.accept(), Err(error) if error.kind()==std::io::ErrorKind::WouldBlock));
+}
+
+const HOSTED_EFFECT_OFFER: &str = "hosted-text";
+
+/// The header names the Runtime's hosted effect reader accepts, compared in
+/// lower case. Any other name, a repeated name, and a `host` other than
+/// `runtime.invalid` are refused
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:549-578`).
+/// This test copies the list instead of depending on `elastos-server`, which is
+/// a separate Cargo workspace.
+const RUNTIME_HOSTED_HEADER_NAMES: [&str; 11] = [
+    "host",
+    "accept",
+    "accept-encoding",
+    "user-agent",
+    "content-type",
+    "content-length",
+    "x-elastos-offer-id",
+    "x-elastos-effect",
+    "x-elastos-run-id",
+    "x-elastos-request-id",
+    "x-elastos-job-id",
+];
+
+/// The Runtime's answer when it refuses a hosted request before dispatch.
+const RUNTIME_HOSTED_REFUSAL: &[u8] =
+    b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
+      Content-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// One request the stand-in read to its end: the request line and every header
+/// line, with the name as sent.
+struct RecordedRequest {
+    request_line: String,
+    headers: Vec<(String, String)>,
+}
+
+impl RecordedRequest {
+    /// The recorded request head, the request line and all header lines.
+    fn head(&self) -> String {
+        let mut head = self.request_line.clone();
+        for (name, value) in &self.headers {
+            head.push_str("\r\n");
+            head.push_str(name);
+            head.push_str(": ");
+            head.push_str(value);
+        }
+        head
+    }
+
+    /// The value of the first header with this name, compared without case.
+    fn value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(sent, _)| sent.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Stand-in for the Runtime-owned hosted effect socket that `init` names in
+/// `runtime_hosted_socket`. It stays in this file because
+/// `tests/confine/main.rs` is cc-model-confine's file in another test binary,
+/// and `src/test_support.rs` is under `src/`, where a change needs a fresh
+/// Sasha note. It counts each connection when `accept` returns it, reads that
+/// connection's one request to its end, records the request, and answers as the
+/// Runtime refuses before dispatch.
+struct HostedEffectStandIn {
+    path: PathBuf,
+    listener: Arc<UnixListener>,
+    connections: Arc<AtomicUsize>,
+    requests: Receiver<RecordedRequest>,
+    stop: Arc<AtomicBool>,
+    accept_loop: Option<thread::JoinHandle<()>>,
+}
+
+impl HostedEffectStandIn {
+    fn bind(label: &str) -> Self {
+        // The provider refuses a socket path of 104 bytes or more
+        // (`src/config.rs:163`), so bind under `/tmp` rather than under the
+        // fixture's temporary root.
+        let path =
+            Path::new("/tmp").join(format!("mp-process-{label}-{}.sock", std::process::id()));
+        // Only a killed run of this process id can have left this path.
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind the Runtime hosted effect stand-in");
+        listener
+            .set_nonblocking(true)
+            .expect("a stoppable Runtime hosted effect stand-in");
+        let listener = Arc::new(listener);
+        let connections = Arc::new(AtomicUsize::new(0));
+        let (request_tx, requests) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept_loop = {
+            let listener = Arc::clone(&listener);
+            let connections = Arc::clone(&connections);
+            let stopping = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            connections.fetch_add(1, Ordering::Relaxed);
+                            let request_tx = request_tx.clone();
+                            thread::spawn(move || serve_hosted_effect(stream, request_tx));
+                        }
+                        Err(_) => thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
+        Self {
+            path,
+            listener,
+            connections,
+            requests,
+            stop,
+            accept_loop: Some(accept_loop),
+        }
+    }
+
+    fn stop_accepting(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(accept_loop) = self.accept_loop.take() {
+            let _ = accept_loop.join();
+        }
+    }
+
+    /// The connections accepted and the requests read. It waits for the first
+    /// recorded request, stops the accept loop, then counts every connection
+    /// still queued on the listener. The stand-in records a request before it
+    /// answers it, so a run that settled on the refusal always finds its record.
+    fn observe(mut self) -> (usize, Vec<RecordedRequest>) {
+        let recorded = self
+            .requests
+            .recv_timeout(FIXTURE_EVENT_TIMEOUT)
+            .expect("the hosted effect request must reach the Runtime socket stand-in");
+        self.stop_accepting();
+        while let Ok((stream, _)) = self.listener.accept() {
+            self.connections.fetch_add(1, Ordering::Relaxed);
+            drop(stream);
+        }
+        (self.connections.load(Ordering::Relaxed), vec![recorded])
+    }
+}
+
+impl Drop for HostedEffectStandIn {
+    fn drop(&mut self) {
+        self.stop_accepting();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn serve_hosted_effect(stream: UnixStream, request_tx: mpsc::Sender<RecordedRequest>) {
+    let recorded = read_hosted_effect_request(&stream);
+    let _ = request_tx.send(recorded);
+    let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
+}
+
+/// Reads one request head and its body to the end, waiting at most
+/// `FIXTURE_EVENT_TIMEOUT` for each read.
+fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
+    // On macOS an accepted socket keeps the listener's non-blocking mode.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    let _ = reader.read_line(&mut request_line);
+    let mut headers = Vec::new();
+    let mut body_bytes = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                body_bytes = value.trim().parse().unwrap_or(0);
+            }
+            headers.push((name.to_string(), value.trim().to_string()));
+        }
+    }
+    // Read the body to its end, so the refusal answers a complete request.
+    let mut body = vec![0; body_bytes];
+    let _ = reader.read_exact(&mut body);
+    RecordedRequest {
+        request_line: request_line.trim_end().to_string(),
+        headers,
+    }
+}
+
+/// The provider's half of the join with the Runtime's hosted effect transport.
+/// With `runtime_hosted_socket` set, macOS sends each hosted effect to
+/// `http://runtime.invalid/v1/hosted-effect` with the offer, run, request and
+/// effect headers and no key (`effect_request` at `src/adapters.rs:45-70`), and
+/// the OpenAI-compatible text worker adds the bearer header only when no
+/// Runtime socket is set (`src/adapters.rs:1980-1984`). The Runtime's reader
+/// accepts one exact request line and a closed header list
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:549-578`),
+/// so a drift fails the run closed there with no named test in this lane
+/// saying why. This test pins the four headers, the contract run id, and the
+/// absent key.
+///
+/// The stand-in lives in this file: `tests/confine/main.rs` is cc-model-confine's
+/// file in another test binary, and `src/test_support.rs` is under `src/`, where
+/// a change needs a fresh Sasha note.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted effect headers: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-effect-headers");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-effect-headers");
+    let policy = json!({
+        "concurrency_limit": 1, "input_bytes_limit": 8192,
+        "inline_output_bytes_limit": 8192, "event_bytes_limit": 8192,
+        "runtime_ms_limit": 30000, "retention_secs": 60,
+        "cancel_settlement_timeout_ms": 20
+    });
+    let hosted = json!({
+        "backend_provider_label": "Fixture Provider", "selection_mode": "pinned",
+        "privacy_policy_ref": "fixture:privacy:v1", "terms_ref": "fixture:terms:v1",
+        "upstream_routing_fallback_assertion": "operator_asserted_disabled",
+        "model_privacy": ""
+    });
+    let offer = json!({
+        "id": HOSTED_EFFECT_OFFER, "title": "Hosted Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"], "output_modalities": ["text/plain"],
+        "policy": policy,
+        "adapter": {"kind": "open_ai_compatible_text",
+        "api_url": "https://hosted.invalid/v1/chat/completions",
+        "api_key": "fixture-key", "model": "fixture/text", "hosted": hosted},
+        "enabled": true
+    });
+    let init = json!({"op": "init", "config": {
+        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
+        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
+        "offers": [offer], "runtime_hosted_socket": stand_in.path}
+    }});
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "hosted effect headers"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:hosted-effect-headers"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    let returned_run_id = create["data"]["run_id"]
+        .as_str()
+        .expect("runs_create returns the run id")
+        .to_string();
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    assert_eq!(
+        returned_run_id, expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &returned_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "the Runtime refusal must fail the run: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the Runtime refusal must settle the run with its reason: {settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the hosted run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the hosted run must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in &recorded.headers {
+        let name = name.to_ascii_lowercase();
+        assert!(
+            RUNTIME_HOSTED_HEADER_NAMES.contains(&name.as_str()),
+            "the Runtime refuses every other header name: {name}"
+        );
+        assert!(
+            !names.contains(&name),
+            "the Runtime refuses a repeated header name: {name}"
+        );
+        names.push(name);
+    }
+    assert_eq!(recorded.value("host"), Some("runtime.invalid"));
+    assert_eq!(recorded.value("x-elastos-effect"), Some("text"));
+    assert_eq!(
+        recorded.value("x-elastos-offer-id"),
+        Some(HOSTED_EFFECT_OFFER)
+    );
+    assert_eq!(
+        recorded.value("x-elastos-request-id"),
+        create_request["runtime_binding"]["request_id"].as_str()
+    );
+    assert_eq!(
+        recorded.value("x-elastos-run-id"),
+        Some(expected_run_id.as_str())
+    );
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+    assert_eq!(
+        recorded.value("x-elastos-job-id"),
+        None,
+        "a text effect carries no job id"
+    );
+    assert!(
+        !recorded.head().contains("fixture-key"),
+        "the offer's key must appear nowhere in the recorded request head: {}",
+        recorded.head()
+    );
+
+    provider.shutdown();
 }
