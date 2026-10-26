@@ -93,8 +93,11 @@ use std::process::Command;
 /// WP83 renames the wallet operations table's cited
 /// `confined_outside_write_is_denied` test in `tests/confine.rs`, so
 /// `every_operations_table_cites_existing_tests` fails because the cited
-/// function is gone.
-const EXPECTED_FALSIFIERS: usize = 81;
+/// function is gone. Task 070's WP84 appends an allow rule to the did profile
+/// that no declared right names, and WP85 appends the same rule to this
+/// profile, so `every_did_and_wallet_allow_rule_traces_to_one_declared_right`
+/// fails on each form.
+const EXPECTED_FALSIFIERS: usize = 83;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
