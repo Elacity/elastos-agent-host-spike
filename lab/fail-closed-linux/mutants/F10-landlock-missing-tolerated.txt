@@ -1,0 +1,12 @@
+id: F10-landlock-missing-tolerated
+file: src/lib.rs
+test: simulated::sim_landlock_missing_refuses
+test: real_kernel::real_landlock_missing_refuses
+--- old
+    let abi = kernel.landlock_abi().map_err(os(Step::AbiProbe))?;
+--- new
+    let abi = match kernel.landlock_abi() {
+        Ok(abi) => abi,
+        Err(_) => return Ok(()),
+    };
+--- end

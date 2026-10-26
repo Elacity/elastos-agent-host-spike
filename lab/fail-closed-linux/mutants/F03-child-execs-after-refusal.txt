@@ -1,0 +1,18 @@
+id: F03-child-execs-after-refusal
+file: src/lib.rs
+test: simulated::sim_every_guard_step_failure_stops_before_exec
+test: simulated::sim_capability_drop_failure_refuses
+test: real_kernel::real_capability_drop_failure_refuses
+test: real_kernel::real_landlock_ruleset_unappliable_refuses
+--- old
+    confine(kernel, plan)?;
+    kernel
+        .exec(plan)
+        .map_err(|errno| Fault::os(Step::Execve, errno))
+--- new
+    let confined = confine(kernel, plan);
+    kernel
+        .exec(plan)
+        .map_err(|errno| Fault::os(Step::Execve, errno))?;
+    confined
+--- end

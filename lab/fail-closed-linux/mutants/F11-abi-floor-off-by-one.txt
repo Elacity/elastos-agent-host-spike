@@ -1,0 +1,10 @@
+id: F11-abi-floor-off-by-one
+file: src/lib.rs
+test: simulated::sim_landlock_abi_too_old_refuses
+test: simulated::sim_landlock_abi_floor_cannot_be_lowered
+test: real_kernel::real_landlock_abi_below_required_refuses
+--- old
+    if abi < plan.abi_floor {
+--- new
+    if abi + 1 < plan.abi_floor {
+--- end

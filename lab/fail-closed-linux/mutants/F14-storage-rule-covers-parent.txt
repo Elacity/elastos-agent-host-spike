@@ -1,0 +1,14 @@
+id: F14-storage-rule-covers-parent
+file: src/lib.rs
+test: real_kernel::real_confined_provider_has_every_layer
+--- old
+        let storage_root = c_string(spec.storage_root.as_os_str()).ok_or_else(invalid)?;
+--- new
+        let storage_root = c_string(
+            spec.storage_root
+                .parent()
+                .unwrap_or(&spec.storage_root)
+                .as_os_str(),
+        )
+        .ok_or_else(invalid)?;
+--- end

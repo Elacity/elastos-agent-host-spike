@@ -1,0 +1,7 @@
+id: F13-socket-allowed
+file: src/seccomp.rs
+test: real_kernel::real_confined_provider_has_every_layer
+--- old
+    libc::SYS_socket,
+--- new
+--- end
