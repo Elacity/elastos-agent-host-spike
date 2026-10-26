@@ -502,6 +502,39 @@ fn model_forged_rights_do_not_widen_the_child_grant() {
 }
 
 #[test]
+fn model_refused_child_journal_stores_no_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/other")
+        .expect_err("path outside the owned root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    let leaked = verifier
+        .use_grant(call, &guest(Handle(2)))
+        .expect_err("a refused create stores no grant");
+    assert_eq!(leaked, Refuse::UnknownHandle);
+    assert_eq!(leaked.to_string(), "unknown handle");
+    let child = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_eq!(child, Handle(2));
+    let parent_decision = verifier
+        .use_grant(call, &guest(parent))
+        .expect("parent grant");
+    assert_eq!(parent_decision.owned_root, "UsersAI/agent-1/journal");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
