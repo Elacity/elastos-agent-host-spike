@@ -708,6 +708,10 @@ fn outside_read_denied() {
 /// the shared diagnostic (DID17); the silent child's failure reads `provider
 /// exited without a response`, so this test fails on its request assertion in
 /// the second case.
+///
+/// Falsifier: use a fixed `Operation not permitted` instead of the child's
+/// standard error in `unanswered` (DID24); the denied start's failure names no
+/// `execvp()` denial, so this test fails on that assertion at the first case.
 #[test]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -746,6 +750,10 @@ fn startup_denial_reports_its_reason() {
     assert!(
         denial.contains("Operation not permitted"),
         "the failure must carry sandbox-exec's denial: {denial}"
+    );
+    assert!(
+        denial.contains("execvp()") && denial.contains(PROVIDER_BINARY),
+        "the denial must be sandbox-exec's exec denial of the provider binary: {denial}"
     );
     eprintln!("startup denial failure: {denial}");
 
@@ -916,6 +924,10 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// Falsifier: drop the stderr pipe instead of draining it (DID13); only `dd`
 /// dies on the closed pipe, so the shell still exits 7, and the collected text
 /// is empty, so this test fails on its byte count, `left: 0`, `right: 131072`.
+///
+/// Falsifier: start reading only after `wait_for_exit` has returned (DID23);
+/// the fixture fills the pipe and blocks, so the wait kills it, and this test
+/// fails on its exit assertion, `no exit within 10s, so it was killed`.
 #[test]
 fn stderr_is_drained_before_wait() {
     let mut child = ConfinedProvider::spawn({
@@ -937,6 +949,56 @@ fn stderr_is_drained_before_wait() {
         stderr.as_bytes().iter().all(|byte| *byte == 0),
         "the drained bytes must be the fixture's zero bytes"
     );
+}
+
+/// An answer that is not JSON fails with its own message.
+///
+/// Through `spawn`, a fixture child reads one request, prints `not json` and a
+/// newline to standard output, and exits 0. The failure names the request,
+/// `invalid JSON`, the parse error `serde_json` gives for the answer and the
+/// answer itself, and it does not say the provider did not answer. The test
+/// starts no sandbox and does not call `sandbox_available`.
+///
+/// Falsifier: return the shared unanswered message from the invalid-JSON branch
+/// (DID25); the answer loses its parse error and says the provider did not
+/// answer, so this test fails on its `invalid JSON` assertion.
+#[test]
+fn invalid_json_answer_names_the_request_and_the_parse_error() {
+    let mut child = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read request; echo 'not json'; exit 0");
+        command
+    });
+    let request = json!({ "op": "get_did" });
+    let failure = child
+        .try_send(&request)
+        .expect_err("an answer that is not JSON must fail");
+    let parse_error = serde_json::from_str::<Value>("not json\n")
+        .expect_err("the fixture answer must not parse as JSON")
+        .to_string();
+    assert!(
+        failure.contains(&request.to_string()),
+        "the failure must name the request: {failure}"
+    );
+    assert!(
+        failure.contains("invalid JSON"),
+        "the failure must name the invalid JSON answer: {failure}"
+    );
+    assert!(
+        failure.contains(&parse_error),
+        "the failure must carry the parse error: {failure}"
+    );
+    assert!(
+        failure.contains("not json"),
+        "the failure must carry the answer: {failure}"
+    );
+    assert!(
+        !failure.contains("did not answer"),
+        "an invalid answer is not an unanswered request: {failure}"
+    );
+    eprintln!("invalid-JSON failure: {failure}");
 }
 
 /// The one profile source denies the network and every default grant.

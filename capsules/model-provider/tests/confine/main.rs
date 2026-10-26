@@ -18,9 +18,11 @@
 //! so a test can run the one receive to its timeout without the provider
 //! binary.
 //!
-//! When `/usr/bin/sandbox-exec` is absent a confined test prints why it did
-//! not run and returns; it never passes silently. The one profile-shape check
-//! is `both_file_profiles_bind_one_storage_parameter_contract` in
+//! On a declared host OS a missing `/usr/bin/sandbox-exec` fails the test,
+//! and `sandbox_available` is the call that fails it. On any other OS, when
+//! `sandbox-exec` is missing, the test prints why it did not run and returns.
+//! The one profile-shape check is
+//! `both_file_profiles_bind_one_storage_parameter_contract` in
 //! `capsules/wallet-provider/tests/confine.rs`; this target adds none.
 
 #![cfg(unix)]
@@ -52,21 +54,144 @@ use std::time::{Duration, Instant};
 use test_support::FIXTURE_EVENT_TIMEOUT;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// The host OSes whose "Host-OS status" in `CONFINEMENT.md` declares this
+/// profile enforced through `/usr/bin/sandbox-exec`, so a confinement test
+/// there must run.
+const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_model-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 const HOSTED_OFFER: &str = "confine-hosted-text";
 
-/// Returns `true` when the confined tests can run, printing why they cannot
-/// otherwise.
-fn sandbox_available() -> bool {
-    if Path::new(SANDBOX_EXEC).is_file() {
-        return true;
+/// Whether a sandbox test runs on this host.
+///
+/// A present `sandbox_exec` runs the test on any OS. A missing one is a skip
+/// only on an OS whose profile `CONFINEMENT.md` does not declare enforced; on
+/// a declared OS it is an error, because a skip there would pass a profile
+/// that was never exercised (P11). `sandbox_gate` prints nothing.
+fn sandbox_gate(os: &str, sandbox_exec: &Path) -> Result<bool, String> {
+    if sandbox_exec.is_file() {
+        return Ok(true);
     }
-    eprintln!(
-        "SKIP model-provider confinement test: {SANDBOX_EXEC} is absent; \
-         the profile was not exercised on this machine"
+    if DECLARED_CONFINED_OS.contains(&os) {
+        return Err(format!(
+            "{os} is declared confined in CONFINEMENT.md, so a confinement test on this OS \
+             must run, not skip: {} is absent",
+            sandbox_exec.display()
+        ));
+    }
+    Ok(false)
+}
+
+/// Returns `true` when the confined test can run.
+///
+/// On `Err` from `sandbox_gate` this fails the test with that reason. It does
+/// not return `false` for an error. It prints the skip line only when the gate
+/// answers `Ok(false)`.
+fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
+    match sandbox_gate(os, sandbox_exec) {
+        Ok(true) => true,
+        Ok(false) => {
+            eprintln!(
+                "SKIP model-provider confinement test: {} is absent; \
+                 the profile was not exercised on this machine",
+                sandbox_exec.display()
+            );
+            false
+        }
+        Err(reason) => panic!("{reason}"),
+    }
+}
+
+/// A declared host OS runs its confinement tests; it never passes by skipping.
+///
+/// A missing `sandbox-exec` on `macos` is a refusal that names the OS and the
+/// path, a missing one on `linux` is a skip, and a present one on `macos` runs
+/// the test. The test calls `sandbox_gate`, which prints nothing, so the
+/// `linux` case prints no skip line. It starts no process, so it runs on every
+/// Unix host.
+///
+/// Falsifier: F-cc17a returns `Ok(false)` from the declared-OS branch; the
+/// `macos` case fails because a missing `sandbox-exec` is no longer `Err`.
+#[test]
+fn sandbox_gate_fails_instead_of_skipping_on_a_declared_os() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine/absent-sandbox-exec");
+    assert!(
+        !missing.exists(),
+        "the fixture path must be absent: {}",
+        missing.display()
     );
-    false
+    let present = Path::new(PROVIDER_BINARY);
+    assert!(
+        present.is_file(),
+        "the present fixture must be a file: {}",
+        present.display()
+    );
+
+    let refusal = sandbox_gate("macos", &missing)
+        .expect_err("a declared OS must run its confinement test, not skip it");
+    assert!(
+        refusal.contains("macos") && refusal.contains(&missing.display().to_string()),
+        "the refusal must name the OS and the missing path: {refusal}"
+    );
+    assert_eq!(
+        sandbox_gate("linux", &missing),
+        Ok(false),
+        "an undeclared OS may skip the test it cannot run"
+    );
+    assert_eq!(
+        sandbox_gate("macos", present),
+        Ok(true),
+        "a declared OS runs the test when sandbox-exec is present"
+    );
+}
+
+/// `sandbox_available` fails the test when `sandbox_gate` refuses a declared
+/// OS. The test calls it with `macos` and a missing path, inside
+/// `std::panic::catch_unwind`. The call panics, and the payload is the gate's
+/// reason, which names `macos` and the path. A return of `false` fails this
+/// test. A present path on `macos` returns `true`. The test calls no OS that
+/// skips, so it prints no skip line, and it starts no process.
+///
+/// Falsifier: F-cc17b returns `false` from the error arm of
+/// `sandbox_available`, so a missing `sandbox-exec` on macos returns and this
+/// test fails.
+#[test]
+fn sandbox_available_fails_for_macos_when_sandbox_exec_is_missing() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine/absent-sandbox-exec");
+    assert!(
+        !missing.exists(),
+        "the fixture path must be absent: {}",
+        missing.display()
+    );
+    let present = Path::new(PROVIDER_BINARY);
+    assert!(
+        present.is_file(),
+        "the present fixture must be a file: {}",
+        present.display()
+    );
+
+    let settled =
+        std::panic::catch_unwind(AssertUnwindSafe(|| sandbox_available("macos", &missing)));
+    let failure = match settled {
+        Err(payload) => panic_text(payload),
+        Ok(returned) => panic!(
+            "a missing sandbox-exec on macos must fail the test, but sandbox_available returned {returned}"
+        ),
+    };
+    let expected = sandbox_gate("macos", &missing)
+        .expect_err("a declared OS must refuse a missing sandbox-exec");
+    assert_eq!(
+        failure, expected,
+        "the panic payload must be the gate's reason"
+    );
+    assert!(
+        failure.contains("macos") && failure.contains(&missing.display().to_string()),
+        "the refusal must name the OS and the missing path: {failure}"
+    );
+    assert!(
+        sandbox_available("macos", present),
+        "a present sandbox-exec on macos must let the confined test run"
+    );
 }
 
 /// Seatbelt matches resolved paths and macOS `/var` is `/private/var`, so
@@ -603,7 +728,7 @@ fn wait_for_terminal(
 /// entry in `confine-falsifiers.json` removes one rule and this test fails.
 #[test]
 fn model_provider_ops_under_profile() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let storage = Storage::prepare("ops");
@@ -722,7 +847,7 @@ fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
 /// test fails.
 #[test]
 fn model_outside_write_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = Redirect::prepare("outside-write");
@@ -831,7 +956,7 @@ fn only_record(runs: &Path) -> PathBuf {
 /// check (`model run is unreadable`), before the open.
 #[test]
 fn model_outside_read_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let storage = Storage::prepare("outside-read");
@@ -938,7 +1063,7 @@ const CREATE_FIXTURE_RULE: &str =
 /// answers `journal_corrupt`.
 #[test]
 fn model_outside_create_reports_access_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = Redirect::prepare("outside-create");
@@ -1035,7 +1160,7 @@ impl LocalEngine {
 /// test fails.
 #[test]
 fn model_local_offer_fails_closed_under_profile() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = LocalEngine::prepare("local-offer");
@@ -1292,7 +1417,7 @@ impl HostedTransport {
 /// `(deny network*)` still refuses the connect.
 #[test]
 fn model_hosted_run_fails_closed_under_profile() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = HostedTransport::prepare("hosted-run");
@@ -1619,7 +1744,7 @@ impl StoredCopy {
 /// passes them.
 #[test]
 fn model_unbound_program_refused_under_profile() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = StoredCopy::prepare("unbound-program");
@@ -1674,11 +1799,12 @@ fn model_unbound_program_refused_under_profile() {
 /// `PROVIDER_EXECUTABLE` and started under the same `confine.sb`. The copy
 /// answers `init` with its offer ready, creates `runs/` beside itself, and
 /// exits cleanly after `shutdown`. The binding is the only difference between
-/// the two runs. It runs under the sandbox, so it skips when `sandbox-exec` is
-/// absent.
+/// the two runs. When `sandbox-exec` is missing on a host OS other than macOS
+/// it prints a skip reason and returns. On macOS a missing `sandbox-exec`
+/// fails the test.
 #[test]
 fn model_bound_copy_serves_under_profile() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = StoredCopy::prepare("bound-copy");
