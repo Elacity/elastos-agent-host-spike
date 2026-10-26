@@ -2,7 +2,7 @@
 
 ```text
 Slice:        lab/b4-permission-map (M1 check B4, static half)
-Branch / PR:  cursor/b4-permission-map-4cfd  (draft, base spike/agent-host)
+Branch / PR:  cursor/b4-permission-map-4cfd  https://github.com/Elacity/elastos-agent-host-spike/pull/330
 Commit:       3168b10a6f1a0c58263ad65bde4d64a20e572e57   parent 042cb132371f77ce1b469af059e054bb7ef78295
 Develop:      Elacity develop not merged: this PR only adds lab/b4-permission-map/
 Machine:      Linux x86_64, kernel 6.12.94+, python3, rustc unused
