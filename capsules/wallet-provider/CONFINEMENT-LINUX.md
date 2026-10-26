@@ -384,9 +384,8 @@ no macOS counterpart is named here for the first time.
   control is a precondition check and claims no policy falsifier. Under the
   policy each call must succeed, the group `chown` must return success and
   the resulting group must be the chosen mapped gid, and the `O_PATH`
-  descriptor and its duplicate must both be obtained. The test reports which
-  call failed; a failure at a call before the group `chown` is reported as
-  missing evidence. The probe reads no file
+  descriptor and its duplicate must both be obtained; a refusal of any of
+  these calls under the policy fails the test. The probe reads no file
   content, because `open(2)` gives `EBADF` for a read on an `O_PATH`
   descriptor. Falsifier for the metadata calls: add a seccomp rule that
   refuses `chmod` and `stat` by syscall number
