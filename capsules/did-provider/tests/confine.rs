@@ -682,6 +682,115 @@ fn outside_read_denied() {
     provider.shutdown();
 }
 
+/// A file planted beneath `STORAGE_PARENT` stays unread and unwritten.
+///
+/// The parent read grants the directory itself only, not a file beneath it,
+/// and the write grant stops at `STORAGE_ROOT`. The test plants real encrypted
+/// nickname state at `<base>/sibling/did/nickname.enc`, beneath `STORAGE_PARENT`
+/// and outside `STORAGE_ROOT`, and records its bytes. With
+/// `<base>/did/nickname.enc` a symlink to the planted file, `init` answers
+/// `storage_error` with the nickname-read reason; after the link is removed
+/// `init` answers ok, `get_nickname` answers `not_set` and `set_nickname`
+/// serves the provider's own root. With the link made again, `set_nickname`
+/// answers `storage_error` with the nickname-save reason. The planted file's
+/// bytes stay unchanged after each half.
+///
+/// Falsifiers: widen the parent read from `literal` to `subpath` (DID27); the
+/// planted file loads, so `init` answers ok and this test fails on its read
+/// half. Append a write grant on `STORAGE_PARENT` (DID28); the write half
+/// succeeds, so this test fails on its `set_nickname` refusal.
+#[test]
+fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    // Beneath `STORAGE_PARENT` (`root`), outside `STORAGE_ROOT` (`root/did`).
+    let sibling = root.join("sibling");
+    fs::create_dir_all(&sibling).expect("sibling base under the storage parent");
+    elastos_identity::save_nickname_with_device_key(&sibling, &DEVICE_KEY, "Planted")
+        .expect("planted nickname fixture");
+    let planted_path = sibling.join("did").join("nickname.enc");
+    let planted = fs::read(&planted_path).expect("planted fixture file");
+
+    let mut provider = ConfinedProvider::start(&root);
+    provider.init(&root);
+    let granted = root.join("did").join("nickname.enc");
+    fs::create_dir_all(granted.parent().expect("nickname parent"))
+        .expect("granted identity directory");
+
+    // Read half: the parent read grants the directory itself, not this file.
+    std::os::unix::fs::symlink(&planted_path, &granted).expect("planted symlink");
+    let denied = provider.send(json!({
+        "op": "init",
+        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+    }));
+    assert_eq!(
+        denied["status"], "error",
+        "the planted read must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .expect("denial must state a reason")
+            .starts_with("did-provider: failed to read nickname:"),
+        "the refusal must reach the nickname loader: {denied}"
+    );
+    assert_eq!(
+        fs::read(&planted_path).expect("planted file stays readable to the test"),
+        planted,
+        "the planted file must stay unchanged after the read half"
+    );
+
+    // Remove the escape and confirm the provider serves its own root.
+    fs::remove_file(&granted).expect("remove planted symlink");
+    provider.init(&root);
+    let nickname = provider.send(json!({ "op": "get_nickname" }));
+    assert_eq!(
+        nickname["code"], "not_set",
+        "the provider must not adopt planted state: {nickname}"
+    );
+    provider.ok(json!({ "op": "set_nickname", "nickname": "Own" }));
+    assert_eq!(
+        provider.ok(json!({ "op": "get_nickname" }))["nickname"],
+        "Own"
+    );
+
+    // Write half: the granted path holds the provider's own file now, so
+    // remove it before pointing that path at the planted file again.
+    fs::remove_file(&granted).expect("provider's own nickname file");
+    std::os::unix::fs::symlink(&planted_path, &granted).expect("planted symlink again");
+    let denied = provider.send(json!({ "op": "set_nickname", "nickname": "Planted" }));
+    assert_eq!(
+        denied["status"], "error",
+        "the planted write must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .expect("denial must state a reason")
+            .starts_with("did-provider: failed to save nickname:"),
+        "the refusal must name the failed write: {denied}"
+    );
+    assert_eq!(
+        fs::read(&planted_path).expect("planted file stays readable to the test"),
+        planted,
+        "the planted file must stay unchanged after the write half"
+    );
+
+    fs::remove_file(&granted).expect("remove planted symlink");
+    provider.ok(json!({ "op": "set_nickname", "nickname": "Recovered" }));
+    assert_eq!(
+        provider.ok(json!({ "op": "get_nickname" }))["nickname"],
+        "Recovered"
+    );
+    provider.ok(json!({ "op": "get_did" }));
+    provider.shutdown();
+}
+
 /// A confined start that fails before it answers shows its reason.
 ///
 /// The fixture profile keeps `(version 1)` first and `(deny default)` second,

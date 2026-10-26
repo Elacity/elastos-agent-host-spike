@@ -1061,8 +1061,8 @@
       "edits": [
         {
           "file": "src/report.rs",
-          "old": "| \"instance_grant_does_not_authorise_sibling\" => &[\"instance-1\", \"instance-2\"],",
-          "new": "| \"instance_grant_does_not_authorise_sibling\" => &[\"instance-1\"],"
+          "old": "| \"instance_grant_does_not_authorise_sibling\"\n        | \"cancelled_instance_settles_with_reason_sibling_completes\" => {\n            &[\"instance-1\", \"instance-2\"]\n        }",
+          "new": "| \"instance_grant_does_not_authorise_sibling\"\n        | \"cancelled_instance_settles_with_reason_sibling_completes\" => {\n            &[\"instance-1\"]\n        }"
         }
       ],
       "tests": [
@@ -1131,6 +1131,86 @@
       ],
       "tests": [
         "run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash"
+      ]
+    },
+    {
+      "id": "F-cancel-sibling",
+      "title": "cancel every pending first request instead of instance-1 only",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "&& request[\"session_id\"] == overlap.first[0][\"session_id\"]",
+          "new": "&& true"
+        }
+      ],
+      "tests": [
+        "cancelled_instance_settles_with_reason_sibling_completes"
+      ]
+    },
+    {
+      "id": "F-cleanup-live-wiring",
+      "title": "bypass the live census call while its control request is pending",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "controller.check_cleanup_wiring(|controller| controller.cleanup_state())",
+          "new": "controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"))"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cancel-retry",
+      "title": "accept every request after cancellation",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {",
+          "new": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {\n        if self.cancel { return Ok(!pending.is_empty()); }"
+        }
+      ],
+      "tests": [
+        "grants::tests::cancel_refuses_retries_and_unexpected_requests"
+      ]
+    },
+    {
+      "id": "F-cancel-reason",
+      "title": "deliver a different cancellation reason",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "            self.deny(request, CANCEL_REASON)?;",
+          "new": "            self.deny(request, \"fixture wrong cancellation reason\")?;"
+        }
+      ],
+      "tests": [
+        "cancelled_instance_settles_with_reason_sibling_completes"
+      ]
+    },
+    {
+      "id": "F-cancel-receipt",
+      "title": "omit both launched identities for the cancel row",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "\n        | \"cancelled_instance_settles_with_reason_sibling_completes\" => {",
+          "new": " => {"
+        }
+      ],
+      "tests": [
+        "instance_receipt_requires_both_launches_and_scope"
       ]
     }
   ]

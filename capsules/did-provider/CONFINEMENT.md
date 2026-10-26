@@ -148,6 +148,17 @@ the outside file to stay unchanged, the provider to report no nickname for its
 own root, and a normal request to succeed after the link is removed. Both cases
 fail when `(deny default)` becomes `(allow default)`.
 
+`planted_file_beneath_storage_parent_is_neither_read_nor_written` plants real
+encrypted nickname state in a sibling directory beneath `STORAGE_PARENT` and
+outside `STORAGE_ROOT`, then points the granted nickname path at it. Under the
+real profile `init` refuses the read with `storage_error` and the nickname-read
+reason, and the planted bytes stay unchanged. After the link is removed `init`
+answers ok, `get_nickname` answers `not_set` and `set_nickname` serves the
+provider's own root. With the link made again, `set_nickname` refuses the write
+with `storage_error`, the nickname-save reason and unchanged planted bytes. The
+parent read grants the directory itself only, so widening it to `subpath`, or
+granting writes on the parent, makes this test fail.
+
 `startup_denial_reports_its_reason` covers the failure path. It starts the
 provider under a fixture profile that holds `(version 1)` and `(deny default)`,
 so `sandbox-exec` cannot exec it, waits for that child to exit, and sends
@@ -327,6 +338,12 @@ argument.
 - Append a second, unpinned `(allow process-exec)` after the exec rule (DID26):
   `unbound_copy_is_refused_under_profile` fails on its deadline assertion
   because the copy under `STORAGE_ROOT` starts instead of being refused.
+- Widen the parent read from `literal` to `subpath` (DID27):
+  `planted_file_beneath_storage_parent_is_neither_read_nor_written` fails on
+  its read half because the planted file loads and `init` answers ok.
+- Append a write grant on `STORAGE_PARENT` after the storage-root rule (DID28):
+  `planted_file_beneath_storage_parent_is_neither_read_nor_written` fails on
+  its write half because that `set_nickname` succeeds; the read half passes.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
