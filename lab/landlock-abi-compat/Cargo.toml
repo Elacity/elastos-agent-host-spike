@@ -1,0 +1,11 @@
+[package]
+name = "landlock-abi-compat"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Decision pack for Landlock ABI floors on the did, wallet, and model providers"
+
+[workspace]
+
+[dev-dependencies]
+libc = "0.2"
