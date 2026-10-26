@@ -318,11 +318,9 @@ mod tests {
         fs::create_dir_all(&named).unwrap();
         let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
         assert!(
-            leftovers
-                .iter()
-                .any(|path| path.starts_with(&moved)
-                    || path.ends_with(leftover.file_name().unwrap())),
-            "unrelated rename moved-away must be found by created set: {leftovers:?}"
+            leftovers.iter().any(|path| path.starts_with(&moved)),
+            "unrelated rename moved-away must be found by created set: leftover={} leftovers={leftovers:?}",
+            leftover.display()
         );
         a12::remove_isolated(&parent);
         println!(

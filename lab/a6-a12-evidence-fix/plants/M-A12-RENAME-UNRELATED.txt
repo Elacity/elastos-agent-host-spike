@@ -8,6 +8,6 @@ fn allow_moved_away(path: &Path) -> bool {
 }
 --- new
 fn allow_moved_away(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name != "moved-away")
+    !path.components().any(|part| part.as_os_str() == "moved-away")
 }
 --- end
