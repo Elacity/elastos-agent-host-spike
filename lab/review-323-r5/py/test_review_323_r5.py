@@ -954,14 +954,17 @@ class HuntR5ProfileForms(unittest.TestCase):
             m = re.search(r"^fn profile_characters\(profile: &str\)", src, re.M)
             self.assertIsNotNone(m, "profile_characters missing")
             start = m.start()
-            rest = src[start:]
-            m2 = re.search(r"\n(?:fn |#\[test\])", rest[3:])
-            end = start + 3 + m2.start() if m2 else len(src)
-            text = src[start:end]
-            return re.sub(r"///.*\n", "", text)
+            end = src.find("\n}", start)
+            self.assertGreater(end, start)
+            return src[start : end + 2]
 
         self.assertEqual(body(sbpl), body(wallet))
         self.assertEqual(body(sbpl), body(did))
+        # include! is only the model copy. Wallet and did still keep
+        # their own function. The bodies match today; a later edit of
+        # one copy can drift.
+        self.assertNotIn("include!", wallet)
+        self.assertNotIn("include!", did)
 
 
 class HuntR5CitationSpoofs(unittest.TestCase):
