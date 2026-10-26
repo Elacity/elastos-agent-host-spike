@@ -223,6 +223,10 @@ note: one bundle-identity rule for the two lab lanes. Its library, its 18 tests
 and its 24 falsifiers are deleted. cc-capsule-identity's own tests and
 falsifiers cover the walk and the encoding.
 
+Task 017: the retired name label is checked in every git-listed lane file,
+docs, `falsifiers.json` and `audit/` included (falsifier
+F-WC3-RETIRED-LABEL-DOC); the code names keep the docs exemption.
+
 ### Why the tests live in the root package
 
 The lane gate `cargo test --locked --manifest-path lab/wasm-capsule/Cargo.toml`
@@ -437,9 +441,11 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   validates, is `type` `wasm` with `entrypoint` `capsule.wasm`, and has the root
   package's `name` and `version`.
 - `this_capsule_bundle_has_the_pinned_lab_cid` — the pinned vector above.
-- `the_lane_keeps_no_bundle_name_rule_of_its_own` — the lane's own files (from
-  `git ls-files`, without `audit/`, the docs and `falsifiers.json`) hold none of
-  007's retired names, and the shared crate's naming functions (`lab_cid`,
+- `the_lane_keeps_no_bundle_name_rule_of_its_own` — no lane file listed by
+  `git ls-files` holds the retired name label; the same files without `audit/`,
+  the docs and `falsifiers.json` hold none of 007's retired code names (the
+  runner's `*.falsify-original` backups are left out), and the shared crate's
+  naming functions (`lab_cid`,
   `lab_cid_observed`, `checked_bundle_observed`, `encode_entries`) are named by
   the one export line only. wc-004's imports of the checked bundle and the name
   signature are allowed. If git cannot run, it fails.
@@ -539,8 +545,8 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, 21 wc-004
-and four wc-008 planted bugs in the provider format (`command: "lab"`). Each requires
+`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, one task-012,
+21 wc-004 and four wc-008 planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -549,7 +555,8 @@ still name the retired `tools/src/lab_name.rs` and none of `tools/src/lib.rs`,
 `tests/common/build.rs`, `.gitignore` or `README.md`, so a killed run cannot
 restore those files (ask **R1**, pending). So each falsifier is proved by the
 repo's break → named test fails → revert method with `cargo test` in this
-workspace, and is listed as hand-proven, pending R1. Runner-caught: none.
+workspace, and is listed as hand-proven, pending R1. Runner-caught: one,
+task 012's F-WC3-CREATE-NEW (below).
 
 Task 010's seven, each hand-proven, pending R1:
 
@@ -590,6 +597,25 @@ assertion with the bug in, and passed again after the revert):
 - F-WC3-CMD-STDOUT — a run refusal goes to stdout.
 - F-WC3-ARTIFACT-PIN — the capsule source changes, so `tools/build` makes
   another module with a matching receipt; only the pinned sha256 catches it.
+
+Task 012's one, runner-caught (the canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-CREATE-NEW`
+reported `summary: 1 CAUGHT of 1` and restored `tools/src/bundle.rs`; by hand,
+the named test failed at its assertion with the bug in and passed after the
+revert). `tools/src/bundle.rs` is still not a recovery target, so a killed run
+cannot restore it:
+
+- F-WC3-CREATE-NEW — `capsule.json` is opened with `create` and `truncate`
+  instead of `create_new`, so an existing file or a link at its path is written
+  over or through. `bundle_io_refusals_keep_path_and_cause` fails at its
+  `expect_err("an entry is there")`.
+
+Task 017's one, runner-caught (the canonical runner reported
+`summary: 3 CAUGHT of 3` for it, F-WC3-SECOND-RULE and F-WC3-SECOND-IMPORT):
+
+- F-WC3-RETIRED-LABEL-DOC — a line holding the retired name label is appended
+  to `LOG.md`. `the_lane_keeps_no_bundle_name_rule_of_its_own` fails at its
+  `found.is_empty()` assertion and names the line as `LOG.md:<line>`.
 
 wc-004's 21, each hand-proven, pending R1 (every named test failed at its
 assertion with the bug in, and passed again after the revert). Task 010's

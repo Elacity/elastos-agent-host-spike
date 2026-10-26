@@ -79,12 +79,20 @@ fn this_capsule_bundle_has_the_pinned_lab_cid() {
 }
 
 /// The lane's own files, as git lists them (tracked, or new and not ignored),
-/// relative to the lane, without `audit/` (the cx-wasm-audit lane's), the
-/// docs and `falsifiers.json`. A listed file that is gone from the work tree
-/// is left out: it holds nothing.
+/// relative to the lane. The listing is NUL-separated (`-z`), so git never
+/// quotes a path and every name read is the file's real name. A listed file
+/// that is gone from the work tree is left out: it holds nothing. So is the
+/// falsifier runner's backup (`<file>.falsify-original`): a transient copy of a
+/// file that is already listed under its own name.
 fn lane_files(lane: &Path) -> Vec<(String, String)> {
     let output = Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .current_dir(lane)
         .output()
         .expect("run git ls-files in the lane");
@@ -96,8 +104,8 @@ fn lane_files(lane: &Path) -> Vec<(String, String)> {
     );
     let listing = String::from_utf8(output.stdout).expect("git lists UTF-8 paths");
     let mut files = Vec::new();
-    for path in listing.lines() {
-        if path.starts_with("audit/") || path.ends_with(".md") || path == "falsifiers.json" {
+    for path in listing.split_terminator('\0') {
+        if path.ends_with(".falsify-original") {
             continue;
         }
         match fs::read(lane.join(path)) {
@@ -111,9 +119,11 @@ fn lane_files(lane: &Path) -> Vec<(String, String)> {
 
 #[test]
 fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
-    // Built at run time, so this file does not match itself.
+    // Built at run time, so this file does not match itself. The retired label
+    // is checked in every listed file, docs included; the code names only
+    // outside the files that may hold them as history.
+    let retired_label = ["lab", "-sha", "256"].concat();
     let retired = [
-        ["lab", "-sha", "256"].concat(),
         ["wc-003", ".lab-closure"].concat(),
         ["name", "_bundle"].concat(),
         ["lab", "_name"].concat(),
@@ -138,7 +148,14 @@ fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
     let mut found = Vec::new();
     let mut imports = Vec::new();
     for (path, text) in &files {
+        let history = holds_history(path);
         for (number, line) in text.lines().enumerate() {
+            if line.contains(retired_label.as_str()) {
+                found.push(format!("{path}:{}: {retired_label}", number + 1));
+            }
+            if history {
+                continue;
+            }
             for needle in &retired {
                 if line.contains(needle.as_str()) {
                     found.push(format!("{path}:{}: {needle}", number + 1));
@@ -158,6 +175,13 @@ fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
         [("tools/src/lib.rs", the_one_export.as_str())],
         "the shared naming function must be imported only by the one export"
     );
+}
+
+/// Whether `path` may name retired code as history, so only the retired label
+/// is checked in it: `audit/` (the cx-wasm-audit lane's), the docs and
+/// `falsifiers.json`.
+fn holds_history(path: &str) -> bool {
+    path.starts_with("audit/") || path.ends_with(".md") || path == "falsifiers.json"
 }
 
 /// Whether `line` holds `word` as a whole identifier: no identifier character
