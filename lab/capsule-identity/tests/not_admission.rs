@@ -146,17 +146,61 @@ fn counted<'a>(names: impl IntoIterator<Item = &'a str>) -> BTreeMap<&'a str, us
     counts
 }
 
+/// The name of the function `line` exports, if it declares one: `pub`, then
+/// any of `async`, `const`, `unsafe` and `extern` (with or without an ABI
+/// string) in any order, then `fn`. `pub(crate)` and `pub(super)` export
+/// nothing, so they are not read.
+fn exported_fn(line: &str) -> Option<&str> {
+    let mut rest = line.trim_start().strip_prefix("pub ")?.trim_start();
+    loop {
+        if let Some(name) = rest.strip_prefix("fn ") {
+            let end = name
+                .find(|c: char| c == '(' || c == '<')
+                .unwrap_or(name.len());
+            return Some(name[..end].trim());
+        }
+        let qualifier = ["async ", "const ", "unsafe ", "extern "]
+            .into_iter()
+            .find(|word| rest.starts_with(word))?;
+        rest = rest[qualifier.len()..].trim_start();
+        if qualifier == "extern " && rest.starts_with('"') {
+            let close = rest[1..].find('"')? + 2;
+            rest = rest[close..].trim_start();
+        }
+    }
+}
+
+#[test]
+fn every_exported_function_form_is_read() {
+    for (line, name) in [
+        ("pub fn plain(", "plain"),
+        ("    pub fn method(&self", "method"),
+        ("pub async fn admit() {}", "admit"),
+        ("pub const fn grant() {}", "grant"),
+        ("pub unsafe fn launch()", "launch"),
+        ("pub extern \"C\" fn run()", "run"),
+        ("pub extern fn run_c()", "run_c"),
+        ("pub const async unsafe extern \"C\" fn all<T>()", "all"),
+        ("pub unsafe extern \"system\" fn sys()", "sys"),
+    ] {
+        assert_eq!(exported_fn(line), Some(name), "{line}");
+    }
+    for line in [
+        "pub(crate) fn inner()",
+        "pub(super) async fn inner()",
+        "pub const MANIFEST_FILE: &str = \"capsule.json\";",
+        "pub struct LabCid([u8; 32]);",
+        "fn private()",
+        "pub extern crate x;",
+    ] {
+        assert_eq!(exported_fn(line), None, "{line}");
+    }
+}
+
 #[test]
 fn the_harness_exports_only_identity_checks() {
     let code = library_code();
-    let declared = code.lines().filter_map(|line| {
-        let rest = line.trim_start().strip_prefix("pub fn ")?;
-        let end = rest
-            .find(|c: char| c == '(' || c == '<')
-            .unwrap_or(rest.len());
-        Some(rest[..end].trim())
-    });
-    let declared = counted(declared);
+    let declared = counted(code.lines().filter_map(exported_fn));
     let expected = counted(IDENTITY_FUNCTIONS);
     let mut problems = Vec::new();
     for (name, &count) in &declared {

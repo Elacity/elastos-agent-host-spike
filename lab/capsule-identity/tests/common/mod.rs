@@ -1,9 +1,10 @@
 //! Shared test support: fixture bundles assembled in fresh temp dirs, the
 //! pinned lab CIDs, a bounded call for bundles that hold a FIFO, observers
 //! that change a bundle while it is named, a driver for wc-001's own build,
-//! and the library's code for tests that read it. Each test file includes
-//! this with `mod common;` and uses only part of it, so dead-code warnings
-//! for the rest are silenced.
+//! the library's code for tests that read it, and the one key-material scan
+//! (kept here, a file the falsifier runner restores after a killed run).
+//! Each test file includes this with `mod common;` and uses only part of it,
+//! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
 
 use std::fs;
@@ -162,6 +163,42 @@ pub fn library_item<'a>(code: &'a str, head: &str) -> &'a str {
         .find(&close)
         .unwrap_or_else(|| panic!("{head:?} has no closing brace"));
     &code[start..start + end + close.len()]
+}
+
+/// The two ends of a PEM private-key header, built here so this source has
+/// no header line of its own.
+pub(super) fn pem_private_ends() -> (String, String) {
+    (
+        format!("-----{} ", "BEGIN"),
+        format!("{}-----", "PRIVATE KEY"),
+    )
+}
+
+pub(super) struct Filed<'a> {
+    pub(super) name: &'a str,
+    pub(super) bytes: &'a [u8],
+}
+
+pub(super) fn key_material_findings(files: &[Filed<'_>]) -> Vec<String> {
+    let (header_start, header_end) = pem_private_ends();
+    let mut found = Vec::new();
+    for file in files {
+        if file.name.ends_with(".key") || file.name.ends_with(".seed") {
+            found.push(format!("name:{}", file.name));
+        }
+        if file.bytes.len() == 32 && std::str::from_utf8(file.bytes).is_err() {
+            found.push(format!("raw-seed:{}", file.name));
+        }
+        // Invalid bytes elsewhere in a file must not hide its ASCII header markers.
+        let text = String::from_utf8_lossy(file.bytes);
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(&header_start) && trimmed.ends_with(&header_end) {
+                found.push(format!("header:{}:{index}", file.name));
+            }
+        }
+    }
+    found
 }
 
 /// Write `bytes` at the bundle-relative `path` under `root`, making folders.

@@ -1376,7 +1376,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/tests/name_signature.rs",
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        let text = String::from_utf8_lossy(file.bytes);\n",
           "new": "        let Ok(text) = std::str::from_utf8(file.bytes) else { continue; };\n"
         }
@@ -1496,6 +1496,54 @@
       ],
       "tests": [
         "printed_lab_cid_parses_back_to_the_same_value"
+      ]
+    },
+    {
+      "id": "F-CI14a",
+      "title": "the library gains a public async admit step, which the export check read only as pub fn missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const MANIFEST_FILE: &str = \"capsule.json\";\n",
+          "new": "pub async fn admit() {}\n\npub const MANIFEST_FILE: &str = \"capsule.json\";\n"
+        }
+      ],
+      "tests": [
+        "the_harness_exports_only_identity_checks"
+      ]
+    },
+    {
+      "id": "F-CI14b",
+      "title": "the library gains a public const grant step, which the export check read only as pub fn missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const NAME_SIGNATURE_DOMAIN: &str = \"lab.capsule-identity.name-signature/v1\";\n",
+          "new": "pub const fn grant() {}\n\npub const NAME_SIGNATURE_DOMAIN: &str = \"lab.capsule-identity.name-signature/v1\";\n"
+        }
+      ],
+      "tests": [
+        "the_harness_exports_only_identity_checks"
+      ]
+    },
+    {
+      "id": "F-CI14c",
+      "title": "a second test-key function makes a key from fixed raw bytes through SigningKey::from, next to the unchanged fresh_signing_key",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "/// One fresh Ed25519 test key, drawn from the operating system's generator.\n",
+          "new": "pub fn fixed_signing_key() -> SigningKey {\n    SigningKey::from(&[4u8; 32])\n}\n\n/// One fresh Ed25519 test key, drawn from the operating system's generator.\n"
+        }
+      ],
+      "tests": [
+        "test_keys_use_fresh_os_randomness"
       ]
     }
   ]
