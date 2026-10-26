@@ -1,0 +1,639 @@
+{
+  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py or journeys.json and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -B -I -m unittest discover -s lab/demo-a14/tests -k <test> (-B, so no cached bytecode outlives a restore), require FAILED, restore, require OK.",
+  "falsifiers": [
+    {
+      "id": "F-A14a",
+      "title": "the gate skips the installed native binaries",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        problems += compare(f\"installed {name}\", layout.install / \"bin\" / name, expected, source)\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "test_changed_installed_runtime_is_refused",
+        "test_changed_installed_provider_is_refused",
+        "test_refused_run_starts_no_journey"
+      ]
+    },
+    {
+      "id": "F-A14b",
+      "title": "the gate skips the Runtime the journeys launch",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        problems += compare(\n            f\"the {name} the journeys launch\", layout.runtime_build / name, expected, source\n        )\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "test_runtime_the_journeys_launch_must_match"
+      ]
+    },
+    {
+      "id": "F-A14c",
+      "title": "the gate trusts a VERSIONS.json changed after install",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if actual != record.get(\"versions_sha256\"):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "tests": [
+        "test_swapped_receipt_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14d",
+      "title": "the gate accepts a checkout at another commit",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        if checkout.commit != commit:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "tests": [
+        "test_receipt_from_another_commit_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14e",
+      "title": "the gate accepts a checkout with local changes",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        if not checkout.clean:\n            problems.append(\n",
+          "new": "        if False:\n            problems.append(\n"
+        }
+      ],
+      "tests": [
+        "test_dirty_checkout_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14f",
+      "title": "a receipt from a failed conformance run is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if receipt.get(\"command_success\") is not True:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "tests": [
+        "test_incomplete_or_failed_receipt_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14g",
+      "title": "the gate skips the agent-host component the journeys load",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        problems += compare(\n            \"the agent-host component the journeys load\", layout.agent_host_wasm, pinned, source\n        )\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "test_changed_agent_host_component_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14h",
+      "title": "the run goes on after the gate refuses",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    problems = version_gate(layout, read(layout.repo), here)\n    if problems:\n        installed = ",
+          "new": "    problems = version_gate(layout, read(layout.repo), here)\n    if False:\n        installed = "
+        }
+      ],
+      "tests": [
+        "test_refused_run_starts_no_journey"
+      ]
+    },
+    {
+      "id": "F-A14i",
+      "title": "a journey's Runtime identity is not compared",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            elif observation.get(\"sha256\") != receipt[field]:\n",
+          "new": "            elif False:\n"
+        }
+      ],
+      "tests": [
+        "test_journey_identity_that_differs_fails_the_run"
+      ]
+    },
+    {
+      "id": "F-A14j",
+      "title": "the gate does not run again after the journeys",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    binding += version_gate(layout, read(layout.repo), here)\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "test_install_changed_during_run_fails"
+      ]
+    },
+    {
+      "id": "F-A14k",
+      "title": "an ok with a SKIP line counts as a pass",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if skip:\n        return Outcome(step, \"NOT RUN\"",
+          "new": "    if False:\n        return Outcome(step, \"NOT RUN\""
+        }
+      ],
+      "tests": [
+        "test_skip_line_is_not_run"
+      ]
+    },
+    {
+      "id": "F-A14l",
+      "title": "macOS-only steps run off macOS",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    return step.platform == \"any\" or host_os == \"Darwin\"\n",
+          "new": "    return True\n"
+        }
+      ],
+      "tests": [
+        "test_macos_steps_do_not_run_off_macos"
+      ]
+    },
+    {
+      "id": "F-A14m",
+      "title": "a journey that prints no identity is not required to",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "                if required not in seen:\n",
+          "new": "                if False:\n"
+        }
+      ],
+      "tests": [
+        "test_missing_required_identity_fails_the_run"
+      ]
+    },
+    {
+      "id": "F-A14n",
+      "title": "install does not compare the receipt with the Runtime build",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        for name, field in NATIVE.items():\n            problems += compare(\n                f\"the {name} lab/agent-conformance built\",\n",
+          "new": "        for name, field in {}.items():\n            problems += compare(\n                f\"the {name} lab/agent-conformance built\",\n"
+        }
+      ],
+      "tests": [
+        "test_install_refuses_a_receipt_that_does_not_match_the_build"
+      ]
+    },
+    {
+      "id": "F-A14o",
+      "title": "the journey list names a test that does not exist",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/journeys.json",
+          "old": "      \"test\": \"host_key_read_is_refused\",\n",
+          "new": "      \"test\": \"host_key_read_is_refused_by_name\",\n"
+        }
+      ],
+      "tests": [
+        "test_every_named_test_exists_in_its_suite"
+      ]
+    },
+    {
+      "id": "F-A14p",
+      "title": "a step executable or provider binary is not hashed against INSTALL.json",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            problems += compare(f\"the {suite} {label}\", Path(path), expected, \"its hash in INSTALL.json\")\n",
+          "new": "            pass\n"
+        }
+      ],
+      "tests": [
+        "test_changed_step_executable_is_refused",
+        "test_changed_provider_binary_is_refused",
+        "test_executable_changed_before_its_suite_is_not_run"
+      ]
+    },
+    {
+      "id": "F-A14q",
+      "title": "a recorded executable outside the repository is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        elif not inside(layout.repo, path):\n",
+          "new": "        elif False:\n"
+        }
+      ],
+      "tests": [
+        "test_step_path_outside_the_repository_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14r",
+      "title": "the gate does not check the recorded step executables",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    for suite in suites:\n        problems += step_problems(layout, record, suite)\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "test_install_without_step_bindings_is_refused",
+        "test_changed_step_executable_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14s",
+      "title": "A1, A2 and C go through Cargo, which may rebuild them, instead of running the hashed files",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if suite.get(\"runner\") == \"cargo\":\n        return [\"cargo\"",
+          "new": "    if True:\n        return [\"cargo\""
+        }
+      ],
+      "tests": [
+        "test_run_executes_the_recorded_files"
+      ]
+    },
+    {
+      "id": "F-A14t",
+      "title": "a suite runs although its recorded bytes changed after the gate",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            blocked = step_problems(layout, record, name) + launch_problems(layout, suite)\n",
+          "new": "            blocked = []\n"
+        }
+      ],
+      "tests": [
+        "test_executable_changed_before_its_suite_is_not_run",
+        "test_a8_refuses_when_the_launched_copy_differs"
+      ]
+    },
+    {
+      "id": "F-A14u",
+      "title": "A8 runs although the elastos it launches is not the installed copy",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    for name in suite.get(\"launches\", []):\n",
+          "new": "    for name in []:\n"
+        }
+      ],
+      "tests": [
+        "test_a8_refuses_when_the_launched_copy_differs"
+      ]
+    },
+    {
+      "id": "F-A14v",
+      "title": "Cargo may run another A8 test executable than the recorded one",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if [(cwd / path).resolve() for path in ran] != [recorded]:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "tests": [
+        "test_a8_cargo_must_run_the_recorded_executable"
+      ]
+    },
+    {
+      "id": "F-A14w",
+      "title": "a signature that does not verify is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "            if status != 0:\n                problems.append(\n                    f\"{name} signature does not verify",
+          "new": "            if False:\n                problems.append(\n                    f\"{name} signature does not verify"
+        }
+      ],
+      "tests": [
+        "test_tampered_signed_receipt_is_refused",
+        "test_tampered_signed_install_record_is_refused",
+        "test_signature_from_another_key_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14x",
+      "title": "an unsigned receipt is accepted while signing is on",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "                problems.append(f\"{name} is unsigned, but signing is on ({layout.signing_pub} exists)\")\n",
+          "new": "                pass\n"
+        }
+      ],
+      "tests": [
+        "test_unsigned_receipt_is_refused_when_signing_is_on"
+      ]
+    },
+    {
+      "id": "F-A14y",
+      "title": "a valid signature by any key is accepted, not only this machine's key",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "                [\"-Y\", \"verify\", \"-f\", str(allowed), \"-I\", SIGNER, \"-n\", SIGNING_NAMESPACE, \"-s\", str(signature)],\n",
+          "new": "                [\"-Y\", \"check-novalidate\", \"-n\", SIGNING_NAMESPACE, \"-s\", str(signature)],\n"
+        }
+      ],
+      "tests": [
+        "test_signature_from_another_key_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14z",
+      "title": "INSTALL.json, which holds the guest and step hashes, is not signed",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "SIGNED = (\"VERSIONS.json\", \"INSTALL.json\")\n",
+          "new": "SIGNED = (\"VERSIONS.json\",)\n"
+        }
+      ],
+      "tests": [
+        "test_tampered_signed_install_record_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14aa",
+      "title": "install picks one of several test executables Cargo built for a suite",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    if len(tests) != 1:\n",
+          "new": "    if not tests:\n"
+        }
+      ],
+      "tests": [
+        "test_install_refuses_unclear_test_executables"
+      ]
+    },
+    {
+      "id": "F-A14ab",
+      "title": "the run claims a valid signature without saying it proves integrity here, not the publisher",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        say(f\"  signature  valid for both receipt files; {SIGNATURE_SCOPE}\")\n",
+          "new": "        say(\"  signature  valid for both receipt files\")\n"
+        }
+      ],
+      "tests": [
+        "test_run_states_what_the_signature_proves"
+      ]
+    },
+    {
+      "id": "F-A14ac",
+      "title": "the signing key folder is readable by other users",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    layout.signing_key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)\n",
+          "new": "    layout.signing_key.parent.mkdir(mode=0o755, parents=True, exist_ok=True)\n"
+        }
+      ],
+      "tests": [
+        "test_signing_key_is_private_and_outside_the_repository"
+      ]
+    },
+    {
+      "id": "F-A14ad",
+      "title": "install skips the machine check and starts cargo fetch",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    problems = ready(layout, host_os)\n    if problems:\n        refuse(say, \"this machine is not ready.\", problems, again)\n",
+          "new": "    problems = ready(layout, host_os)\n    if False:\n        refuse(say, \"this machine is not ready.\", problems, again)\n"
+        }
+      ],
+      "tests": [
+        "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+      ]
+    },
+    {
+      "id": "F-A14ae",
+      "title": "install.sh --sign writes the key before it knows the install can finish",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        return EXIT_REFUSED\n    problems = ready(layout, host_os)\n",
+          "new": "        return EXIT_REFUSED\n    if sign:\n        make_signing_key(layout)\n    problems = ready(layout, host_os)\n"
+        }
+      ],
+      "tests": [
+        "test_install_sign_on_linux_without_receipt_does_not_write_the_key",
+        "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+      ]
+    },
+    {
+      "id": "F-A14af",
+      "title": "a refusal before any journey writes no summary.txt",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        say(f\"Saved: {run_dir}\")\n        write_summary(run_dir, say)\n        return EXIT_REFUSED\n",
+          "new": "        say(f\"Saved: {run_dir}\")\n        return EXIT_REFUSED\n"
+        }
+      ],
+      "tests": [
+        "test_refused_run_starts_no_journey",
+        "test_run_without_install_names_it"
+      ]
+    },
+    {
+      "id": "F-A14ag",
+      "title": "suite_env keeps a parent CARGO_TERM_COLOR=always",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    env[\"CARGO_TERM_COLOR\"] = \"never\"\n",
+          "new": "    pass\n"
+        }
+      ],
+      "tests": [
+        "test_suite_env_forces_cargo_term_color_never"
+      ]
+    },
+    {
+      "id": "F-A14ah",
+      "title": "a Rosetta shell is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        if translated == \"1\":\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "tests": [
+        "test_rosetta_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14ai",
+      "title": "a space in HOME is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        problem = space_problem(label, path)\n        if problem:\n            problems.append(problem)\n",
+          "new": "        problem = space_problem(label, path)\n        if False:\n            problems.append(problem)\n"
+        }
+      ],
+      "tests": [
+        "test_space_in_home_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14aj",
+      "title": "an absolute CARGO_TARGET_DIR outside the repository is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        if target.is_absolute() and not inside(layout.repo, str(target)):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "tests": [
+        "test_outside_cargo_target_dir_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14ak",
+      "title": "a missing wasm32-unknown-unknown target is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        elif not wasm.is_dir():\n",
+          "new": "        elif False:\n"
+        }
+      ],
+      "tests": [
+        "test_missing_wasm_target_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14al",
+      "title": "morning step 2 checks out spike/agent-host, which has no demo",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "git checkout cursor/demo-a14-installed-demo-83e1\n",
+          "new": "git checkout spike/agent-host\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_stays_on_the_demo_branch"
+      ]
+    },
+    {
+      "id": "F-A14am",
+      "title": "step 5 opens an empty path when no run folder exists",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "test -n \"$run\" && test -d \"$run\" && open \"$run\"\n",
+          "new": "open \"$run\"\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_step_5_opens_only_a_real_path"
+      ]
+    }
+  ]
+}
