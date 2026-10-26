@@ -277,41 +277,9 @@ fn manifest_denied_response(resource: &str) -> serde_json::Value {
 }
 
 /// Host-side receipt for one `request_capability` bus call. The guest has no
-/// filesystem and cannot write this record. `result` is the structured code
-/// the bridge decided (`manifest_capability_denied`, `pending`, …).
-fn record_capability_request_event(
-    data_dir: &Path,
-    capsule_id: &str,
-    principal_id: Option<&str>,
-    resource: &str,
-    action: &str,
-    code: &str,
-) -> Result<()> {
-    let occurred_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
-    crate::auth::append_audit_event(
-        data_dir,
-        RuntimeAuditEventV1 {
-            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
-            event_id: format!("audit:{}", random_hex(16)),
-            event_type: "component.capability.request".to_string(),
-            principal_id: principal_id.map(ToString::to_string),
-            proof_binding_id: None,
-            session_id: Some(capsule_id.to_string()),
-            challenge_id: None,
-            capsule_id: Some(capsule_id.to_string()),
-            result: code.to_string(),
-            reason: format!("{action} {resource}"),
-            occurred_at,
-            signer_did: None,
-            signature: None,
-        },
-    )
-}
-
+/// filesystem and cannot write this file. `code` is the structured outcome
+/// (`manifest_capability_denied`, `pending`, …). A write failure is logged
+/// and does not replace the bus refusal.
 fn record_capability_request(
     data_dir: Option<&Path>,
     capsule_id: &str,
@@ -319,17 +287,34 @@ fn record_capability_request(
     resource: &str,
     action: &str,
     code: &str,
-) -> Result<()> {
-    match data_dir {
-        Some(data_dir) => record_capability_request_event(
-            data_dir,
-            capsule_id,
-            principal_id,
-            resource,
-            action,
-            code,
-        ),
-        None => Ok(()),
+) {
+    let Some(data_dir) = data_dir else {
+        return;
+    };
+    let directory = data_dir.join("runtime");
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        tracing::warn!("capability request receipt directory: {error}");
+        return;
+    }
+    let line = serde_json::json!({
+        "capsule_id": capsule_id,
+        "principal_id": principal_id,
+        "action": action,
+        "resource": resource,
+        "code": code,
+    });
+    let path = directory.join("capability-requests.jsonl");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "{line}")?;
+            file.sync_all()
+        }) {
+        Ok(()) => {}
+        Err(error) => tracing::warn!("capability request receipt {}: {error}", path.display()),
     }
 }
 
@@ -1034,7 +1019,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                         resource,
                         action_str,
                         "manifest_capability_denied",
-                    )?;
+                    );
                     return Ok(serde_json::json!({
                         "id": id,
                         "response": manifest_denied_response(resource),
@@ -1047,7 +1032,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     resource,
                     action_str,
                     "pending",
-                )?;
+                );
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
                 // Create a pending request — the shell decides whether to grant.
@@ -1457,7 +1442,7 @@ pub async fn handle_remote_request_with_audit_dir(
                     resource,
                     action_str,
                     "manifest_capability_denied",
-                )?;
+                );
                 return Ok(serde_json::json!({
                     "id": id,
                     "response": manifest_denied_response(resource),
@@ -1470,7 +1455,7 @@ pub async fn handle_remote_request_with_audit_dir(
                 resource,
                 action_str,
                 "pending",
-            )?;
+            );
 
             let resp = client
                 .post(api_base.join("/api/capability/request")?)
@@ -3181,12 +3166,17 @@ mod tests {
     }
 
     fn remote_capability_audit(data_dir: &Path) -> Vec<(String, String, String)> {
-        crate::auth::load_auth_state(data_dir)
-            .unwrap()
-            .audit
-            .into_iter()
-            .filter(|event| event.event_type == "component.capability.request")
-            .map(|event| (event.event_type, event.result, event.reason))
+        let path = data_dir.join("runtime/capability-requests.jsonl");
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).ok()?;
+                Some((
+                    value["code"].as_str()?.to_string(),
+                    value["action"].as_str()?.to_string(),
+                    value["resource"].as_str()?.to_string(),
+                ))
+            })
             .collect()
     }
 
@@ -3301,9 +3291,9 @@ mod tests {
         assert_eq!(
             events,
             [(
-                "component.capability.request".to_string(),
                 "manifest_capability_denied".to_string(),
-                format!("read {resource}"),
+                "read".to_string(),
+                resource.to_string(),
             )]
         );
     }

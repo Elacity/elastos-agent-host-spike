@@ -428,7 +428,7 @@ impl Home {
     /// Host-side `request_capability` receipts the Runtime wrote under this
     /// Home. The guest has no filesystem and cannot add a row.
     pub fn capability_requests(&self) -> Vec<CapabilityRequestRecord> {
-        let path = self.data.join("auth-state.json");
+        let path = self.data.join("runtime/capability-requests.jsonl");
         for _ in 0..8 {
             match read_capability_requests(&path) {
                 Some(records) => return records,
@@ -469,22 +469,15 @@ pub struct CapabilityRequestRecord {
 }
 
 fn read_capability_requests(path: &Path) -> Option<Vec<CapabilityRequestRecord>> {
-    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    let audit = value.get("audit")?.as_array()?;
+    let text = fs::read_to_string(path).ok()?;
     Some(
-        audit
-            .iter()
-            .filter(|event| {
-                event.get("event_type").and_then(|v| v.as_str())
-                    == Some("component.capability.request")
-            })
-            .filter_map(|event| {
-                let reason = event.get("reason")?.as_str()?;
-                let (action, resource) = reason.split_once(' ')?;
+        text.lines()
+            .filter_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).ok()?;
                 Some(CapabilityRequestRecord {
-                    action: action.to_string(),
-                    resource: resource.to_string(),
-                    code: event.get("result")?.as_str()?.to_string(),
+                    action: value.get("action")?.as_str()?.to_string(),
+                    resource: value.get("resource")?.as_str()?.to_string(),
+                    code: value.get("code")?.as_str()?.to_string(),
                 })
             })
             .collect(),

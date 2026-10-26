@@ -11,8 +11,8 @@ review cannot take them back for want of evidence:
 
 The Runtime owns admission and grants. These tests build, stage and launch,
 then read the Runtime's host-side receipts. The guest cannot write those
-receipts. A small Runtime change records each `request_capability` in the
-Home's signed audit as `component.capability.request`.
+receipts. A small Runtime change appends each `request_capability` to
+`runtime/capability-requests.jsonl` under the Home data dir.
 
 ## Rows
 
@@ -90,8 +90,8 @@ an obvious marker at `<home>/.ssh/id_ed25519`. With `Public` at
 parent segments name that file on both Linux and macOS; the test checks this
 depth lexically and never resolves the path.
 
-Authorship is a host-side receipt. The Runtime writes one signed
-`component.capability.request` audit row per bus call, with the structured
+Authorship is a host-side receipt. The Runtime appends one JSON line per
+bus call to `runtime/capability-requests.jsonl`, with the structured
 code `manifest_capability_denied` and the action plus resource. The guest
 has no filesystem and cannot add a row. The test requires write and then
 read for that one fake key, which is what `request_journal_grants` asks.
