@@ -22,6 +22,7 @@ class PackTests(unittest.TestCase):
         self.assertIn("011d01f283a3f4ed4717383ecedf55622d451b4d", text)
         self.assertIn("cursor/demo-a14-installed-demo-83e1", text)
         self.assertIn("39b4b47edc64d8705a0294c978e6171819cea9fc", text)
+        self.assertIn("pin:NEEDS_REPIN", text)
         self.assertIn("A14  sh lab/demo-a14/preflight.sh", text)
         command_lines = [
             line
@@ -40,7 +41,7 @@ class PackTests(unittest.TestCase):
             try:
                 results = pack.run(
                     work=work,
-                    source_repo=PACK.parents[1],
+                    pack_clone=None,
                     dry_run=True,
                     facts=load_facts(PACK / "fixtures" / "linux-x64.json"),
                 )
@@ -58,6 +59,8 @@ class PackTests(unittest.TestCase):
         self.assertIn("A8", summary)
         self.assertIn("A14", summary)
         self.assertIn("1a82d25bdd00d3a383433de84e97c39a4184d107", plan)
+        self.assertIn("pin:NEEDS_REPIN", plan)
+        self.assertIn("fa1841f35d32e7bea98e124fd406231d0088fd4e", summary)
         self.assertIn("rosetta: REFUSED", fixtures)
         self.assertIn("darwin-arm64: PASS", fixtures)
         self.assertIn("pointer", summary)
@@ -75,7 +78,7 @@ class PackTests(unittest.TestCase):
             try:
                 results = pack.run(
                     work=work,
-                    source_repo=PACK.parents[1],
+                    pack_clone=None,
                     dry_run=True,
                     facts=load_facts(PACK / "fixtures" / "darwin-arm64.json"),
                     run_row_fn=boom,
@@ -98,7 +101,7 @@ class PackTests(unittest.TestCase):
             work = home / "mac-evidence-pack" / "refused"
             results = pack.run(
                 work=work,
-                source_repo=PACK.parents[1],
+                pack_clone=None,
                 dry_run=False,
                 facts=load_facts(PACK / "fixtures" / "rosetta.json"),
             )
@@ -116,11 +119,50 @@ class PackTests(unittest.TestCase):
             os.environ["HOME"] = str(home)
             try:
                 status = pack.main(
-                    ["--dry-run", "--work-dir", str(outside), "--repo", str(PACK.parents[1])]
+                    ["--dry-run", "--work-dir", str(outside)]
                 )
             finally:
                 if previous_home is None:
                     del os.environ["HOME"]
                 else:
                     os.environ["HOME"] = previous_home
-        self.assertEqual(status, 2)
+            self.assertEqual(status, 2)
+            summaries = list(home.glob("mac-evidence-pack/*/summary.txt"))
+            self.assertTrue(summaries, "refused run must still write summary.txt")
+            text = summaries[0].read_text(encoding="utf-8")
+            self.assertIn("abort:", text)
+            self.assertIn("outside HOME", text)
+
+    def test_foreign_pack_clone_writes_summary_and_refuses(self):
+        from common import init_repo
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            foreign = Path(tmp) / "sash-spike"
+            init_repo(foreign)
+            work = home / "mac-evidence-pack" / "foreign"
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = str(home)
+            try:
+                status = pack.main(
+                    [
+                        "--dry-run",
+                        "--work-dir",
+                        str(work),
+                        "--pack-clone",
+                        str(foreign),
+                    ]
+                )
+            finally:
+                if previous_home is None:
+                    del os.environ["HOME"]
+                else:
+                    os.environ["HOME"] = previous_home
+            summary = work / "summary.txt"
+            self.assertEqual(status, 2)
+            self.assertTrue(summary.is_file())
+            text = summary.read_text(encoding="utf-8")
+        self.assertIn("FOREIGN_CLONE", text)
+        self.assertIn("abort:", text)
+        self.assertIn("fa1841f35d32e7bea98e124fd406231d0088fd4e", text)

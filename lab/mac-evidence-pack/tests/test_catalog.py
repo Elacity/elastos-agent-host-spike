@@ -3,7 +3,7 @@ import unittest
 import common  # noqa: F401
 from common import PACK
 
-from catalog import ROWS, a14_runs_demo, unique_checkouts
+from catalog import PIN_BY_ID, ROWS, a14_runs_demo, unique_checkouts
 
 
 class CatalogTests(unittest.TestCase):
@@ -40,13 +40,21 @@ class CatalogTests(unittest.TestCase):
             row = next(item for item in ROWS if item.id == row_id)
             self.assertEqual(row.pr, 323)
             self.assertEqual(row.branch, "cursor/redteam-fix-4bfb")
+            self.assertEqual(row.pin_status, "NEEDS_REPIN")
+            self.assertEqual(PIN_BY_ID[row_id].status, "NEEDS_REPIN")
 
     def test_readme_has_sash_commands(self):
         text = (PACK / "README.md").read_text(encoding="utf-8")
-        for needle in (
-            "git fetch origin cursor/mac-evidence-pack-be32",
-            "git checkout cursor/mac-evidence-pack-be32",
-            "sh lab/mac-evidence-pack/run.sh",
-            "summary.txt",
-        ):
-            self.assertIn(needle, text)
+        self.assertIn("sh lab/mac-evidence-pack/morning.sh", text)
+        self.assertIn("pack-clone", text)
+        self.assertIn("PACK_CLONE_FOREIGN", text)
+        self.assertIn("summary.txt", text)
+        self.assertNotIn("git checkout cursor/mac-evidence-pack-be32", text)
+        self.assertNotIn("git fetch origin cursor/mac-evidence-pack-be32", text)
+
+    def test_pins_file_is_the_only_row_map(self):
+        pins_text = (PACK / "pins.ini").read_text(encoding="utf-8")
+        self.assertIn("row -> branch + SHA", pins_text)
+        self.assertIn("NEEDS_REPIN", pins_text)
+        self.assertIn("[C1]", pins_text)
+        self.assertIn("fa1841f35d32e7bea98e124fd406231d0088fd4e", pins_text)

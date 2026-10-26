@@ -4,30 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pins import REMOTE, load_pin_file
 
-REPO = "https://github.com/Elacity/elastos-agent-host-spike.git"
-
-# Draft-PR heads recorded on 26 Oct 2026. The pack checks out this exact commit.
-PIN_A8 = (
-    "cursor/a1-a8-hardening-85ce",
-    "1a82d25bdd00d3a383433de84e97c39a4184d107",
-    301,
-)
-PIN_C = (
-    "cursor/redteam-fix-4bfb",
-    "fa1841f35d32e7bea98e124fd406231d0088fd4e",
-    323,
-)
-PIN_A6A12 = (
-    "cursor/a6-a12-evidence-fix-6e3b",
-    "011d01f283a3f4ed4717383ecedf55622d451b4d",
-    343,
-)
-PIN_A14 = (
-    "cursor/demo-a14-installed-demo-83e1",
-    "39b4b47edc64d8705a0294c978e6171819cea9fc",
-    289,
-)
+REPO = REMOTE
+PACK_PIN, PIN_BY_ID = load_pin_file()
 
 
 @dataclass(frozen=True)
@@ -45,6 +25,8 @@ class Row:
     notes: tuple[str, ...] = ()
     unset_cargo_target: bool = False
     demo_pointer: str = ""
+    pin_status: str = "ok"
+    pin_reason: str = ""
 
     @property
     def checkout_name(self) -> str:
@@ -54,18 +36,19 @@ class Row:
 def _row(
     id: str,
     title: str,
-    pin: tuple[str, str, int],
     commands: list[list[str]],
     **kwargs,
 ) -> Row:
-    branch, commit, pr = pin
+    pin = PIN_BY_ID[id]
     return Row(
         id=id,
         title=title,
-        branch=branch,
-        commit=commit,
-        pr=pr,
+        branch=pin.branch,
+        commit=pin.sha,
+        pr=pin.pr,
         commands=tuple(tuple(cmd) for cmd in commands),
+        pin_status=pin.status,
+        pin_reason=pin.reason,
         **kwargs,
     )
 
@@ -74,7 +57,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "A8",
         "A8 macOS run: agent-host host key refused by the Runtime",
-        PIN_A8,
         [["bash", "lab/a1-a8-hardening/run.sh"]],
         expect_ok=("agent_host_host_key_read_is_refused",),
         expect_text=("A8 | agent_host_host_key_read_is_refused | PASS",),
@@ -85,7 +67,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "C1",
         "C1 did-provider refuses to start without its storage root",
-        PIN_C,
         [
             [
                 "cargo",
@@ -101,12 +82,14 @@ ROWS: tuple[Row, ...] = (
             ]
         ],
         expect_ok=("init_requires_storage_without_key",),
-        notes=("Named test from #323's did-provider tree. Not a sandbox-exec row.",),
+        notes=(
+            "Named test from #323's did-provider tree. Not a sandbox-exec row.",
+            "Pin is NEEDS_REPIN until a new #323 SHA is recorded.",
+        ),
     ),
     _row(
         "C2",
         "C2 denied nickname read reports a storage error",
-        PIN_C,
         [
             [
                 "cargo",
@@ -142,7 +125,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "C3",
         "C3 did-provider confine.sb denies outside write and read",
-        PIN_C,
         [
             [
                 "cargo",
@@ -181,7 +163,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "C4",
         "C4 verify_did_recovery under the did-provider profile",
-        PIN_C,
         [
             [
                 "cargo",
@@ -204,7 +185,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "C5",
         "C5 wallet-provider refuses to start without its storage root",
-        PIN_C,
         [
             [
                 "cargo",
@@ -225,7 +205,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "C6",
         "C6 wallet-provider confine.sb denies outside write and read",
-        PIN_C,
         [
             [
                 "cargo",
@@ -265,7 +244,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "C7",
         "C7 model-provider confine.sb serves under the profile and denies outside write",
-        PIN_C,
         [
             [
                 "cargo",
@@ -302,7 +280,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "A6",
         "A6 token bind plus full ThrowawayHome journeys",
-        PIN_A6A12,
         [
             ["sh", "lab/a6-a12-evidence-fix/run.sh"],
             [
@@ -348,7 +325,6 @@ ROWS: tuple[Row, ...] = (
     _row(
         "A12",
         "A12 in-root cleanup plus runtime-temp census",
-        PIN_A6A12,
         [
             ["sh", "lab/a6-a12-evidence-fix/run.sh"],
             [
@@ -372,13 +348,12 @@ ROWS: tuple[Row, ...] = (
         ),
         notes=(
             "In-root leftover is cleanup_census_refuses_each_leftover (ThrowawayHome).",
-            "run.sh also walks /tmp/elastos/storage; this pack itself never deletes that tree.",
+            "run.sh plants /tmp/elastos/storage. The pack redirects that root or FAILs A12_SHARED_TMP_UNREDIRECTABLE.",
         ),
     ),
     _row(
         "A14",
         "A14 installed-demo preflight only",
-        PIN_A14,
         [["sh", "lab/demo-a14/preflight.sh"]],
         expect_text=("preflight: OK",),
         unset_cargo_target=True,

@@ -34,10 +34,13 @@ def grade(
     evidence_path: Path | None,
     crashed: str | None = None,
     skipped: str | None = None,
+    blocked: str | None = None,
 ) -> Verdict:
     evidence = str(evidence_path) if evidence_path is not None else ""
     if skipped:
         return Verdict("NOT RUN", skipped, evidence)
+    if blocked:
+        return Verdict("FAIL", blocked, evidence)
     if crashed:
         return Verdict("FAIL", f"crashed: {crashed}", evidence)
     if evidence_path is None or not evidence_path.is_file():

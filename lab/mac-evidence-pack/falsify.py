@@ -83,9 +83,83 @@ ENTRIES = (
     {
         "id": "F-ME-SUMMARY",
         "file": "pack.py",
-        "old": '            work / "summary.txt",\n',
-        "new": '            work / "summary.skipped.txt",\n',
+        "old": '    path = work / "summary.txt"\n',
+        "new": '    path = work / "summary.skipped.txt"\n',
         "test": "test_summary_written_after_crash",
+    },
+    {
+        "id": "F-ME-FOREIGN-CLONE",
+        "file": "pins.py",
+        "old": "    try:\n"
+        "        return path.is_file() and path.read_text(encoding=\"utf-8\") == MARKER_TEXT\n"
+        "    except OSError:\n"
+        "        return False",
+        "new": "    try:\n"
+        "        return True\n"
+        "    except OSError:\n"
+        "        return False",
+        "test": "test_refuses_existing_non_pack_clone_path",
+    },
+    {
+        "id": "F-ME-PIN-REPIN",
+        "file": "pins.py",
+        "old": '    if status == "NEEDS_REPIN":\n'
+        '        detail = pin.reason or "pin is marked NEEDS_REPIN"\n'
+        '        return f"PIN_NEEDS_REPIN: {detail}"',
+        "new": '    if status == "NEEDS_REPIN":\n'
+        "        return None",
+        "test": "test_needs_repin_row_is_fail_not_pass",
+    },
+    {
+        "id": "F-ME-PIN-MISSING",
+        "file": "pins.py",
+        "old": '    if status == "MISSING" or not pin.sha:\n'
+        '        return f"PIN_MISSING: row {pin.id} has no usable SHA"\n'
+        "    if len(pin.sha) != 40 or any(ch not in \"0123456789abcdef\" for ch in pin.sha.lower()):\n"
+        '        return f"PIN_MISSING: row {pin.id} SHA is not a full commit"',
+        "new": '    if status == "MISSING" or not pin.sha:\n'
+        "        return None\n"
+        "    if len(pin.sha) != 40 or any(ch not in \"0123456789abcdef\" for ch in pin.sha.lower()):\n"
+        "        return None",
+        "test": "test_missing_pin_is_fail",
+    },
+    {
+        "id": "F-ME-PIN-SUPERSEDED",
+        "file": "pins.py",
+        "old": '    if status == "SUPERSEDED":\n'
+        '        detail = pin.reason or "pin is marked superseded"\n'
+        '        return f"PIN_SUPERSEDED: {detail}"',
+        "new": '    if status == "SUPERSEDED":\n'
+        "        return None",
+        "test": "test_superseded_pin_is_fail",
+    },
+    {
+        "id": "F-ME-A12-TMP",
+        "file": "isolate.py",
+        "old": "    if _REDIRECT_RE.search(text):\n"
+        "        return None\n"
+        "    return UNREDIRECTABLE",
+        "new": "    if _REDIRECT_RE.search(text):\n"
+        "        return None\n"
+        "    return None",
+        "test": "test_a12_unredirectable_is_fail_named_reason",
+    },
+    {
+        "id": "F-ME-ABORT-SUMMARY",
+        "file": "pack.py",
+        "old": "    dest.mkdir(parents=True, exist_ok=True)\n"
+        "    write_summary(\n"
+        "        dest,\n"
+        "        facts=None,\n"
+        "        gaps=[],\n"
+        "        results=abort_results(reason),\n"
+        "        dry_run=dry_run,\n"
+        "        abort=reason,\n"
+        "    )\n"
+        "    return dest",
+        "new": "    dest.mkdir(parents=True, exist_ok=True)\n"
+        "    return dest",
+        "test": "test_foreign_pack_clone_writes_summary_and_refuses",
     },
 )
 
@@ -96,9 +170,13 @@ def _copy_pack(dest: Path) -> None:
         "catalog.py",
         "checkout.py",
         "grade.py",
+        "isolate.py",
         "pack.py",
         "paths.py",
+        "pins.ini",
+        "pins.py",
         "preflight.py",
+        "morning.sh",
         "run.sh",
         "README.md",
         "fixtures",
@@ -130,6 +208,12 @@ def _discover_module(name: str) -> str:
         "test_refuses_delete_outside_work_dir": "tests.test_paths.PathTests",
         "test_a14_does_not_run_the_demo": "tests.test_catalog.CatalogTests",
         "test_summary_written_after_crash": "tests.test_pack.PackTests",
+        "test_refuses_existing_non_pack_clone_path": "tests.test_checkout.CheckoutTests",
+        "test_needs_repin_row_is_fail_not_pass": "tests.test_pins.PinTests",
+        "test_missing_pin_is_fail": "tests.test_pins.PinTests",
+        "test_superseded_pin_is_fail": "tests.test_pins.PinTests",
+        "test_a12_unredirectable_is_fail_named_reason": "tests.test_isolate.IsolateTests",
+        "test_foreign_pack_clone_writes_summary_and_refuses": "tests.test_pack.PackTests",
     }
     return f"{mapping[name]}.{name}"
 

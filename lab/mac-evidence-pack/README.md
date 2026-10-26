@@ -4,35 +4,45 @@ One morning command that runs the macOS M1 rows that have never been run on
 Sash's Mac. It writes one work folder under `$HOME/mac-evidence-pack/` and one
 `summary.txt`.
 
+The pack creates its own clone under `$HOME/mac-evidence-pack/pack-clone`.
+It refuses that path if it already holds something the pack did not create.
+It never runs a changing git command in any other directory.
+
 The pack calls the existing runners. It does not reimplement them. Live rows
 need native arm64 macOS. This Linux VM marks every macOS row **NOT RUN**.
 
 ## What Sash types
 
-From the clone you already have (for example
-`/Users/sash/code/wt-agent-host` or `~/code/elastos-agent-host-spike`):
+Do not `cd` into the spike clone. Do not `git checkout` or `git fetch` there.
+
+From a copy of this folder (a browser download of `lab/mac-evidence-pack/`
+from draft PR #359, a USB copy, or the pack-owned clone):
 
 ```bash
-cd /path/to/elastos-agent-host-spike
-git fetch origin cursor/mac-evidence-pack-be32
-git checkout cursor/mac-evidence-pack-be32
-sh lab/mac-evidence-pack/run.sh
+sh lab/mac-evidence-pack/morning.sh
 cat "$(ls -dt "$HOME/mac-evidence-pack/"*/summary.txt | head -1)"
 ```
 
-Stop if `lab/mac-evidence-pack/run.sh` is missing. The run stays inside
-`$HOME/mac-evidence-pack/<stamp>/`. It fetches only this repository. It does
-not delete anything outside that folder.
+`morning.sh` creates `$HOME/mac-evidence-pack/pack-clone` or exits with
+`PACK_CLONE_FOREIGN` if that path already holds something this pack did not
+create. A refused or aborted run still writes `summary.txt`.
+
+Stop if `lab/mac-evidence-pack/morning.sh` is missing.
 
 ## What it runs
 
-| Row | Draft PR | Branch | Commit | Existing command |
-| --- | --- | --- | --- | --- |
-| A8 | #301 | `cursor/a1-a8-hardening-85ce` | `1a82d25bdd00d3a383433de84e97c39a4184d107` | `lab/a1-a8-hardening/run.sh` |
-| C1–C7 | #323 | `cursor/redteam-fix-4bfb` | `fa1841f35d32e7bea98e124fd406231d0088fd4e` | named `cargo test` on that commit |
-| A6 | #343 | `cursor/a6-a12-evidence-fix-6e3b` | `011d01f283a3f4ed4717383ecedf55622d451b4d` | `lab/a6-a12-evidence-fix/run.sh` then the A6 ThrowawayHome journeys |
-| A12 | #343 | same | same | `run.sh` then `cleanup_census_refuses_each_leftover` |
-| A14 | #289 | `cursor/demo-a14-installed-demo-83e1` | `39b4b47edc64d8705a0294c978e6171819cea9fc` | `lab/demo-a14/preflight.sh` only |
+Pins live in `pins.ini` (row → branch + SHA). The pack prints each SHA in
+`summary.txt` and verifies an `ok` pin exists before that row runs. A pin
+that is missing, superseded, or `NEEDS_REPIN` is **FAIL** with that named
+reason, never PASS.
+
+| Row | Draft PR | Branch | Pin |
+| --- | --- | --- | --- |
+| A8 | #301 | `cursor/a1-a8-hardening-85ce` | `ok` |
+| C1–C7 | #323 | `cursor/redteam-fix-4bfb` | `NEEDS_REPIN` (failed adversarial review #352; do not guess a new SHA) |
+| A6 | #343 | `cursor/a6-a12-evidence-fix-6e3b` | `ok`, isolated temp root or `A12_SHARED_TMP_UNREDIRECTABLE` |
+| A12 | #343 | same | same |
+| A14 | #289 | `cursor/demo-a14-installed-demo-83e1` | `ok`, preflight only |
 
 A14 does not install or run the demo. The summary points at
 `lab/demo-a14/RUNBOOK.md` steps 3–5 on that branch.
@@ -53,7 +63,7 @@ python3 -I lab/mac-evidence-pack/pack.py --dry-run
 ```
 
 That prints the plan and the pinned commits. It runs the preflight logic
-against `fixtures/`. It does not run the macOS rows.
+against `fixtures/`. It does not run the macOS rows. It does not clone.
 
 ## Pack tests
 

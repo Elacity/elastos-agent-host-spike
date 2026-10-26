@@ -83,6 +83,19 @@ class GradeTests(unittest.TestCase):
             )
         self.assertEqual(verdict.status, "NOT RUN")
 
+    def test_blocked_pin_is_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.txt"
+            path.write_text("FAIL: PIN_NEEDS_REPIN\n", encoding="utf-8")
+            verdict = grade(
+                row_by_id("C1"),
+                exit_code=0,
+                evidence_path=path,
+                blocked="PIN_NEEDS_REPIN: #323 needs a new SHA",
+            )
+        self.assertEqual(verdict.status, "FAIL")
+        self.assertTrue(verdict.reason.startswith("PIN_NEEDS_REPIN"))
+
     def test_crash_is_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "evidence.txt"
