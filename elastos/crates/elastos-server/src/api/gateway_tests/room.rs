@@ -318,7 +318,7 @@ async fn test_chat_room_summary_requires_signed_launch_authority() {
     let summary = app
         .clone()
         .oneshot(
-            Request::builder()
+            test_browser_request("localhost:61180", "null")
                 .uri("/api/apps/chat-room/summary")
                 .header("x-elastos-home-token", token.as_str())
                 .body(Body::empty())
@@ -340,6 +340,57 @@ async fn test_chat_room_summary_requires_signed_launch_authority() {
         payload["transport"]["status"],
         "Collaboration is isolated on this Runtime."
     );
+}
+
+#[tokio::test]
+async fn legacy_chat_room_summary_admits_only_chat_or_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority(dir.path());
+    let capsule_summary = |token: String| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri("/api/apps/chat-room/summary")
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let other = capsule_summary(app_token_for_authority(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &authority,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(other.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("pending_requests"));
+
+    let chat = capsule_summary(app_token_for_authority(
+        dir.path(),
+        CHAT_ROOM_CAPSULE_ID,
+        &authority,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(chat.status(), StatusCode::OK);
+
+    let home = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/chat-room/summary")
+                .header(COOKIE, signed_home_cookie_for_room_test(&authority))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(home.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1445,11 +1496,14 @@ async fn test_chat_room_cookie_auth_prefers_home_room_session_over_browser_sessi
     crate::room_service::approve_next_request(dir.path())
         .unwrap()
         .unwrap();
-    let browser_token =
-        crate::room_service::browser_access_status(dir.path(), &browser_request.request_id)
-            .unwrap()
-            .token
-            .unwrap();
+    let browser_token = crate::room_service::browser_access_status(
+        dir.path(),
+        &browser_request.request_id,
+        &browser_request.status_secret,
+    )
+    .unwrap()
+    .token
+    .unwrap();
     let both_cookies =
         format!("{gateway_home_cookie}; browser-session={browser_token}; {room_cookie}");
 
@@ -1795,10 +1849,14 @@ async fn browser_room_cookie_capabilities_require_signed_home_admission() {
     crate::room_service::approve_next_request(dir.path())
         .unwrap()
         .unwrap();
-    let guest_token = crate::room_service::browser_access_status(dir.path(), request_id)
-        .unwrap()
-        .token
+    let request_secret = request_cookie
+        .strip_prefix("browser-session-request=")
         .unwrap();
+    let guest_token =
+        crate::room_service::browser_access_status(dir.path(), request_id, request_secret)
+            .unwrap()
+            .token
+            .unwrap();
     let before = room_store_snapshot(dir.path());
     for request in [
         test_browser_request("localhost:61180", "http://localhost:61180")
@@ -1879,6 +1937,80 @@ async fn test_browser_session_request_and_status_routes_chat_room() {
         .unwrap();
     let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
     assert_eq!(status_json["status"].as_str(), Some("pending"));
+}
+
+#[tokio::test]
+async fn browser_session_request_status_requires_its_secret_not_the_request_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority(dir.path());
+    let home_cookie = signed_home_cookie_for_room_test(&authority);
+
+    let pair_resp = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .header(COOKIE, &home_cookie)
+                .method("POST")
+                .uri("/api/browser/session/request")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"display_name":"Alice","device_label":"Phone","capabilities":["room.access"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pair_resp.status(), StatusCode::OK);
+    let request_cookie = browser_request_cookie_header(&pair_resp);
+    let pair_body = axum::body::to_bytes(pair_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let pair_json: Value = serde_json::from_slice(&pair_body).unwrap();
+    let request_id = pair_json["request_id"].as_str().unwrap().to_string();
+    let secret = request_cookie
+        .strip_prefix("browser-session-request=")
+        .unwrap();
+    assert_eq!(secret.len(), 64);
+    assert_ne!(secret, request_id);
+    assert!(!String::from_utf8_lossy(&pair_body).contains(secret));
+    crate::room_service::approve_request(dir.path(), &request_id)
+        .unwrap()
+        .unwrap();
+
+    let status = |cookie: Option<String>| {
+        let mut request = test_browser_request("localhost:61180", "http://localhost:61180")
+            .uri(format!("/api/browser/session/request/{request_id}"));
+        let cookie = match cookie {
+            Some(cookie) => format!("{home_cookie}; {cookie}"),
+            None => home_cookie.clone(),
+        };
+        request = request.header(COOKIE, cookie);
+        app.clone().oneshot(request.body(Body::empty()).unwrap())
+    };
+    for cookie in [
+        None,
+        Some(format!("browser-session-request={request_id}")),
+        Some(format!("browser-session-request={}", "0".repeat(64))),
+    ] {
+        let refused = status(cookie).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert!(refused.headers().get(SET_COOKIE).is_none());
+        let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("approved"));
+    }
+
+    let approved = status(Some(request_cookie)).await.unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    assert!(browser_cookie_header(&approved).starts_with("browser-session="));
+    let body = axum::body::to_bytes(approved.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status_json["status"], "approved");
+    assert!(status_json["token"].is_null());
 }
 
 #[tokio::test]
@@ -2835,9 +2967,13 @@ async fn configured_inbox_refuses_legacy_room_decisions_before_mutation() {
             .contains("Legacy room controls are unavailable"));
         assert_eq!(room_store_snapshot(dir.path()), before);
         assert_eq!(
-            crate::room_service::browser_access_status(dir.path(), &request.request_id)
-                .unwrap()
-                .status,
+            crate::room_service::browser_access_status(
+                dir.path(),
+                &request.request_id,
+                &request.status_secret
+            )
+            .unwrap()
+            .status,
             "pending"
         );
     }
@@ -2894,17 +3030,25 @@ async fn legacy_inbox_room_decisions_require_current_admin() {
             if status == StatusCode::FORBIDDEN {
                 assert_eq!(room_store_snapshot(dir.path()), before);
                 assert_eq!(
-                    crate::room_service::browser_access_status(dir.path(), &request.request_id)
-                        .unwrap()
-                        .status,
+                    crate::room_service::browser_access_status(
+                        dir.path(),
+                        &request.request_id,
+                        &request.status_secret
+                    )
+                    .unwrap()
+                    .status,
                     "pending"
                 );
             }
         }
         assert_eq!(
-            crate::room_service::browser_access_status(dir.path(), &request.request_id)
-                .unwrap()
-                .status,
+            crate::room_service::browser_access_status(
+                dir.path(),
+                &request.request_id,
+                &request.status_secret
+            )
+            .unwrap()
+            .status,
             expected
         );
     }

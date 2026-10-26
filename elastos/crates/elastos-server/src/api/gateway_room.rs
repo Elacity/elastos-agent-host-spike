@@ -541,12 +541,18 @@ pub(super) async fn chat_room_summary(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
+    let chat_launch =
+        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID);
     if state.collaboration_chat_product_port.is_none() {
+        // The legacy summary lists guest requests and sessions: Chat or Home only.
+        if let Err(err) = chat_launch {
+            if require_home_token(&state.data_dir, &headers).is_err() {
+                return room_service_error_response(err);
+            }
+        }
         return room_service_summary(State(state)).await;
     }
-    if let Err(err) =
-        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID)
-    {
+    if let Err(err) = chat_launch {
         return room_service_error_response(err);
     }
     Json(serde_json::json!({
