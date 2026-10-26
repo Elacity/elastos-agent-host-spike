@@ -38,7 +38,7 @@ Each rule is load-bearing: removing it alone makes
 
 | Rule | Why the provider needs it | Without it |
 | --- | --- | --- |
-| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | Start only the binary bound as `PROVIDER_EXECUTABLE`. | F-cc1-rm-exec: `sandbox-exec` cannot execute the binary and exits 71. |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | Start only the binary bound as `PROVIDER_EXECUTABLE`; see "Starting other programs". | F-cc1-rm-exec: `sandbox-exec` cannot execute the binary and exits 71. |
 | `(allow file-read-data (literal "/"))` | Process startup reads the root directory before `main` runs; `/bin/echo` aborts the same way without it, so this is not provider code. A metadata-only grant is not enough. | F-cc1-rm-rootdir: the process aborts (SIGABRT) before its first answer, with no output. |
 | `(allow sysctl-read)` | At startup the Rust runtime reads the page size to place its stack guard page. These are read-only kernel facts. | F-cc1-rm-sysctl: the runtime panics with "failed to allocate a guard page" before `main` and the process aborts (SIGABRT). |
 | `(allow file-read* (literal (param "STORAGE_PARENT")))` | `init` inspects the existing parent before it creates the journal root. The grant is literal: the parent directory itself, nothing below it. | F-cc1-rm-parent: `init` answers `journal_corrupt`; the provider logs EPERM for the parent. |
@@ -57,7 +57,8 @@ from the starting set's `file-read*` to `file-read-data`, the one class that
 startup needs.
 
 `(deny network*)` is held by the shared contract check, not by a behaviour
-test here (see Tests). With that one form removed, `(deny default)` still
+test here (see Tests): F-cc12a removes it, and that check fails (see
+Falsifiers). With that one form removed, `(deny default)` still
 refuses the hosted run's connect, and
 `model_hosted_run_fails_closed_under_profile` still passes. The profile's
 refusal of a network operation is now also shown by behaviour: that test and
@@ -135,6 +136,49 @@ every rule, and adds only a write grant on `STORAGE_PARENT`. The create then
 succeeds and `runs/` appears under the outside sibling, so the second test
 fails: it watches the write grant itself. `model_outside_write_denied` still
 passes under F-cc8c, because it is refused at a read.
+
+## Starting other programs
+
+The exec rule, `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`,
+lets the process execute only the path bound as `PROVIDER_EXECUTABLE`.
+`sandbox-exec` applies the profile to its own process before it executes the
+program it was given. So the same rule checks that first exec and any exec by
+the confined provider, and a test can check the rule without the provider
+creating a process.
+
+`model_unbound_program_refused_under_profile` runs under `confine.sb` itself,
+with no fixture rule. It creates `STORAGE_ROOT` owner-only and copies the
+provider binary into it, the one place the profile lets the provider write.
+The copy has the same SHA-256 as the binary. The test binds the real binary as
+`PROVIDER_EXECUTABLE`, binds the two storage parameters as usual, and starts
+the copy. The profile refuses the exec:
+
+- `init` gets no answer;
+- `sandbox-exec` exits with status 71 and logs
+  `sandbox-exec: execvp() of '<copy>' failed: Operation not permitted`;
+- nothing is written: `STORAGE_ROOT` holds only the copy, with the same mode
+  and bytes, and there is no `runs/`.
+
+A missing program also exits 71, but with `No such file or directory`, so the
+test checks the EPERM line.
+
+`model_bound_copy_serves_under_profile` is the control. It makes the copy the
+same way, at the same place under `STORAGE_ROOT`, binds it as
+`PROVIDER_EXECUTABLE` and starts it under the same profile. The copy answers
+`init` with its offer ready, creates `runs/` beside itself, and exits cleanly
+after `shutdown`. The binding is the only difference between the two runs. So
+a program in the provider's own storage cannot run, and only the bound path
+runs. Which binary is bound is the Runtime half (see "The Runtime half");
+these tests do not check it.
+
+F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
+adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
+exec rule word for word, so both pass the one shape check,
+`both_file_profiles_bind_one_storage_parameter_contract`: it requires the exec
+rule, but it does not refuse a second, wider exec rule. Under each, the copy
+starts and answers `init`, and of the `confine` tests only
+`model_unbound_program_refused_under_profile` fails. So this test is the check
+that holds the limit. F-cc14a, `(allow default)`, fails it the same way.
 
 ## What the profile does not grant
 
@@ -302,6 +346,14 @@ profile does not grant".
   same fixture and requests, without the profile: the run's one request
   reaches the stand-in, and the stand-in's refusal settles the run as
   `hosted_effect_refused`.
+- `model_unbound_program_refused_under_profile`: a byte-identical copy of the
+  provider binary under `STORAGE_ROOT`, started with the real binary bound as
+  `PROVIDER_EXECUTABLE`, never answers `init`. `sandbox-exec` exits 71 and logs
+  the refused `execvp()` with `Operation not permitted`, and nothing is
+  written. See "Starting other programs".
+- `model_bound_copy_serves_under_profile`: the control. A copy made the same
+  way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
+  answers `init`, creates `runs/` and exits cleanly after `shutdown`.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and `journal_access_denied` is its code for a refused journal create or write
@@ -313,15 +365,18 @@ The control shows that the same request succeeds without the profile, so the
 profile is the only difference between the two runs.
 
 The confined tests print a skip reason and return when `/usr/bin/sandbox-exec`
-is absent. When it is present and the sandbox refuses to launch the binary,
-they fail. The controls need no sandbox and run on every Unix host, except
-`model_hosted_run_reaches_runtime_socket_when_unconfined`: off macOS the
-provider refuses every hosted run before any socket, so that control prints a
-skip reason there and returns.
+is absent. When it is present and the sandbox refuses to launch the bound
+binary, they fail. The unconfined controls need no sandbox and run on every
+Unix host, except `model_hosted_run_reaches_runtime_socket_when_unconfined`:
+off macOS the provider refuses every hosted run before any socket, so that
+control prints a skip reason there and returns.
+`model_bound_copy_serves_under_profile` is a control that runs under the
+profile, so it skips without `sandbox-exec`, as the confined tests do.
 
 The profile shape has one check (P10):
 `both_file_profiles_bind_one_storage_parameter_contract` in
-`../wallet-provider/tests/confine.rs` runs over this file whenever it exists.
+`../wallet-provider/tests/confine.rs` requires this file and fails when it is
+missing or unreadable.
 It requires `(version 1)` first, `(deny default)` second, `(deny network*)`,
 no network allow, only the three parameter tokens, the three shared rules
 verbatim, and no `(allow default)`. This crate adds no second shape test.
@@ -337,10 +392,11 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 ## Falsifiers
 
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
-runner. Every entry uses command `provider` and `expect: caught`. Each
-mutates `confine.sb` only, except the two entries that edit
-`tests/confine/main.rs`: F-cc1e removes the outside-read fixture rule, and
-F-cc8-rm-journal removes the outside-create fixture grant.
+runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
+because the one shape check is in the wallet crate, and every other entry
+uses command `provider`. Each mutates `confine.sb` only, except the two
+entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
+fixture rule, and F-cc8-rm-journal removes the outside-create fixture grant.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -361,6 +417,10 @@ F-cc8-rm-journal removes the outside-create fixture grant.
 | F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
 | F-cc10a | `(deny default)` becomes `(allow default)` and `(deny network*)` is removed; `(version 1)` stays first | `model_hosted_run_fails_closed_under_profile` | The hosted run's request reaches the Runtime socket stand-in. `(allow default)` alone is not enough: `(deny network*)` still refuses the connect. |
 | F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
+| F-cc12a | Remove `(deny network*)`; nothing else changes | `both_file_profiles_bind_one_storage_parameter_contract` (wallet crate) | The one shape check refuses the model profile with "model-provider must deny the network explicitly with (deny network*)". |
+| F-cc14a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_unbound_program_refused_under_profile` | The copy under `STORAGE_ROOT` starts and answers `init`. |
+| F-cc14b | One line, `(allow process-exec)`, is added after the exec rule; the exec rule stays word for word | `model_unbound_program_refused_under_profile` | The copy starts and answers `init`. The one shape check still passes, so this test holds the exec limit. |
+| F-cc14c | One line, `(allow process-exec (subpath (param "STORAGE_ROOT")))`, is added after the exec rule; the exec rule stays word for word | `model_unbound_program_refused_under_profile` | The copy starts and answers `init`, so a program in the provider's own storage would run. The one shape check still passes. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -370,13 +430,12 @@ startup recovery restores `tests/confine/main.rs` after a killed run (provider
 task 015), as it restores `confine.sb`.
 
 The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
-skip and pass, so the runner reports each entry as SURVIVED there.
+skip and pass, so the runner reports each sandbox entry as SURVIVED there.
+F-cc12a needs no sandbox. Its check only reads the profile files, so it is
+CAUGHT on any host that builds the wallet crate.
 
-The runner's `provider` command runs only this crate, so the `(deny network*)`
-falsifier is applied by hand: delete `(deny network*)` from `confine.sb` and
-run the wallet command above.
-`both_file_profiles_bind_one_storage_parameter_contract` then fails with
-"model-provider must deny the network explicitly with (deny network*)".
-Restore the file and it passes. The check itself is guarded by WP06 in
-`../wallet-provider/falsifiers.json`, which deletes the `(deny network*)`
+F-cc12a registers the removal of `(deny network*)`: the runner applies it
+with the `wallet` command and restores `confine.sb` afterwards, or at its
+next start after a killed run. WP06 in `../wallet-provider/falsifiers.json`
+guards the check's own `(deny network*)` requirement: it deletes that
 requirement from the check.

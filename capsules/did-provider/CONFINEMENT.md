@@ -40,13 +40,15 @@ from its inline policy to that file is part of the same bridge change.
 
 ## Host-OS status
 
-These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On Linux
-the providers are not confined yet; the `sandbox-exec` integration tests print
-a skip reason and do not run. The rule for provider-status documents is that a
-provider is marked "confined" only for a host OS where a test proves its
-profile, so no status document records `did-provider` or `wallet-provider` as
-confined on Linux until that test exists (P10, P11). The status change lands
-when the Runtime side does.
+These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On macOS
+a confinement test that cannot run because `/usr/bin/sandbox-exec` is missing
+fails the gate; it never passes by skipping. On Linux the providers are not
+confined yet; there, and on any host OS other than macOS, the `sandbox-exec`
+integration tests print a skip reason and do not run. The rule for
+provider-status documents is that a provider is marked "confined" only for a
+host OS where a test proves its profile, so no status document records
+`did-provider` or `wallet-provider` as confined on Linux until that test
+exists (P10, P11). The status change lands when the Runtime side does.
 
 ## What the profile allows
 
@@ -117,7 +119,7 @@ standard error on its own thread while the child runs, so a child that fills
 the pipe still reaches its own exit. `stderr_is_drained_before_wait` writes
 128 KiB to standard error and expects every byte plus the child's own exit
 status. The startup case skips with its printed reason when `sandbox-exec` is
-absent.
+absent on a host OS other than macOS.
 
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
@@ -138,10 +140,22 @@ and a missing or unreadable profile fails the check with a reason that names
 its path. The test runs on every platform because it reads files and starts
 no process.
 
+`sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
+itself without starting a process: a missing `sandbox-exec` on `macos` is an
+error that names the OS and the path, a missing one on `linux` is a skip, and
+a present one on `macos` runs the test. It runs on every supported build
+target.
+
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
-the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
-print a skip reason; a present sandbox that refuses to launch the child fails
-the test.
+the repository root. When `/usr/bin/sandbox-exec` is absent on a host OS other
+than macOS the native tests print a skip reason; on macOS a missing
+`sandbox-exec` fails the gate, as does a present sandbox that refuses to
+launch the child.
+
+The one runner applies and restores each registered falsifier with
+`python3 -I examples/agent-host/falsify.py --from capsules/did-provider/falsifiers.json`
+from the repository root; the list's edit paths are relative to
+`examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
 
 ## Falsifiers
 

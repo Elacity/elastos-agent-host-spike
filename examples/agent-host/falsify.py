@@ -56,14 +56,16 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 # Each provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
-# One table for every provider crate. Each entry is the crate's workspace
-# manifest, so a provider command exists only with the manifest its spec
-# builds and tests: a second branch per crate would be a second copy of the
-# same rule (P10).
+# One table for the three provider crates and the lab's capsule-identity
+# crate. Each entry is a crate that is its own workspace with its own
+# lockfile, and its command exists only with the manifest its spec builds and
+# tests: a second branch per crate would be a second copy of the same rule
+# (P10).
 PROVIDER_CRATES = {
     "provider": PROVIDER_MANIFEST,
     "did": REPO / "capsules" / "did-provider" / "Cargo.toml",
     "wallet": REPO / "capsules" / "wallet-provider" / "Cargo.toml",
+    "capsule-identity": REPO / "lab" / "capsule-identity" / "Cargo.toml",
 }
 BACKUP_SUFFIX = ".falsify-original"
 # Capture ancestor ownership once. The environment then publishes that set
@@ -239,16 +241,24 @@ def load(path=DATA):
     return entries
 
 
-# The provider files this runner's falsifiers mutate, relative to REPO. Each
-# exact target is restored on startup; every other provider file stays with
-# its owning runner. The model provider's confinement profile and its
-# confinement test harness are targets because cc-model-confine's list mutates
-# them through the `provider` command (F-cc1e edits tests/confine/main.rs).
-# The did and wallet files are the confine lane's edit files, which its `did`
-# and `wallet` lists name from the repository root; every DID12 and later
-# entry edits tests/confine.rs. Wallet's falsifier honesty test is a target
-# because wallet's list mutates it (WP25). A killed run therefore restores a
-# harness instead of leaving a weakened confinement test behind.
+# The files the committed falsifier lists mutate, relative to REPO. Each
+# exact target is restored on startup; every other file stays with the runner
+# its list belongs to. The lists and their targets:
+# - capsules/model-provider/falsifiers.json: the model provider's
+#   src/local_memory.rs, src/journal.rs, src/contract.rs, src/local_llama.rs
+#   and src/adapters.rs. Its `selftest` entries edit falsify.py, which
+#   recovery finds under examples/agent-host.
+# - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`
+#   and tests/confine/main.rs (cc-model-confine's F-cc1e).
+# - capsules/did-provider/falsifiers.json: did's src/main.rs, confine.sb and
+#   tests/confine.rs (DID12 and later).
+# - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs,
+#   confine.sb, tests/confine.rs and src/tests/falsifiers.rs (WP25), and did's
+#   confine.sb.
+# - lab/capsule-identity/falsifiers.json: capsule-identity's src/lib.rs,
+#   tests/common/mod.rs and fixtures/wc001-core/capsule.json.
+# A killed run therefore restores an exact file instead of leaving a weakened
+# confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
     "capsules/model-provider/src/local_memory.rs",
     "capsules/model-provider/src/journal.rs",
@@ -262,6 +272,9 @@ PROVIDER_TARGETS = (
     "capsules/wallet-provider/confine.sb",
     "capsules/wallet-provider/tests/confine.rs",
     "capsules/wallet-provider/src/tests/falsifiers.rs",
+    "lab/capsule-identity/src/lib.rs",
+    "lab/capsule-identity/tests/common/mod.rs",
+    "lab/capsule-identity/fixtures/wc001-core/capsule.json",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -293,8 +306,9 @@ def disown_backup(backup):
 
 
 def recover_backups():
-    """Restore this runner's originals: agent-host files and this lane's exact
-    provider targets. Other provider files stay with their owning runners.
+    """Restore this runner's originals: agent-host files and the exact files
+    named in PROVIDER_TARGETS, which include other lanes' edit files and not
+    only provider files. Other files stay with their owning runners.
     Recovery is independent of the data file selected for the next run, and it
     never touches a backup a caller still owns."""
     owned = owned_backups()
@@ -439,8 +453,9 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
             "one": (cargo + ["--"], REPO, []),
         }
     if command in PROVIDER_CRATES:
-        # Each provider crate is its own workspace with its own lockfile, so
-        # its test command names --locked and that crate's manifest directly.
+        # Each crate in the table is its own workspace with its own lockfile,
+        # so its test command names --locked and that crate's manifest
+        # directly.
         cargo = ["cargo", "test", "--locked",
                  "--manifest-path", str(manifest or PROVIDER_CRATES[command])]
         return {
@@ -1032,21 +1047,24 @@ def another_lanes_backup_is_not_recovered():
 def a_killed_provider_edit_is_recovered():
     """Kill real and synthetic provider edits in an isolated tree, restart
     through main(), and repeat the edit. This lane's model-provider targets,
-    the model provider's confinement test harness, and the confine lane's five
+    the model provider's confinement test harness, the confine lane's five
     did/wallet targets plus its did confinement test harness and wallet's
-    falsifier honesty test all come back in either startup mode. Foreign
-    backups, including both providers' confinement documents, each harness's
-    support neighbour and wallet's test support neighbour, stay with their
-    owners."""
+    falsifier honesty test, and capsule-identity's src/lib.rs,
+    tests/common/mod.rs and fixtures/wc001-core/capsule.json all come back in
+    either startup mode (PV51-PV53). Foreign backups, including both
+    providers' confinement documents, each harness's support neighbour,
+    wallet's test support neighbour and the lab's README and web-app fixture,
+    stay with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
     profile = "../../capsules/model-provider/confine.sb"
-    # The did and wallet targets, both confinement test harnesses and
-    # wallet's falsifier honesty test are named here, not read from the table,
-    # so a target dropped from PROVIDER_TARGETS is caught (PV44, PV45, PV47,
-    # PV48, PV49). Their original bytes are written in the isolated tree,
-    # never read from the real crates.
+    # The did and wallet targets, both confinement test harnesses, wallet's
+    # falsifier honesty test, and capsule-identity's src/lib.rs,
+    # tests/common/mod.rs and fixtures/wc001-core/capsule.json are named here,
+    # not read from the table, so a target dropped from PROVIDER_TARGETS is
+    # caught (PV44, PV45, PV47-PV49, PV51-PV53). Their original bytes are
+    # written in the isolated tree, never read from the real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/did-provider/src/main.rs",
                  "../../capsules/did-provider/confine.sb",
@@ -1054,7 +1072,10 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/src/main.rs",
                  "../../capsules/wallet-provider/confine.sb",
                  "../../capsules/wallet-provider/tests/confine.rs",
-                 "../../capsules/wallet-provider/src/tests/falsifiers.rs")
+                 "../../capsules/wallet-provider/src/tests/falsifiers.rs",
+                 "../../lab/capsule-identity/src/lib.rs",
+                 "../../lab/capsule-identity/tests/common/mod.rs",
+                 "../../lab/capsule-identity/fixtures/wc001-core/capsule.json")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -1096,7 +1117,9 @@ os.kill(os.getpid(), signal.SIGKILL)
                                repo / "capsules/did-provider/CONFINEMENT.md",
                                repo / "capsules/model-provider/tests/confine/support.rs",
                                repo / "capsules/did-provider/tests/support.rs",
-                               repo / "capsules/wallet-provider/src/tests/support.rs"]
+                               repo / "capsules/wallet-provider/src/tests/support.rs",
+                               repo / "lab/capsule-identity/README.md",
+                               repo / "lab/capsule-identity/fixtures/web-app/capsule.json"]
             for target in foreign_targets:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"foreign mutation\n")
@@ -1576,15 +1599,17 @@ def argv_refusal_precedes_work():
 
 
 def provider_spec_uses_locked_manifest():
-    """Every provider crate is a registered command, and both its build and
+    """Every crate in the table, the three provider crates and the lab's
+    capsule-identity crate, is a registered command, and both its build and
     run argv name --locked and the manifest that follows --manifest-path.
     The expected manifests are written here, so a table that maps one crate
-    to another crate's manifest is caught (PV43)."""
+    to another crate's manifest is caught (PV43, PV50)."""
     ok = True
     expected = {
         "provider": str(REPO / "capsules" / "model-provider" / "Cargo.toml"),
         "did": str(REPO / "capsules" / "did-provider" / "Cargo.toml"),
         "wallet": str(REPO / "capsules" / "wallet-provider" / "Cargo.toml"),
+        "capsule-identity": str(REPO / "lab" / "capsule-identity" / "Cargo.toml"),
     }
     for command, manifest in expected.items():
         if command not in COMMANDS:

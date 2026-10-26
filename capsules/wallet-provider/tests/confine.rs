@@ -6,8 +6,9 @@
 //! line-delimited JSON from stdin and writes one JSON response per line to
 //! stdout, and the profile denies every network operation.
 //!
-//! When `/usr/bin/sandbox-exec` is absent the test prints why it did not run
-//! and returns; it never passes silently.
+//! On macOS, the host OS `CONFINEMENT.md` declares confined, a missing
+//! `/usr/bin/sandbox-exec` fails the test. On any other OS the test prints why
+//! it did not run and returns.
 
 use elastos_wallet_contract::{
     VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
@@ -22,6 +23,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// The host OSes whose "Host-OS status" in `CONFINEMENT.md` declares these
+/// profiles enforced through `/usr/bin/sandbox-exec`, so a confinement test
+/// there must run.
+const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
@@ -29,16 +34,81 @@ const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-/// Returns `true` when the test can run, printing why it cannot otherwise.
-fn sandbox_available() -> bool {
-    if Path::new(SANDBOX_EXEC).is_file() {
-        return true;
+/// Whether a sandbox test runs on this host.
+///
+/// A present `sandbox_exec` runs the test on any OS. A missing one is a skip
+/// only on an OS whose profiles `CONFINEMENT.md` does not declare enforced; on
+/// a declared OS it is an error, because a skip there would pass a profile
+/// that was never exercised (P11).
+fn sandbox_gate(os: &str, sandbox_exec: &Path) -> Result<bool, String> {
+    if sandbox_exec.is_file() {
+        return Ok(true);
     }
-    eprintln!(
-        "SKIP wallet-provider confinement test: {SANDBOX_EXEC} is absent; \
-         the profile was not exercised on this machine"
+    if DECLARED_CONFINED_OS.contains(&os) {
+        return Err(format!(
+            "{os} is declared confined in CONFINEMENT.md, so a confinement test on this OS \
+             must run, not skip: {} is absent",
+            sandbox_exec.display()
+        ));
+    }
+    Ok(false)
+}
+
+/// Returns `true` when the test can run, and fails it on a declared OS.
+fn sandbox_available() -> bool {
+    match sandbox_gate(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        Ok(true) => true,
+        Ok(false) => {
+            eprintln!(
+                "SKIP wallet-provider confinement test: {SANDBOX_EXEC} is absent; \
+                 the profile was not exercised on this machine"
+            );
+            false
+        }
+        Err(reason) => panic!("{reason}"),
+    }
+}
+
+/// A declared host OS runs its confinement tests; it never passes by skipping.
+///
+/// A missing `sandbox-exec` on `macos` is an error that names the OS and the
+/// path, a missing one on `linux` is a skip, and a present one on `macos` runs
+/// the test. The test starts no process, so it runs on every supported build
+/// target.
+///
+/// Falsifier: return `Ok(false)` from the declared-OS branch (WP27); the
+/// `macos` case fails because a missing `sandbox-exec` skips and passes.
+#[test]
+fn sandbox_gate_fails_instead_of_skipping_on_a_declared_os() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
+    assert!(
+        !missing.exists(),
+        "the fixture path must be absent: {}",
+        missing.display()
     );
-    false
+    let present = std::env::current_exe().expect("the test executable path must be available");
+    assert!(
+        present.is_file(),
+        "the present fixture must be a file: {}",
+        present.display()
+    );
+
+    let refusal = sandbox_gate("macos", &missing)
+        .expect_err("a declared OS must run its confinement test, not skip it");
+    assert!(
+        refusal.contains("macos") && refusal.contains(&missing.display().to_string()),
+        "the refusal must name the OS and the missing path: {refusal}"
+    );
+    assert_eq!(
+        sandbox_gate("linux", &missing),
+        Ok(false),
+        "an undeclared OS may skip the test it cannot run"
+    );
+    assert_eq!(
+        sandbox_gate("macos", &present),
+        Ok(true),
+        "a declared OS runs the test when sandbox-exec is present"
+    );
 }
 
 fn now_ts() -> u64 {

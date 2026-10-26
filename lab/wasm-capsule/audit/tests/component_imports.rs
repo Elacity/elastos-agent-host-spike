@@ -8,6 +8,29 @@ fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
     assert_eq!(refusal.to_string(), format!("undeclared interface {name}"));
 }
 
+fn component_with_two_import_sections() -> Vec<u8> {
+    // Share the instance type so only the core module separates the imports.
+    let wasm = wat::parse_str(
+        r#"(component
+            (type $empty (instance))
+            (import "elastos:bus/runtime@1.0.0" (instance (type $empty)))
+            (core module)
+            (import "wasi:filesystem/types@0.2.0" (instance (type $empty))))"#,
+    )
+    .unwrap();
+    // This fixture has no nested component, so every import section is top-level.
+    let sections = Parser::new(0)
+        .parse_all(&wasm)
+        .map(|payload| payload.unwrap())
+        .filter(|payload| matches!(payload, Payload::ComponentImportSection(_)))
+        .count();
+    assert_eq!(
+        sections, 2,
+        "fixture must have two top-level import sections"
+    );
+    wasm
+}
+
 #[test]
 fn component_importing_only_a_declared_interface_passes() {
     let declared = ["elastos:bus/log@1.0.0", "elastos:bus/runtime@1.0.0"];
@@ -18,13 +41,7 @@ fn component_importing_only_a_declared_interface_passes() {
         Ok(vec![declared[1].into()])
     );
 
-    let sections = wat::parse_str(
-        r#"(component
-            (import "elastos:bus/runtime@1.0.0" (instance))
-            (core module)
-            (import "wasi:filesystem/types@0.2.0" (instance)))"#,
-    )
-    .unwrap();
+    let sections = component_with_two_import_sections();
     let both = ["wasi:filesystem/types@0.2.0", "elastos:bus/runtime@1.0.0"];
     assert_eq!(
         audit_component(&sections, &both),
@@ -53,13 +70,7 @@ fn component_importing_wasi_filesystem_is_refused_by_name() {
     .unwrap();
     assert_undeclared(&wasm, &[], "wasi:filesystem/types@0.2.0");
 
-    let sections = wat::parse_str(
-        r#"(component
-            (import "elastos:bus/runtime@1.0.0" (instance))
-            (core module)
-            (import "wasi:filesystem/types@0.2.0" (instance)))"#,
-    )
-    .unwrap();
+    let sections = component_with_two_import_sections();
     assert_undeclared(
         &sections,
         &["elastos:bus/runtime@1.0.0"],
@@ -86,6 +97,11 @@ fn a_different_version_of_a_declared_interface_is_refused() {
         ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.1.0"),
         ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.0.1"),
         ("elastos:bus/runtime@1.1.0", "elastos:bus/runtime@1.0.0"),
+        (
+            "elastos:bus/runtime@1.0.0",
+            "elastos:bus/runtime@1.0.0-rc.1",
+        ),
+        ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.0.0+b1"),
     ] {
         let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
         assert_undeclared(&wasm, &[declared], name);
@@ -229,27 +245,54 @@ fn component_custom_section_carrying_code_is_refused() {
         0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
     ];
     hidden_name.extend_from_slice(&[b'x'; 75]);
-    for (name, expected) in [
-        (hidden_name, Err(Refusal::CodeInCustomSection)),
-        (vec![b'x'; 97], Ok(vec![])),
+    for (case, name, expected) in [
+        (
+            "hidden_name",
+            hidden_name,
+            Err(Refusal::CodeInCustomSection),
+        ),
+        ("plain_name", vec![b'x'; 97], Ok(vec![])),
     ] {
-        assert_eq!(name.len(), 97);
-        let mut wasm = wat::parse_str("(component)").unwrap();
-        let size_last_byte = wasm.len() + 2;
         // Section id, padded size 98, name length 97, then the name; data is empty.
-        wasm.extend_from_slice(&[0x00, 0xe2, 0x00, 0x61]);
-        wasm.extend_from_slice(&name);
-        Validator::new().validate_all(&wasm).unwrap();
-        if expected.is_err() {
-            assert_eq!(
-                &wasm[size_last_byte..size_last_byte + 24],
-                wat::parse_str("(module (func))").unwrap()
+        let mut custom = vec![0x00, 0xe2, 0x00, 0x61];
+        custom.extend_from_slice(&name);
+        for layout in ["(i) Component", "(ii) embedded core module"] {
+            assert_eq!(name.len(), 97, "{layout}: {case}");
+            let mut wasm = wat::parse_str("(component)").unwrap();
+            let size_last_byte = if layout == "(i) Component" {
+                let offset = wasm.len() + 2;
+                wasm.extend_from_slice(&custom);
+                offset
+            } else {
+                let mut module = wat::parse_str("(module)").unwrap();
+                let offset = module.len() + 2;
+                module.extend_from_slice(&custom);
+                assert!(module.len() < 0x80, "{layout}: {case}: one-byte size");
+                wasm.extend_from_slice(&[0x01, module.len() as u8]);
+                let offset = wasm.len() + offset;
+                wasm.extend_from_slice(&module);
+                offset
+            };
+            assert!(
+                Validator::new().validate_all(&wasm).is_ok(),
+                "{layout}: {case}: valid Component"
             );
-        }
-        let result = audit_component(&wasm, &[]);
-        assert_eq!(result, expected, "padded size with name {name:?}");
-        if let Err(refusal) = result {
-            assert_eq!(refusal.to_string(), "code in custom section");
+            if expected.is_err() {
+                assert_eq!(
+                    &wasm[size_last_byte..size_last_byte + 24],
+                    wat::parse_str("(module (func))").unwrap(),
+                    "{layout}: {case}: whole hidden module"
+                );
+            }
+            let result = audit_component(&wasm, &[]);
+            assert_eq!(result, expected, "{layout}: {case}: padded size");
+            if let Err(refusal) = result {
+                assert_eq!(
+                    refusal.to_string(),
+                    "code in custom section",
+                    "{layout}: {case}"
+                );
+            }
         }
     }
 }

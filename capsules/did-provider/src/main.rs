@@ -747,13 +747,15 @@ mod tests {
 
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
-    /// The committed list records these falsifiers.
-    const EXPECTED_FALSIFIER_IDS: [&str; 18] = [
+    /// The committed list records these falsifiers, including DID20, which
+    /// makes a missing `sandbox-exec` on macOS skip instead of failing.
+    const EXPECTED_FALSIFIER_IDS: [&str; 20] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
-        "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18",
+        "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
     ];
 
-    /// The repository root; `falsifiers.json` paths are relative to it.
+    /// The repository root; this crate, its test targets and the one runner's
+    /// `examples/agent-host` folder all sit below it.
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -912,6 +914,10 @@ mod tests {
             root.join("capsules/did-provider/src/main.rs").is_file(),
             "the repository root must own capsules/did-provider"
         );
+        // The one runner applies every edit relative to examples/agent-host, so
+        // the list names files by that rule and this test resolves them by the
+        // same rule (P10).
+        let edit_base = root.join("examples/agent-host");
 
         let mut ids: Vec<&str> = Vec::new();
         for entry in entries {
@@ -957,13 +963,14 @@ mod tests {
                 assert_ne!(old, new, "{id}: new must differ from old");
                 assert!(
                     !Path::new(file).is_absolute(),
-                    "{id}: {file} must be repository-relative"
+                    "{id}: {file} must not be absolute; \
+                     edit paths are relative to examples/agent-host"
                 );
-                let source_path = root.join(file);
+                let source_path = edit_base.join(file);
                 let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
                     panic!(
-                        "{id}: edit file {} must exist and be readable: {err}",
-                        source_path.display()
+                        "{id}: {file}: edit paths are relative to examples/agent-host; \
+                         the edit file must exist and be readable: {err}"
                     )
                 });
                 let occurrences = source.matches(old).count();
@@ -1068,6 +1075,50 @@ mod tests {
             let expected = format!("{id}: {selector} must not be ignored in the test executable");
             assert_eq!(refusal.downcast_ref::<String>(), Some(&expected));
         }
+    }
+
+    /// The list names edit files by the runner's rule, not the repository root.
+    ///
+    /// Regression: writing every edit path from the repository root must be
+    /// refused for DID01, the first entry, in the runner's own words.
+    ///
+    /// Falsifier: resolve edits from `repo_root()` again (DID19); this test
+    /// fails because the DID01 refusal does not come.
+    #[test]
+    fn falsifiers_list_rejects_a_repository_relative_path() {
+        let mut doc = read_falsifiers_list();
+        let entries = doc["falsifiers"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("the falsifier list must carry a falsifiers array"));
+        for entry in entries {
+            let id = entry["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every falsifier needs an id"))
+                .to_owned();
+            let edits = entry["edits"]
+                .as_array_mut()
+                .unwrap_or_else(|| panic!("{id}: edits must be a list"));
+            for edit in edits {
+                let file = edit["file"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
+                let repository_relative = file.strip_prefix("../../").unwrap_or_else(|| {
+                    panic!("{id}: {file} must start with ../../ (relative to examples/agent-host)")
+                });
+                edit["file"] = serde_json::Value::String(repository_relative.to_owned());
+            }
+        }
+        let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+            .expect_err("the list must refuse paths written from the repository root");
+        let message = refusal
+            .downcast_ref::<String>()
+            .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+        let expected = "DID01: capsules/did-provider/src/main.rs: \
+                        edit paths are relative to examples/agent-host";
+        assert!(
+            message.contains(expected),
+            "the refusal must name DID01, its file and the runner's path rule; got: {message}"
+        );
     }
 
     // Keep the test declaration in source while removing it from the harness.

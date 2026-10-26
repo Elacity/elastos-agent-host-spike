@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). Files are relative to examples/agent-host.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -1044,6 +1044,70 @@
           "file": "falsify.py",
           "old": "    \"capsules/wallet-provider/tests/confine.rs\",\n    \"capsules/wallet-provider/src/tests/falsifiers.rs\",",
           "new": "    \"capsules/wallet-provider/tests/confine.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV50",
+      "title": "the capsule-identity command builds the wasm-capsule manifest",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsule-identity\": REPO / \"lab\" / \"capsule-identity\" / \"Cargo.toml\",",
+          "new": "    \"capsule-identity\": REPO / \"lab\" / \"wasm-capsule\" / \"Cargo.toml\","
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV51",
+      "title": "startup recovery skips capsule-identity's source",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/wallet-provider/src/tests/falsifiers.rs\",\n    \"lab/capsule-identity/src/lib.rs\",",
+          "new": "    \"capsules/wallet-provider/src/tests/falsifiers.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV52",
+      "title": "startup recovery skips capsule-identity's test support",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/capsule-identity/src/lib.rs\",\n    \"lab/capsule-identity/tests/common/mod.rs\",",
+          "new": "    \"lab/capsule-identity/src/lib.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV53",
+      "title": "startup recovery skips capsule-identity's fixture",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/capsule-identity/tests/common/mod.rs\",\n    \"lab/capsule-identity/fixtures/wc001-core/capsule.json\",",
+          "new": "    \"lab/capsule-identity/tests/common/mod.rs\","
         }
       ],
       "tests": [
