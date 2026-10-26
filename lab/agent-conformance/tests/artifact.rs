@@ -6,14 +6,26 @@ use probe::{build_probe, Effect};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use wasmparser::{Encoding, Parser, Payload, Validator};
 
-fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 3] {
-    static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 3]> = OnceLock::new();
+static PROBE_BUILD: Mutex<()> = Mutex::new(());
+
+fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 8] {
+    static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 8]> = OnceLock::new();
     BUILDS.get_or_init(|| {
-        [Effect::Default, Effect::Read, Effect::Network]
-            .map(|effect| (effect, [build_probe(effect, 1), build_probe(effect, 2)]))
+        let _serial = PROBE_BUILD.lock().unwrap();
+        [
+            Effect::Default,
+            Effect::Read,
+            Effect::Network,
+            Effect::Task(0),
+            Effect::Task(1),
+            Effect::Task(2),
+            Effect::Task(3),
+            Effect::Runaway,
+        ]
+        .map(|effect| (effect, [build_probe(effect, 1), build_probe(effect, 2)]))
     })
 }
 
@@ -157,23 +169,31 @@ fn probe_manifest_names_the_current_bus_world() {
 
 #[test]
 fn probe_effects_are_exclusive() {
-    let _ = builds();
-    let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
-        .unwrap()
-        .args([
-            "check",
-            "--locked",
-            "--offline",
-            "--manifest-path",
-            "lab/agent-conformance/probe/Cargo.toml",
-            "--features",
-            "read,network",
-        ])
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "two effects must be refused");
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("select exactly one probe effect: read or network"));
+    let _serial = PROBE_BUILD.lock().unwrap();
+    for features in [
+        "read,network",
+        "read,task",
+        "read,runaway",
+        "network,task",
+        "network,runaway",
+        "task,runaway",
+    ] {
+        let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+            .unwrap()
+            .args([
+                "check",
+                "--locked",
+                "--offline",
+                "--manifest-path",
+                "lab/agent-conformance/probe/Cargo.toml",
+                "--features",
+                features,
+            ])
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "two effects must be refused");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("select exactly one probe effect"));
+    }
 }

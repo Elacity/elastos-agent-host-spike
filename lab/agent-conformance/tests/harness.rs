@@ -1,4 +1,4 @@
-use agent_conformance::harness::{data_dir, RunningChild, ThrowawayHome};
+use agent_conformance::harness::{data_dir, Launch, RunningChild, RunningInstances, ThrowawayHome};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -193,5 +193,171 @@ fn managed_child_drop_kills_its_group_and_keeps_root() {
     );
     assert!(root.is_dir());
     // This test has now verified the retained-root policy and empty group.
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn parallel_collection_preserves_each_status_and_capture() {
+    let homes = [(); 4].map(|_| ThrowawayHome::new().unwrap());
+    let ids = ["0", "1", "2", "3"];
+    let launches: Vec<_> = homes.iter().zip(ids).map(|(home, id)| Launch {
+        home,
+        program: Path::new("/bin/sh"),
+        args: vec!["-c", "touch ready; while [ ! -f release ]; do /bin/sleep 0.01; done; printf 'out%s' \"$1\"; printf 'err%s' \"$1\" >&2; exit \"$1\"", "fixture", id],
+    }).collect();
+    let running = RunningInstances::start(&launches, None).unwrap();
+    let started = Instant::now();
+    while homes.iter().any(|home| !home.home().join("ready").exists()) {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "all children must start before any collection"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for home in &homes {
+        fs::write(home.home().join("release"), b"").unwrap();
+    }
+    let completions = running.collect(Duration::from_secs(5)).unwrap();
+    assert_eq!(completions.len(), 4);
+    for (index, completion) in completions.iter().enumerate() {
+        assert_eq!(completion.output.status.code(), Some(index as i32));
+        assert_eq!(completion.output.stdout, format!("out{index}").as_bytes());
+        assert_eq!(completion.output.stderr, format!("err{index}").as_bytes());
+        assert!(completion.elapsed < Duration::from_secs(5));
+    }
+    for home in homes {
+        home.finish().unwrap();
+    }
+}
+
+#[test]
+fn parallel_timeout_is_failure_and_reaps_every_group() {
+    let homes = [(); 2].map(|_| ThrowawayHome::new().unwrap());
+    let launches: Vec<_> = homes
+        .iter()
+        .map(|home| Launch {
+            home,
+            program: Path::new("/bin/sh"),
+            args: vec!["-c", "printf '%s' \"$$\" > pid; exec /bin/sleep 3"],
+        })
+        .collect();
+    let running = RunningInstances::start(&launches, None).unwrap();
+    let started = Instant::now();
+    let result = running.collect(Duration::from_secs(1));
+    let reason = result.err();
+    for home in homes {
+        let pgid = fs::read_to_string(home.home().join("pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(!home.group_is_alive(pgid).unwrap());
+        let root = home.root().to_path_buf();
+        let finish = home.finish();
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert_eq!(
+            finish,
+            Err("keep the root after an unstopped child or failed stop")
+        );
+    }
+    assert_eq!(
+        reason,
+        Some("instances exceeded their shared time bound; harness cleanup is not a Runtime stop")
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn parallel_attach_uses_only_guarded_fixture_coordinates() {
+    let operator = ThrowawayHome::new().unwrap();
+    let home = ThrowawayHome::new().unwrap();
+    let launches = [Launch {
+        home: &home,
+        program: Path::new("/usr/bin/env"),
+        args: vec![],
+    }];
+    let result = RunningInstances::start(&launches, Some(&operator))
+        .unwrap()
+        .collect(Duration::from_secs(2))
+        .unwrap();
+    let output = &result[0].output;
+    assert!(output.status.success() && output.stderr.is_empty());
+    let env = std::str::from_utf8(&output.stdout).unwrap();
+    assert_eq!(
+        env.lines().count(),
+        5,
+        "attached child environment must have five entries"
+    );
+    for expected in [
+        format!("HOME={}", home.home().display()),
+        format!("TMPDIR={}", home.temp().display()),
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin".into(),
+        "ELASTOS_CARRIER_MDNS=0".into(),
+        format!(
+            "ELASTOS_RUNTIME_COORDS_FILE={}",
+            operator.data().join("runtime-coords.json").display()
+        ),
+    ] {
+        assert!(
+            env.lines().any(|line| line == expected),
+            "required fixture environment entry is missing"
+        );
+    }
+    // No coordinates content is created or read. A damaged operator guard must
+    // refuse even a harmless env command before starting any client.
+    fs::remove_dir(operator.temp()).unwrap();
+    std::os::unix::fs::symlink(home.temp(), operator.temp()).unwrap();
+    let refused = RunningInstances::start(&launches, Some(&operator)).err();
+    fs::remove_file(operator.temp()).unwrap();
+    fs::create_dir(operator.temp()).unwrap();
+    assert_eq!(
+        refused,
+        Some("temp directory must use directories without symlinks")
+    );
+    home.finish().unwrap();
+    operator.finish().unwrap();
+}
+
+#[test]
+fn parallel_collection_refuses_live_descendants() {
+    let home = ThrowawayHome::new().unwrap();
+    let launches = [Launch {
+        home: &home,
+        program: Path::new("/bin/sh"),
+        args: vec!["-c", "printf '%s' \"$$\" > pid; /bin/sleep 30 & exit 0"],
+    }];
+    let result = RunningInstances::start(&launches, None)
+        .unwrap()
+        .collect(Duration::from_secs(2));
+    let pgid = fs::read_to_string(home.home().join("pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let alive = home.group_is_alive(pgid).unwrap();
+    // Settle the planted missing-drain check too, before failing the assertion.
+    if alive {
+        home.launch(
+            Path::new("/bin/kill"),
+            &["-KILL", &format!("-{pgid}")],
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let started = Instant::now();
+        while home.group_is_alive(pgid).unwrap() {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert_eq!(
+        result.err(),
+        Some("completed child left a live process group")
+    );
+    assert!(!alive, "collection failure must clean every descendant");
+    let root = home.root().to_path_buf();
+    assert_eq!(
+        home.finish(),
+        Err("keep the root after an unstopped child or failed stop")
+    );
     fs::remove_dir_all(root).unwrap();
 }

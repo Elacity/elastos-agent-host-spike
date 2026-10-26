@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 read = []
 network = []
+task = []
+runaway = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wit-bindgen = "=0.57.1"

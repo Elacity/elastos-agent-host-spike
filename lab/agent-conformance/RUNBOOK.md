@@ -153,3 +153,42 @@ test as well as its original host test; both must fail under that mutation.
 F-probe-e follows the shared builder to `tests/common/probe.rs`. The remaining
 artifact falsifiers retain their named checks. Commands and measured outputs
 are recorded in LOG.md for the supervisor's PR and review.
+
+
+Task 005 adds the following rows. The `process_isolation::` prefix and the
+scope line printed by `run.sh` mean **process isolation, not capsule isolation**.
+
+- `process_isolation::parallel_instances_complete_independently`: four `elastos run` clients start before collection, with separate temporary Homes, and attach to one fixture operator. Each probe computes its own addition and returns exactly its own diagnostic; both captures exclude sibling results. All finish inside one ten-second deadline from the first launch.
+- `process_isolation::runaway_trap_is_bounded_while_siblings_finish`: the build-time runaway loops without bound. Runtime must return a natural lifecycle trap with exit 1 within the same deadline; the three finite siblings still return their expected diagnostics. Harness cleanup is a failure, never a Runtime stop.
+- `process_isolation::runaway_is_stopped_with_reason`: BLOCKED (AC-005-REASON). Runtime must also expose the resource-stop cause on stderr. The strict assertion stays in this ignored test.
+- `parallel_capsules_complete_independently`: BLOCKED (RT4). Separate client processes cannot establish resident capsule isolation in one Runtime.
+- `parallel_instances_return_success_payloads`: BLOCKED (AC-002-ARGS). Bus v1 success returns unit. Finite probe results use `BusError::Unavailable` and exit 1 deliberately; their PASS rows prove diagnostic completion only.
+- `parallel_collection_preserves_each_status_and_capture`: four shell fixtures all reach a barrier before collection, then return distinct statuses, stdout and stderr.
+- `parallel_timeout_is_failure_and_reaps_every_group`: a shared deadline fails with its exact safety-net reason, reaps every group, and retains failed Homes.
+- `parallel_collection_refuses_live_descendants`: a parent exit with a live child fails collection and triggers group cleanup.
+- `parallel_attach_uses_only_guarded_fixture_coordinates`: clients receive exactly five environment entries and a damaged operator Home is refused before launch. The extra entry is the fixture-derived `ELASTOS_RUNTIME_COORDS_FILE`; Runtime alone reads its contents.
+
+`RunningInstances::start` and `collect` extend the existing spawn site. Every
+child still gets a cleared environment, null stdin and in-root capture files.
+The group borrows both client and operator Homes until it settles. A failed
+start or collection drops unfinished children through the existing process-group
+cleanup. The operator gets the usual two socket samples and explicit stop.
+
+The one probe has `task` and `runaway` Cargo features in addition to the earlier
+read/network effects. The task index is supplied at build time; no guest
+selector or environment import is added. All eight built variants retain the
+Bus import check and two-build hash comparison. Builds and live runs use the
+same staging function and artifact hashes. The tasks request no resource and
+perform no provider, model or network effect.
+
+F-ac3a uses the task's permitted probe mutation because Runtime fuel and memory
+limits are compile-time constants. It replaces the runaway loop with 1,000
+iterations and a successful return. The narrower live trap test must fail;
+restoring the loop must restore PASS. This proves the trap check distinguishes
+Runtime interruption from probe completion. The full stop-with-reason grade
+remains BLOCKED. F-parallel-result replaces task-b's fixture with task-a's;
+both named process tests must fail on their own-result check. F-parallel-capture,
+F-parallel-bound, F-parallel-operator-guard, F-parallel-coordinates,
+F-parallel-start and F-parallel-drain plant errors in the harness rules and each must fail its named harness test. Apply the exact edits from
+`falsifiers.json` by hand and restore them before the normal gate. LOG.md holds
+the commands and measured outcomes; this adds no second runner.

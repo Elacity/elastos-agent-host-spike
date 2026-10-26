@@ -14,12 +14,23 @@ use std::time::{Duration, Instant};
 // native build preparation sequential even with RUST_TEST_THREADS=2.
 static EFFECT_RUN: Mutex<()> = Mutex::new(());
 
-fn assert_refusal(effect: Effect, bus_error: &str) {
-    let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
-    let bytes = build_probe(effect, 1);
-    let hash = format!("{:x}", Sha256::digest(&bytes));
-    let runtime = runtime_under_test().expect("build the checkout Runtime offline");
-    let home = ThrowawayHome::new().unwrap();
+#[path = "common/parallel.rs"]
+mod process_isolation;
+
+#[test]
+#[ignore = "blocked: RT4"]
+fn parallel_capsules_complete_independently() {
+    panic!("blocked: RT4 — resident instances in one Runtime need Bus v2 lifecycle support");
+}
+
+#[test]
+#[ignore = "blocked: AC-002-ARGS"]
+fn parallel_instances_return_success_payloads() {
+    panic!("blocked: AC-002-ARGS — Bus lifecycle needs a success payload and CLI forwarding");
+}
+
+fn stage_probe(home: &ThrowawayHome, bytes: &[u8], effect: Effect) -> std::path::PathBuf {
+    let hash = format!("{:x}", Sha256::digest(bytes));
     home.guard(home.home(), home.data()).unwrap();
     // The hash identifies these exact bytes; the directory only locates them.
     // Bundle-CID admission remains a separate grade point.
@@ -36,6 +47,16 @@ fn assert_refusal(effect: Effect, bus_error: &str) {
     )
     .unwrap();
     println!("probe component sha256:{hash} effect:{}", effect.name());
+
+    capsule
+}
+
+fn assert_refusal(effect: Effect, bus_error: &str) {
+    let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
+    let bytes = build_probe(effect, 1);
+    let runtime = runtime_under_test().expect("build the checkout Runtime offline");
+    let home = ThrowawayHome::new().unwrap();
+    let capsule = stage_probe(&home, &bytes, effect);
 
     let mut operator = common::operator::Operator::start(&home).expect("start fixture operator");
     operator.ready().expect("operator readiness");

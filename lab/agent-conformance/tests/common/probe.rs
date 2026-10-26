@@ -8,6 +8,8 @@ pub enum Effect {
     Default,
     Read,
     Network,
+    Task(u8),
+    Runaway,
 }
 
 impl Effect {
@@ -16,6 +18,12 @@ impl Effect {
             Self::Default => "default",
             Self::Read => "read",
             Self::Network => "network",
+            Self::Task(0) => "task-a",
+            Self::Task(1) => "task-b",
+            Self::Task(2) => "task-c",
+            Self::Task(3) => "task-d",
+            Self::Task(_) => panic!("only four task fixtures exist"),
+            Self::Runaway => "runaway",
         }
     }
 
@@ -26,6 +34,8 @@ impl Effect {
             Self::Default => "-Dwarnings",
             Self::Read => "-Dwarnings --cfg feature=\"read\"",
             Self::Network => "-Dwarnings --cfg feature=\"network\"",
+            Self::Task(_) => "-Dwarnings --cfg feature=\"task\"",
+            Self::Runaway => "-Dwarnings --cfg feature=\"runaway\"",
         }
     }
 }
@@ -44,6 +54,14 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
         .arg(root.join("scripts/build-component-capsule.sh"))
         .arg(lane.join("probe"))
         .env("RUSTFLAGS", effect.rustflags())
+        .env(
+            "AC_PROBE_TASK_INDEX",
+            match effect {
+                Effect::Task(index) => index,
+                _ => 0,
+            }
+            .to_string(),
+        )
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()
         .expect("start the existing component build script");
