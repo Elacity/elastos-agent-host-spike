@@ -85,8 +85,12 @@ use std::process::Command;
 /// WP78, which renames the did operations table's cited test in
 /// `capsules/did-provider/tests/confine.rs`, so
 /// `every_operations_table_cites_existing_tests` fails because the cited
-/// function is gone.
-const EXPECTED_FALSIFIERS: usize = 76;
+/// function is gone. WP79 and WP80 bypass the operations-table check's
+/// unresolved-file and no-citation refusals, so
+/// `operations_table_check_reports_each_missing_citation` fails. WP81 and WP82
+/// bypass its absolute-path and resolved-path containment refusals, so
+/// `operations_table_check_rejects_paths_outside_provider` fails.
+const EXPECTED_FALSIFIERS: usize = 80;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

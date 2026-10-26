@@ -1891,8 +1891,9 @@ fn backtick_spans(text: &str) -> Vec<&str> {
 ///
 /// The section under `OPERATIONS_HEADING` must cite at least one backtick span
 /// that holds a file relative to `capsule_dir`, two colons and a function
-/// name. A cited file must exist and hold `fn <fn>(`. The check does not decide
-/// whether that function is a `#[test]`.
+/// name. A cited path must be relative and resolve beneath `capsule_dir`,
+/// including through symbolic links, before its file is read. The file must
+/// hold `fn <fn>(`. The check does not decide whether it is a `#[test]`.
 fn operations_table_citation_problems(
     document_name: &str,
     document: &str,
@@ -1901,6 +1902,15 @@ fn operations_table_citation_problems(
     let section = match section_under_one_heading(document_name, document, OPERATIONS_HEADING) {
         Ok(section) => section,
         Err(problems) => return problems,
+    };
+    let provider_root = match fs::canonicalize(capsule_dir) {
+        Ok(root) => root,
+        Err(err) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: provider directory {} cannot be resolved: {err}",
+                capsule_dir.display()
+            )];
+        }
     };
     let mut problems = Vec::new();
     let mut citations: Vec<&str> = Vec::new();
@@ -1912,8 +1922,35 @@ fn operations_table_citation_problems(
             continue;
         }
         citations.push(span);
+        if Path::new(file).is_absolute() {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {span} names an absolute path; \
+                 cited files must be relative to the provider directory"
+            ));
+            continue;
+        }
         let path = capsule_dir.join(file);
-        let source = match fs::read_to_string(&path) {
+        let resolved = match fs::canonicalize(&path) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {span} names a file that is not \
+                     readable because its path cannot be resolved: {} ({err})",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if !resolved.starts_with(&provider_root) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {span} resolves outside the provider directory: \
+                 {} (provider directory {})",
+                resolved.display(),
+                provider_root.display()
+            ));
+            continue;
+        }
+        let source = match fs::read_to_string(&resolved) {
             Ok(source) => source,
             Err(err) => {
                 problems.push(format!(
@@ -2661,7 +2698,8 @@ fn falsifier_document_read_rejects_unreadable_source() {
 ///
 /// Falsifier: WP78 renames `outside_write_denied` in did's `tests/confine.rs`,
 /// so the real document's citation names a missing function; the real-document
-/// test above fails on it.
+/// test above fails on it. WP79 bypasses the unresolved-file refusal and WP80
+/// bypasses the no-citation refusal; this fixture test catches both.
 #[test]
 fn operations_table_check_reports_each_missing_citation() {
     let capsule = tempfile::tempdir().expect("temporary provider folder");
@@ -2696,6 +2734,13 @@ fn operations_table_check_reports_each_missing_citation() {
         "the reason must name the document, the citation and the missing function: {}",
         problems[0]
     );
+    assert_eq!(
+        problems,
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: tests/confine.rs::absent_case names a function that {} does not hold",
+            capsule.path().join("tests/confine.rs").display()
+        )]
+    );
 
     let missing_file = "## Operations and the rights they need\n\n| `tests/absent.rs::present_case` |\n\n## Host-OS status\n";
     let problems =
@@ -2712,6 +2757,31 @@ fn operations_table_check_reports_each_missing_citation() {
         "the reason must name the document, the citation and the missing file: {}",
         problems[0]
     );
+    let absent_path = capsule.path().join("tests/absent.rs");
+    let absent_error = fs::canonicalize(&absent_path).expect_err("fixture file is absent");
+    assert_eq!(
+        problems,
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: tests/absent.rs::present_case names a file that is not readable because its path cannot be resolved: {} ({absent_error})",
+            absent_path.display()
+        )]
+    );
+
+    for file in ["tests", "tests/invalid-utf8.rs"] {
+        let path = capsule.path().join(file);
+        if file.ends_with(".rs") {
+            fs::write(&path, [0xff]).expect("fixture invalid UTF-8 file");
+        }
+        let read_error = fs::read_to_string(&path).expect_err("fixture source is unreadable");
+        let document = format!("{OPERATIONS_HEADING}\n\n`{file}::present_case`\n");
+        assert_eq!(
+            operations_table_citation_problems("fixture-provider", &document, capsule.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {file}::present_case names a file that is not readable: {} ({read_error})",
+                path.display()
+            )]
+        );
+    }
 
     let missing_section = "## Tests\n\n- `tests/confine.rs::present_case` is cited\n";
     let problems =
@@ -2728,6 +2798,16 @@ fn operations_table_check_reports_each_missing_citation() {
         "the reason must name the document and the missing heading: {}",
         problems[0]
     );
+    assert_eq!(
+        problems,
+        vec!["fixture-provider CONFINEMENT.md must hold one line ## Operations and the rights they need; found none"]
+    );
+
+    let duplicate_section = format!("{present}\n{present}");
+    assert_eq!(
+        operations_table_citation_problems("fixture-provider", &duplicate_section, capsule.path()),
+        vec!["fixture-provider CONFINEMENT.md must hold one line ## Operations and the rights they need; found 2"]
+    );
 
     let no_citation = "## Operations and the rights they need\n\n| init |\n\n## Host-OS status\n";
     let problems =
@@ -2742,6 +2822,98 @@ fn operations_table_check_reports_each_missing_citation() {
         "the reason must name the document and the missing citation: {}",
         problems[0]
     );
+    assert_eq!(
+        problems,
+        vec!["fixture-provider CONFINEMENT.md: ## Operations and the rights they need cites no file::fn test"]
+    );
+
+    let absent_provider = capsule.path().join("absent-provider");
+    let provider_error =
+        fs::canonicalize(&absent_provider).expect_err("fixture provider is absent");
+    assert_eq!(
+        operations_table_citation_problems("fixture-provider", present, &absent_provider),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: provider directory {} cannot be resolved: {provider_error}",
+            absent_provider.display()
+        )]
+    );
+}
+
+/// Citation evidence belongs to its named provider, including after resolving
+/// a file link or a directory link. Absolute paths have their own refusal.
+/// Every outside file holds the cited function, so accepting one loses the
+/// containment refusal. A link to an inside file remains valid.
+///
+/// WP81 bypasses the absolute-path refusal and WP82 bypasses the resolved-path
+/// containment refusal; this test catches each mutation. No process starts.
+#[test]
+fn operations_table_check_rejects_paths_outside_provider() {
+    let capsules = tempfile::tempdir().expect("temporary capsules folder");
+    let provider = capsules.path().join("fixture-provider");
+    // The sibling shares the provider's string prefix but is a different path component.
+    let sibling = capsules.path().join("fixture-provider-sibling");
+    for dir in [&provider, &sibling] {
+        fs::create_dir_all(dir.join("tests")).expect("fixture tests folder");
+        fs::write(dir.join("tests/confine.rs"), "fn present_case() {}\n")
+            .expect("fixture test source");
+    }
+    for file in [
+        provider.join("tests/confine.rs"),
+        sibling.join("tests/confine.rs"),
+    ] {
+        let span = format!("{}::present_case", file.display());
+        let document = format!("{OPERATIONS_HEADING}\n\n`{span}`\n");
+        assert_eq!(
+            operations_table_citation_problems("fixture-provider", &document, &provider),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {span} names an absolute path; cited files must be relative to the provider directory"
+            )]
+        );
+    }
+
+    let mut outside = vec!["../fixture-provider-sibling/tests/confine.rs"];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink(
+            sibling.join("tests/confine.rs"),
+            provider.join("tests/outside.rs"),
+        )
+        .expect("fixture file link outside the provider");
+        symlink(sibling.join("tests"), provider.join("linked-tests"))
+            .expect("fixture directory link outside the provider");
+        outside.extend(["tests/outside.rs", "linked-tests/confine.rs"]);
+        symlink("confine.rs", provider.join("tests/inside.rs"))
+            .expect("fixture file link inside the provider");
+        let inside = format!("{OPERATIONS_HEADING}\n\n`tests/inside.rs::present_case`\n");
+        assert!(
+            operations_table_citation_problems("fixture-provider", &inside, &provider).is_empty(),
+            "a relative citation that resolves inside the provider must pass"
+        );
+        // A provider directory reached through a link has the same canonical boundary.
+        let provider_alias = capsules.path().join("provider-alias");
+        symlink(&provider, &provider_alias).expect("fixture provider directory link");
+        assert!(
+            operations_table_citation_problems("fixture-provider", &inside, &provider_alias)
+                .is_empty(),
+            "the provider directory and citation must use the same resolved boundary"
+        );
+    }
+    let root = fs::canonicalize(&provider).expect("fixture provider resolves");
+    let escaped = fs::canonicalize(sibling.join("tests/confine.rs"))
+        .expect("fixture outside source resolves");
+    for file in outside {
+        let span = format!("{file}::present_case");
+        let document = format!("{OPERATIONS_HEADING}\n\n`{span}`\n");
+        assert_eq!(
+            operations_table_citation_problems("fixture-provider", &document, &provider),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {span} resolves outside the provider directory: {} (provider directory {})",
+                escaped.display(),
+                root.display()
+            )]
+        );
+    }
 }
 
 /// The one contract check refuses a profile that omits the explicit network
