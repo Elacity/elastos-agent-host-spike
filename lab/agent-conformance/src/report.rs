@@ -305,6 +305,7 @@ pub fn write_run(
     };
     let document = serde_json::json!({
         "schema": "agent-conformance.versions/v1",
+        "description": "Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.",
         "identity_status": if complete { "complete" } else { "incomplete" },
         "repository": git,
         "runtime_sha256": evidence.identities.runtime,

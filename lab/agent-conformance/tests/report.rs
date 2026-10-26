@@ -150,6 +150,10 @@ fn versions_receipt_binds_current_run() {
         );
         assert!(report.passed, "{:?}", report.failures);
         let document = read_receipt(&path);
+        assert_eq!(
+            document["description"],
+            "Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence."
+        );
         assert_eq!(document["repository"], serde_json::to_value(git).unwrap());
         assert_eq!(document["runtime_sha256"], sha256(&[seed, 1]));
         assert_eq!(document["localhost_provider_sha256"], sha256(&[seed, 2]));

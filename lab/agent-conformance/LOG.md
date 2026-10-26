@@ -2177,3 +2177,106 @@ this lane. The cached upstream divergence is zero ahead and zero behind.
 Network access and Git-state changes were outside this builder's work. Other
 worktrees and refs remain under their existing owners. These are author
 checks; the supervisor owns independent review and integration.
+
+
+## 018 follow-up — explicit receipt authority boundary (2026-10-26)
+
+The starting checkout already contains the receipt writer, staging identities,
+three receipt tests and the two required falsifiers from task 018. This follow-up
+keeps that implementation and adds the missing authority description to
+`src/report.rs::write_run`. Each receipt now states that a lab CID and a separate
+signed record give zero admission or permission credit. Runtime decides admission;
+resource authority requires its grant for the requesting session. Only the
+corresponding observed Runtime journey supplies that evidence. RUNBOOK gives the
+same ownership rule and retains the existing review-and-remove policy.
+
+`versions_receipt_binds_current_run` now checks the serialized description in
+both synthetic runs. New F-versions-boundary removes that field and fails this
+named test. F-versions-required and F-versions-bundle retain their existing edits
+and named tests. All mutations stayed in `src/report.rs`, used synthetic inputs,
+and restored the exact source bytes in a `finally` block.
+
+All build commands held the existing shared `fcntl.flock` lease. Free space was
+28.18 GiB before the focused checks, above the 12 GiB estimate plus 2 GiB reserve.
+Commands ran from the repository root with:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-018-followup"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_rejects_incomplete_identity -- --exact --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_uses_the_staged_bundle_identity -- --exact --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_binds_current_run -- --exact --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+Each single-test command ran once planted and once restored. The focused report
+suite passed all four tests in 2.12 s. The initial format check passed in 0.08 s.
+
+| Falsifier | Planted | Restored |
+| --- | --- | --- |
+| F-versions-required | Exit 101; named test failed; 0.86 s | Exit 0; named test passed; 0.72 s |
+| F-versions-bundle | Exit 101; named test failed; 0.87 s | Exit 0; named test passed; 0.65 s |
+| F-versions-boundary | Exit 101; named test failed; 1.31 s | Exit 0; named test passed; 0.88 s |
+
+The basic gate passed: `git diff --check`, `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 method contracts),
+`node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`,
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, and
+`bash -n lab/agent-conformance/run.sh`.
+
+### Principles check for this follow-up
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New names or URLs in place of code/content hashes? | No | `src/identity.rs:73` retains separate component SHA-256 and bundle lab CID fields. |
+| 2. New capsule or UI ambient authority? | No | `src/report.rs:308` describes evidence; the change leaves Runtime grants and the probe unchanged. |
+| 3. A second path or copy of an operation rule? | No | `src/report.rs:279` retains the shared evidence parser; `src/identity.rs:62` calls the existing bundle library. |
+| 4. Does the Runtime core grow? | No | `src/report.rs:308` adds a host-side receipt field within this lane. |
+| 5. Do new refusals fail closed with a clear reason? | Yes | `src/report.rs:91` and `src/report.rs:339` retain the tested identity and exclusive-write refusals. |
+| 6. Does the capsule keep its logic and granted Bus calls? | Yes | `tests/artifact.rs:88` retains the Bus import test; probe source stays unchanged. |
+| 7. Do named tests and caught falsifiers prove the rules? | Yes | `tests/report.rs:135` checks the added field; F-versions-boundary failed planted and passed restored. |
+| 8. Are identity, admission and allowance separate decisions? | Yes | `src/report.rs:308` records Runtime admission and the requesting session's resource grant as separate requirements. |
+
+### Fresh full gates and receipt inspection
+
+With local process/socket access for the isolated fixtures, the final formatting
+check passed in 0.13 s. The locked lane suite returned exit 0 in 406.62 s:
+31 passed, zero failed, five ignored with their existing blocker IDs. The
+artifact group took 233.49 s and the live effect group took 157.51 s. Free space
+was 28.17 GiB at gate start.
+
+`lab/agent-conformance/run.sh` returned exit 0 in 423.70 s, starting with
+27.62 GiB free. The matching table has 31 passing Cargo tests, five BLOCKED rows
+and A14 PASS. Its receipt is
+[`target/run-table.sX45vx/VERSIONS.json`](target/run-table.sX45vx/VERSIONS.json),
+6,823 bytes and the sole file retained in that fresh run directory.
+
+Inspection matched the embedded table byte for byte to stdout and checked its
+SHA-256. Both native hashes match `target/runtime/debug/elastos` and
+`target/runtime/debug/localhost-provider`. All eight launched identities match
+this invocation's typed observations and its separate build-only records.
+The receipt records the current full repository commit and `dirty: true`;
+`identity_status` is `complete`, `command_success` is true, and `suite_outcome`
+stays `BLOCKED`. Its authority description is present. These are version and
+journey results for the lab fixture, with the existing admission and grant
+boundaries retained.
+
+The normal gates created zero retained Homes. A final read-only process census
+found zero matching lane Runtime/provider processes. Three expected synthetic
+falsifier failure roots remain for supervisor review, with their removal
+condition in the ignored lifecycle inventory. The receipt and command outputs
+also remain until that review. All lane code, manifests, scripts and falsifiers
+had identical SHA-256 values before and after the full gates.
+
+The final branch/worktree inventory covers the existing task checkout, with
+cached upstream divergence zero ahead / zero behind. Network access remains
+disabled, so this is cached-ref evidence. The builder made source edits only
+inside this lane and left Git history and refs unchanged. The supervisor owns
+independent review, commits and integration.

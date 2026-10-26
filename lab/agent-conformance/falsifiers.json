@@ -499,6 +499,22 @@
       "tests": [
         "versions_receipt_uses_the_staged_bundle_identity"
       ]
+    },
+    {
+      "id": "F-versions-boundary",
+      "title": "omit the receipt authority boundary",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        \"description\": \"Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.\",\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "versions_receipt_binds_current_run"
+      ]
     }
   ]
 }

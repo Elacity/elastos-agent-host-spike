@@ -209,7 +209,11 @@ exact graded table plus its SHA-256. The sibling identity library owns the bundl
 walk, manifest validation and encoding. The staging path uses its checked entries
 for the component bytes. The lab CID covers `capsule.json` and the payload;
 Runtime CID launch remains BACKLOG item 13. Identity, admission and resource
-allowance remain separate decisions.
+allowance remain separate decisions. The receipt's description gives the lab
+CID and any separate signed record zero admission or permission credit.
+Runtime decides admission. Resource authority requires a Runtime grant for the
+requesting session; only the corresponding observed Runtime journey supplies
+that evidence. The signed-record contract stays with its owner.
 
 Artifact observations stay in `build_only_probes`. Successful live launches
 supply `probes`. The report checks the required variants for each active journey
@@ -251,3 +255,5 @@ the bundle field while the component hash stays fixed. The extended
 F-versions-required bypasses the Runtime-identity requirement;
 F-versions-bundle writes the component hash into the receipt's bundle field.
 Each runs only its named synthetic report test, then passes after restoration.
+F-versions-boundary removes the receipt's authority description; the same
+current-run test must fail under that mutation and pass after restoration.
