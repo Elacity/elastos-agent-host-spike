@@ -5,6 +5,9 @@
 //! cx-wasm-audit crate's `audit` with the caller's granted imports. Ordinary
 //! callers grant nothing; only the grant tests pass a non-empty list.
 //!
+//! wc-009a: `read_grants`, the one lab grants file reader, and the grants the
+//! module does not import (`unused_grants()`), also in `verify.rs`.
+//!
 //! Every test key is made fresh in memory inside its test, with no fixed seed,
 //! and is never written, kept in a constant or printed. The signature stays in
 //! memory too: there is no signature file. The tests share one process, so
@@ -17,26 +20,21 @@ use capsule_identity::{
     Refusal as IdentityRefusal,
 };
 use common::build::{lane_dir, run_build, sha256_file, Receipt, TempDir};
+use common::grants::{env_f, grant, grants_file, write_grants, IMPORTING_MODULE};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use wasm_capsule_audit::{audit, DeclaredImport, Refusal as AuditRefusal};
-use wasm_capsule_tools::verify::{verify_bundle, verify_checked, VerifiedBundle, VerifyRefusal};
+use wasm_capsule_tools::verify::{
+    read_grants, verify_bundle, verify_checked, GrantsReason, GrantsRefusal, VerifiedBundle,
+    VerifyRefusal, GRANTS_LABEL, GRANTS_SCHEMA,
+};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
 /// The smallest core Wasm module: the magic and version 1, no sections.
 const MODULE: &[u8] = b"\0asm\x01\0\0\0";
-
-/// A valid core module that imports one function, `env.f`, of type
-/// `() -> ()`, and has nothing else.
-const IMPORTING_MODULE: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic, version 1
-    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: one type, () -> ()
-    0x02, 0x09, 0x01, // import section, 9 bytes, one import
-    0x03, b'e', b'n', b'v', 0x01, b'f', 0x00, 0x00, // env.f, a function of type 0
-];
 
 /// A valid core module with one custom section, `x`, whose data is a whole
 /// Wasm module: the audit's "code in custom section" case.
@@ -63,13 +61,6 @@ fn fresh_key() -> SigningKey {
 /// The canonical `did:key` of `key`, from the Runtime's own encoder.
 fn did(key: &SigningKey) -> String {
     elastos_identity::encode_signing_key_did(key)
-}
-
-fn env_f() -> DeclaredImport {
-    DeclaredImport {
-        module: "env".into(),
-        name: "f".into(),
-    }
 }
 
 /// This capsule's manifest with its entrypoint changed to `entrypoint`.
@@ -565,6 +556,213 @@ fn verifier_uses_audit_api_v1() {
     assert_eq!(wasm_capsule_audit::AUDIT_API, 1);
 }
 
+/// The reader's refusal for the file at `path`.
+fn grants_refused(path: &Path) -> GrantsRefusal {
+    match read_grants(path) {
+        Ok(grants) => panic!("read_grants passed {}: {grants:?}", path.display()),
+        Err(refusal) => refusal,
+    }
+}
+
+/// A grants document with `imports` as given and the right schema and label.
+fn grants_text(imports: &str) -> String {
+    format!(r#"{{"schema": "{GRANTS_SCHEMA}", "label": "{GRANTS_LABEL}", "imports": {imports}}}"#)
+}
+
+/// wc-009a: every refusal of `read_grants` has its own reason, asserted as an
+/// exact string after the path, and a well-formed file reads in file order.
+#[test]
+fn grants_file_refusals_keep_their_reason() {
+    assert_eq!(GRANTS_SCHEMA, "wc-009.lab-grants/v1");
+    assert_eq!(GRANTS_LABEL, "lab stand-in, not admission");
+    let tmp = TempDir::new("grants-refusals");
+    let folder = tmp.path();
+
+    // Well-formed: an empty list, and two grants kept in file order.
+    let empty = grants_file(folder, "empty.json", &[]);
+    assert_eq!(read_grants(&empty).expect("an empty list is valid"), []);
+    let two = grants_file(folder, "two.json", &[("env", "g"), ("env", "f")]);
+    assert_eq!(
+        read_grants(&two).expect("two grants are valid"),
+        [grant("env", "g"), env_f()]
+    );
+
+    // The file cannot be read: the OS cause is kept.
+    let missing = folder.join("missing.json");
+    let refusal = grants_refused(&missing);
+    match &refusal.reason {
+        GrantsReason::Unreadable(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound)
+        }
+        other => panic!("not an unreadable refusal: {other}"),
+    }
+    assert_eq!(refusal.path, missing);
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: the grants file cannot be read: No such file or directory (os error 2)",
+            missing.display()
+        )
+    );
+
+    let entry = "grant 1 is not an object of exactly two strings, module and name";
+    let cases: [(&str, String, &str); 19] = [
+        (
+            "not JSON",
+            "{".into(),
+            "the grants file is not JSON: EOF while parsing an object at line 1 column 1",
+        ),
+        (
+            "a list document",
+            "[]".into(),
+            "the grants file is not a JSON object",
+        ),
+        (
+            "a string document",
+            "\"grants\"".into(),
+            "the grants file is not a JSON object",
+        ),
+        (
+            "an unknown key",
+            format!(
+                r#"{{"schema": "{GRANTS_SCHEMA}", "label": "{GRANTS_LABEL}", "imports": [], "kind": "x"}}"#
+            ),
+            "the grants file has an unknown key \"kind\"",
+        ),
+        (
+            "no schema",
+            format!(r#"{{"label": "{GRANTS_LABEL}", "imports": []}}"#),
+            "the grants file has no \"schema\" key",
+        ),
+        (
+            "no label",
+            format!(r#"{{"schema": "{GRANTS_SCHEMA}", "imports": []}}"#),
+            "the grants file has no \"label\" key",
+        ),
+        (
+            "no imports",
+            format!(r#"{{"schema": "{GRANTS_SCHEMA}", "label": "{GRANTS_LABEL}"}}"#),
+            "the grants file has no \"imports\" key",
+        ),
+        (
+            "another schema",
+            format!(
+                r#"{{"schema": "wc-009.lab-grants/v2", "label": "{GRANTS_LABEL}", "imports": []}}"#
+            ),
+            "the grants file's schema is \"wc-009.lab-grants/v2\", not \"wc-009.lab-grants/v1\"",
+        ),
+        (
+            "a number schema",
+            format!(r#"{{"schema": 1, "label": "{GRANTS_LABEL}", "imports": []}}"#),
+            "the grants file's schema is 1, not \"wc-009.lab-grants/v1\"",
+        ),
+        (
+            "another label",
+            format!(r#"{{"schema": "{GRANTS_SCHEMA}", "label": "admission", "imports": []}}"#),
+            "the grants file's label is \"admission\", not \"lab stand-in, not admission\"",
+        ),
+        (
+            "imports as an object",
+            grants_text(r#"{"module": "env", "name": "f"}"#),
+            "the grants file's imports is not a list",
+        ),
+        (
+            "an entry that is a string",
+            grants_text(r#"[{"module": "env", "name": "g"}, "env.f"]"#),
+            entry,
+        ),
+        (
+            "an entry with no name",
+            grants_text(r#"[{"module": "env", "name": "g"}, {"module": "env"}]"#),
+            entry,
+        ),
+        (
+            "an entry with a third key",
+            grants_text(
+                r#"[{"module": "env", "name": "g"}, {"module": "env", "name": "f", "kind": "func"}]"#,
+            ),
+            entry,
+        ),
+        (
+            "an entry with another key",
+            grants_text(r#"[{"module": "env", "name": "g"}, {"module": "env", "nam": "f"}]"#),
+            entry,
+        ),
+        (
+            "an entry with a number name",
+            grants_text(r#"[{"module": "env", "name": "g"}, {"module": "env", "name": 1}]"#),
+            entry,
+        ),
+        (
+            "an entry with a null module",
+            grants_text(r#"[{"module": "env", "name": "g"}, {"module": null, "name": "f"}]"#),
+            entry,
+        ),
+        (
+            "the same pair twice",
+            grants_text(
+                r#"[{"module": "env", "name": "f"}, {"module": "env", "name": "g"}, {"name": "f", "module": "env"}]"#,
+            ),
+            "the grant env.f is listed twice",
+        ),
+        (
+            "a label with a trailing space",
+            format!(
+                r#"{{"schema": "{GRANTS_SCHEMA}", "label": "{GRANTS_LABEL} ", "imports": []}}"#
+            ),
+            "the grants file's label is \"lab stand-in, not admission \", not \"lab stand-in, not admission\"",
+        ),
+    ];
+    for (index, (kind, text, reason)) in cases.iter().enumerate() {
+        let path = write_grants(folder, &format!("case-{index}.json"), text);
+        let refusal = grants_refused(&path);
+        assert_eq!(refusal.path, path, "{kind}");
+        assert_eq!(
+            refusal.to_string(),
+            format!("{}: {reason}", path.display()),
+            "{kind}"
+        );
+    }
+}
+
+/// wc-009a: `unused_grants()` holds exactly the grants the module does not
+/// import, in file order, and `imports()` only what the module imports. The
+/// grants file is outside the bundle and no part of its lab CID.
+#[test]
+fn unused_grants_excludes_linked_and_preserves_file_order() {
+    let tmp = TempDir::new("verify-unused");
+    let bundle = importing_bundle(&tmp);
+    let key = fresh_key();
+    let sig = sign(&key, &bundle);
+    let name = bundle_identity(&bundle).expect("name the bundle");
+    let grants = grants_file(
+        tmp.path(),
+        "grants.json",
+        &[("z", "last"), ("env", "f"), ("a", "first")],
+    );
+    let granted: Vec<DeclaredImport> = read_grants(&grants).expect("read the grants");
+
+    let value = verified(verify_bundle(&bundle, Some(&sig), &[did(&key)], &granted));
+    assert_eq!(value.imports(), [env_f()], "the linked imports");
+    assert_eq!(
+        value.unused_grants(),
+        [grant("z", "last"), grant("a", "first")],
+        "the unused grants, in file order"
+    );
+    assert_eq!(value.cid(), name, "the grants changed the lab CID");
+    let mut paths: Vec<&str> = value
+        .entries()
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        ["capsule.json", "capsule.wasm"],
+        "the bundle entries"
+    );
+}
+
 /// `text` without its whole-line comments (`//`, or `#` for a manifest).
 fn without_comments(text: &str, marker: &str) -> String {
     text.lines()
@@ -642,7 +840,11 @@ fn verifier_has_no_import_parser_of_its_own() {
 
 #[test]
 fn verifier_reads_no_bundle_file_by_path() {
+    // wc-009a: the grants reader is the one place that reads a file by a path,
+    // the caller's grants file, once. The rest of the verifier reaches no file.
     let code = verifier_code();
+    let reader = item(&code, "pub fn read_grants(");
+    let rest = code.replacen(reader, "", 1);
     for call in [
         "fs::read",
         "File::open",
@@ -652,9 +854,23 @@ fn verifier_reads_no_bundle_file_by_path() {
         "read_to_end",
     ] {
         assert!(
-            !code.contains(call),
-            "the verifier reaches a file by a path: {call}"
+            !rest.contains(call),
+            "the verifier reaches a file by a path outside read_grants: {call}"
         );
+    }
+    assert_eq!(
+        calls(reader, "fs::read"),
+        1,
+        "read_grants does not read the grants file exactly once"
+    );
+    for call in [
+        "File::open",
+        "OpenOptions",
+        "read_dir",
+        "metadata",
+        "read_to_end",
+    ] {
+        assert!(!reader.contains(call), "read_grants reaches a file: {call}");
     }
 }
 
@@ -678,23 +894,53 @@ fn verifier_has_one_check_path() {
     for other in ["verify_name_signature", "audit_component"] {
         assert!(!all.contains(other), "the tools crate uses {other}");
     }
-    // One manifest read: one parse in the whole crate, and one call of the
-    // reader beside its definition.
+    // One manifest read and one grants read: two parses in the whole crate,
+    // one in each reader, and one call of each reader beside its definition.
     assert_eq!(
         calls(&all, "from_slice"),
-        1,
-        "the tools crate parses a manifest in more than one place"
+        2,
+        "the tools crate parses JSON somewhere other than the manifest and grants readers"
     );
     assert_eq!(
         calls(&all, "manifest_entrypoint"),
         2,
         "the tools crate reads the manifest's entrypoint in more than one place"
     );
+    // wc-009a: one grants-file read and one grants parse. `read_grants` is
+    // defined and called by nobody in the crate (the caller passes its list);
+    // `parse_grants` is called once, by `read_grants`.
+    assert_eq!(
+        calls(&all, "fs::read"),
+        1,
+        "the tools crate reads a file by fs::read in more than one place"
+    );
+    assert_eq!(
+        calls(&all, "read_grants"),
+        1,
+        "the tools crate calls the grants reader itself"
+    );
+    assert_eq!(
+        calls(&all, "parse_grants"),
+        2,
+        "the tools crate parses grants in more than one place"
+    );
 
     let code = verifier_code();
+    let reader = item(&code, "pub fn read_grants(");
+    assert_eq!(calls(reader, "fs::read"), 1, "read_grants reads once");
+    assert_eq!(calls(reader, "parse_grants"), 1, "read_grants parses once");
+    let parser = item(&code, "fn parse_grants(");
+    assert_eq!(calls(parser, "from_slice"), 1, "parse_grants parses once");
+    let manifest = item(&code, "fn manifest_entrypoint(");
+    assert_eq!(
+        calls(manifest, "from_slice"),
+        1,
+        "the manifest is parsed once"
+    );
     let check = item(&code, "pub fn verify_checked(");
     assert_eq!(calls(check, "verify_checked_signature"), 1);
     assert_eq!(calls(check, "audit"), 1);
+    assert_eq!(calls(check, "read_grants"), 0, "the verifier reads grants");
     let wrapper = item(&code, "pub fn verify_bundle(");
     assert_eq!(calls(wrapper, "checked_bundle"), 1, "the walk");
     assert_eq!(calls(wrapper, "verify_checked"), 1, "the delegation");
@@ -737,6 +983,8 @@ fn verified_bundle_is_sealed() {
             "entries",
             "entrypoint",
             "imports",
+            "read_grants",
+            "unused_grants",
             "verify_bundle",
             "verify_checked"
         ],
@@ -764,13 +1012,14 @@ fn verified_bundle_is_sealed() {
         "pub fn entries(&self) -> &[BundleEntry] {",
         "pub fn entrypoint(&self) -> &BundleEntry {",
         "pub fn imports(&self) -> &[DeclaredImport] {",
+        "pub fn unused_grants(&self) -> &[DeclaredImport] {",
     ] {
         assert!(accessors.contains(signature), "missing {signature}");
     }
     let literal = item(&code, "pub fn verify_checked(");
     assert!(
         literal.contains(
-            "Ok(VerifiedBundle {\n        checked,\n        entrypoint,\n        imports,\n    })"
+            "Ok(VerifiedBundle {\n        checked,\n        entrypoint,\n        imports,\n        unused,\n    })"
         ),
         "verify_checked does not make the value"
     );
