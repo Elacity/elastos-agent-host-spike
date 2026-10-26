@@ -476,3 +476,28 @@ fn model_release_on_a_sibling_instance_is_refused() {
     assert_eq!(verifier.ledger.charged, 0);
     assert!(verifier.ledger.open.contains_key(&reservation.id));
 }
+
+#[test]
+fn model_settle_below_the_hold_returns_the_rest() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 9,
+        ..guest(handle)
+    };
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    assert_eq!(verifier.ledger.held, 10);
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Known(4)),
+        Ok(4)
+    );
+    assert_eq!(verifier.ledger.charged, 4);
+    assert_eq!(verifier.ledger.held, 0);
+    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+    verifier
+        .reserve(&call, &request, 10)
+        .expect("reserve after settle");
+    assert_eq!(verifier.ledger.held, 10);
+}
