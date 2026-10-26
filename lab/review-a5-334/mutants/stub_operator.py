@@ -40,7 +40,7 @@ class State:
     def next_id(self, prefix: str) -> str:
         self.n += 1
         if MODE == "prefix" and prefix == "inst":
-            return "instance-1" if self.n == 1 else "instance-1-evil"
+            return "instance-1" if (self.n % 2) == 1 else "instance-1-evil"
         return f"{prefix}-{self.n}"
 
 
@@ -52,6 +52,8 @@ def json_bytes(obj: object) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         sys.stderr.write("stub %s\n" % (fmt % args))
 
@@ -66,12 +68,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: object) -> None:
         payload = json_bytes(body)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(payload)
+        reason = {200: "OK", 403: "Forbidden", 404: "Not Found"}.get(status, "OK")
+        head = (
+            f"HTTP/1.1 {status} {reason}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            f"Connection: close\r\n\r\n"
+        )
+        self.wfile.write(head.encode("ascii") + payload)
+        self.wfile.flush()
+        self.close_connection = True
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path

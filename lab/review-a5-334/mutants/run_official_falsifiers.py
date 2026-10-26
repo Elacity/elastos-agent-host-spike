@@ -29,7 +29,6 @@ def run_exact(manifest: Path, name: str) -> tuple[int, float, str]:
             str(manifest),
             name,
             "--",
-            "--exact",
             "--nocapture",
         ],
         stdout=subprocess.PIPE,

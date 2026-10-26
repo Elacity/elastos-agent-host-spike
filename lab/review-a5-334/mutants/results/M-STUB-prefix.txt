@@ -1,0 +1,117 @@
+warning: constant `ROUTES` is never used
+  --> src/capability.rs:35:7
+   |
+35 | const ROUTES: &str = "elastos/crates/elastos-server/src/api/routes.rs";
+   |       ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `SERVER` is never used
+  --> src/capability.rs:36:7
+   |
+36 | const SERVER: &str = "elastos/crates/elastos-server/src/api/server.rs";
+   |       ^^^^^^
+
+warning: constant `CAPABILITY` is never used
+  --> src/capability.rs:37:7
+   |
+37 | const CAPABILITY: &str = "elastos/crates/elastos-server/src/api/handlers/capability.rs";
+   |       ^^^^^^^^^^
+
+warning: constant `COMPONENT` is never used
+  --> src/capability.rs:38:7
+   |
+38 | const COMPONENT: &str = "elastos/crates/elastos-compute/src/providers/component.rs";
+   |       ^^^^^^^^^
+
+warning: constant `RUN_CMD` is never used
+  --> src/capability.rs:39:7
+   |
+39 | const RUN_CMD: &str = "elastos/crates/elastos-server/src/run_cmd.rs";
+   |       ^^^^^^^
+
+warning: constant `BRIDGE` is never used
+  --> src/capability.rs:40:7
+   |
+40 | const BRIDGE: &str = "elastos/crates/elastos-server/src/resource_bridge.rs";
+   |       ^^^^^^
+
+warning: constant `AUTH` is never used
+  --> src/capability.rs:41:7
+   |
+41 | const AUTH: &str = "elastos/crates/elastos-server/src/auth.rs";
+   |       ^^^^
+
+warning: constant `REGISTRY` is never used
+  --> src/capability.rs:42:7
+   |
+42 | const REGISTRY: &str = "elastos/crates/elastos-runtime/src/session/registry.rs";
+   |       ^^^^^^^^
+
+warning: constant `TOKEN` is never used
+  --> src/capability.rs:43:7
+   |
+43 | const TOKEN: &str = "elastos/crates/elastos-runtime/src/capability/token.rs";
+   |       ^^^^^
+
+warning: constant `LIVE_GRANT_VIEW` is never used
+  --> src/capability.rs:45:7
+   |
+45 | const LIVE_GRANT_VIEW: &[Pin] = &[
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `SETTLEMENT` is never used
+  --> src/capability.rs:65:7
+   |
+65 | const SETTLEMENT: &[Pin] = &[
+   |       ^^^^^^^^^^
+
+warning: constant `HOME_STORAGE` is never used
+  --> src/capability.rs:83:7
+   |
+83 | const HOME_STORAGE: &[Pin] = &[Pin {
+   |       ^^^^^^^^^^^^
+
+warning: constant `USERS_AI_ALIAS` is never used
+  --> src/capability.rs:89:7
+   |
+89 | const USERS_AI_ALIAS: &[Pin] = &[
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `RESIDENT_CORE` is never used
+   --> src/capability.rs:109:7
+    |
+109 | const RESIDENT_CORE: &[Pin] = &[
+    |       ^^^^^^^^^^^^^
+
+check | test | grade
+A5-ID-POS | acceptance_a5_identity_grant_used_by_bound_agent | PASS
+A5-ID-REPLAY | acceptance_a5_identity_grant_replayed_by_other_agent | FAIL
+A5-SESS-POS | acceptance_a5_session_grant_used_in_bound_session | PASS
+A5-SESS-END | acceptance_a5_session_grant_reused_after_session_end | FAIL
+A5-INST-POS | acceptance_a5_instance_grant_used_by_bound_instance | PASS
+A5-INST-SIB | acceptance_a5_instance_grant_used_by_sibling | FAIL
+A5-STOR-POS | acceptance_a5_owned_storage_grant_used_on_bound_root | PASS
+A5-STOR-OTHER | acceptance_a5_owned_storage_grant_pointed_at_other_root | FAIL
+A5-PUB | acceptance_a5_public_storage_read_is_not_binding | PASS
+
+A5-ID-POS PASS: Allowed  by Runtime status=Some(200) request=Some("grant-5")
+
+A5-ID-REPLAY FAIL: live grant grant-10 bound to agent-a/sess-7/inst-0 UsersAI/agent-a/sess-7/inst-0, expected agent-a/sess-7/instance-1-evil UsersAI/agent-a/sess-7/inst-0
+
+A5-SESS-POS PASS: Allowed  by Runtime status=Some(200) request=Some("grant-13")
+
+A5-SESS-END FAIL: live-grant view still lists grant-16 after session sess-15 ended
+
+A5-INST-POS PASS: Allowed  by Runtime status=Some(200) request=Some("grant-19")
+
+A5-INST-SIB FAIL: sibling instances must have different id and session
+
+A5-STOR-POS PASS: Allowed  by Runtime status=Some(200) request=Some("grant-26")
+
+A5-STOR-OTHER FAIL: live grant grant-31 bound to agent-a/sess-28/inst-0 UsersAI/agent-a/sess-28/inst-0, expected agent-a/sess-28/instance-1-evil UsersAI/agent-a/sess-28/inst-0
+
+A5-PUB PASS: Refused public storage read does not bind by Runtime status=Some(403) request=Some("public-claim")
+
+A5 binding: accepted 5 of 9; failed 4; blocked 0; skipped 0
+exit=1

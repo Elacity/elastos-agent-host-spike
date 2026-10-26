@@ -1,0 +1,18 @@
+harness=/tmp/a5-review-copy/lab/a5-binding-harness
+F-A5-FAKE-REFUSAL CAUGHT
+  fake_refusal_is_rejected FAILED exit=101 ASSERT 0.62s thread 'fake_refusal_is_rejected' (4772) panicked at tests/journeys.rs:19:5:
+  fixture_refusal_is_not_runtime_evidence FAILED exit=101 ASSERT 0.04s thread 'contract::tests::fixture_refusal_is_not_runtime_evidence' (4780) panicked at src/contract.rs:338:9:
+  restore src/contract.rs IDENTICAL e7f54420e63de4fbc14c379ea254581eca5e3395cb832709b94e35c1089fa241
+F-A5-SKIP-AS-PASS CAUGHT
+  skipped_is_never_accepted FAILED exit=101 ASSERT 0.68s thread 'skipped_is_never_accepted' (4903) panicked at tests/gates.rs:127:5:
+  restore src/lib.rs IDENTICAL 846a918d6393753d8e4a71a28b8d1836b48b88d530e19704bb4b4bf7d1b58eb8
+F-A5-PUBLIC-AS-BIND CAUGHT
+  public_read_as_binding_is_rejected FAILED exit=101 ASSERT 0.63s thread 'public_read_as_binding_is_rejected' (5027) panicked at tests/journeys.rs:19:5:
+  restore src/journey.rs IDENTICAL 96697f01cddb9c4de44e80d207c184fed58da589e79812bbdac7885c62838426
+F-A5-SIBLING CAUGHT
+  sibling_allowed_is_rejected FAILED exit=101 ASSERT 0.59s thread 'sibling_allowed_is_rejected' (5151) panicked at tests/journeys.rs:18:38:
+  restore src/journey.rs IDENTICAL 96697f01cddb9c4de44e80d207c184fed58da589e79812bbdac7885c62838426
+F-A5-SESSION-END CAUGHT
+  session_survives_end_is_rejected FAILED exit=101 ASSERT 0.57s thread 'session_survives_end_is_rejected' (5275) panicked at tests/journeys.rs:19:5:
+  restore src/journey.rs IDENTICAL 96697f01cddb9c4de44e80d207c184fed58da589e79812bbdac7885c62838426
+official 5 CAUGHT of 5

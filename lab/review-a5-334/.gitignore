@@ -2,3 +2,5 @@ mutants/results/*.log
 mutants/results/stub-*.err
 mutants/results/stub-*.pid
 mutants/results/stub-*.port
+mutants/results/coords-*.json
+mutants/results/forged-coords.json
