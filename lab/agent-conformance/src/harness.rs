@@ -75,6 +75,7 @@ pub struct ThrowawayHome {
     removed: bool,
     keep: Cell<bool>,
     captures: RefCell<Vec<u64>>,
+    run_starts: Cell<usize>,
 }
 
 impl ThrowawayHome {
@@ -122,6 +123,7 @@ impl ThrowawayHome {
             removed: false,
             keep: Cell::new(false),
             captures: RefCell::new(Vec::new()),
+            run_starts: Cell::new(0),
         };
         match include_str!("../fixtures/home-source.txt").trim() {
             "throwaway" => {}
@@ -242,6 +244,9 @@ impl ThrowawayHome {
         let child = command
             .spawn()
             .map_err(|_| "could not start child process")?;
+        if args.first() == Some(&"run") {
+            self.run_starts.set(self.run_starts.get() + 1);
+        }
         Ok(CapturedChild {
             child,
             stdout,
@@ -279,6 +284,10 @@ impl ThrowawayHome {
             stdout: capture(&mut spawned.stdout)?,
             stderr: capture(&mut spawned.stderr)?,
         })
+    }
+
+    pub fn run_starts(&self) -> usize {
+        self.run_starts.get()
     }
 
     pub fn start(&self, program: &Path, args: &[&str]) -> Result<RunningChild<'_>> {
@@ -492,12 +501,14 @@ pub struct Launch<'a> {
 pub struct RunningInstances<'a> {
     children: Vec<RunningChild<'a>>,
     started: Instant,
+    kills: Vec<Option<Duration>>,
 }
 
 pub struct Completion {
     pub output: Output,
     /// Includes all launches, polling, capture and group-drain checks.
     pub elapsed: Duration,
+    pub kill_requested_at: Option<Duration>,
 }
 
 impl<'a> RunningInstances<'a> {
@@ -505,6 +516,7 @@ impl<'a> RunningInstances<'a> {
         let mut group = Self {
             children: Vec::new(),
             started: Instant::now(),
+            kills: vec![None; launches.len()],
         };
         for launch in launches {
             group.children.push(RunningChild {
@@ -514,6 +526,34 @@ impl<'a> RunningInstances<'a> {
             });
         }
         Ok(group)
+    }
+
+    /// Kill and reap exactly the owned worker, preserving its status for the
+    /// collector. This leaves the operator and every sibling handle alone.
+    pub fn kill_worker(&mut self, index: usize) -> Result<()> {
+        let child = self
+            .children
+            .get_mut(index)
+            .ok_or("kill: worker is missing")?;
+        if !child.is_alive()? || self.kills[index].is_some() {
+            return Err("kill: worker must be alive and killed exactly once");
+        }
+        child
+            .spawned
+            .child
+            .kill()
+            .map_err(|_| "kill: SIGKILL failed")?;
+        self.kills[index] = Some(self.started.elapsed());
+        child
+            .spawned
+            .child
+            .wait()
+            .map_err(|_| "kill: worker reap failed")?;
+        Ok(())
+    }
+
+    pub fn kill_recorded(&self, index: usize) -> bool {
+        self.kills.get(index).is_some_and(Option::is_some)
     }
 
     /// Observe the actual children, including exits before collection starts.
@@ -545,12 +585,13 @@ impl<'a> RunningInstances<'a> {
         let mut results: Vec<_> = self.children.iter().map(|_| None).collect();
         while results.iter().any(Option::is_none) {
             service(&mut self)?;
-            for (child, result) in self.children.iter_mut().zip(&mut results) {
+            for (index, (child, result)) in self.children.iter_mut().zip(&mut results).enumerate() {
                 if result.is_none() {
                     if let Some(output) = child.try_output()? {
                         *result = Some(Completion {
                             output,
                             elapsed: self.started.elapsed(),
+                            kill_requested_at: self.kills[index],
                         });
                     }
                 }

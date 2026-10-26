@@ -105,7 +105,7 @@ impl Evidence {
                     | "ungranted_sibling_read_is_refused"
                     | "run_leaves_no_live_grant"
             ) {
-                text.push_str(" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included");
+                text.push_str(" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows");
             }
             if matches!(
                 name.as_str(),
@@ -118,6 +118,9 @@ impl Evidence {
                 text.push_str(
                     " | cancel at the pending-request point, lab half of A10 (A12 census)",
                 );
+            }
+            if name == "killed_worker_settlement_recorded_without_retry" {
+                text.push_str(" | kill-worker settlement, lab half of A11 (A12 census); orphan settled by the fixture (AC-027-ORPHAN)");
             }
             text.push('\n');
         }
@@ -188,9 +191,8 @@ fn required_effects(test: &str) -> &'static [&'static str] {
         ],
         "two_instances_overlap_with_separate_grants"
         | "instance_grant_does_not_authorise_sibling"
-        | "cancelled_instance_settles_with_reason_sibling_completes" => {
-            &["instance-1", "instance-2"]
-        }
+        | "cancelled_instance_settles_with_reason_sibling_completes"
+        | "killed_worker_settlement_recorded_without_retry" => &["instance-1", "instance-2"],
         "host_key_read_is_refused" => &["host-key-read"],
         "ungranted_effect_is_refused" => &["read"],
         "ungranted_network_is_refused" => &["network"],

@@ -141,6 +141,7 @@ enum ReadOutcome {
     NoPolicy,
     Instances,
     Cancel,
+    Kill,
 }
 
 fn exercise_fixture_read(effect: Effect, granted: bool) {
@@ -158,7 +159,10 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
 fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool) {
     use agent_conformance::harness::{Launch, RunningInstances};
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
-    let instances = matches!(outcome, ReadOutcome::Instances | ReadOutcome::Cancel);
+    let instances = matches!(
+        outcome,
+        ReadOutcome::Instances | ReadOutcome::Cancel | ReadOutcome::Kill
+    );
     let effects = if instances {
         vec![Effect::Instance1, Effect::Instance2]
     } else {
@@ -237,6 +241,8 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         controller.require_overlap();
     } else if outcome == ReadOutcome::Cancel {
         controller.require_cancel();
+    } else if outcome == ReadOutcome::Kill {
+        controller.require_kill();
     }
     let launches: Vec<_> = capsules
         .iter()
@@ -261,24 +267,59 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     }
     let bound = match outcome {
         ReadOutcome::NoPolicy => 40,
-        ReadOutcome::Instances | ReadOutcome::Cancel => 25,
+        ReadOutcome::Instances | ReadOutcome::Cancel | ReadOutcome::Kill => 25,
         _ => 10,
     };
+    let mut unapproved = None;
     let collected = running.collect_with(Duration::from_secs(bound), |running| {
         if apply_policy {
-            controller.poll(running)
-        } else {
-            // Seeding uses the shell fixture. This client receives no approval
-            // or denial from it; only Runtime can settle the pending request.
+            controller.poll(running)?;
+            if outcome == ReadOutcome::Kill
+                && running.kill_recorded(0)
+                && launch_homes[0].run_starts() != 1
+            {
+                return Err("no-retry check: instance-1 must start exactly once");
+            }
             Ok(())
+        } else {
+            // Observe without a grant or denial until the client exits.
+            controller.observe_unapproved(&mut unapproved)
         }
     });
-    let cleanup_state = if outcome == ReadOutcome::NoPolicy {
-        Ok("pending:unmeasured grants:unmeasured (no-policy refusal scope)")
-    } else {
-        controller.check_cleanup_wiring(|controller| controller.cleanup_state())
+    let settlement = match outcome {
+        ReadOutcome::Kill => controller
+            .killed_request()
+            .and_then(|original| controller.settle_orphan(&original, grants::KILL_REASON))
+            .map(Some),
+        ReadOutcome::NoPolicy => unapproved
+            .as_ref()
+            .ok_or("no-policy: original pending evidence is missing")
+            .and_then(|original| controller.settle_orphan(original, grants::NO_POLICY_REASON))
+            .map(Some),
+        _ => Ok(None),
     };
-    let finished = operator.finish_check(sampled);
+    let quiet = if outcome == ReadOutcome::Kill && collected.is_ok() && settlement.is_ok() {
+        controller.quiet_after_kill().map(Some)
+    } else {
+        Ok(None)
+    };
+    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());
+    let mut finished = operator.finish_check(sampled);
+    if outcome == ReadOutcome::Kill {
+        // Reuse 021's root census for both client roots after the quiet window.
+        // The existing path checks process holders, the API port and TMPDIR.
+        for client in &client_homes {
+            let census = agent_conformance::census::cleanup(client, controller.port());
+            controller
+                .print_checked(match &census {
+                    Ok(line) | Err(line) => line,
+                })
+                .expect("client census excludes fixture credentials");
+            if let Err(reason) = census {
+                finished = Err(reason);
+            }
+        }
+    }
     let line = match &finished {
         Ok(line) | Err(line) => line,
     };
@@ -321,6 +362,12 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     if instances {
         let overlap = if outcome == ReadOutcome::Cancel {
             controller.check_cancel(collected.as_ref().ok().map(Vec::as_slice))
+        } else if outcome == ReadOutcome::Kill {
+            controller.check_kill(
+                collected.as_ref().ok().map(Vec::as_slice),
+                settlement.as_ref().ok().and_then(Option::as_ref),
+                quiet.as_ref().ok().copied().flatten(),
+            )
         } else {
             controller.check_overlap()
         };
@@ -347,10 +394,24 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         let reads = collected
             .as_ref()
             .map_err(|_| "overlap collection failed")
-            .and_then(|completions| instance_read_result(completions, &controller, outcome));
-        let passed = reads.is_ok() && overlap.is_ok() && finished.is_ok() && cleanup_state.is_ok();
+            .and_then(|completions| {
+                instance_read_result(
+                    completions,
+                    &controller,
+                    outcome,
+                    settlement.as_ref().ok().and_then(Option::as_ref),
+                )
+            });
+        let passed = reads.is_ok()
+            && overlap.is_ok()
+            && finished.is_ok()
+            && cleanup_state.is_ok()
+            && settlement.is_ok()
+            && quiet.is_ok();
         let names = if outcome == ReadOutcome::Cancel {
             vec!["cancelled_instance_settles_with_reason_sibling_completes"]
+        } else if outcome == ReadOutcome::Kill {
+            vec!["killed_worker_settlement_recorded_without_retry"]
         } else {
             vec![
                 "two_instances_overlap_with_separate_grants",
@@ -365,6 +426,20 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         collected.expect("overlap journey failed");
         reads.expect("instance read acceptance failed");
         overlap.expect("required instance settlement evidence");
+        settlement.expect("orphan settlement failed");
+        quiet.expect("no-retry check: quiet window failed");
+        if outcome == ReadOutcome::Kill {
+            assert_eq!(
+                launch_homes[0].run_starts(),
+                1,
+                "no-retry check: instance-1 must start exactly once"
+            );
+            assert_eq!(
+                launch_homes[1].run_starts(),
+                1,
+                "sibling must start exactly once"
+            );
+        }
         assert!(
             finished.is_ok(),
             "cleanup census refused leftovers; see checked reason"
@@ -416,13 +491,32 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
             Some(1),
             "no-policy acceptance failed; private triage required"
         );
-        assert_output_refusal(
+        let (line, refused) = refusal_evidence(
             output,
             effect,
             "Internal(\"capability request still pending after 30s\")",
         );
+        controller
+            .print_checked(&line)
+            .expect("no-policy refusal excludes fixture credentials");
+        assert!(
+            refused,
+            "no-policy client must report its 30 second wait refusal"
+        );
+        let orphan = settlement
+            .as_ref()
+            .expect("no-policy orphan measurement failed")
+            .as_ref()
+            .expect("no-policy settlement evidence is missing");
+        controller
+            .print_settlement(
+                "absent-policy",
+                Some(&completions),
+                &format!("reason:{}; {}", grants::NO_POLICY_REASON, orphan.line()),
+            )
+            .expect("no-policy settlement excludes fixture credentials");
         assert_eq!(controller.decisions.granted, 0);
-        assert_eq!(controller.decisions.denied, 0);
+        assert_eq!(controller.decisions.denied, orphan.before);
         assert_eq!(controller.decisions.matched, 0);
     } else if outcome == ReadOutcome::Granted {
         assert_eq!(controller.decisions.matched, 1);
@@ -467,7 +561,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
                 ReadOutcome::Granted => "granted_read_succeeds",
                 ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
                 ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
-                ReadOutcome::Instances | ReadOutcome::Cancel => {
+                ReadOutcome::Instances | ReadOutcome::Cancel | ReadOutcome::Kill => {
                     unreachable!("instances checked above")
                 }
             },
@@ -488,6 +582,7 @@ fn instance_read_result(
     completions: &[agent_conformance::harness::Completion],
     controller: &grants::Controller,
     outcome: ReadOutcome,
+    settlement: Option<&grants::Settlement>,
 ) -> Result<(), &'static str> {
     if completions.len() != 2 {
         return Err("both clients must be collected");
@@ -495,6 +590,9 @@ fn instance_read_result(
     // Check the sibling first: cancelling every first request must fail here.
     for index in [1, 0] {
         let completion = &completions[index];
+        if outcome == ReadOutcome::Kill && index == 0 {
+            continue;
+        }
         let stderr = std::str::from_utf8(&completion.output.stderr)
             .map_err(|_| "client stderr requires UTF-8")?;
         if stderr.contains("fixture provider")
@@ -523,14 +621,30 @@ fn instance_read_result(
             });
         }
     }
-    let grants = if outcome == ReadOutcome::Cancel { 1 } else { 2 };
+    let grants = if matches!(outcome, ReadOutcome::Cancel | ReadOutcome::Kill) {
+        1
+    } else {
+        2
+    };
+    let denials = if outcome == ReadOutcome::Kill {
+        1 + settlement
+            .ok_or("kill: orphan measurement is missing")?
+            .before
+    } else {
+        2
+    };
     if controller.decisions.matched != grants
         || controller.decisions.granted != grants
-        || controller.decisions.denied != 2
+        || controller.decisions.denied != denials
     {
         return Err("expected own session grants and two denials are required");
     }
     Ok(())
+}
+
+#[test]
+fn killed_worker_settlement_recorded_without_retry() {
+    exercise_read(Effect::Instance1, ReadOutcome::Kill, false);
 }
 
 #[test]
