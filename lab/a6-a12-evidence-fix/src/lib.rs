@@ -154,12 +154,32 @@ mod tests {
     }
 
     #[test]
-    fn combined_cleanup_imports_existing_census() {
+    fn combined_cleanup_invokes_existing_census_by_name() {
+        assert_eq!(a12::EXISTING_CLEANUP, "agent_conformance::census::cleanup");
+        assert_eq!(
+            a12::EXISTING_HOME,
+            "agent_conformance::harness::ThrowawayHome"
+        );
         let in_root = a12::in_root_census_on_this_host();
-        let temps = a12::runtime_temp_census();
-        let merged = a12::merge_host(in_root, temps);
-        println!("combined cleanup: {merged:?}");
-        let _ = merged;
+        match &in_root {
+            a12::HostPart::NotRun(reason) => println!("NOT RUN: {reason}"),
+            other => panic!("expected NOT RUN on this task, got {other:?}"),
+        }
+        let plant = a12::StoragePlant::place().expect("plant storage");
+        let existing_pass = Ok(
+            "cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
+                .into(),
+        );
+        let err = a12::cleanup_with_runtime_temps(existing_pass)
+            .expect_err("existing PASS plus storage leftover must fail the wrap");
+        assert!(
+            err.contains("outside-root:BLOCKED(AC-006-STORAGE)"),
+            "{err}"
+        );
+        assert!(err.contains("runtime-temp census: FAIL"), "{err}");
+        assert!(err.contains(plant.path().to_str().unwrap()), "{err}");
+        println!("combined wrap caught leftover while existing census would PASS: {err}");
+        drop(plant);
     }
 
     #[test]

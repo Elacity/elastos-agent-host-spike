@@ -5,6 +5,3 @@ edition = "2021"
 publish = false
 
 [workspace]
-
-[dependencies]
-agent-conformance = { path = "../agent-conformance" }

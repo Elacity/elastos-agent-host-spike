@@ -64,6 +64,9 @@ pub fn census_ignores_runtime_storage() -> Result<String, String> {
     if !CENSUS.contains("home.temp()") {
         return Err("census.rs no longer inspects home.temp()".into());
     }
+    if !CENSUS.contains("pub fn cleanup(") {
+        return Err("census.rs no longer exports cleanup".into());
+    }
     Ok(
         "existing cleanup census still inspects only the throwaway TMPDIR and labels outside-root BLOCKED"
             .into(),

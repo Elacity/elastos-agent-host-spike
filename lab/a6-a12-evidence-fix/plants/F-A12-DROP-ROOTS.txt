@@ -1,7 +1,7 @@
 id: F-A12-DROP-ROOTS
 file: src/a12.rs
-test: a12_census_lists_runtime_storage
-test: a12_planted_storage_file_is_caught
+test: tests::a12_census_lists_runtime_storage
+test: tests::a12_planted_storage_file_is_caught
 --- old
 pub const RUNTIME_TEMP_ROOTS: &[&str] = &["/tmp/elastos/storage", "/tmp/elastos"];
 --- new

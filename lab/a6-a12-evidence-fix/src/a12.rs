@@ -2,24 +2,30 @@
 //!
 //! The agent-conformance census (`census::cleanup`) inspects the throwaway
 //! root, its TMPDIR, and the API port, then labels outside-root leftovers
-//! `BLOCKED(AC-006-STORAGE)` without walking `/tmp/elastos/storage`.
+//! `BLOCKED(AC-006-STORAGE)` without walking `/tmp/elastos/storage`. This
+//! crate invokes that module by source (`existing.rs`) and name; it does not
+//! compile the owner crate (that graph pulls Runtime).
 
-use agent_conformance::census;
-use agent_conformance::harness::ThrowawayHome;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static ISOLATED: AtomicU64 = AtomicU64::new(0);
+static REAL_ROOT: Mutex<()> = Mutex::new(());
 
 /// Production paths the Runtime creates outside a throwaway Home.
 /// `/tmp/elastos/storage` is the `create_runtime` / `serve --storage-path`
 /// default. `/tmp/elastos` is the `security_cmd` data-dir fallback parent
 /// and covers `policy.json` and `crosvm-empty` under the same tree.
 pub const RUNTIME_TEMP_ROOTS: &[&str] = &["/tmp/elastos/storage", "/tmp/elastos"];
+
+/// Existing in-root census, invoked by name (see `existing.rs`).
+pub const EXISTING_CLEANUP: &str = "agent_conformance::census::cleanup";
+pub const EXISTING_HOME: &str = "agent_conformance::harness::ThrowawayHome";
 
 const PLANTED_NAME: &str = "a6-a12-evidence-fix-planted";
 
@@ -78,24 +84,17 @@ pub enum HostPart {
     NotRun(String),
 }
 
-/// Invoke the existing in-root census when this host can build a throwaway Home.
+/// Invoke the existing throwaway-Home census when this host can run it.
+/// Linux matches `ThrowawayHome::data_dir` (`harness.rs`): Homes need macOS.
 pub fn in_root_census_on_this_host() -> HostPart {
-    match ThrowawayHome::new() {
-        Err(reason) if reason.contains("macOS") => HostPart::NotRun(format!(
-            "in-root A12 census: {reason}; A6/A12 resident instances are out of scope"
-        )),
-        Err(reason) => HostPart::Fail(reason.to_string()),
-        Ok(home) => {
-            let line = census::cleanup(&home, 59999);
-            match home.finish() {
-                Ok(()) => match line {
-                    Ok(text) => HostPart::Pass(text),
-                    Err(text) => HostPart::Fail(text),
-                },
-                Err(reason) => HostPart::Fail(reason.to_string()),
-            }
-        }
+    if !cfg!(target_os = "macos") {
+        return HostPart::NotRun(format!(
+            "in-root A12 census via {EXISTING_CLEANUP}: throwaway Homes require macOS; A6/A12 resident instances are out of scope"
+        ));
     }
+    HostPart::NotRun(format!(
+        "in-root A12 census via {EXISTING_HOME}: resident instances are out of scope on this task"
+    ))
 }
 
 pub fn merge_host(in_root: HostPart, temps: Result<String, String>) -> Result<String, String> {
@@ -110,9 +109,12 @@ pub fn merge_host(in_root: HostPart, temps: Result<String, String>) -> Result<St
     }
 }
 
-pub fn cleanup_with_runtime_temps(home: &ThrowawayHome, port: u16) -> Result<String, String> {
+/// Merge an existing `census::cleanup` result with the Runtime temp walk.
+pub fn cleanup_with_runtime_temps(
+    existing_cleanup: Result<String, String>,
+) -> Result<String, String> {
     merge_host(
-        match census::cleanup(home, port) {
+        match existing_cleanup {
             Ok(text) => HostPart::Pass(text),
             Err(text) => HostPart::Fail(text),
         },
@@ -125,10 +127,14 @@ pub fn cleanup_with_runtime_temps(home: &ThrowawayHome, port: u16) -> Result<Str
 pub struct StoragePlant {
     path: PathBuf,
     created: Vec<PathBuf>,
+    _lock: MutexGuard<'static, ()>,
 }
 
 impl StoragePlant {
     pub fn place() -> Result<Self, String> {
+        let lock = REAL_ROOT
+            .lock()
+            .map_err(|_| "Runtime storage plant lock is poisoned")?;
         let path = PathBuf::from("/tmp/elastos/storage").join(PLANTED_NAME);
         let mut created = Vec::new();
         for dir in [
@@ -150,7 +156,11 @@ impl StoragePlant {
         }
         fs::write(&path, b"a12 planted leftover\n")
             .map_err(|_| format!("could not plant {}", path.display()))?;
-        Ok(Self { path, created })
+        Ok(Self {
+            path,
+            created,
+            _lock: lock,
+        })
     }
 
     pub fn path(&self) -> &Path {

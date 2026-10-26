@@ -1,9 +1,10 @@
 # A6 / A12 evidence fix
 
 Lab-only corrected checks for the two #294 evidence holes that #323 left as
-NEEDS RUNTIME. This folder imports the agent-conformance census and
-`ThrowawayHome`. It does not edit that lane, `BACKLOG.md`, `lane.env`,
-`scripts/`, or Runtime source.
+NEEDS RUNTIME. This folder invokes the agent-conformance census and
+`ThrowawayHome` by source and name (`existing.rs`, `EXISTING_CLEANUP`).
+It does not compile that crate and does not edit that lane, `BACKLOG.md`,
+`lane.env`, `scripts/`, or Runtime source.
 
 ## What the checks prove
 
