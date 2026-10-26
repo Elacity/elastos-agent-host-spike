@@ -1,8 +1,8 @@
 # A6 / A12 evidence findings
 
 Lab folder: `lab/a6-a12-evidence-fix/`. Head is this branch. Machine: Linux
-x86_64, `rustc 1.91.0`. Every path, line number, and count below comes from a
-command run in this session.
+x86_64, `rustc 1.91.0 (f8297e351 2025-10-28)`. Every path, line number, and
+count below comes from a command run in this session.
 
 ## Plain status
 
@@ -63,8 +63,12 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: recorded after the r2 fix run in this session. See the table
-filled from that command.
+Result: `test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.57s`.
+`planted_bugs_are_caught` printed **15 CAUGHT lines** from **13 plants**
+(F-A12-DROP-ROOTS and M-A6-COMMENT-STEP4 each name two tests). After the
+suite, `ls /tmp/elastos` was `No such file or directory`. Runtime
+`manager.rs` sha256 stayed
+`cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
 
 | Check | Verdict | Notes |
 | --- | --- | --- |
@@ -82,8 +86,50 @@ filled from that command.
 
 ## Falsifiers
 
-Recorded after `planted_bugs_are_caught`. Plants for `/` and unset, and
-for unrelated rename and no-marker leftovers, must print CAUGHT.
+| Id | What it breaks | Named tests that FAILED |
+| --- | --- | --- |
+| F-A6-NO-TOKEN-CHECK | Runtime `if token.capsule != caller` becomes `if false &&` | `tests::a6_sibling_presenting_owner_token_is_refused` |
+| M-A6-PREFIX-BIND | `!=` becomes `!caller.starts_with(token)` | `tests::a6_prefix_capsule_id_is_refused` |
+| M-A6-EMPTY-TOKEN | skip the check when `token.capsule` is empty | `tests::a6_empty_token_capsule_is_refused` |
+| M-A6-COMMENT-STEP4 | delete Runtime step 4 | `tests::a6_sibling_presenting_owner_token_is_refused`, `tests::a6_resident_two_instances_is_blocked` |
+| M-A6-CLAIM-RESIDENT | RA-6 journey returns Pass | `tests::a6_resident_two_instances_is_blocked` |
+| F-A12-DROP-ROOTS | `runtime_owned_temp_roots` returns empty | `tests::a12_census_lists_runtime_storage`, `tests::a12_planted_storage_file_is_caught` |
+| M-A12-HARDCODE-FAIL | census always returns FAIL | `tests::a12_clean_isolated_root_passes` |
+| M-A12-SYMLINK-ROOT | do not scan through a symlink root | `tests::a12_symlink_root_is_scanned_through` |
+| M-A12-RENAME-ROOT | created-set keeps nothing | `tests::a12_renamed_root_is_found_by_created_set` |
+| M-A12-RENAME-UNRELATED | hide any path under `moved-away` | `tests::a12_renamed_to_unrelated_name_is_found` |
+| M-A12-NO-MARKER | keep only leftover-marker bytes | `tests::a12_leftover_without_marker_is_found` |
+| M-A12-TMP-SLASH | drop the `/` refuse | `tests::a12_slash_tmp_root_is_refused` |
+| M-A12-TMP-UNSET | unset defaults to `/tmp/elastos` | `tests::a12_unset_tmp_root_is_refused` |
+
+## Plants table (r2)
+
+| Plant | Result |
+| --- | --- |
+| F-A6-NO-TOKEN-CHECK | **CAUGHT** |
+| M-A6-PREFIX-BIND | **CAUGHT** |
+| M-A6-EMPTY-TOKEN | **CAUGHT** |
+| M-A6-COMMENT-STEP4 | **CAUGHT** (sibling + RA-6 journey) |
+| M-A6-CLAIM-RESIDENT | **CAUGHT** |
+| F-A12-DROP-ROOTS | **CAUGHT** (two tests) |
+| M-A12-HARDCODE-FAIL | **CAUGHT** |
+| M-A12-SYMLINK-ROOT | **CAUGHT** |
+| M-A12-RENAME-ROOT | **CAUGHT** |
+| M-A12-RENAME-UNRELATED | **CAUGHT** |
+| M-A12-NO-MARKER | **CAUGHT** |
+| M-A12-TMP-SLASH | **CAUGHT** |
+| M-A12-TMP-UNSET | **CAUGHT** |
+
+## Still BLOCKED
+
+- **RA-6** — two resident capsule instances in one Runtime. The ready
+  journey is written. It reports BLOCKED. It does not PASS.
+- **ThrowawayHome / owner `census::cleanup`** — NOT RUN on Linux.
+- **Mac owner A6/A12 commands** — NOT RUN here. `run.sh` and
+  `mac-pack.sh` set isolated `ELASTOS_TMP_ROOT` for them. Those owner
+  rows still use fixture deny, so they do not close RA-6.
+
+A6 and A12 stay in-flight for Anders's resident-instance rule.
 
 ## NOT RUN (macOS / resident instances)
 
@@ -97,6 +143,3 @@ cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
 cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime \
   cleanup_census_refuses_each_leftover -- --nocapture
 ```
-
-A6 stays BLOCKED on RA-6 even after those Mac commands. Those owner
-rows still use fixture deny.
