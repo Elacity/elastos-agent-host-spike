@@ -16,6 +16,17 @@ pub const IMPORTING_MODULE: &[u8] = &[
     0x03, b'e', b'n', b'v', 0x01, b'f', 0x00, 0x00, // env.f, a function of type 0
 ];
 
+/// `IMPORTING_MODULE` with its one import renamed to `env.<name>`, a one-byte
+/// name: the same `() -> ()` function, under another name.
+pub fn importing_env(name: u8) -> Vec<u8> {
+    let mut module = IMPORTING_MODULE.to_vec();
+    // The import's one-byte name, before its kind and type index.
+    let at = module.len() - 3;
+    assert_eq!(module[at], b'f', "IMPORTING_MODULE's import name");
+    module[at] = name;
+    module
+}
+
 /// The one import `IMPORTING_MODULE` has.
 pub fn env_f() -> DeclaredImport {
     grant("env", "f")
@@ -37,11 +48,13 @@ pub fn write_grants(folder: &Path, name: &str, text: &str) -> PathBuf {
 }
 
 /// A new, well-formed lab grants file `name` in `folder` granting `grants`
-/// (module, name) in order. It sits beside a bundle, never inside one.
-pub fn grants_file(folder: &Path, name: &str, grants: &[(&str, &str)]) -> PathBuf {
+/// (module, name, right) in order. It sits beside a bundle, never inside one.
+pub fn grants_file(folder: &Path, name: &str, grants: &[(&str, &str, &str)]) -> PathBuf {
     let imports: Vec<serde_json::Value> = grants
         .iter()
-        .map(|(module, name)| serde_json::json!({ "module": module, "name": name }))
+        .map(|(module, name, right)| {
+            serde_json::json!({ "module": module, "name": name, "right": right })
+        })
         .collect();
     let document = serde_json::json!({
         "schema": GRANTS_SCHEMA,

@@ -680,3 +680,32 @@
   `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (91 passed, 2 ignored, 0 failed) and `cargo fmt
   --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
   `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 031 (M1 B4 lab half, typed lab operations; base `b75ffefdbe09b3ff1c7328450cb0db8baa0c71f0`):
+  `tools/src/verify.rs` gets `pub const LAB_OPERATIONS` (type `LabOperation`: module, name, inputs, outputs, right,
+  effect `Effect::None`/`Read`/`Write`), with one entry, `env.f`, inputs and outputs none, right `call`, effect
+  `none`. The grants file is now `wc-009.lab-grants/v2`: each grant is exactly `module`, `name` and `right`
+  (`EntryNotAPair` became `EntryNotATriple`, reworded for three keys; a v1 file is refused by the schema reason).
+  `parse_grants` calls `check_right`, which refuses a grant whose right is not its operation's
+  (`RightNotNeeded`: "the grant env.f names the right \"write\", but its typed lab operation needs \"call\""); a
+  grant with no typed operation is read. `verify_checked` refuses a module import with no typed operation
+  (`VerifyRefusal::UntypedImport`, "no typed lab operation for import env.g"). That check runs on the audit's own
+  returned list, right after the one `audit` call, not before it: a check on the granted list before the audit
+  would refuse the untyped unused grants of `unused_grants_excludes_linked_and_preserves_file_order` (z.last,
+  a.first), and the tools crate may not read the module's imports itself (P10). No engine starts either way.
+  Tests: `grant_naming_a_right_the_operation_does_not_need_is_refused` (`tests/verify.rs`),
+  `module_import_with_no_typed_operation_is_refused` (`tests/run.rs`, counting stand-ins, zero `--version` and
+  zero module starts; `env.g` with no grant is still `undeclared import env.g`), `readme_lists_each_typed_lab_operation`
+  (`tests/docs.rs`). `tests/common/grants.rs`: `grants_file` takes (module, name, right), new `importing_env`. The
+  wc-009a tests use the v2 form (`env.f` granted `call`); `grants_file_refusals_keep_their_reason` now has 21
+  cases (a v1 file, an entry with no right, a number right). README: the wc-009a section shows v2 and the new
+  refusals, new "### Typed lab operations (M1 B4 lab half)", the verify section has five checks, the named-test
+  lists, totals 159 (two task 031) and 95 runner-caught. ADOPTION: gap 3 for Anders. `falsifiers.json`:
+  F-WC-B4-UNTYPED-LINKED, F-WC-B4-RIGHT-IGNORED, F-WC-README-COUNT re-anchored to 159, one `"about"` sentence.
+  `readme_lists_each_typed_lab_operation` checked by hand (README's `env.f` effect set to `read`: the test failed
+  at its list comparison; reverted, it passed); it is a README guard, with no `falsifiers.json` entry. Canonical
+  runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json`
+  with the two new ids, all 37 other entries that edit `tools/src/verify.rs` and F-WC-README-COUNT: "baseline: 22
+  named tests pass without an edit, 0 do not", "summary: 40 CAUGHT of 40", exit 0, no `*.falsify-original` backup
+  left. Gates, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (94 passed, 2 ignored, 0
+  failed) and `cargo fmt --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
