@@ -225,6 +225,97 @@ CID, that an accepted test key signed it, and that every import is granted. It
 makes no admission, launch or publisher-trust decision, and the granted list
 (empty for ordinary callers until wc-009) is a lab stand-in, not admission.
 
+## Runtime ABI for a bare capsule (wc-008)
+
+Discovery, read only at base `f9d2b48f8160398e843e0d656d2771fefc4fef29`
+(`git rev-parse HEAD` at task start, 2026-10-26), for M1 check B2. The
+question: which `runtime_abi` in `elastos.capsule/v1` fits this lane's
+zero-import core Wasm module, which is not a Component? Lines are in
+`elastos/crates/elastos-common/src/manifest.rs` (last changed in `f4b7236d4`)
+unless a file is named. `runtime_abi` is optional (`:36-41`): "Runtime uses
+this field to select the execution provider". `validate()` (`:432`) calls
+`validate_execution_metadata()` (`:494`, defined at `:731`). This capsule's
+manifest is `role` `app`, `type` `wasm`, `entrypoint` `capsule.wasm`.
+
+The seven `CapsuleRuntimeAbi` values (`:1050-1067`), each put into this
+capsule's manifest and run through `validate()` by
+`no_runtime_abi_names_a_bare_core_module`:
+
+| Value | Fits a bare core module? | Why (file:line) |
+|---|---|---|
+| `native-host` | no | only the trusted shell helper: `role` `shell`, `name`/`entrypoint` `shell` (`:866-881`) |
+| `elastos.provider-stdio/v1` | no | a native provider: `role` `provider`, `type`/`execution` `native-provider` (`:848-865`) |
+| `wasi-preview1` | no | refused outright: "WASI Preview 1 is not a supported product capsule ABI" (`:738-743`) |
+| `elastos.runtime-projection/v1` | no | a web projection: `execution` `web-projection`, its bus contract, a web projection (`:802-846`) |
+| `elastos.component/v1` | no (a near fit, not a fit) | a Component: `type` `wasm`, `execution` `component`, `bus_contract` `elastos:bus@v1`, the bus WIT's sha256 (`:775-801`) |
+| `microvm-linux` | no | needs `type` `microvm` (`:882-888`) |
+| `data` | no | needs `type` `data` (`:889-894`) |
+
+**No `runtime_abi` (this capsule today).** The manifest passes `validate()`
+(`lab_manifest_passes_runtime_validate`), but no run path takes it. Both run
+paths, re-read at the base above, branch on `type` `wasm` and refuse anything
+that is not a Component. `is_component_capsule()` (`:674-678`) is true only for
+`runtime_abi` `elastos.component/v1`, `execution` `component` or
+`bus_contract` `elastos:bus@v1`, and this manifest has none of them.
+
+- `elastos/crates/elastos-server/src/run_cmd.rs`, `run_capsule` (`:3`): the
+  manifest is parsed and validated (`load_valid_manifest_if_present`,
+  `:149-163`); `match manifest.execution_type()` (`:35`) reaches
+  `CapsuleType::Wasm` (`:51`); the condition is
+  `if !manifest.is_component_capsule()` (`:52`), refused at `:53-56` with
+  "WASI Preview 1 capsules are not supported; '{}' must use
+  runtime_abi=\"elastos.component/v1\"". Only a Component goes on, to
+  `run_component_via_operator_runtime` (`:58`).
+- `elastos/crates/elastos-server/src/capsule_cmd.rs`, `run_capsule` (`:184`):
+  after `load_capsule_manifest` (`:255`), the condition is
+  `if manifest.capsule_type == elastos_common::CapsuleType::Wasm` (`:267`) and
+  then `if !manifest.is_component_capsule()` (`:268`), refused at `:269-272`
+  with "WASI Preview 1 capsules are not supported; '{}' must use
+  runtime_abi=\"elastos.component/v1\" (Runtime projections open through
+  Home)". Only a Component goes on, to `run_component_capsule` (`:274`).
+
+The planner's hint (a run needs `runtime_abi="elastos.component/v1"`) holds in
+both files at this base. A manifest that passes `validate()` is not proof that
+a run path accepts a bare module, and here none does.
+
+**Decision: `NO_ABI_FOR_BARE_CAPSULE`.** No value fits. `capsule/capsule.json`
+keeps no `runtime_abi`, and the pinned lab CID does not change. Declaring
+`elastos.component/v1` on a module that is not a Component would be a near
+fit, and the Runtime refuses it anyway (falsifier F-WC8-NEAR-FIT). The lane
+records the gap as SKIPPED in `bare_capsule_runtime_abi_is_recorded_as_skipped`,
+never PASS, and invents no field and no ABI value.
+
+## Gaps for Anders
+
+Facts only; nothing here is proposed as a contract.
+
+1. **No runtime ABI for a bare core module.** Rong's design question (26 Oct),
+   in his words: "Component-only admission means a bare core module (the
+   closest thing to a self-contained DigitCapsule) has no path in v1. Is that
+   intended, or should v1 have a bare-module ABI?" The facts are in the section
+   above: none of the seven `CapsuleRuntimeAbi` values (`manifest.rs:1050-1067`)
+   describes a core module that is not a Component, and both run paths
+   (`run_cmd.rs:51-57`, `capsule_cmd.rs:267-273`) refuse a `type` `wasm`
+   capsule unless `is_component_capsule()` (`manifest.rs:674-678`). Tied to
+   https://github.com/Elacity/elastos-runtime/issues/463 ("make Bus v2 the one
+   app ABI").
+2. **No summary of Wasm imports in the manifest.** Rong's words (26 Oct): "v1
+   has no manifest summary of Wasm imports for user review or approval; the lab
+   treats the module's import section as the declaration." The facts:
+   `CapsuleManifest` has `#[serde(deny_unknown_fields)]` (`manifest.rs:20`), so
+   a field the lab invents is refused by name (`an_unknown_manifest_field_is_refused_by_name`
+   adds `lab_imports` and sees the Runtime refuse it, and `bundle_identity`
+   refuse the bundle with its manifest-parse reason). No field lists imports:
+   `requires` (`:76-80`) names capsules and external tools, `interfaces`
+   (`:94-100`) are exposed interfaces, `providers` (`:112-114`) map schemes to
+   sources, and `capabilities` (`:90-92`) take only `elastos://` and
+   `localhost://` URIs (the check at `:616-622`, its message at `:619`), not
+   module and name pairs. The module's import section is inside the lab CID,
+   so a signature over that name covers it. The import rule at link time is a
+   later lane task (wc-009); this task adds no import check. Tied to
+   https://github.com/Elacity/elastos-runtime/issues/463 and
+   https://github.com/Elacity/elastos-runtime/issues/464.
+
 ## Not yet wired
 
 The canonical falsifier runner (`examples/agent-host/falsify.py`) now has a
@@ -235,4 +326,7 @@ not this lane's current edit files (`tools/src/lib.rs`, `tools/src/bundle.rs`,
 `.gitignore`, `README.md`), so a killed run cannot restore them (ask **R1**,
 pending, owned by the model-provider lane). Until that lands, the lane's
 falsifiers are proved by hand (break → named test fails → revert); do not add
-a second runner or edit `falsify.py`.
+a second runner or edit `falsify.py`. The runner itself does run lab entries:
+`--from lab/wasm-capsule/falsifiers.json F-WC8 F-WC3-LABCID-PIN` reported
+`summary: 5 CAUGHT of 5` for wc-008's four and the reused entry, which still count as hand-proven, pending R1, until the
+recovery targets name `capsule/capsule.json` and `tools/src/lib.rs`.
