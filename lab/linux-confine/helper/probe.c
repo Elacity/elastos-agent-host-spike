@@ -24,6 +24,8 @@
 #define S_IFSOCK 0140000
 #define S_IRUSR 0400
 #define S_IWUSR 0200
+/* TIOCGPTN on /dev/ptmx. ioctl(0) on /dev/null is ENOTTY unconfined. */
+#define TIOCGPTN 0x80045430
 
 static long sc(long n, long a, long b, long c, long d, long e, long f) {
 #if defined(__x86_64__)
@@ -317,13 +319,17 @@ int main(int argc, char **argv) {
     call_result("refer", sc(SYS_linkat, AT_FDCWD, (long)storage, AT_FDCWD, (long)refer_dest, 0, 0),
                 "landlock refused REFER", "linkat across directories succeeded");
     {
-        long fd = sc(SYS_openat, AT_FDCWD, (long)ioctl_dev, O_RDONLY, 0, 0, 0);
+        unsigned int ptn = 0;
+        long fd = sc(SYS_openat, AT_FDCWD, (long)ioctl_dev, O_RDWR, 0, 0, 0);
+        if (fd < 0) {
+            fd = sc(SYS_openat, AT_FDCWD, (long)"/dev/ptmx", O_RDWR, 0, 0, 0);
+        }
         if (fd < 0) {
             line("ioctl-dev", "refused", fd, "open of planted device failed");
         } else {
-            long r = sc(SYS_ioctl, fd, 0, 0, 0, 0, 0);
+            long r = sc(SYS_ioctl, fd, TIOCGPTN, (long)&ptn, 0, 0, 0);
             sc(SYS_close, fd, 0, 0, 0, 0, 0);
-            call_result("ioctl-dev", r, "landlock refused IOCTL_DEV", "ioctl of planted device succeeded");
+            call_result("ioctl-dev", r, "landlock refused IOCTL_DEV", "ioctl TIOCGPTN succeeded");
         }
     }
 

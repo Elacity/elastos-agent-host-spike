@@ -38,5 +38,13 @@
     "new": "int provider_deny_socket = deny_network && 0",
     "test": "provider_filter_refuses_socket",
     "caught": "provider filter socket denial did not hold"
+  },
+  {
+    "id": "F-LC-ANY-ERRNO",
+    "file": "lab/linux-confine/tests/confine.rs and lab/linux-confine/helper/setup.c",
+    "old": "expect() asserts errno; clone denial returns EPERM",
+    "new": "expect() ignores errno; clone denial returns ENOSYS",
+    "test": "provider_filter_refuses_clone_process",
+    "caught": "not any failure"
   }
 ]

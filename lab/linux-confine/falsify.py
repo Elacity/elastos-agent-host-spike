@@ -18,46 +18,93 @@ STORAGE = (
     "LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | "
     "LANDLOCK_ACCESS_FS_REMOVE_DIR)"
 )
+CLONE_ERRNO_OLD = (
+    "    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);\n"
+    "    filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone3, 0, 1);"
+)
+CLONE_ERRNO_NEW = (
+    "    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS);\n"
+    "    filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone3, 0, 1);"
+)
+EXPECT_ERRNO_OLD = '    assert_eq!(found.errno, errno, "{name}\\n{}", report.raw);'
+EXPECT_ERRNO_NEW = "    let _ = errno; /* accept any errno */"
 CHECKS = [
     {
         "id": "F-LC-SOCKET",
-        "file": HERE / "src" / "policy.rs",
-        "old": "pub const DENY_SOCKET: bool = true;",
-        "new": "pub const DENY_SOCKET: bool = false;",
+        "edits": [
+            {
+                "file": HERE / "src" / "policy.rs",
+                "old": "pub const DENY_SOCKET: bool = true;",
+                "new": "pub const DENY_SOCKET: bool = false;",
+            }
+        ],
         "test": "did_profile_permits_its_operations_and_refuses_the_rest",
         "caught": "socket denial did not hold",
     },
     {
         "id": "F-LC-CAPBND",
-        "file": HERE / "helper" / "setup.c",
-        "old": "    drop_bounding_set();",
-        "new": "    if (0) drop_bounding_set();",
+        "edits": [
+            {
+                "file": HERE / "helper" / "setup.c",
+                "old": "    drop_bounding_set();",
+                "new": "    if (0) drop_bounding_set();",
+            }
+        ],
         "test": "confined_process_cap_bnd_is_zero",
         "caught": "capability bounding set did not drop",
     },
     {
         "id": "F-LC-BLOCK",
-        "file": HERE / "build.rs",
-        "old": 'let production_flags: &[&str] = &["-O2", "-Wall", "-Wextra", "-Werror"];',
-        "new": 'let production_flags: &[&str] = &["-DLC_TEST_HOOKS", "-O2", "-Wall", "-Wextra", "-Werror"];',
+        "edits": [
+            {
+                "file": HERE / "build.rs",
+                "old": 'let production_flags: &[&str] = &["-O2", "-Wall", "-Wextra", "-Werror"];',
+                "new": 'let production_flags: &[&str] = &["-DLC_TEST_HOOKS", "-O2", "-Wall", "-Wextra", "-Werror"];',
+            }
+        ],
         "test": "production_launcher_rejects_block_switches",
         "caught": "the production launcher accepted a block switch",
     },
     {
         "id": "F-LC-STORAGE",
-        "file": HERE / "helper" / "setup.c",
-        "old": STORAGE,
-        "new": STORAGE[:-1] + " | LANDLOCK_ACCESS_FS_IOCTL_DEV)",
+        "edits": [
+            {
+                "file": HERE / "helper" / "setup.c",
+                "old": STORAGE,
+                "new": STORAGE[:-1] + " | LANDLOCK_ACCESS_FS_IOCTL_DEV)",
+            }
+        ],
         "test": "did_profile_permits_its_operations_and_refuses_the_rest",
         "caught": "storage root rights drifted",
     },
     {
         "id": "F-LC-PROVIDER-SOCKET",
-        "file": HERE / "helper" / "setup.c",
-        "old": "    int provider_deny_socket = deny_network && 1;",
-        "new": "    int provider_deny_socket = deny_network && 0;",
+        "edits": [
+            {
+                "file": HERE / "helper" / "setup.c",
+                "old": "    int provider_deny_socket = deny_network && 1;",
+                "new": "    int provider_deny_socket = deny_network && 0;",
+            }
+        ],
         "test": "provider_filter_refuses_socket",
         "caught": "provider filter socket denial did not hold",
+    },
+    {
+        "id": "F-LC-ANY-ERRNO",
+        "edits": [
+            {
+                "file": HERE / "tests" / "confine.rs",
+                "old": EXPECT_ERRNO_OLD,
+                "new": EXPECT_ERRNO_NEW,
+            },
+            {
+                "file": HERE / "helper" / "setup.c",
+                "old": CLONE_ERRNO_OLD,
+                "new": CLONE_ERRNO_NEW,
+            },
+        ],
+        "test": "provider_filter_refuses_clone_process",
+        "caught": "not any failure",
     },
 ]
 
@@ -83,24 +130,29 @@ def cargo(test):
 
 
 def one(check):
-    source = check["file"]
-    original = source.read_text()
-    old = check["old"]
-    new = check["new"]
     name = check["id"]
-    if original.count(old) != 1 or new in original:
-        print(f"{name} NOT RUN: the standing line is not unique")
-        return 1
+    originals = []
+    for edit in check["edits"]:
+        source = edit["file"]
+        original = source.read_text()
+        old = edit["old"]
+        new = edit["new"]
+        if original.count(old) != 1 or new in original:
+            print(f"{name} NOT RUN: the standing line is not unique in {source.name}")
+            return 1
+        originals.append((source, original, old, new))
     baseline = cargo(check["test"])
     if baseline.returncode != 0:
         print(baseline.stdout)
         print(f"{name} NOT RUN: the standing test failed before the edit")
         return 1
     try:
-        source.write_text(original.replace(old, new, 1))
+        for source, original, old, new in originals:
+            source.write_text(original.replace(old, new, 1))
         mutated = cargo(check["test"])
     finally:
-        source.write_text(original)
+        for source, original, _, _ in originals:
+            source.write_text(original)
     if mutated.returncode == 0 or check["caught"] not in mutated.stdout:
         print(mutated.stdout)
         print(f"{name} SURVIVED")

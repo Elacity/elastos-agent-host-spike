@@ -31,4 +31,18 @@ fails.
 
 The provider filter allows `clone` only when `CLONE_THREAD` is set. `clone3`
 returns `ENOSYS` so a thread call falls back to `clone`. `clone(SIGCHLD)` is
-refused. `provider_filter_refuses_clone_process` is the named test.
+refused. `provider_filter_refuses_clone_process` is the named test. Every
+denied row asserts that exact errno. `F-LC-ANY-ERRNO` plants an `expect()`
+that accepts any errno plus a clone denial of `ENOSYS`, and that test fails.
+
+## Withheld storage rights
+
+`withheld_storage_rights_are_landlock_eacces` is the named test. Confined
+`make-sym`, `make-fifo`, `make-sock`, and `ioctl-dev` return Landlock
+`EACCES`. `refer` returns Landlock `EXDEV`. Each of those rows has a
+same-test unconfined success. Device ioctl is `TIOCGPTN` on `/dev/ptmx`.
+
+`make-char` and `make-block` return confined Landlock `EACCES`. Their
+unconfined controls stay NOT PROVEN: this uid has no `CAP_MKNOD` in the
+initial user namespace, and a user namespace also refuses char/block
+`mknod` (`EPERM`).

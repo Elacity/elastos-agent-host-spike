@@ -86,8 +86,10 @@ cargo test --manifest-path lab/linux-confine/Cargo.toml -- --test-threads=1 --no
 python3 lab/linux-confine/falsify.py
 ```
 
+`build.rs` honours the cargo target the same way the `cc` crate does: `CC_aarch64_unknown_linux_gnu`, then `TARGET_CC`, then `aarch64-linux-gnu-gcc`. Host `cc` is used only when TARGET equals HOST. `cargo check --target aarch64-unknown-linux-gnu` is not aarch64 proof: without that target compiler the C helpers do not build, and real aarch64 execution is NOT RUN.
+
 `tests/aarch64.rs` `aarch64_launcher_compiles` is `#[ignore]`. It cross-compiles the launcher, the test launcher, the probe, and the witness with `aarch64-linux-gnu-gcc` and runs the explain path on the test launcher and the probe under `qemu-aarch64`. When those tools are absent the test is ignored, never counted as a pass, and panics if someone runs it with `--ignored`. The production aarch64 launcher refuses `--block-landlock`. Jetson execution is NOT RUN.
 
-The second command plants five bugs, one at a time, and restores each file. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, and `F-LC-PROVIDER-SOCKET CAUGHT`.
+The second command plants six bugs, one at a time, and restores each file. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, `F-LC-PROVIDER-SOCKET CAUGHT`, and `F-LC-ANY-ERRNO CAUGHT`.
 
-`socketpair(AF_UNIX)` on the provider filter is a named C9 departure. See `CONFINEMENT-LINUX.md`. `clone(SIGCHLD)` is refused. The seven withheld Landlock rights are proven by `EACCES` from Landlock, not by the printed mask alone.
+`socketpair(AF_UNIX)` on the provider filter is a named C9 departure. See `CONFINEMENT-LINUX.md`. `clone(SIGCHLD)` is refused. Every denied row asserts its exact errno. The withheld Landlock rights that have a same-test unconfined success are proven by that pair. `make-char` and `make-block` stay NOT PROVEN for the positive control: this uid has no `CAP_MKNOD` in the initial user namespace, and a user namespace also refuses char/block `mknod`.

@@ -133,6 +133,13 @@ fn expect(report: &Report, name: &str, result: &str, errno: Option<i32>, reason:
     let found = op(report, name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(found.result, result, "{name}\n{}", report.raw);
     assert_eq!(found.errno, errno, "{name}\n{}", report.raw);
+    if result == "refused" {
+        assert_eq!(
+            found.errno, errno,
+            "denied {name} must carry exact errno {errno:?}, not any failure\n{}",
+            report.raw
+        );
+    }
     assert_eq!(found.reason, reason, "{name}\n{}", report.raw);
 }
 
@@ -416,6 +423,13 @@ fn expect_refused(report: &Report, name: &str, errno: i32, reason: &str) {
 fn provider_filter_refuses_clone_process() {
     let (built, report) = provider_probe("did");
     expect_refused(&report, "clone", EPERM, "seccomp refused clone");
+    let clone = op(&report, "clone").unwrap();
+    assert_eq!(
+        clone.errno,
+        Some(EPERM),
+        "denied clone must carry exact errno EPERM, not any failure: {:?}",
+        clone
+    );
     let control = run_unconfined(&built.launch).unwrap_or_else(|err| panic!("{err}"));
     let clone = control
         .iter()
@@ -495,7 +509,7 @@ fn withheld_storage_rights_are_landlock_eacces() {
         "mkdir under STORAGE_ROOT",
     );
     let control = run_unconfined(&built.launch).unwrap_or_else(|err| panic!("{err}"));
-    for name in ["make-sym", "make-fifo", "make-sock", "refer"] {
+    for name in ["make-sym", "make-fifo", "make-sock", "refer", "ioctl-dev"] {
         let found = control
             .iter()
             .find(|op| op.op == name)
@@ -503,6 +517,24 @@ fn withheld_storage_rights_are_landlock_eacces() {
         assert_eq!(
             found.result, "ok",
             "positive control: unconfined {name} must succeed: {found:?}"
+        );
+    }
+    for name in ["make-char", "make-block"] {
+        let found = control
+            .iter()
+            .find(|op| op.op == name)
+            .unwrap_or_else(|| panic!("unconfined probe omitted {name}"));
+        assert_eq!(
+            found.result, "refused",
+            "unconfined {name} is expected to fail without CAP_MKNOD: {found:?}"
+        );
+        assert_eq!(
+            found.errno,
+            Some(EPERM),
+            "unconfined {name} is EPERM without CAP_MKNOD: {found:?}"
+        );
+        println!(
+            "NOT PROVEN: unconfined {name} is EPERM (no CAP_MKNOD in the initial user namespace; a user namespace also refuses char/block mknod). No same-test unconfined success on this machine."
         );
     }
 }
