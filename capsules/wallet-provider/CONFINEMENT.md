@@ -36,7 +36,7 @@ holds that rule for encoded names.
 
 | Rule | Why the provider needs it |
 | --- | --- |
-| `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the launch named. |
+| `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the launch named. `unbound_copy_is_refused_under_profile` shows that a byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71 and the `execvp()` `Operation not permitted` line, and `bound_copy_serves_under_profile` is its control. |
 | `(allow file-read* (literal "/"))` | The kernel resolves every absolute path through the root directory. |
 | `(allow sysctl-read)` | The loader and the allocator read kernel facts at startup. |
 | `(allow file-read* (literal STORAGE_PARENT))` | Inspect and synchronize the existing parent during wallet directory creation. |
@@ -163,6 +163,18 @@ oracles and supplies contract evidence, not Linux execution evidence.
   failure names the request, the exit status and `sandbox-exec`'s own line on
   standard error. That failure also shows that `sandbox-exec` refused the
   profile before any exec.
+
+`unbound_copy_is_refused_under_profile` and `bound_copy_serves_under_profile`
+split the exec rule into its two halves under the real profile, with no fixture
+rule. The first binds the real binary as `PROVIDER_EXECUTABLE` and starts a
+byte-identical copy stored under `STORAGE_ROOT`; `sandbox-exec` applies the
+profile before the exec, so the copy is refused with exit 71 and the `execvp()`
+`Operation not permitted` line, the `init` request gets no answer, and the
+storage root keeps only the copy with its bytes unchanged. The second is its
+control: the same fixture with `PROVIDER_EXECUTABLE` bound to the copy and the
+copy started answers `init` and `status` and exits 0 after `shutdown`, so the
+binding is the only difference between the two runs.
+
 - `both_file_profiles_bind_one_storage_parameter_contract` lives in
   `../wallet-provider/tests/confine.rs`. One check function holds the
   contract: `(version 1)` first, `(deny default)` second, an explicit
@@ -396,6 +408,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   (WP55): `start_with_profile_refuses_an_encoded_canonical_parameter` fails
   because the encoded canonical name reaches the launch instead of the
   canonical-binding refusal.
+- Append a second, unpinned `(allow process-exec)` after the exec rule (WP56):
+  `unbound_copy_is_refused_under_profile` fails on its deadline assertion
+  because the copy under `STORAGE_ROOT` starts instead of being refused.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
@@ -423,11 +438,11 @@ The one runner applies and restores each registered falsifier with
 from the repository root; the list's edit paths are relative to
 `examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
 
-A run of the list is evidence only where the sandbox tests run: on macOS
-without `/usr/bin/sandbox-exec` each sandbox test fails at the gate whatever
-the edit, and the runner runs no unmutated baseline, so a `CAUGHT` there proves
-nothing, while where the sandbox tests skip an entry that names one reads
-`SURVIVED`. A call site that passes a fixed `"linux"` for the OS is not caught
-by a run on a Mac where `/usr/bin/sandbox-exec` exists, because a present tool
-runs the test before the OS is read, so that run is no evidence for the OS
-argument.
+A run of the list is evidence only where the sandbox tests run: the runner runs
+every chosen named test once on the unmutated tree before its first edit, so on
+macOS without `/usr/bin/sandbox-exec` each sandbox test fails at the gate and
+its entry reads `NOT RUN` instead of `CAUGHT`, while where the sandbox tests
+skip an entry that names one reads `SURVIVED`. A call site that passes a fixed
+`"linux"` for the OS is not caught by a run on a Mac where
+`/usr/bin/sandbox-exec` exists, because a present tool runs the test before the
+OS is read, so that run is no evidence for the OS argument.

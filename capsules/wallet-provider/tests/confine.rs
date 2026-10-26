@@ -473,19 +473,20 @@ impl ConfinedProvider {
             .map(|(name, path)| (*name, path.as_path()))
             .collect();
         bindings.extend_from_slice(parameters);
-        Self::start_under(profile, &bindings)
+        Self::start_under(profile, &bindings, Path::new(PROVIDER_BINARY))
     }
 
-    /// The one launch builder: the provider binary under `profile`, with
-    /// exactly the `bindings` it is given. A caller can leave a parameter
-    /// unbound, as a Runtime bug would.
-    fn start_under(profile: &Path, bindings: &[(&str, &Path)]) -> Self {
+    /// The one launch builder: `program` under `profile`, with exactly the
+    /// `bindings` it is given. The tests start the provider binary; a test
+    /// that needs another program passes it through the same builder. A
+    /// caller can leave a parameter unbound, as a Runtime bug would.
+    fn start_under(profile: &Path, bindings: &[(&str, &Path)], program: &Path) -> Self {
         let mut command = Command::new(SANDBOX_EXEC);
         command.arg("-f").arg(profile);
         for (name, path) in bindings {
             command.arg("-D").arg(format!("{name}={}", path.display()));
         }
-        command.arg(PROVIDER_BINARY);
+        command.arg(program);
         Self::spawn(command)
     }
 
@@ -901,7 +902,8 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
             .iter()
             .map(|(name, path)| (*name, path.as_path()))
             .collect();
-        let mut provider = ConfinedProvider::start_under(&profile, &bindings);
+        let mut provider =
+            ConfinedProvider::start_under(&profile, &bindings, Path::new(PROVIDER_BINARY));
         let exit = provider.wait_for_exit();
         assert!(
             exit.code().is_some(),
@@ -940,6 +942,160 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     }
 }
 
+/// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
+/// and its control. It keeps the temporary base alive, resolves it, creates
+/// `STORAGE_ROOT` first, and copies the provider binary there byte for byte,
+/// so the copy and the binary differ only by path.
+struct StoredCopy {
+    _fixture: tempfile::TempDir,
+    base: PathBuf,
+    storage: PathBuf,
+    copy: PathBuf,
+}
+
+impl StoredCopy {
+    fn prepare() -> Self {
+        let fixture = tempfile::tempdir().expect("temporary wallet base");
+        let base = resolved(fixture.path());
+        let binary = resolved(Path::new(PROVIDER_BINARY));
+        let bindings = canonical_bindings(&base);
+        create_shared_ancestors(&bindings);
+        let storage = wallet_dir(&base);
+        fs::create_dir(&storage).expect("STORAGE_ROOT must be created first");
+        let copy = storage.join(binary.file_name().expect("the provider binary's file name"));
+        fs::copy(&binary, &copy).expect("copy the provider binary under STORAGE_ROOT");
+        let copy = resolved(&copy);
+        assert_eq!(
+            fs::read(&copy).expect("the copy must be readable"),
+            fs::read(&binary).expect("the binary must be readable"),
+            "the copy must be byte-identical to the bound binary"
+        );
+        Self {
+            _fixture: fixture,
+            base,
+            storage,
+            copy,
+        }
+    }
+}
+
+/// Under the real profile, only the path bound as `PROVIDER_EXECUTABLE` can be
+/// started. The test runs `confine.sb` itself, with no fixture rule. It binds
+/// the real provider binary as `PROVIDER_EXECUTABLE` and the storage
+/// parameters as usual, and starts the byte-identical copy under
+/// `STORAGE_ROOT`. `sandbox-exec` applies the profile before it executes its
+/// program, so the refused step is that exec of the copy, checked by the same
+/// `process-exec` rule as any exec by the confined provider. `sandbox-exec`
+/// exits 71 and logs `execvp() of '<copy>' failed: Operation not permitted`,
+/// and `STORAGE_ROOT` keeps only the copy. A missing program also exits 71,
+/// but with `No such file or directory`, so the test checks the EPERM line.
+/// `bound_copy_serves_under_profile` is the control: the same copy from the
+/// same fixture, bound and started, serves.
+///
+/// Falsifier: append one `(allow process-exec)` after the exec rule (WP56);
+/// the copy starts and stays alive to the deadline, so this test fails on its
+/// deadline assertion.
+#[test]
+fn unbound_copy_is_refused_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare();
+    let before = fs::read(&stored.copy).expect("the copy must be readable");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": stored.base.display().to_string() }
+    });
+    let canonical = canonical_bindings(&stored.base);
+    let bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut refused =
+        ConfinedProvider::start_under(Path::new(PROFILE_PATH), &bindings, &stored.copy);
+
+    let exit = refused.wait_for_exit();
+    assert!(
+        !matches!(exit, ChildExit::TimedOut),
+        "the profile must refuse the exec, so sandbox-exec must exit: {exit}"
+    );
+    assert_eq!(
+        exit.code(),
+        Some(71),
+        "sandbox-exec must exit 71 when the profile refuses the exec: {exit}"
+    );
+    refused
+        .try_send(&request)
+        .expect_err("the refused copy must not answer init");
+
+    // Quote only `sandbox-exec`'s exec lines, never the whole stream.
+    let copy = stored.copy.display().to_string();
+    let stderr = refused.stderr();
+    let execs: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    assert!(
+        execs
+            .iter()
+            .any(|line| line.contains(&copy) && line.contains("Operation not permitted")),
+        "sandbox-exec must log the refused exec of {copy} with EPERM: {execs:?}"
+    );
+
+    let entries: Vec<PathBuf> = fs::read_dir(&stored.storage)
+        .expect("STORAGE_ROOT must stay readable")
+        .map(|entry| entry.expect("STORAGE_ROOT entry").path())
+        .collect();
+    assert_eq!(
+        entries,
+        [stored.copy.clone()],
+        "STORAGE_ROOT must hold only the copy"
+    );
+    assert_eq!(
+        fs::read(&stored.copy).expect("the copy must stay readable"),
+        before,
+        "the refused run must leave the copy's bytes unchanged"
+    );
+}
+
+/// The control for `unbound_copy_is_refused_under_profile`: the same fixture,
+/// with the copy at the same place under `STORAGE_ROOT` bound as
+/// `PROVIDER_EXECUTABLE` and started under the same `confine.sb`. `init` with
+/// `base_path` as the fixture base answers `ok`, a following `status` answers
+/// `ok`, and `shutdown` exits 0. The binding is the only difference between
+/// the two runs.
+#[test]
+fn bound_copy_serves_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare();
+    let bound: Vec<(&str, PathBuf)> = canonical_bindings(&stored.base)
+        .into_iter()
+        .map(|(name, path)| match name {
+            "PROVIDER_EXECUTABLE" => (name, stored.copy.clone()),
+            _ => (name, path),
+        })
+        .collect();
+    let bindings: Vec<(&str, &Path)> = bound
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut provider =
+        ConfinedProvider::start_under(Path::new(PROFILE_PATH), &bindings, &stored.copy);
+    let init = provider.init(&stored.base);
+    assert_eq!(
+        init["status"], "ok",
+        "the bound copy must answer init: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the bound copy must answer status: {status}"
+    );
+    provider.shutdown();
+}
+
 /// A confined start that fails before it answers shows its reason.
 ///
 /// The fixture profile keeps `(version 1)` first and `(deny default)` second,
@@ -948,10 +1104,6 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// request, the exit status and `sandbox-exec`'s own denial on standard error.
 /// A fixture child that reads one request and exits without answering reaches
 /// the response-stream branch of the same harness with the same three facts.
-///
-/// Falsifier: drop the child's standard error from `unanswered` (WP29); the
-/// denied start loses `Operation not permitted`, so this test fails on that
-/// assertion at the first case.
 ///
 /// Falsifier: use a fixed `Operation not permitted` instead of the child's
 /// standard error in `unanswered` (WP42); the denied start's failure names no
@@ -979,7 +1131,7 @@ fn startup_denial_reports_its_reason() {
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
         .collect();
-    let mut denied = ConfinedProvider::start_under(&profile, &bindings);
+    let mut denied = ConfinedProvider::start_under(&profile, &bindings, Path::new(PROVIDER_BINARY));
     let exit = denied.wait_for_exit();
     assert_ne!(
         exit.code(),
@@ -1480,7 +1632,7 @@ fn both_file_profiles_bind_one_storage_parameter_contract() {
 /// test reads files and starts no process, so it runs on every platform.
 ///
 /// Falsifier: WP44 appends `(allow file-read* (literal "/etc"))` to the did
-/// profile; this test fails on that form. WP49 to WP52 make each source
+/// profile; this test fails on that form. WP49 to WP53 make each source
 /// refusal a skip, so `allow_rule_removal_check_rejects_bad_inputs` fails.
 #[test]
 fn every_did_and_wallet_allow_rule_has_a_registered_removal() {
