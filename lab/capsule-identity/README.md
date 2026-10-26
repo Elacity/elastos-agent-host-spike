@@ -401,11 +401,13 @@ that pattern.
 | The checked form judges the bytes it holds; the path form reads the folder now | `checked_signature_judges_the_checked_bytes` | F-CI4c, F-CI4k |
 | A malformed DID is refused with the decoder's text, even when listed | `malformed_signer_did_is_refused` | F-CI4g |
 | The checked form runs every check, not only the path form | `checked_signature_runs_all_checks` | F-CI4l, F-CI4m, F-CI4n |
-| Both wrappers keep the walk's refusal, including bad signature inputs | `signature_paths_preserve_walk_refusals` | F-CI4o, F-CI4p, F-CI4q, F-CI4r, F-CI4s |
+| Both wrappers keep the walk's refusal, including bad signature inputs | `signature_paths_preserve_walk_refusals` | F-CI4o, F-CI4p, F-CI4q, F-CI4r |
+| The walk's refusal precedes a bad signature from a canonical accepted signer | `signature_walk_refusal_precedes_bad_signature` | F-CI4s |
 | Two faults at once: the earlier check answers | `signature_refusal_order_is_stable` | F-CI4t, F-CI4u, F-CI4v |
 | One message, one verification, and the path form holds no check of its own | `signature_paths_share_one_implementation` | F-CI4w, F-CI4x |
 | Test keys come from the operating system's generator | `test_keys_use_fresh_os_randomness` | F-CI4y |
 | No key material is in what git would stage | `no_key_material_is_tracked` | F-CI4i |
+| Private-key header lines are found even when a file has invalid UTF-8 | `key_material_scan_finds_headers_in_non_utf8_files` | F-CI4z |
 | `*.key` and `*.seed` are ignored | `key_and_seed_files_are_ignored_by_git` | F-CI4h |
 
 The tests are in `tests/name_signature.rs`. F-CI4h drops `*.seed` from this

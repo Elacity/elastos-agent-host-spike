@@ -1270,7 +1270,7 @@
         }
       ],
       "tests": [
-        "signature_paths_preserve_walk_refusals"
+        "signature_walk_refusal_precedes_bad_signature"
       ]
     },
     {
@@ -1367,6 +1367,22 @@
       ],
       "tests": [
         "test_keys_use_fresh_os_randomness"
+      ]
+    },
+    {
+      "id": "F-CI4z",
+      "title": "key-material scan skips headers when any file byte is invalid UTF-8",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/name_signature.rs",
+          "old": "        let text = String::from_utf8_lossy(file.bytes);\n",
+          "new": "        let Ok(text) = std::str::from_utf8(file.bytes) else { continue; };\n"
+        }
+      ],
+      "tests": [
+        "key_material_scan_finds_headers_in_non_utf8_files"
       ]
     }
   ]

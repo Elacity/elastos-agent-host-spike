@@ -330,6 +330,24 @@ fn signature_paths_preserve_walk_refusals() {
     }
 }
 
+#[test]
+fn signature_walk_refusal_precedes_bad_signature() {
+    let good = assemble(&CONTENT_SAMPLE);
+    let (_, mut sig) = sign(good.path());
+    flip_signature(&mut sig);
+    let accepted = accepted_of(&sig);
+    let refusal = verify_checked_signature(&checked(good.path()), &sig, &accepted)
+        .expect_err("the canonical accepted signer has a bad signature");
+    assert_does_not_verify(refusal, &sig.signer_did, &sig.name);
+
+    let no_manifest = temp_dir();
+    let from_walk = checked_bundle_refusal(no_manifest.path());
+    assert_same_refusal(
+        verify_name_signature(no_manifest.path(), &sig, &accepted),
+        &from_walk,
+    );
+}
+
 fn lab_cid_refusal(bundle: &Path) -> Refusal {
     capsule_identity::lab_cid(bundle).expect_err("lab_cid refuses this bundle")
 }
@@ -592,12 +610,12 @@ fn key_material_findings(files: &[Filed<'_>]) -> Vec<String> {
         if file.bytes.len() == 32 && std::str::from_utf8(file.bytes).is_err() {
             found.push(format!("raw-seed:{}", file.name));
         }
-        if let Ok(text) = std::str::from_utf8(file.bytes) {
-            for (index, line) in text.lines().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.starts_with(&header_start) && trimmed.ends_with(&header_end) {
-                    found.push(format!("header:{}:{index}", file.name));
-                }
+        // Invalid bytes elsewhere in a file must not hide its ASCII header markers.
+        let text = String::from_utf8_lossy(file.bytes);
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(&header_start) && trimmed.ends_with(&header_end) {
+                found.push(format!("header:{}:{index}", file.name));
             }
         }
     }
@@ -649,6 +667,46 @@ fn no_key_material_is_tracked() {
             found.iter().any(|hit| hit.contains(needle)),
             "the scan missed {needle}: {found:?}"
         );
+    }
+}
+
+#[test]
+fn key_material_scan_finds_headers_in_non_utf8_files() {
+    let (header_start, header_end) = pem_private_ends();
+    let header = format!("{header_start}{header_end}");
+    let padded = format!("\t\u{2003}{header}\u{2003}\r\n");
+    for (bytes, line) in [
+        ([b"\xff\n".as_slice(), header.as_bytes(), b"\n"].concat(), 1),
+        ([padded.as_bytes(), b"\xff"].concat(), 0),
+        (
+            [header_start.as_bytes(), b"\xff", header_end.as_bytes()].concat(),
+            0,
+        ),
+    ] {
+        assert!(std::str::from_utf8(&bytes).is_err());
+        assert_ne!(bytes.len(), 32, "this case isolates the header check");
+        assert_eq!(
+            key_material_findings(&[Filed {
+                name: "notes.bin",
+                bytes: &bytes
+            }]),
+            vec![format!("header:notes.bin:{line}")],
+        );
+    }
+
+    let public_header = format!("{header_start}PUBLIC KEY-----");
+    for bytes in [
+        [b"\xff".as_slice(), header.as_bytes()].concat(),
+        [header.as_bytes(), b"\xff"].concat(),
+        [b"\xff\n".as_slice(), public_header.as_bytes(), b"\n"].concat(),
+    ] {
+        assert!(std::str::from_utf8(&bytes).is_err());
+        assert_ne!(bytes.len(), 32, "this case isolates the header check");
+        assert!(key_material_findings(&[Filed {
+            name: "notes.bin",
+            bytes: &bytes
+        }])
+        .is_empty());
     }
 }
 
