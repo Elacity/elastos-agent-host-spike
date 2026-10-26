@@ -192,18 +192,18 @@ fn canonical_bindings(base: &Path) -> [(&'static str, String); 3] {
 }
 
 /// The one launch builder: `sandbox-exec -f <profile>` with each binding, then
-/// the provider binary.
+/// `program`, the one program this launch starts.
 ///
-/// `start_under` binds the three canonical parameters. A test that needs a
-/// launch the Runtime cannot make passes fewer bindings through the same
-/// command shape, so one builder covers every start (P10).
-fn confinement_command(profile: &Path, bindings: &[(&str, String)]) -> Command {
+/// `start_under` starts the provider binary. A test that needs a launch the
+/// Runtime cannot make passes fewer bindings, or another program, through the
+/// same command shape, so one builder covers every start (P10).
+fn confinement_command(profile: &Path, bindings: &[(&str, String)], program: &Path) -> Command {
     let mut command = Command::new(SANDBOX_EXEC);
     command.arg("-f").arg(profile);
     for (name, value) in bindings {
         command.arg("-D").arg(format!("{name}={value}"));
     }
-    command.arg(PROVIDER_BINARY);
+    command.arg(program);
     command
 }
 
@@ -285,7 +285,11 @@ impl ConfinedProvider {
 
     /// Starts the provider under `profile`, its one profile source.
     fn start_under(profile: &Path, base: &Path) -> Self {
-        Self::spawn(confinement_command(profile, &canonical_bindings(base)))
+        Self::spawn(confinement_command(
+            profile,
+            &canonical_bindings(base),
+            Path::new(PROVIDER_BINARY),
+        ))
     }
 
     /// Sends one request and returns its answer; a failure panics with the
@@ -678,6 +682,115 @@ fn outside_read_denied() {
     provider.shutdown();
 }
 
+/// A file planted beneath `STORAGE_PARENT` stays unread and unwritten.
+///
+/// The parent read grants the directory itself only, not a file beneath it,
+/// and the write grant stops at `STORAGE_ROOT`. The test plants real encrypted
+/// nickname state at `<base>/sibling/did/nickname.enc`, beneath `STORAGE_PARENT`
+/// and outside `STORAGE_ROOT`, and records its bytes. With
+/// `<base>/did/nickname.enc` a symlink to the planted file, `init` answers
+/// `storage_error` with the nickname-read reason; after the link is removed
+/// `init` answers ok, `get_nickname` answers `not_set` and `set_nickname`
+/// serves the provider's own root. With the link made again, `set_nickname`
+/// answers `storage_error` with the nickname-save reason. The planted file's
+/// bytes stay unchanged after each half.
+///
+/// Falsifiers: widen the parent read from `literal` to `subpath` (DID27); the
+/// planted file loads, so `init` answers ok and this test fails on its read
+/// half. Append a write grant on `STORAGE_PARENT` (DID28); the write half
+/// succeeds, so this test fails on its `set_nickname` refusal.
+#[test]
+fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    // Beneath `STORAGE_PARENT` (`root`), outside `STORAGE_ROOT` (`root/did`).
+    let sibling = root.join("sibling");
+    fs::create_dir_all(&sibling).expect("sibling base under the storage parent");
+    elastos_identity::save_nickname_with_device_key(&sibling, &DEVICE_KEY, "Planted")
+        .expect("planted nickname fixture");
+    let planted_path = sibling.join("did").join("nickname.enc");
+    let planted = fs::read(&planted_path).expect("planted fixture file");
+
+    let mut provider = ConfinedProvider::start(&root);
+    provider.init(&root);
+    let granted = root.join("did").join("nickname.enc");
+    fs::create_dir_all(granted.parent().expect("nickname parent"))
+        .expect("granted identity directory");
+
+    // Read half: the parent read grants the directory itself, not this file.
+    std::os::unix::fs::symlink(&planted_path, &granted).expect("planted symlink");
+    let denied = provider.send(json!({
+        "op": "init",
+        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+    }));
+    assert_eq!(
+        denied["status"], "error",
+        "the planted read must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .expect("denial must state a reason")
+            .starts_with("did-provider: failed to read nickname:"),
+        "the refusal must reach the nickname loader: {denied}"
+    );
+    assert_eq!(
+        fs::read(&planted_path).expect("planted file stays readable to the test"),
+        planted,
+        "the planted file must stay unchanged after the read half"
+    );
+
+    // Remove the escape and confirm the provider serves its own root.
+    fs::remove_file(&granted).expect("remove planted symlink");
+    provider.init(&root);
+    let nickname = provider.send(json!({ "op": "get_nickname" }));
+    assert_eq!(
+        nickname["code"], "not_set",
+        "the provider must not adopt planted state: {nickname}"
+    );
+    provider.ok(json!({ "op": "set_nickname", "nickname": "Own" }));
+    assert_eq!(
+        provider.ok(json!({ "op": "get_nickname" }))["nickname"],
+        "Own"
+    );
+
+    // Write half: the granted path holds the provider's own file now, so
+    // remove it before pointing that path at the planted file again.
+    fs::remove_file(&granted).expect("provider's own nickname file");
+    std::os::unix::fs::symlink(&planted_path, &granted).expect("planted symlink again");
+    let denied = provider.send(json!({ "op": "set_nickname", "nickname": "Planted" }));
+    assert_eq!(
+        denied["status"], "error",
+        "the planted write must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .expect("denial must state a reason")
+            .starts_with("did-provider: failed to save nickname:"),
+        "the refusal must name the failed write: {denied}"
+    );
+    assert_eq!(
+        fs::read(&planted_path).expect("planted file stays readable to the test"),
+        planted,
+        "the planted file must stay unchanged after the write half"
+    );
+
+    fs::remove_file(&granted).expect("remove planted symlink");
+    provider.ok(json!({ "op": "set_nickname", "nickname": "Recovered" }));
+    assert_eq!(
+        provider.ok(json!({ "op": "get_nickname" }))["nickname"],
+        "Recovered"
+    );
+    provider.ok(json!({ "op": "get_did" }));
+    provider.shutdown();
+}
+
 /// A confined start that fails before it answers shows its reason.
 ///
 /// The fixture profile keeps `(version 1)` first and `(deny default)` second,
@@ -805,7 +918,11 @@ fn assert_startup_is_refused(
     root: &Path,
     request: &Value,
 ) {
-    let mut child = ConfinedProvider::spawn(confinement_command(profile, bindings));
+    let mut child = ConfinedProvider::spawn(confinement_command(
+        profile,
+        bindings,
+        Path::new(PROVIDER_BINARY),
+    ));
     let exit = child.wait_for_exit();
     // A live child means the launch fell back to an unconfined start; the
     // deadline killed it before it could answer, so check that first.
@@ -913,6 +1030,150 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
         &root,
         &request,
     );
+}
+
+/// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
+/// and its control. It keeps the temporary base alive, resolves it, creates
+/// `STORAGE_ROOT` first, and copies the provider binary there byte for byte,
+/// so the copy and the binary differ only by path.
+struct StoredCopy {
+    _fixture: tempfile::TempDir,
+    base: PathBuf,
+    storage: PathBuf,
+    copy: PathBuf,
+}
+
+impl StoredCopy {
+    fn prepare() -> Self {
+        let fixture = tempfile::tempdir().expect("temporary identity root");
+        let base = resolved(fixture.path());
+        let binary = resolved(Path::new(PROVIDER_BINARY));
+        let storage = base.join("did");
+        fs::create_dir(&storage).expect("STORAGE_ROOT must be created first");
+        let copy = storage.join(binary.file_name().expect("the provider binary's file name"));
+        fs::copy(&binary, &copy).expect("copy the provider binary under STORAGE_ROOT");
+        let copy = resolved(&copy);
+        assert_eq!(
+            fs::read(&copy).expect("the copy must be readable"),
+            fs::read(&binary).expect("the binary must be readable"),
+            "the copy must be byte-identical to the bound binary"
+        );
+        Self {
+            _fixture: fixture,
+            base,
+            storage,
+            copy,
+        }
+    }
+}
+
+/// Under the real profile, only the path bound as `PROVIDER_EXECUTABLE` can be
+/// started. The test runs `confine.sb` itself, with no fixture rule. It binds
+/// the real provider binary as `PROVIDER_EXECUTABLE` and the storage
+/// parameters as usual, and starts the byte-identical copy under
+/// `STORAGE_ROOT`. `sandbox-exec` applies the profile before it executes its
+/// program, so the refused step is that exec of the copy, checked by the same
+/// `process-exec` rule as any exec by the confined provider. `sandbox-exec`
+/// exits 71 and logs `execvp() of '<copy>' failed: Operation not permitted`,
+/// and `STORAGE_ROOT` keeps only the copy. A missing program also exits 71,
+/// but with `No such file or directory`, so the test checks the EPERM line.
+/// `bound_copy_serves_under_profile` is the control: the same copy from the
+/// same fixture, bound and started, serves.
+///
+/// Falsifier: append one `(allow process-exec)` after the exec rule (DID26);
+/// the copy starts and stays alive to the deadline, so this test fails on its
+/// deadline assertion.
+#[test]
+fn unbound_copy_is_refused_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare();
+    let before = fs::read(&stored.copy).expect("the copy must be readable");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": stored.base, "encryption_key": hex::encode(DEVICE_KEY) }
+    });
+    let mut refused = ConfinedProvider::spawn(confinement_command(
+        Path::new(PROFILE_PATH),
+        &canonical_bindings(&stored.base),
+        &stored.copy,
+    ));
+
+    let exit = refused.wait_for_exit();
+    assert!(
+        !matches!(exit, ChildExit::TimedOut),
+        "the profile must refuse the exec, so sandbox-exec must exit: {exit}"
+    );
+    assert_eq!(
+        exit.code(),
+        Some(71),
+        "sandbox-exec must exit 71 when the profile refuses the exec: {exit}"
+    );
+    refused
+        .try_send(&request)
+        .expect_err("the refused copy must not answer init");
+
+    // Quote only `sandbox-exec`'s exec lines, never the whole stream.
+    let copy = stored.copy.display().to_string();
+    let stderr = refused.stderr();
+    let execs: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    assert!(
+        execs
+            .iter()
+            .any(|line| line.contains(&copy) && line.contains("Operation not permitted")),
+        "sandbox-exec must log the refused exec of {copy} with EPERM: {execs:?}"
+    );
+
+    let entries: Vec<PathBuf> = fs::read_dir(&stored.storage)
+        .expect("STORAGE_ROOT must stay readable")
+        .map(|entry| entry.expect("STORAGE_ROOT entry").path())
+        .collect();
+    assert_eq!(
+        entries,
+        [stored.copy.clone()],
+        "STORAGE_ROOT must hold only the copy"
+    );
+    assert_eq!(
+        fs::read(&stored.copy).expect("the copy must stay readable"),
+        before,
+        "the refused run must leave the copy's bytes unchanged"
+    );
+}
+
+/// The control for `unbound_copy_is_refused_under_profile`: the same fixture,
+/// with the copy at the same place under `STORAGE_ROOT` bound as
+/// `PROVIDER_EXECUTABLE` and started under the same `confine.sb`. `init` with
+/// `base_path` as the fixture base answers `ok`, a following `get_did` answers
+/// `ok`, and `shutdown` exits 0. The binding is the only difference between
+/// the two runs.
+#[test]
+fn bound_copy_serves_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare();
+    let bindings: Vec<(&str, String)> = canonical_bindings(&stored.base)
+        .into_iter()
+        .map(|(name, value)| match name {
+            "PROVIDER_EXECUTABLE" => (name, stored.copy.display().to_string()),
+            _ => (name, value),
+        })
+        .collect();
+    let mut provider = ConfinedProvider::spawn(confinement_command(
+        Path::new(PROFILE_PATH),
+        &bindings,
+        &stored.copy,
+    ));
+    provider.ok(json!({
+        "op": "init",
+        "config": { "base_path": stored.base, "encryption_key": hex::encode(DEVICE_KEY) }
+    }));
+    provider.ok(json!({ "op": "get_did" }));
+    provider.shutdown();
 }
 
 /// The harness drains standard error while the child runs.

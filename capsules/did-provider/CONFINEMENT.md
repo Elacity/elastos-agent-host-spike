@@ -90,7 +90,10 @@ contract evidence, not Linux execution evidence.
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the
-  binary the launch named.
+  binary the launch named. `unbound_copy_is_refused_under_profile` shows that a
+  byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71
+  and the `execvp()` `Operation not permitted` line, and
+  `bound_copy_serves_under_profile` is its control.
 - `(allow file-read* (literal "/"))`: resolve the absolute program path through
   the root directory.
 - `(allow sysctl-read)`: the loader and the allocator read kernel facts at
@@ -145,6 +148,17 @@ the outside file to stay unchanged, the provider to report no nickname for its
 own root, and a normal request to succeed after the link is removed. Both cases
 fail when `(deny default)` becomes `(allow default)`.
 
+`planted_file_beneath_storage_parent_is_neither_read_nor_written` plants real
+encrypted nickname state in a sibling directory beneath `STORAGE_PARENT` and
+outside `STORAGE_ROOT`, then points the granted nickname path at it. Under the
+real profile `init` refuses the read with `storage_error` and the nickname-read
+reason, and the planted bytes stay unchanged. After the link is removed `init`
+answers ok, `get_nickname` answers `not_set` and `set_nickname` serves the
+provider's own root. With the link made again, `set_nickname` refuses the write
+with `storage_error`, the nickname-save reason and unchanged planted bytes. The
+parent read grants the directory itself only, so widening it to `subpath`, or
+granting writes on the parent, makes this test fail.
+
 `startup_denial_reports_its_reason` covers the failure path. It starts the
 provider under a fixture profile that holds `(version 1)` and `(deny default)`,
 so `sandbox-exec` cannot exec it, waits for that child to exit, and sends
@@ -176,6 +190,17 @@ root. The failure never names `execvp`, so the exec was never attempted. The
 case skips with its printed reason when `sandbox-exec` is absent on a host OS
 other than macOS.
 
+`unbound_copy_is_refused_under_profile` and `bound_copy_serves_under_profile`
+split the exec rule into its two halves under the real profile, with no fixture
+rule. The first binds the real binary as `PROVIDER_EXECUTABLE` and starts a
+byte-identical copy stored under `STORAGE_ROOT`; `sandbox-exec` applies the
+profile before the exec, so the copy is refused with exit 71 and the `execvp()`
+`Operation not permitted` line, the `init` request gets no answer, and the
+storage root keeps only the copy with its bytes unchanged. The second is its
+control: the same fixture with `PROVIDER_EXECUTABLE` bound to the copy and the
+copy started answers `init` and `get_did` and exits 0 after `shutdown`, so the
+binding is the only difference between the two runs.
+
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
 no default grant. It runs on every platform, and removing `(deny network*)`
@@ -194,6 +219,10 @@ and `capsules/model-provider/confine.sb`. All three profiles are required,
 and a missing or unreadable profile fails the check with a reason that names
 its path. The test runs on every platform because it reads files and starts
 no process.
+
+`every_did_and_wallet_allow_rule_has_a_registered_removal` in the same file
+requires a registered removal falsifier for every top-level allow rule of did's
+profile.
 
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
 itself without starting a process: a missing `sandbox-exec` on `macos` is an
@@ -306,6 +335,15 @@ argument.
 - Return the shared unanswered message from the invalid-JSON branch (DID25):
   `invalid_json_answer_names_the_request_and_the_parse_error` fails because the
   answer loses its parse error and says the provider did not answer.
+- Append a second, unpinned `(allow process-exec)` after the exec rule (DID26):
+  `unbound_copy_is_refused_under_profile` fails on its deadline assertion
+  because the copy under `STORAGE_ROOT` starts instead of being refused.
+- Widen the parent read from `literal` to `subpath` (DID27):
+  `planted_file_beneath_storage_parent_is_neither_read_nor_written` fails on
+  its read half because the planted file loads and `init` answers ok.
+- Append a write grant on `STORAGE_PARENT` after the storage-root rule (DID28):
+  `planted_file_beneath_storage_parent_is_neither_read_nor_written` fails on
+  its write half because that `set_nickname` succeeds; the read half passes.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
