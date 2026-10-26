@@ -2,9 +2,10 @@
 //! pinned lab CIDs, a bounded call for bundles that hold a FIFO, observers
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
-//! signature checks share, the one key-material scan, and the run of
-//! README's Python rule (both kept here, a file the falsifier runner restores
-//! after a killed run).
+//! signature checks share, the one key-material scan, the run of README's
+//! Python rule, and the scan for lab crates that use this one, read through
+//! `cargo metadata` (all three kept here, a file the falsifier runner
+//! restores after a killed run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
@@ -602,27 +603,41 @@ pub fn readme_python_block() -> Result<String, String> {
 /// one, or an unclosed block is refused with its reason, which names the
 /// section.
 pub fn python_block_under(readme: &str, heading: &str) -> Result<String, String> {
+    fenced_block_under(readme, heading, "python")
+}
+
+/// The text of the section of `readme` under `heading`, up to the next `## `
+/// heading. A missing section is refused with its reason.
+pub fn section_under<'a>(readme: &'a str, heading: &str) -> Result<&'a str, String> {
     let title = heading.trim_end();
     let start = readme
         .find(heading)
         .ok_or_else(|| format!("README.md has no {title:?} section"))?
         + heading.len();
     let section = &readme[start..];
-    let section = &section[..section.find("\n## ").unwrap_or(section.len())];
-    let open = "```python\n";
-    match section.matches(open).count() {
+    Ok(&section[..section.find("\n## ").unwrap_or(section.len())])
+}
+
+/// The one ```` ```lang ```` block of the section of `readme` under `heading`,
+/// as written: the one README block reader. Its refusals are
+/// [`python_block_under`]'s, with `lang` in place of `python`.
+pub fn fenced_block_under(readme: &str, heading: &str, lang: &str) -> Result<String, String> {
+    let title = heading.trim_end();
+    let section = section_under(readme, heading)?;
+    let open = format!("```{lang}\n");
+    match section.matches(&open).count() {
         1 => {}
-        0 => return Err(format!("README.md's {title:?} holds no ```python block")),
+        0 => return Err(format!("README.md's {title:?} holds no ```{lang} block")),
         more => {
             return Err(format!(
-                "README.md's {title:?} holds {more} ```python blocks, not one"
+                "README.md's {title:?} holds {more} ```{lang} blocks, not one"
             ))
         }
     }
-    let body = &section[section.find(open).expect("found once") + open.len()..];
+    let body = &section[section.find(&open).expect("found once") + open.len()..];
     let end = body
         .find("\n```\n")
-        .ok_or_else(|| format!("README.md's ```python block in {title:?} is never closed"))?;
+        .ok_or_else(|| format!("README.md's ```{lang} block in {title:?} is never closed"))?;
     let block = &body[..end + 1];
     Ok(block.to_owned())
 }
@@ -776,4 +791,214 @@ pub fn run_python_with(interpreter: &str, program: &str, stdin: &[u8]) -> Result
             lines.len()
         )),
     }
+}
+
+/// The heading of README's consumer adoption note.
+pub const ADOPTION_HEADING: &str = "## For a lab that uses the lab CID\n";
+
+/// The text of README's consumer adoption note, as committed.
+pub fn readme_adoption_note() -> Result<&'static str, String> {
+    section_under(README, ADOPTION_HEADING)
+}
+
+/// The consumer manifests README's adoption note lists, sorted.
+pub fn readme_lab_cid_consumers() -> Result<Vec<String>, String> {
+    consumers_listed_in(README)
+}
+
+/// The manifests listed in the ```text block of `readme`'s adoption note,
+/// sorted. Each line is a repo-relative path and what that consumer uses:
+/// `pins`, `parse` or `both`. Any other line is refused with its text.
+pub fn consumers_listed_in(readme: &str) -> Result<Vec<String>, String> {
+    let block = fenced_block_under(readme, ADOPTION_HEADING, "text")?;
+    let mut listed = Vec::new();
+    for line in block.lines() {
+        match line.split_whitespace().collect::<Vec<_>>()[..] {
+            [path, "pins" | "parse" | "both"] => listed.push(path.to_owned()),
+            _ => {
+                let what = "a manifest path and pins, parse or both";
+                return Err(format!("the adoption note's line {line:?} is not {what}"));
+            }
+        }
+    }
+    listed.sort();
+    Ok(listed)
+}
+
+/// The package name a dependency on this crate carries in Cargo's metadata,
+/// whatever key or rename the consumer writes.
+const CRATE_NAME: &str = "capsule-identity";
+
+/// This lane's folder, as `git ls-files` prints it from the repository root.
+const LANE_PREFIX: &str = "lab/capsule-identity/";
+
+/// The repository's root: the folder that holds `lab/`.
+pub fn repo_dir() -> PathBuf {
+    lane_dir()
+        .parent()
+        .and_then(Path::parent)
+        .expect("the lane is lab/capsule-identity")
+        .to_path_buf()
+}
+
+/// Every git-tracked `Cargo.toml` under `lab/`, at any depth, outside this
+/// lane: repo-relative paths, sorted. A git that cannot run or fails, or a
+/// path that is not UTF-8, is refused with its cause.
+pub fn lab_manifests() -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z", "--", ":(glob)lab/**/Cargo.toml"])
+        .current_dir(repo_dir())
+        .output()
+        .map_err(|error| format!("git cannot run: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut manifests = Vec::new();
+    for name in output.stdout.split(|byte| *byte == 0) {
+        if name.is_empty() {
+            continue;
+        }
+        let path = String::from_utf8(name.to_vec())
+            .map_err(|_| format!("a tracked path is not UTF-8: {name:?}"))?;
+        if !path.starts_with(LANE_PREFIX) {
+            manifests.push(path);
+        }
+    }
+    manifests.sort();
+    Ok(manifests)
+}
+
+/// The manifests of [`lab_manifests`] whose package depends on this crate
+/// ([`depends_on_this_crate`]): repo-relative paths, sorted. The first
+/// manifest that cannot be read is refused with its cause.
+pub fn lab_cid_consumers() -> Result<Vec<String>, String> {
+    let mut consumers = Vec::new();
+    for path in lab_manifests()? {
+        if depends_on_this_crate(&repo_dir().join(&path))? {
+            consumers.push(path);
+        }
+    }
+    Ok(consumers)
+}
+
+/// Whether the package of the manifest at `manifest`, as Cargo's own reader
+/// reads it, has a dependency of any kind on this crate. It runs `cargo
+/// metadata --no-deps --offline --format-version 1` with the cargo that built
+/// these tests, from a fresh, empty temp folder, and reads its JSON with
+/// [`consumer_in_metadata`]. No TOML is read here. A cargo that cannot start
+/// or exits non-zero is refused with the manifest and cargo's stderr.
+pub fn depends_on_this_crate(manifest: &Path) -> Result<bool, String> {
+    let empty = temp_dir();
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .current_dir(empty.path())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("cargo could not run for {}: {error}", manifest.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata refused {} ({}): {}",
+            manifest.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    consumer_in_metadata(manifest, &output.stdout)
+}
+
+/// Whether `metadata`, the JSON `cargo metadata` printed for `manifest`,
+/// holds a package whose `manifest_path` is that file and whose dependencies,
+/// of any kind, hold one with `name` [`CRATE_NAME`] and a `path` that
+/// resolves to this lane's folder. JSON that does not parse, no package for
+/// that manifest, a field that is not of its type, or a path that does not
+/// resolve is refused with the manifest and its cause.
+pub fn consumer_in_metadata(manifest: &Path, metadata: &[u8]) -> Result<bool, String> {
+    let shown = manifest.display();
+    let metadata: serde_json::Value = serde_json::from_slice(metadata)
+        .map_err(|error| format!("cargo metadata for {shown} is not JSON: {error}"))?;
+    let resolved = |path: &str| {
+        fs::canonicalize(path).map_err(|error| {
+            format!("cargo metadata for {shown} names {path}, which does not resolve: {error}")
+        })
+    };
+    let wanted = resolved(&manifest.to_string_lossy())?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| format!("cargo metadata for {shown} holds no packages list"))?;
+    let mut package = None;
+    for candidate in packages {
+        let path = candidate["manifest_path"].as_str().ok_or_else(|| {
+            format!("cargo metadata for {shown} has a package with no manifest_path")
+        })?;
+        if resolved(path)? == wanted {
+            package = Some(candidate);
+        }
+    }
+    let package = package.ok_or_else(|| {
+        format!("cargo metadata for {shown} holds no package whose manifest is that file")
+    })?;
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("cargo metadata for {shown} holds no dependencies list"))?;
+    let lane = resolved(&lane_dir().to_string_lossy())?;
+    for dependency in dependencies {
+        if dependency["name"] != CRATE_NAME {
+            continue;
+        }
+        let Some(path) = dependency["path"].as_str() else {
+            continue;
+        };
+        if resolved(path)? == lane {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Every path under `root`, relative to it, with its bytes (a link's target
+/// for a link, `None` for a folder), sorted: the state a scan must leave as
+/// it found it, ignored files and folders such as `target/` included.
+pub fn folder_state(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut state = Vec::new();
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let entries = fs::read_dir(&folder)
+            .unwrap_or_else(|error| panic!("list {}: {error}", folder.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| panic!("list {}: {error}", folder.display()));
+            let path = entry.path();
+            let relative = path.strip_prefix(root).expect("under root").to_path_buf();
+            let kind = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()));
+            let bytes = if kind.is_dir() {
+                folders.push(path);
+                None
+            } else if kind.is_symlink() {
+                let target = fs::read_link(&path)
+                    .unwrap_or_else(|error| panic!("read link {}: {error}", path.display()));
+                Some(target.into_os_string().into_encoded_bytes())
+            } else {
+                Some(
+                    fs::read(&path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+                )
+            };
+            state.push((relative, bytes));
+        }
+    }
+    state.sort();
+    state
 }
