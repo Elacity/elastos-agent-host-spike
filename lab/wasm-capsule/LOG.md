@@ -383,3 +383,21 @@
   tests pass without an edit, 0 do not", "summary: 21 CAUGHT of 21", exit 0 (runner-caught). No change to
   `tools/Cargo.toml`, `Cargo.toml` or `Cargo.lock`. `cargo test --locked` and both fmt checks green. Retired-label
   greps: both empty, exit 1.
+- Task 021 (wc-010a, memory cap discovery, read-only): README "## Memory cap discovery (wc-010a)" records, at base
+  `a5b4e8a105fca181469ce15b2b84c03b86f0266d`, `wasmtime 45.0.1 (83166ba31 2026-06-05)` and `wasmer 7.5.0` (each from
+  `--version`, absolute Homebrew paths, each its own process). Declared size: `manifest.rs:102-103` (`resources`
+  defaults), `:1167-1169` (`memory_mb: u32`, `default = "default_memory"`), `:1188-1190` (`64`); `capsule.json` has
+  no `resources` key, so 64 MB, read as 67108864 bytes = 1024 pages. wasmtime FOUND: `-W max-memory-size=N` (bytes,
+  `wasmtime -W help`); with it a grow to 1024 pages returned `1` (exit 0), a grow to 1025 pages returned `-1` (exit 0),
+  with `trap-on-grow-failure=y` added it trapped (exit 1, "forcing trap when growing memory to 67174400 bytes"), and
+  without the flag the same grow returned `1` (exit 0); a module with minimum 1025 pages was refused at start (exit
+  1, "memory minimum size of 1025 pages exceeds memory limits"). wasmer SKIPPED: `wasmer run --help` and `wasmer
+  --help` have no memory cap flag (words searched in README); without one, the grow past 64 MB returned `1` (exit
+  0) and the 1025-page minimum started (exit 0, `1025`). Answer for wc-010b: wasmtime "grow returns -1" ("trap" with
+  `-W trap-on-grow-failure=y`; above-cap minimum "start refused"), wasmer "SKIPPED"; the engines differ, so not
+  "traps on both". `/usr/bin/time -l` prints "maximum resident set size" (engine process resident memory, not linear
+  memory): 14696448 for wasmtime, 19218432 for wasmer. Probe `.wat` files only under git-ignored `target/wc010a/`;
+  both engines took `.wat` directly. No rule, so no falsifier; the with/without-flag runs are the evidence. Only
+  `README.md` and `LOG.md` changed. `cargo test --locked` (81 passed, 1 ignored, 0 failed) and both fmt checks
+  green. Retired-label greps (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target
+  'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
