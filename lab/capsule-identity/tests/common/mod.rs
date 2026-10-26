@@ -1,8 +1,9 @@
 //! Shared test support: fixture bundles assembled in fresh temp dirs, the
 //! pinned lab CIDs, a bounded call for bundles that hold a FIFO, observers
 //! that change a bundle while it is named, a driver for wc-001's own build,
-//! the library's code for tests that read it, and the one key-material scan
-//! (kept here, a file the falsifier runner restores after a killed run).
+//! the library's code for tests that read it, the refusal asserts both
+//! signature checks share, and the one key-material scan (kept here, a file
+//! the falsifier runner restores after a killed run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
@@ -139,6 +140,108 @@ pub fn assert_mismatch(answer: Result<(), Refusal>, claimed: &str, actual: LabCi
         refusal.to_string(),
         format!("bundle bytes name {actual}; the claim is {claimed}")
     );
+}
+
+/// The refusal is the decoder's: `did` is not a canonical Ed25519 `did:key`,
+/// with `elastos_identity::decode_did_key`'s own text.
+pub fn assert_malformed(refusal: Refusal, did: &str) {
+    let reason = elastos_identity::decode_did_key(did)
+        .expect_err("this DID is not canonical")
+        .to_string();
+    assert_eq!(
+        refusal,
+        Refusal::MalformedSignerDid {
+            did: did.to_owned(),
+            reason: reason.clone(),
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        format!("signer DID {did} is not a canonical Ed25519 did:key: {reason}")
+    );
+}
+
+/// The refusal is the accepted-list check's, for `did`.
+pub fn assert_not_accepted(refusal: Refusal, did: &str) {
+    assert_eq!(
+        refusal,
+        Refusal::SignerNotAccepted {
+            did: did.to_owned()
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        format!("signer {did} is not in the accepted list")
+    );
+}
+
+/// The refusal is the Ed25519 check's, for `did` over `name`.
+pub fn assert_does_not_verify(refusal: Refusal, did: &str, name: &str) {
+    assert_eq!(
+        refusal,
+        Refusal::SignatureDoesNotVerify {
+            did: did.to_owned(),
+            name: name.to_owned(),
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        format!("signature by {did} does not verify over {name}")
+    );
+}
+
+/// A wrapper's answer is the walk's own refusal `own`, unchanged.
+pub fn assert_same_refusal(got: Result<(), Refusal>, own: &Refusal) {
+    let got = got.expect_err("the wrapper must refuse what the walk refuses");
+    assert_eq!(&got, own, "the wrapper changed the walk's refusal");
+    assert_eq!(got.to_string(), own.to_string());
+}
+
+/// Flip one bit of web-app's `browser/app.js` on disk.
+pub fn flip_web_app_js(bundle: &Path) {
+    let mut bytes = fs::read(bundle.join("browser/app.js")).expect("read browser/app.js");
+    assert!(!bytes.is_empty(), "browser/app.js has a byte to change");
+    bytes[0] ^= 1;
+    write_file(bundle, "browser/app.js", &bytes);
+}
+
+/// Three bundles the walk refuses, each for its own reason: no manifest, a
+/// manifest the Runtime's check refuses, and a payload that is a link.
+pub fn walk_refused_bundles() -> [TempDir; 3] {
+    let no_manifest = temp_dir();
+    write_file(
+        no_manifest.path(),
+        "sample.example",
+        &read_fixture(&CONTENT_SAMPLE, "sample.example"),
+    );
+
+    let invalid = assemble(&CONTENT_SAMPLE);
+    let manifest = String::from_utf8(read_fixture(&CONTENT_SAMPLE, "capsule.json"))
+        .expect("UTF-8 manifest")
+        .replacen("elastos.capsule/v1", "elastos.capsule/v2", 1);
+    write_file(invalid.path(), "capsule.json", manifest.as_bytes());
+
+    let linked = assemble(&WEB_APP);
+    std::os::unix::fs::symlink("app.js", linked.path().join("browser/alias.js"))
+        .expect("link a payload");
+
+    [no_manifest, invalid, linked]
+}
+
+/// The names in the folder `parent`, sorted.
+pub fn listing(parent: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(parent)
+        .unwrap_or_else(|error| panic!("list {}: {error}", parent.display()))
+        .map(|entry| {
+            entry
+                .expect("read a folder entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// The library's code without its comment lines, so a test that reads the

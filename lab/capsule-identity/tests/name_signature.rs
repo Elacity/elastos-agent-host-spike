@@ -32,63 +32,6 @@ fn flip_signature(sig: &mut NameSignature) {
     sig.signature[0] ^= 1;
 }
 
-fn flip_web_app_js(bundle: &Path) {
-    let mut bytes = fs::read(bundle.join("browser/app.js")).expect("read browser/app.js");
-    assert!(!bytes.is_empty(), "browser/app.js has a byte to change");
-    bytes[0] ^= 1;
-    write_file(bundle, "browser/app.js", &bytes);
-}
-
-fn assert_malformed(refusal: Refusal, did: &str) {
-    let reason = elastos_identity::decode_did_key(did)
-        .expect_err("this DID is not canonical")
-        .to_string();
-    assert_eq!(
-        refusal,
-        Refusal::MalformedSignerDid {
-            did: did.to_owned(),
-            reason: reason.clone(),
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        format!("signer DID {did} is not a canonical Ed25519 did:key: {reason}")
-    );
-}
-
-fn assert_not_accepted(refusal: Refusal, did: &str) {
-    assert_eq!(
-        refusal,
-        Refusal::SignerNotAccepted {
-            did: did.to_owned()
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        format!("signer {did} is not in the accepted list")
-    );
-}
-
-fn assert_does_not_verify(refusal: Refusal, did: &str, name: &str) {
-    assert_eq!(
-        refusal,
-        Refusal::SignatureDoesNotVerify {
-            did: did.to_owned(),
-            name: name.to_owned(),
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        format!("signature by {did} does not verify over {name}")
-    );
-}
-
-fn assert_same_refusal(got: Result<(), Refusal>, own: &Refusal) {
-    let got = got.expect_err("the wrapper must refuse what the walk refuses");
-    assert_eq!(&got, own, "the wrapper changed the walk's refusal");
-    assert_eq!(got.to_string(), own.to_string());
-}
-
 #[test]
 fn test_key_signature_over_the_lab_cid_verifies() {
     for (fixture, pin) in [
@@ -281,23 +224,6 @@ fn checked_signature_runs_all_checks() {
 
 #[test]
 fn signature_paths_preserve_walk_refusals() {
-    let no_manifest = temp_dir();
-    write_file(
-        no_manifest.path(),
-        "sample.example",
-        &read_fixture(&CONTENT_SAMPLE, "sample.example"),
-    );
-
-    let invalid = assemble(&CONTENT_SAMPLE);
-    let manifest = String::from_utf8(read_fixture(&CONTENT_SAMPLE, "capsule.json"))
-        .expect("UTF-8 manifest")
-        .replacen("elastos.capsule/v1", "elastos.capsule/v2", 1);
-    write_file(invalid.path(), "capsule.json", manifest.as_bytes());
-
-    let linked = assemble(&WEB_APP);
-    std::os::unix::fs::symlink("app.js", linked.path().join("browser/alias.js"))
-        .expect("link a payload");
-
     let good = assemble(&CONTENT_SAMPLE);
     let (_, sig) = sign(good.path());
     let mut malformed = sig.clone();
@@ -314,7 +240,7 @@ fn signature_paths_preserve_walk_refusals() {
         (&flipped, vec![did.clone()]),
         (&not_a_name, vec![did]),
     ];
-    for bundle in [&no_manifest, &invalid, &linked] {
+    for bundle in &walk_refused_bundles() {
         let path = bundle.path();
         let from_lab_cid = lab_cid_refusal(path);
         assert_same_refusal(
@@ -396,7 +322,7 @@ fn signature_paths_share_one_implementation() {
     let code = library_code();
     assert_eq!(code.matches("Sha256::new()").count(), 2, "Sha256::new()");
     assert_eq!(
-        library_item(&code, "pub fn name_signature_message(")
+        library_item(&code, "pub fn domain_separated_digest(")
             .matches("Sha256::new()")
             .count(),
         1
@@ -407,17 +333,38 @@ fn signature_paths_share_one_implementation() {
             .count(),
         1
     );
+    let message = library_item(&code, "pub fn name_signature_message(");
+    assert_eq!(
+        message.matches("domain_separated_digest(").count(),
+        1,
+        "{message}"
+    );
+    assert!(!message.contains("Sha256"), "{message}");
     assert_eq!(code.matches("name_signature_message(").count(), 3);
+    // One DID encoder, one DID decoder and one Ed25519 verification, each
+    // behind its one function, which both signatures call.
     assert_eq!(code.matches("decode_did_key(").count(), 1);
     assert_eq!(code.matches("encode_signing_key_did(").count(), 1);
     assert_eq!(code.matches(".verify(").count(), 1);
+    assert_eq!(code.matches("Signature::from_bytes(").count(), 1);
     assert_eq!(code.matches("fn decode_signer(").count(), 1);
     assert_eq!(code.matches("fn require_accepted(").count(), 1);
     assert_eq!(code.matches("fn verify_signature(").count(), 1);
+    assert_eq!(code.matches("fn verify_ed25519(").count(), 1);
+    assert_eq!(code.matches("fn signer_did_of(").count(), 1);
+    for (item, call) in [
+        ("fn decode_signer(", "decode_did_key("),
+        ("fn signer_did_of(", "encode_signing_key_did("),
+        ("fn verify_ed25519(", ".verify("),
+    ] {
+        let body = library_item(&code, item);
+        assert_eq!(body.matches(call).count(), 1, "{body}");
+    }
 
     let sign = library_item(&code, "pub fn sign_bundle(");
     assert_eq!(sign.matches("lab_cid(").count(), 1, "{sign}");
     assert_eq!(sign.matches("name_signature_message(").count(), 1, "{sign}");
+    assert_eq!(sign.matches("signer_did_of(").count(), 1, "{sign}");
     assert!(!sign.contains("Sha256"), "{sign}");
     assert!(!sign.contains("checked_bundle"), "{sign}");
 
@@ -427,7 +374,7 @@ fn signature_paths_share_one_implementation() {
         1,
         "{message}"
     );
-    assert_eq!(message.matches(".verify(").count(), 1, "{message}");
+    assert_eq!(message.matches("verify_ed25519(").count(), 1, "{message}");
 
     let checked = library_item(&code, "pub fn verify_checked_signature(");
     for call in [

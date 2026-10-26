@@ -61,6 +61,21 @@
 //! those checks and nothing else. `Ok(())` means the test key signed that
 //! name; it is not a permission to run.
 //!
+//! # Lab package record
+//!
+//! A [`PackageRecord`] is the signed record that sits outside the bundle: it
+//! names the signer and binds the printed lab CID. Its bytes are
+//! [`PackageRecord::package_record_payload`], compact JSON with the keys
+//! `cid`, `schema` ([`PACKAGE_RECORD_SCHEMA`]) and `signer_did`, and no name
+//! field. [`sign_package_record`] signs [`domain_separated_digest`] of
+//! [`PACKAGE_RECORD_DOMAIN`] and that payload; it writes nothing.
+//! [`verify_checked_package_record`] checks, in order, the signer's
+//! `did:key`, the explicit accepted list, the record's CID against the
+//! checked bundle's, then the Ed25519 signature. [`verify_package_record`]
+//! is [`checked_bundle`] and then that check. Both signatures share one
+//! digest, one DID encoder and decoder, one accepted-list check and one
+//! Ed25519 verification. `Ok(())` grants nothing.
+//!
 //! # The walk reads only checked handles
 //!
 //! The walk opens the bundle root once, by its path. After that it reaches
@@ -104,14 +119,17 @@ pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";
 /// The manifest every bundle holds at its root.
 pub const MANIFEST_FILE: &str = "capsule.json";
 
-/// Domain of the lab name signature.
-///
-/// The digest is the three-step form of `domain_separated_sign` in
-/// `elastos/crates/elastos-server/src/crypto.rs`: SHA-256 over the domain, one
-/// `0x00` byte and the payload. That form lives only in the Runtime server,
-/// which this lab does not link, so the lab keeps this one marked copy under
-/// its own domain. It is a lab proposal.
+/// Domain of the lab name signature, for [`domain_separated_digest`]. It is a
+/// lab proposal.
 pub const NAME_SIGNATURE_DOMAIN: &str = "lab.capsule-identity.name-signature/v1";
+
+/// Schema of the lab package record's payload. It is the lab's own name, not
+/// the Runtime's capsule record schema.
+pub const PACKAGE_RECORD_SCHEMA: &str = "lab.capsule-identity.record/v1";
+
+/// Domain of the lab package record's signature, for
+/// [`domain_separated_digest`]. It is a lab proposal.
+pub const PACKAGE_RECORD_DOMAIN: &str = "lab.capsule-identity.package-record/v1";
 
 /// A lab CID: SHA-256 over a bundle's lab CID stream. It prints with its
 /// `lab-cid:sha256:` label so it is never mistaken for the Runtime's CID.
@@ -190,6 +208,24 @@ pub struct NameSignature {
     pub signature: [u8; 64],
 }
 
+/// A test-key signed record, outside the bundle, that names the signer and
+/// binds a printed lab CID.
+///
+/// It lives in memory only, like [`NameSignature`]: no serde derive, no file,
+/// and nothing writes it into or next to the bundle. It has no name field, so
+/// it binds a CID and never a capsule name. The signature is not part of the
+/// payload it covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageRecord {
+    /// The printed lab CID the record binds, as `LabCid`'s `Display` prints it.
+    pub cid: String,
+    /// The signer's canonical Ed25519 `did:key`.
+    pub signer_did: String,
+    /// The 64-byte Ed25519 signature over [`domain_separated_digest`] of
+    /// [`PACKAGE_RECORD_DOMAIN`] and [`PackageRecord::package_record_payload`].
+    pub signature: [u8; 64],
+}
+
 /// What the walk does with one entry, decided from the entry's own type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -217,9 +253,9 @@ pub enum Moment {
 /// Why a bundle gets no lab CID, why a name check ([`check_name`] or
 /// [`CheckedBundle::check_name`]) refuses a claimed name, why a printed lab
 /// CID does not parse ([`LabCid`]'s `FromStr`), or why a test-key
-/// signature check refuses. Each refusal has its own reason. A refused bundle
-/// gets no name and no signature. A refused signature check returns no trust,
-/// admission or launch value.
+/// signature or package record check refuses. Each refusal has its own
+/// reason. A refused bundle gets no name, no signature and no record. A
+/// refused check returns no trust, admission or launch value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The bundle root holds no regular file `capsule.json`.
@@ -262,6 +298,10 @@ pub enum Refusal {
     /// key, a changed signature and a name moved onto other bytes all meet
     /// this one check.
     SignatureDoesNotVerify { did: String, name: String },
+    /// A package record binds a CID that is not the checked bundle's. `record`
+    /// is the record's CID, kept only to say what was refused; `bundle` is the
+    /// lab CID of the checked bytes.
+    RecordNamesAnotherCid { record: String, bundle: LabCid },
 }
 
 impl fmt::Display for Refusal {
@@ -306,6 +346,9 @@ impl fmt::Display for Refusal {
             }
             Refusal::SignatureDoesNotVerify { did, name } => {
                 write!(f, "signature by {did} does not verify over {name}")
+            }
+            Refusal::RecordNamesAnotherCid { record, bundle } => {
+                write!(f, "record names {record}; the bundle names {bundle}")
             }
         }
     }
@@ -684,18 +727,30 @@ fn unreadable(path: &str, reason: impl Into<io::Error>) -> Refusal {
     }
 }
 
-/// The bytes a name signature covers: SHA-256 over the domain, one `0x00`
-/// byte and the UTF-8 bytes of the printed lab CID.
+/// The digest every lab signature covers: SHA-256 over the UTF-8 bytes of
+/// `domain`, one `0x00` byte and `payload`.
+///
+/// This is the three-step form of `domain_separated_sign` in
+/// `elastos/crates/elastos-server/src/crypto.rs`. That form lives only in the
+/// Runtime server, which this lab does not link, so the lab keeps this one
+/// marked copy and calls it a lab proposal. It is the one message hash: the
+/// name signature and the package record both call it, each with its own
+/// domain. [`encode_entries`] remains the one naming hash.
+pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(payload);
+    hasher.finalize().into()
+}
+
+/// The bytes a name signature covers: [`domain_separated_digest`] of
+/// [`NAME_SIGNATURE_DOMAIN`] and the UTF-8 bytes of the printed lab CID.
 ///
 /// Signing and verifying both call this, and nothing else builds the message.
-/// The lab CID's label is part of the signed name. This is the one message
-/// hash; [`encode_entries`] remains the one naming hash.
+/// The lab CID's label is part of the signed name.
 pub fn name_signature_message(name: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(name.as_bytes());
-    hasher.finalize().into()
+    domain_separated_digest(NAME_SIGNATURE_DOMAIN, name.as_bytes())
 }
 
 /// Sign `bundle`'s printed lab CID with `key`.
@@ -710,9 +765,16 @@ pub fn sign_bundle(key: &SigningKey, bundle: &Path) -> Result<NameSignature, Ref
     let signature = key.sign(&digest).to_bytes();
     Ok(NameSignature {
         name,
-        signer_did: elastos_identity::encode_signing_key_did(key),
+        signer_did: signer_did_of(key),
         signature,
     })
+}
+
+/// The canonical Ed25519 `did:key` of `key`, from
+/// `elastos_identity::encode_signing_key_did`: the one DID encoding both
+/// signers use.
+fn signer_did_of(key: &SigningKey) -> String {
+    elastos_identity::encode_signing_key_did(key)
 }
 
 /// Check `sig` against the bytes `checked` holds.
@@ -779,11 +841,127 @@ fn require_accepted(did: &str, accepted: &[String]) -> Result<(), Refusal> {
 /// Check (d): Ed25519 verification of `sig` over the message of its name.
 fn verify_signature(key: &VerifyingKey, sig: &NameSignature) -> Result<(), Refusal> {
     let digest = name_signature_message(&sig.name);
-    let signature = Signature::from_bytes(&sig.signature);
-    key.verify(&digest, &signature)
+    verify_ed25519(key, &digest, &sig.signature, &sig.signer_did, &sig.name)
+}
+
+/// The one Ed25519 verification: `signature` by `key` over `digest`. A
+/// failure is refused with the signer `did` and the signed `name`.
+fn verify_ed25519(
+    key: &VerifyingKey,
+    digest: &[u8; 32],
+    signature: &[u8; 64],
+    did: &str,
+    name: &str,
+) -> Result<(), Refusal> {
+    let signature = Signature::from_bytes(signature);
+    key.verify(digest, &signature)
         .map_err(|_| Refusal::SignatureDoesNotVerify {
-            did: sig.signer_did.clone(),
-            name: sig.name.clone(),
+            did: did.to_owned(),
+            name: name.to_owned(),
         })?;
+    Ok(())
+}
+
+impl PackageRecord {
+    /// The bytes the record's signature covers: compact JSON, keys in this
+    /// order, no spaces and no trailing newline:
+    /// `{"cid":"<cid>","schema":"lab.capsule-identity.record/v1","signer_did":"<did>"}`.
+    ///
+    /// This is the only builder of those bytes. The signature is not in them,
+    /// and there is no name field. The values are written as they are: when
+    /// verification hashes these bytes, check (a) has already decoded the DID
+    /// as a canonical `did:key` and check (c) has already found the CID equal
+    /// to a printed lab CID, so neither holds a character JSON would escape.
+    pub fn package_record_payload(&self) -> Vec<u8> {
+        format!(
+            "{{\"cid\":\"{}\",\"schema\":\"{}\",\"signer_did\":\"{}\"}}",
+            self.cid, PACKAGE_RECORD_SCHEMA, self.signer_did
+        )
+        .into_bytes()
+    }
+}
+
+/// The digest a package record's signature covers: [`domain_separated_digest`]
+/// of [`PACKAGE_RECORD_DOMAIN`] and [`PackageRecord::package_record_payload`].
+/// Signing and verifying both call this.
+fn package_record_message(record: &PackageRecord) -> [u8; 32] {
+    domain_separated_digest(PACKAGE_RECORD_DOMAIN, &record.package_record_payload())
+}
+
+/// Sign a package record for `bundle` with `key`.
+///
+/// The CID is [`lab_cid`]'s printed form; a bundle [`lab_cid`] refuses gets no
+/// record, and the refusal is [`lab_cid`]'s own. `signer_did` is
+/// `elastos_identity::encode_signing_key_did` of `key`. The signature is
+/// Ed25519 over [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and
+/// the record's payload. It writes no file and changes no bundle byte.
+pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
+    let cid = lab_cid(bundle)?.to_string();
+    let signer_did = signer_did_of(key);
+    let mut record = PackageRecord {
+        cid,
+        signer_did,
+        signature: [0; 64],
+    };
+    record.signature = key.sign(&package_record_message(&record)).to_bytes();
+    Ok(record)
+}
+
+/// Check `record` against the bytes `checked` holds.
+///
+/// The checks run in this order, and the first refusal is the answer:
+///
+/// 1. `elastos_identity::decode_did_key` on `record.signer_did`, with the name
+///    signature's reason.
+/// 2. `record.signer_did` is an exact member of `accepted`, with the name
+///    signature's reason. An empty list refuses every signer.
+/// 3. `record.cid` is `checked.cid()`'s printed form. Otherwise it is refused
+///    naming both. This reads nothing from disk.
+/// 4. Ed25519 verification of `record.signature` over the record's digest,
+///    with the key from step 1 and the name signature's reason.
+///
+/// `Ok(())` means all four passed. It is not a trust, admission or launch
+/// value, and it grants nothing.
+pub fn verify_checked_package_record(
+    checked: &CheckedBundle,
+    record: &PackageRecord,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    let key = decode_signer(&record.signer_did)?;
+    require_accepted(&record.signer_did, accepted)?;
+    require_record_cid(checked, record)?;
+    let message = package_record_message(record);
+    verify_ed25519(
+        &key,
+        &message,
+        &record.signature,
+        &record.signer_did,
+        &record.cid,
+    )?;
+    Ok(())
+}
+
+/// Check `record` against the bundle at `bundle`.
+///
+/// This is [`checked_bundle`] and then [`verify_checked_package_record`]. It
+/// holds no check of its own, so a bundle the walk refuses is refused first,
+/// with the walk's own reason.
+pub fn verify_package_record(
+    bundle: &Path,
+    record: &PackageRecord,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    let held = checked_bundle(bundle)?;
+    verify_checked_package_record(&held, record, accepted)
+}
+
+/// Check (c) of a package record: it binds the checked bundle's printed CID.
+fn require_record_cid(checked: &CheckedBundle, record: &PackageRecord) -> Result<(), Refusal> {
+    if record.cid != checked.cid().to_string() {
+        return Err(Refusal::RecordNamesAnotherCid {
+            record: record.cid.clone(),
+            bundle: checked.cid(),
+        });
+    }
     Ok(())
 }

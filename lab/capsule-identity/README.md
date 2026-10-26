@@ -345,10 +345,12 @@ That is the three-step digest in `domain_separated_sign`
 (`elastos/crates/elastos-server/src/crypto.rs:88-128`): SHA-256 of
 `domain || 0x00 || payload`, then Ed25519 over that digest. The form lives
 only in the Runtime server. This lab does not link that crate, so it keeps
-one marked copy under its own domain and calls the copy a lab proposal.
-Moving the form next to `decode_did_key` in `elastos-identity` is a question
-for Anders. Signing and verifying both call `name_signature_message`. Nothing
-else builds the message.
+one marked copy, `domain_separated_digest(domain, payload)`, and calls the
+copy a lab proposal. `name_signature_message` is that digest with the
+name-signature domain; the package record (below) uses the same digest with
+its own domain. Moving the form next to `decode_did_key` in
+`elastos-identity` is a question for Anders. Signing and verifying both call
+`name_signature_message`. Nothing else builds the message.
 
 **In memory only.** `NameSignature` is a plain struct: `name`, `signer_did`
 and a 64-byte `signature`. It has no serde derive, no file and no envelope.
@@ -480,8 +482,12 @@ signs it:
   `check_name` and its checked form `CheckedBundle::check_name`,
   `CheckedBundle::cid`, `CheckedBundle::entries`, `encode_entries`,
   `entry_kind`, `entry_path`, `name_signature_message`, `sign_bundle`,
-  `verify_checked_signature` and `verify_name_signature`. Each answers "do
-  these bytes match this name" or "did this key sign this name". None takes
+  `verify_checked_signature` and `verify_name_signature`, and task 011's
+  package record: `domain_separated_digest`,
+  `PackageRecord::package_record_payload`, `sign_package_record`,
+  `verify_checked_package_record` and `verify_package_record`. Each answers
+  "do these bytes match this name" or "did this key sign this name or this
+  record". None takes
   or returns a grant, an admission or a launch value. A test keeps the list:
   a new public function fails it until someone lists it on purpose. The test
   reads the declaration after every `pub` word token by token, across line
@@ -530,6 +536,120 @@ decisions into Runtime policy is Runtime issue 464,
 https://github.com/Elacity/elastos-runtime/issues/464. So these tests say
 nothing about what the Runtime would decide. They do not run the Runtime, and
 they model no admission or grant, not even in a test.
+
+Claim scope: one Mac, these fixtures, test keys only.
+
+## Lab package record (outside the bundle)
+
+Anders's answer splits the package CID from the publisher. The CID names
+the bytes. A separate signed record names the signer and binds that CID.
+`PackageRecord` is that record, in the lab. It stays outside the bundle.
+
+**The record.** `PackageRecord` has three fields: `cid` (the printed lab
+CID, exactly as `LabCid`'s `Display` prints it), `signer_did` (a canonical
+Ed25519 `did:key`) and a 64-byte `signature`. Like `NameSignature`, it has
+no serde derive and no file form. Nothing writes it to disk.
+
+**The payload.** `package_record_payload` is the only builder of the signed
+bytes. They are compact JSON, keys in this order, no spaces and no trailing
+newline:
+
+```
+{"cid":"<printed CID>","schema":"lab.capsule-identity.record/v1","signer_did":"<did:key>"}
+```
+
+The schema is `lab.capsule-identity.record/v1` (`PACKAGE_RECORD_SCHEMA`). It
+is the lab's own name, not the Runtime's `elastos.capsule.record/v1`. The
+signature is not a field of the payload. There is no name field. So the
+record binds a CID and never a capsule name, and a grant or a token built on
+it would bind a CID too, not a name.
+
+**The digest.** The signature is Ed25519 over
+`domain_separated_digest("lab.capsule-identity.package-record/v1", payload)`
+(`PACKAGE_RECORD_DOMAIN`): SHA-256 of the domain, one `0x00` byte and the
+payload. It is the same one digest function the name signature uses, under
+another domain, so a name signature can never pass as a record. The domain
+and the schema both carry `/v1`, so a later encoding gets a new version, not
+a silent change. A second implementation of the encoding must agree; for
+`content-sample`, with the signer's DID written in:
+
+```python
+import hashlib
+
+cid = "lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51"
+did = "<the signer's did:key>"
+payload = ('{"cid":"%s","schema":"lab.capsule-identity.record/v1","signer_did":"%s"}' % (cid, did)).encode()
+digest = hashlib.sha256(b"lab.capsule-identity.package-record/v1" + b"\x00" + payload).hexdigest()
+```
+
+**Sign.** `sign_package_record(key, bundle)` names the bundle with `lab_cid`.
+A refusal from that walk passes through unchanged, and a refused bundle gets
+no record. It sets `signer_did` with the one DID encoder
+(`elastos_identity::encode_signing_key_did`, the same call `sign_bundle`
+uses) and signs the digest above. It writes no file and changes no bundle
+byte. The manifest's `signature` field stays empty.
+
+**Verify.** `verify_checked_package_record(checked, record, accepted)` checks
+009's `CheckedBundle` in this order. The first refusal is the answer, and it
+reads nothing from disk:
+
+1. Decode `record.signer_did` with the one DID decoder. On error: `signer DID <did> is not a canonical Ed25519 did:key: <the decoder's own text>`.
+2. The DID is an exact member of `accepted`, the explicit list (no trust
+   policy). An empty list refuses every signer: `signer <did> is not in the
+   accepted list`.
+3. `record.cid` equals `checked.cid()`'s printed form. Otherwise: `record
+   names <record cid>; the bundle names <bundle cid>`.
+4. Ed25519 over the digest of the record domain and
+   `package_record_payload(record)`, with the key from step 1. On failure:
+   `signature by <did> does not verify over <record cid>`.
+
+Steps 1, 2 and 4 are the name signature's own checks and reasons, from the
+same functions (`decode_signer`, `require_accepted` and one shared Ed25519
+check). Step 3 runs before step 4, so when the payload is hashed its CID is a
+printed lab CID and its DID is canonical: neither holds a character JSON
+would escape. `verify_package_record(bundle, record, accepted)` is
+`checked_bundle(bundle)` and then the checked form. It holds no check of its
+own, so a bundle the walk refuses is refused first, with the walk's reason.
+`Ok(())` grants nothing: it is no trust, admission or launch value.
+
+**What stays.** `NameSignature`, `sign_bundle`, `verify_checked_signature`
+and `verify_name_signature` stay as they are: the in-memory name signature
+that wasm-capsule-lab already calls. The record is the outside encoding. It is
+not a second crypto stack: one digest, one DID encoder, one DID decoder, one
+accepted-list check and one Ed25519 verification serve both.
+
+**What it does not do.** No key rotation, no delegation, no publisher policy
+beyond the explicit accepted list. Publisher rotation and delegation are the
+Runtime's, issue 213 (https://github.com/Elacity/elastos-runtime/issues/213).
+Grants are the Runtime's, issue 464
+(https://github.com/Elacity/elastos-runtime/issues/464). One record signs
+one closure, the one bundle its CID names: signing each capsule's whole
+closure is issue 465 (https://github.com/Elacity/elastos-runtime/issues/465),
+and each capsule being signed on its own is issue 274
+(https://github.com/Elacity/elastos-runtime/issues/274). No record groups
+several CIDs.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The record binds the fixture's pinned CID, its payload is the rule's exact JSON, and both verifiers pass | `package_record_binds_the_cid_and_verifies` | F-CI11a, F-CI11f |
+| Signing and both verifiers leave the lab CID, `capsule.json`, the parent folder and the manifest's `signature` as they were | `package_record_stays_outside_the_bundle` | F-CI11e |
+| A record signed under the name-signature domain is refused; the same bytes under the record domain verify | `record_signed_under_the_wrong_domain_is_refused` | F-CI11b, F-CI11s, F-CI11x |
+| A record rebound to another CID is refused naming both CIDs | `record_rebound_to_another_cid_is_refused` | F-CI11c, F-CI11r |
+| Another key's signature, an unlisted signer and an empty list are refused | `record_by_another_signer_is_refused` | F-CI11d, F-CI11q |
+| The checked form judges the bytes it holds; the path form reads the folder now | `checked_record_judges_the_checked_bytes` | F-CI11c |
+| A malformed DID is refused with the decoder's text, even when listed | `record_malformed_signer_did_is_refused` | F-CI11g, F-CI11p |
+| Two faults at once: the earlier check answers | `record_refusal_order_is_stable` | F-CI11h, F-CI11i, F-CI11j |
+| Signing and the path verifier keep the walk's refusal, whatever the record | `record_paths_preserve_walk_refusals` | F-CI11k, F-CI11l, F-CI11m, F-CI11n, F-CI11o |
+| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the path form holds no check of its own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w |
+
+The tests are in `tests/package_record.rs`. Every refusal test runs both
+verifiers, so a check that lives only in the path form fails it (F-CI11p to
+F-CI11s move one check each into the path form). Every expected CID comes
+from the pins in `tests/common/mod.rs`, never from a literal, so a change of
+the printed form changes the pins in one place. The domains in these tests
+are written out, not read from the library, so a changed domain constant
+fails them (F-CI11x). F-CI11u, F-CI11v and F-CI11w also fail 004's
+`signature_paths_share_one_implementation`.
 
 Claim scope: one Mac, these fixtures, test keys only.
 
@@ -582,11 +702,13 @@ cache. `wc001_capsule_bundle_gets_a_stable_lab_cid` runs
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
 src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
-                         the encoder, the walk, and the test-key signature
+                         the encoder, the walk, the test-key signature, the shared
+                         digest and the lab package record
 fixtures/                content-sample, web-app, wc001-core, agent-host
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
-                         the key-material scan
+                         the refusal asserts both signature checks share, the
+                         key-material scan
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
@@ -595,6 +717,7 @@ tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
 tests/name_signature.rs  a test key signs the printed lab CID; verification only
 tests/not_admission.rs   verify is not admit: a valid signature grants nothing
+tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
 tests/walk.rs            changes made while a bundle is named; one walk
@@ -603,7 +726,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 94 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 118 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -615,7 +738,9 @@ task 007's F-CI7a to F-CI7d (see
 F-CI13a to F-CI13c (see [reading a printed lab CID](#reading-a-printed-lab-cid)),
 and task 014's F-CI14a to F-CI14e (see
 [the test-key signature](#test-key-publisher-signature-lab-proposal) and
-[verify is not admit](#verify-is-not-admit-m1-check-b1)).
+[verify is not admit](#verify-is-not-admit-m1-check-b1)), and task 011's
+F-CI11a to F-CI11x (see
+[the lab package record](#lab-package-record-outside-the-bundle)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h and F-CI4i edits a file the runner
@@ -626,6 +751,14 @@ The runner still runs them. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged.
+
+Task 011 moved three of 004's edits. The body of `name_signature_message`
+moved into `domain_separated_digest`, so F-CI4a and F-CI4b now plant their
+same two bugs there (the payload left out; the domain and `0x00` dropped),
+with their tests unchanged. The Ed25519 check moved into `verify_ed25519`,
+which both signatures call, so F-CI4d now ignores its result there, with its
+tests unchanged. F-CI4j stays at `sign_bundle`. Every other older edit's
+text is still found exactly once.
 
 Task 009 moved code without changing an older entry. The root manifest check
 and the encoder call moved from `lab_cid_observed` into
@@ -649,8 +782,9 @@ At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
 that followed added F-CI4z, so 004 merged 82 entries. At task 007
 it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
 At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
-`summary: 94 CAUGHT of 94`.
-The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013
-and 014 prove each of their falsifiers by break, named test fails, revert.
+`summary: 94 CAUGHT of 94`. At task 011 it reported
+`summary: 118 CAUGHT of 118` (with the id prefix `F-CI11`: 24 of 24).
+The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
+014 and 011 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
