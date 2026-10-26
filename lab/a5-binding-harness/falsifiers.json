@@ -58,7 +58,7 @@
       "edits": [
         {
           "file": "../../lab/a5-binding-harness/src/journey.rs",
-          "old": "        j.use_refused(&y, &grant, &path, INSTANCE_REASON)?;\n",
+          "old": "        j.use_refused(&y.handle, &grant, &path, INSTANCE_REFUSAL)?;\n",
           "new": ""
         }
       ],
@@ -74,12 +74,93 @@
       "edits": [
         {
           "file": "../../lab/a5-binding-harness/src/journey.rs",
-          "old": "        j.use_refused(&a, &grant, &path, SESSION_REASON)?;\n",
+          "old": "        j.use_refused(&a.handle, &grant, &path, SESSION_REFUSAL)?;\n",
           "new": ""
         }
       ],
       "tests": [
         "session_survives_end_is_rejected"
+      ]
+    },
+    {
+      "id": "F-A5-THEATRE",
+      "title": "theatre stub 9/9: gap cleared + forged coords + loopback stub is accepted",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/contract.rs",
+          "old": "    if evidence\n        .guest_handle\n        .as_deref()\n        .map(str::is_empty)\n        .unwrap_or(true)\n    {\n        return Err(\"PASS requires a guest handle presented by the guest\".to_owned());\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "theatre_without_guest_handle_is_not_accepted"
+      ]
+    },
+    {
+      "id": "F-A5-EMPTY-ID",
+      "title": "an empty grant id is accepted",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/contract.rs",
+          "old": "    if id.is_empty() {\n        return Err(\"empty grant id is refused\".to_owned());\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "empty_grant_id_is_rejected",
+        "empty_grant_id_is_rejected_on_the_journey"
+      ]
+    },
+    {
+      "id": "F-A5-REASON-SUB",
+      "title": "a reason substring is accepted as a structured refusal",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/contract.rs",
+          "old": "    match evidence.code.as_deref() {\n        Some(code) => code == expected.code,\n        None => evidence.reason == expected.reason,\n    }\n",
+          "new": "    evidence.reason.contains(expected.code) || evidence.reason.contains(expected.reason)\n"
+        }
+      ],
+      "tests": [
+        "reason_substring_is_not_a_match"
+      ]
+    },
+    {
+      "id": "F-A5-PUB-HARDCODE",
+      "title": "Public bound is hardcoded false",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/http.rs",
+          "old": "    value.get(\"grant_id\").is_some()\n        || value.get(\"owned_root\").is_some()\n        || value.get(\"identity\").is_some()\n        || value.get(\"instance_id\").is_some()\n        || value.get(\"session_id\").is_some()\n",
+          "new": "    false\n"
+        }
+      ],
+      "tests": [
+        "public_read_bound_is_not_hardcoded"
+      ]
+    },
+    {
+      "id": "F-A5-GAP-CLEAR",
+      "title": "gap() cleared with no guest unblocks the rows",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/capability.rs",
+          "old": "        if holds {\n            Some(pins)\n        } else if self.guest_measured() {\n            None\n        } else {\n            Some(pins)\n        }\n",
+          "new": "        let _ = (holds, pins);\n        None\n"
+        }
+      ],
+      "tests": [
+        "gap_cleared_without_guest_keeps_rows_blocked"
       ]
     }
   ]

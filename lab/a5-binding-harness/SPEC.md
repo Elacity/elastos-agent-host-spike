@@ -24,8 +24,9 @@ A grant is bound to four dimensions at once:
 3. the **capsule instance** that holds it;
 4. the **owned storage** root of that instance.
 
-The guest may carry claims. The stored binding and the host record decide
-every use. A forged identity, session, instance or root changes nothing.
+The guest presents a handle. The stored binding and the host record decide
+every use. The harness never sends identity, session or instance as client
+JSON. A forged identity, session, instance or root changes nothing.
 
 A5 stays open until every row below has run against a live operator and
 passed. One dimension in isolation does not close the check.
@@ -48,9 +49,13 @@ every run (`src/capability.rs`).
   has request id, resource, action, duration and time. It names no identity,
   session, instance or owned root. There is no `all_sessions_live` scope
   (RA-1).
+- `POST /api/capability/grant` wants `request_id`. There is no guest-handle
+  use route on develop. The harness names that missing route as a Runtime
+  ask and does not call it.
 - Ending a session emits `invalidated` and revokes no grant
-  (`crates/elastos-runtime/src/session/registry.rs`). There is no shell route
-  that reads a settled request record (RA-2).
+  (`crates/elastos-runtime/src/session/registry.rs`). There is no session-end
+  shell route. `GET /api/capability/request/:id` exists and has no
+  `settled_by` field (RA-2). A5-SESS-END requires `settled_by=runtime`.
 - `elastos run` still builds storage at `/tmp/elastos/storage`
   (`crates/elastos-server/src/run_cmd.rs`, three sites). That is not a
   per-instance owned root (RA-3).
@@ -73,11 +78,11 @@ extends existing routes where one exists (PRINCIPLES.md 10).
 
 | ID | Capability | Needed by |
 | --- | --- | --- |
-| RA-1 | a shell view of every session's live grants | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB |
+| RA-1 | a shell view of every session's live grants | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER |
 | RA-2 | the Runtime settles an ended requester's pending requests, and the shell reads who settled | A5-SESS-END |
-| RA-3 | the run launcher takes its storage directory from the selected Home | A5-STOR-POS, A5-STOR-OTHER, A5-PUB |
-| RA-5 | a UsersAI alias that resolves to the verified agent principal's root | A5-ID-POS, A5-ID-REPLAY, A5-STOR-POS, A5-STOR-OTHER, A5-PUB |
-| RA-6 | resident component instances: world, launch, list, stop | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER |
+| RA-3 | the run launcher takes its storage directory from the selected Home | A5-STOR-POS, A5-STOR-OTHER |
+| RA-5 | a UsersAI alias that resolves to the verified agent principal's root | A5-ID-POS, A5-ID-REPLAY, A5-STOR-POS, A5-STOR-OTHER |
+| RA-6 | resident component instances: world, launch, list, stop | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER, A5-PUB |
 
 RA-4 and RA-7 are not named here. They unblock A15 and A11.
 
@@ -143,9 +148,9 @@ with no session; stop refuses a running component.
 | A5-SESS-END | `acceptance_a5_session_grant_reused_after_session_end` | RA-1, RA-2, RA-6 |
 | A5-INST-POS | `acceptance_a5_instance_grant_used_by_bound_instance` | RA-1, RA-6 |
 | A5-INST-SIB | `acceptance_a5_instance_grant_used_by_sibling` | RA-1, RA-6 |
-| A5-STOR-POS | `acceptance_a5_owned_storage_grant_used_on_bound_root` | RA-3, RA-5, RA-6 |
-| A5-STOR-OTHER | `acceptance_a5_owned_storage_grant_pointed_at_other_root` | RA-3, RA-5, RA-6 |
-| A5-PUB | `acceptance_a5_public_storage_read_is_not_binding` | RA-3, RA-5 |
+| A5-STOR-POS | `acceptance_a5_owned_storage_grant_used_on_bound_root` | RA-1, RA-3, RA-5, RA-6 |
+| A5-STOR-OTHER | `acceptance_a5_owned_storage_grant_pointed_at_other_root` | RA-1, RA-3, RA-5, RA-6 |
+| A5-PUB | `acceptance_a5_public_storage_read_is_not_binding` | RA-6 |
 
 Every journey starts with `GET /api/health` ok. Every journey launches only
 through the operator's shell API. Every journey ends by stopping what it
@@ -158,60 +163,67 @@ use the owned resource only.
 ### Agent identity
 
 **A5-ID-POS.** Launch agent A and agent B, two verified principals. Seed A's
-owned root. Mint a grant for A's owned read. The live-grant view shows that
-grant bound to A's identity, A's session, A's instance and A's owned root.
-A uses the grant on that root. The Runtime allows. The bytes come from A's
-root through the operator.
+owned root with known bytes. Mint a grant for A's owned read. The live-grant
+view shows that grant bound to A's identity, A's session, A's instance and
+A's owned root, read from the host record of A's handle. A uses the grant
+on that root. The Runtime allows. The bytes come from A's root through the
+operator. B does not observe those bytes.
 
 **A5-ID-REPLAY.** Same mint for A. B presents A's grant on A's root. The
-Runtime refuses. The reason contains `identity`. A's grant stays bound to A
-in the live-grant view. B's own request, if any, stays B's.
+Runtime refuses with code `identity` or the exact reason
+`identity does not match the grant`. A's grant stays bound to A in the
+live-grant view. B's own request, if any, stays B's.
 
 ### Session
 
-**A5-SESS-POS.** Launch one instance. Mint a grant in its session. The
-live-grant view names that session. The same session uses the grant on the
-bound root. The Runtime allows.
+**A5-SESS-POS.** Launch one instance. The host record names the session.
+Mint a grant in that session. The live-grant view names that same session
+id. The same session uses the grant on the bound root. The Runtime allows.
+This is not the identity journey: one principal, the proof is the host
+session id.
 
-**A5-SESS-END.** Mint a grant in session S. End S. The request record is
-`denied` or the grant is revoked, `settled_by` is `runtime`, and the harness
-never decided it. A later use of that grant is refused. The reason contains
-`session`. The live-grant view no longer lists it.
+**A5-SESS-END.** Mint a grant in session S. End S. The request record from
+`GET /api/capability/request/:id` has `settled_by=runtime`. A 403 whose
+reason contains `session` is not enough. A later use of that grant is
+refused with code `session`. The live-grant view no longer lists it.
 
 ### Capsule instance
 
-**A5-INST-POS.** Launch one instance. Mint a grant for it. The live-grant
-view names that instance. The same instance uses the grant. The Runtime
-allows.
+**A5-INST-POS.** Launch two activations of one capsule. Mint a grant for the
+first. The live-grant view names that instance. The bound activation uses
+the grant. The Runtime allows. This is not the session journey: the proof
+is two instance ids.
 
 **A5-INST-SIB.** Launch instance X and sibling Y of the same capsule and the
 same agent identity. Mint a grant for X. Y presents X's grant. The Runtime
-refuses. The reason contains `instance`. X's grant stays bound to X.
+refuses with code `instance`. A prefix collision (`instance-1` vs
+`instance-1-evil`) is refused. X's grant stays bound to X.
 
 ### Owned storage
 
 **A5-STOR-POS.** Launch one instance. The grant's `owned_root` is
 `UsersAI/<identity>/<session>/<instance>`. A use on that root or a child
-succeeds.
+succeeds. A use of `..`, a symlink-shaped segment, or a prefix collision
+is refused. A's object is unchanged.
 
 **A5-STOR-OTHER.** Same grant. A use pointed at the sibling instance's root
-is refused. The reason contains `owned root` or `outside`. A's root is
-unchanged.
+is refused with code `owned_root`. A's root is unchanged.
 
-**A5-PUB.** Present a Public-storage read as A5 binding evidence. The harness
-refuses that claim. A bind or use of `localhost://Public/...` as a bound
-grant is refused by the Runtime with `public storage read does not bind`. A
-successful Public read, if the operator serves one, is recorded and is not
-a PASS.
+**A5-PUB.** Read Public through the operator. `bound` is derived from the
+operator body; it is never hardcoded false. Do not forge a `public-claim`
+grant. A mint of `localhost://Public/...` as a bound grant is refused with
+`public storage read does not bind`. A successful Public read is recorded
+and is not a PASS. This row launches (RA-6). It does not use Home storage
+(no RA-3).
 
 ## 5. What proves the Runtime refused
 
 A refusal counts only when the operator produced it. The harness accepts:
 
 - an HTTP status from the operator on a grant-use or validate route, with
-  the Runtime's reason text;
-- a request record from `GET /api/capability/requests` whose `settled_by`
-  is `runtime` and whose decision contains the dimension name;
+  a structured refusal code or the exact reason string (never a substring);
+- a request record from `GET /api/capability/request/:id` whose
+  `settled_by` is `runtime`;
 - a live-grant view that still shows the original binding and does not show
   a grant for the refusing caller.
 
@@ -230,9 +242,10 @@ binding.
 
 ## 6. Grading
 
-- **BLOCKED**: a capability the row needs is missing. The row names the
-  capabilities and the evidence for each gap, read from this checkout on
-  every run. A blocked row never reads setup or contacts an operator.
+- **BLOCKED**: a capability the row needs has no guest measurement. The row
+  names the capabilities and the evidence for each gap, read from this
+  checkout on every run. Clearing `gap()` is not a measurement. A blocked
+  row never reads setup or contacts an operator.
 - **SKIPPED**: every capability is there, but the live setup is incomplete:
   `A5_RUNTIME_COORDS` or the shell attach. SKIPPED is a failed command,
   never a pass. `counts_as_accepted` is true only for `PASS`.

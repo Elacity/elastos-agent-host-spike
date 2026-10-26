@@ -5,7 +5,10 @@
 mod common;
 
 use a5_binding_harness::capability::Check;
-use a5_binding_harness::contract::PUBLIC_RESOURCE;
+use a5_binding_harness::contract::{
+    refusal_matches, RuntimeEvidence, IDENTITY_REFUSAL, INSTANCE_REFUSAL, OWNED_ROOT_REFUSAL,
+    PUBLIC_RESOURCE,
+};
 use a5_binding_harness::journey::Outcome;
 use common::double::{Double, Faults};
 
@@ -36,6 +39,21 @@ fn honest_double_passes_every_journey() {
 }
 
 #[test]
+fn positive_rows_are_different_journeys() {
+    let id = run(Check::IdentityUse, Faults::default()).unwrap();
+    let sess = run(Check::SessionUse, Faults::default()).unwrap();
+    let inst = run(Check::InstanceUse, Faults::default()).unwrap();
+    let stor = run(Check::StorageUse, Faults::default()).unwrap();
+    assert!(id.contains("bytes from A's root"), "{id}");
+    assert!(sess.contains("host session"), "{sess}");
+    assert!(inst.contains("sibling activation"), "{inst}");
+    assert!(stor.contains(".. / symlink / prefix refused"), "{stor}");
+    assert_ne!(id, sess);
+    assert_ne!(sess, inst);
+    assert_ne!(inst, stor);
+}
+
+#[test]
 fn fake_refusal_is_rejected() {
     let faults = Faults {
         fake_refusal: true,
@@ -43,7 +61,7 @@ fn fake_refusal_is_rejected() {
     };
     for check in Check::ALL {
         if check == Check::PublicNotBinding {
-            // Public row reads Public first; fake_refusal still hits use_grant.
+            continue;
         }
         refused(check, faults, "fixture refusal is not Runtime evidence");
     }
@@ -74,8 +92,17 @@ fn identity_replay_allowed_is_rejected() {
     refused(
         Check::IdentityReplay,
         faults,
-        "expected Runtime refusal containing \"identity\"",
+        "expected Runtime refusal identity",
     );
+}
+
+#[test]
+fn session_end_without_settled_by_is_rejected() {
+    let faults = Faults {
+        omit_settled_by: true,
+        ..Faults::default()
+    };
+    refused(Check::SessionEnded, faults, "settled_by=runtime");
 }
 
 #[test]
@@ -87,7 +114,7 @@ fn session_survives_end_is_rejected() {
     refused(
         Check::SessionEnded,
         faults,
-        "expected Runtime refusal containing \"session\"",
+        "expected Runtime refusal session",
     );
 }
 
@@ -101,7 +128,7 @@ fn sibling_allowed_is_rejected() {
     refused(
         Check::InstanceSibling,
         faults,
-        "expected Runtime refusal containing \"instance\"",
+        "expected Runtime refusal instance",
     );
 }
 
@@ -114,7 +141,7 @@ fn other_root_allowed_is_rejected() {
     refused(
         Check::StorageOtherRoot,
         faults,
-        "expected Runtime refusal containing \"owned root\"",
+        "expected Runtime refusal owned_root",
     );
 }
 
@@ -141,6 +168,31 @@ fn blind_grant_view_is_rejected() {
 }
 
 #[test]
+fn empty_grant_id_is_rejected_on_the_journey() {
+    let faults = Faults {
+        empty_grant_id: true,
+        ..Faults::default()
+    };
+    refused(Check::IdentityUse, faults, "empty grant id is refused");
+}
+
+#[test]
 fn public_resource_constant_is_public() {
     assert!(PUBLIC_RESOURCE.starts_with("localhost://Public/"));
+}
+
+#[test]
+fn substring_reasons_are_not_structured_matches() {
+    let evidence = RuntimeEvidence::from_double(
+        a5_binding_harness::contract::EvidenceKind::Refused,
+        Some(403),
+        Some("r1".to_owned()),
+        "no identity check".to_owned(),
+        None,
+        a5_binding_harness::contract::Actor::Runtime,
+        PUBLIC_RESOURCE.to_owned(),
+    );
+    assert!(!refusal_matches(&evidence, IDENTITY_REFUSAL));
+    assert!(!refusal_matches(&evidence, INSTANCE_REFUSAL));
+    assert!(!refusal_matches(&evidence, OWNED_ROOT_REFUSAL));
 }

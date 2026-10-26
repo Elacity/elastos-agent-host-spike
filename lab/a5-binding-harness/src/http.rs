@@ -1,10 +1,17 @@
-//! The operator adapter: the journeys' calls as shell requests on the
-//! routes SPEC.md names. It reaches only IPv4 loopback, keeps the attach
-//! secret and session token in memory, and bounds every response.
+//! The operator adapter: the journeys' calls as shell requests on routes
+//! that exist on elastos-runtime develop (92aeea44 or newer).
 //!
-//! Until the RA-* gaps close, [`crate::acceptance`] never constructs this
-//! type. A later real-Runtime run sets `A5_RUNTIME_COORDS` and the journeys
-//! call through here.
+//! The guest presents a handle. This adapter never sends identity, session
+//! or instance as client JSON. Missing routes are named as Runtime asks.
+//!
+//! Present on develop: `GET /api/health`, `POST /api/auth/attach`,
+//! `POST /api/capsules`, `DELETE /api/capsules/:id`,
+//! `POST /api/capability/request`, `POST /api/capability/grant` (body
+//! `request_id`), `GET /api/capability/list`,
+//! `GET /api/capability/request/:id`, `GET`/`PUT /api/localhost/*path`.
+//!
+//! Absent, named as asks: guest-handle use (not on develop), session-end
+//! (RA-2), host-record-for-handle (RA-1 / #463), launch handle (RA-6).
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -14,8 +21,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::contract::{
-    Actor, BindingRuntime, Caller, EvidenceKind, Fixture, Grant, Instance, LiveGrant, PublicRead,
-    RuntimeEvidence, UseOutcome, PUBLIC_RESOURCE,
+    require_grant_id, BindingRuntime, Fixture, Grant, Handle, HostBinding, Instance, LiveGrant,
+    PublicRead, RequestRecord, RuntimeEvidence, UseOutcome, PUBLIC_RESOURCE,
 };
 
 pub const COORDS_VAR: &str = "A5_RUNTIME_COORDS";
@@ -124,7 +131,8 @@ fn http(
     method: &str,
     path: &str,
     token: Option<&str>,
-    body: Option<&Value>,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
 ) -> Result<(u16, Vec<u8>), String> {
     let fail = |what: &str| format!("{method} {path}: {what}");
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -133,10 +141,6 @@ fn http(
     stream
         .set_write_timeout(Some(HTTP_BOUND))
         .map_err(|_| fail("cannot bound the write"))?;
-    let encoded = match body {
-        Some(body) => Some(serde_json::to_vec(body).map_err(|_| fail("cannot encode the body"))?),
-        None => None,
-    };
     let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
     if let Some(token) = token {
         if !header_safe(token) {
@@ -144,8 +148,11 @@ fn http(
         }
         request.push_str(&format!("Authorization: Bearer {token}\r\n"));
     }
-    if let Some(encoded) = &encoded {
-        request.push_str("Content-Type: application/json\r\n");
+    if let Some(encoded) = body {
+        request.push_str(&format!(
+            "Content-Type: {}\r\n",
+            content_type.unwrap_or("application/octet-stream")
+        ));
         request.push_str(&format!("Content-Length: {}\r\n", encoded.len()));
     } else {
         request.push_str("Content-Length: 0\r\n");
@@ -154,7 +161,7 @@ fn http(
     stream
         .write_all(request.as_bytes())
         .map_err(|_| fail("write headers failed"))?;
-    if let Some(encoded) = &encoded {
+    if let Some(encoded) = body {
         stream
             .write_all(encoded)
             .map_err(|_| fail("write body failed"))?;
@@ -188,7 +195,21 @@ fn http(
     parse_response(&bytes)
 }
 
-/// Live operator. Binding evidence is recorded only from HTTP answers.
+/// True when the operator body claims grant-binding fields. Raw Public file
+/// bytes are not a bind. The flag is derived, never hardcoded.
+pub fn public_binding_claim(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value.get("grant_id").is_some()
+        || value.get("owned_root").is_some()
+        || value.get("identity").is_some()
+        || value.get("instance_id").is_some()
+        || value.get("session_id").is_some()
+}
+
+/// Live operator. Binding evidence is recorded only from HTTP answers that
+/// carry a guest handle.
 pub struct OperatorRuntime {
     port: u16,
     token: String,
@@ -201,7 +222,15 @@ impl OperatorRuntime {
             .map_err(|_| format!("cannot read {}", setup.coords.display()))?;
         let coords = parse_coords(&bytes)?;
         let attach = json!({"secret": coords.secret, "scope": "shell"});
-        let (status, body) = http(coords.port, "POST", "/api/auth/attach", None, Some(&attach))?;
+        let encoded = serde_json::to_vec(&attach).map_err(|_| "cannot encode attach".to_owned())?;
+        let (status, body) = http(
+            coords.port,
+            "POST",
+            "/api/auth/attach",
+            None,
+            Some(&encoded),
+            Some("application/json"),
+        )?;
         if status != 200 {
             return Err(format!("POST /api/auth/attach returned HTTP {status}"));
         }
@@ -225,17 +254,41 @@ impl OperatorRuntime {
         self.evidence.take()
     }
 
+    fn call_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+    ) -> Result<(u16, Vec<u8>), String> {
+        http(
+            self.port,
+            method,
+            path,
+            Some(&self.token),
+            body,
+            content_type,
+        )
+    }
+
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
-        let (status, bytes) = http(self.port, method, path, Some(&self.token), body)?;
+        let encoded = match body {
+            Some(body) => {
+                Some(serde_json::to_vec(body).map_err(|_| "cannot encode the body".to_owned())?)
+            }
+            None => None,
+        };
+        let (status, bytes) = self.call_raw(
+            method,
+            path,
+            encoded.as_deref(),
+            body.map(|_| "application/json"),
+        )?;
         if bytes.is_empty() {
             return Ok((status, Value::Null));
         }
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Ok((status, value))
-    }
-
-    fn record(&mut self, evidence: RuntimeEvidence) {
-        self.evidence = Some(evidence);
     }
 }
 
@@ -248,26 +301,32 @@ impl BindingRuntime for OperatorRuntime {
         Ok(())
     }
 
-    fn launch(&mut self, identity: &str, _fixture: Fixture) -> Result<Instance, String> {
+    fn launch(&mut self, _identity: &str, fixture: Fixture) -> Result<Instance, String> {
         let (status, value) = self.call(
             "POST",
             "/api/capsules",
-            Some(&json!({"path": format!("a5-binding/{identity}")})),
+            Some(&json!({"path": format!("a5-binding/{}", fixture.name())})),
         )?;
-        let session = value["session_id"].as_str().unwrap_or("");
+        let handle = value["handle"].as_str().unwrap_or("");
         let id = value["id"].as_str().unwrap_or("");
-        if session.is_empty() || value["status"] == "completed" {
+        if handle.is_empty() || value["status"] == "completed" {
             return Err(format!(
-                "POST /api/capsules returned HTTP {status} status={} session empty={}; missing RA-6",
+                "POST /api/capsules returned HTTP {status} status={} handle empty={}; missing RA-6 / #463 guest handle",
                 value["status"],
-                session.is_empty()
+                handle.is_empty()
             ));
         }
         Ok(Instance {
             id: id.to_owned(),
-            identity: identity.to_owned(),
-            session: session.to_owned(),
+            handle: Handle::new(handle)?,
         })
+    }
+
+    fn host_record(&mut self, _handle: &Handle) -> Result<HostBinding, String> {
+        Err(
+            "no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)"
+                .to_owned(),
+        )
     }
 
     fn stop(&mut self, id: &str, reason: &str) -> Result<(), String> {
@@ -284,117 +343,65 @@ impl BindingRuntime for OperatorRuntime {
         Ok(())
     }
 
-    fn end_session(&mut self, session: &str) -> Result<(), String> {
-        let (status, _) = self.call(
-            "POST",
-            &format!("/api/sessions/{session}/end"),
-            Some(&json!({})),
-        )?;
-        if status != 200 {
-            return Err(format!(
-                "POST /api/sessions/{session}/end returned HTTP {status}; missing RA-2"
-            ));
-        }
-        Ok(())
+    fn end_session(&mut self, _handle: &Handle) -> Result<(), String> {
+        Err("session end route is absent on develop (RA-2)".to_owned())
     }
 
-    fn mint_grant(&mut self, instance: &Instance, resource: &str) -> Result<Grant, String> {
+    fn mint_grant(&mut self, handle: &Handle, resource: &str) -> Result<Grant, String> {
+        if crate::contract::is_public_resource(resource) {
+            return Err(crate::contract::PUBLIC_REASON.to_owned());
+        }
+        let (req_status, req_value) = self.call(
+            "POST",
+            "/api/capability/request",
+            Some(&json!({
+                "resource": resource,
+                "action": "read",
+                "reason": "a5-binding harness"
+            })),
+        )?;
+        let request_id = req_value["request_id"].as_str().unwrap_or("");
+        if req_status != 200 || request_id.is_empty() {
+            return Err(format!(
+                "POST /api/capability/request returned HTTP {req_status} without request_id"
+            ));
+        }
+        require_grant_id(request_id)?;
         let (status, value) = self.call(
             "POST",
             "/api/capability/grant",
             Some(&json!({
-                "session_id": instance.session,
-                "resource": resource,
-                "action": "read"
+                "request_id": request_id,
+                "duration": "session",
+                "rationale": "a5-binding harness"
             })),
         )?;
-        let id = value["request_id"].as_str().or(value["id"].as_str());
-        let owned = value["owned_root"].as_str().unwrap_or("");
-        let identity = value["identity"].as_str().unwrap_or("");
-        if status != 200 || id.is_none() || owned.is_empty() || identity.is_empty() {
+        if status != 200 || value["success"] != true {
             return Err(format!(
-                "POST /api/capability/grant returned HTTP {status} without identity/owned_root; missing RA-1, RA-5"
+                "POST /api/capability/grant returned HTTP {status} without success for request_id"
             ));
         }
         Ok(Grant {
-            id: id.unwrap().to_owned(),
-            identity: identity.to_owned(),
-            session: instance.session.clone(),
-            instance: instance.id.clone(),
-            owned_root: owned.to_owned(),
+            id: request_id.to_owned(),
+            handle: handle.clone(),
             resource: resource.to_owned(),
         })
     }
 
     fn use_grant(
         &mut self,
-        caller: &Caller,
-        grant: &Grant,
-        path: &str,
+        _handle: &Handle,
+        _grant: &Grant,
+        _path: &str,
     ) -> Result<UseOutcome, String> {
-        let (status, value) = self.call(
-            "POST",
-            "/api/capability/use",
-            Some(&json!({
-                "grant_id": grant.id,
-                "identity": caller.identity,
-                "session": caller.session,
-                "instance": caller.instance,
-                "path": path
-            })),
-        )?;
-        let reason = value["reason"]
-            .as_str()
-            .or(value["message"].as_str())
-            .unwrap_or("")
-            .to_owned();
-        let request_id = value["request_id"].as_str().map(str::to_owned);
-        if status == 200 && value["status"] != "denied" {
-            let evidence = RuntimeEvidence::from_operator(
-                EvidenceKind::Allowed,
-                status,
-                request_id.or_else(|| Some(grant.id.clone())),
-                reason,
-                Actor::Runtime,
-                path.to_owned(),
-                Some(caller.identity.clone()),
-                Some(caller.session.clone()),
-                Some(caller.instance.clone()),
-            );
-            self.record(evidence.clone());
-            return Ok(UseOutcome::Allowed { evidence });
-        }
-        if status == 0 {
-            return Err(
-                "POST /api/capability/use produced no HTTP status; missing RA-1".to_owned(),
-            );
-        }
-        let evidence = RuntimeEvidence::from_operator(
-            EvidenceKind::Refused,
-            status,
-            request_id.or_else(|| Some(grant.id.clone())),
-            if reason.is_empty() {
-                format!("HTTP {status}")
-            } else {
-                reason
-            },
-            Actor::Runtime,
-            path.to_owned(),
-            Some(caller.identity.clone()),
-            Some(caller.session.clone()),
-            Some(caller.instance.clone()),
-        );
-        self.record(evidence.clone());
-        Ok(UseOutcome::Refused { evidence })
+        Err("guest-handle use route is absent on develop (RA-1 / #463)".to_owned())
     }
 
     fn live_grants(&mut self) -> Result<Vec<LiveGrant>, String> {
-        let (status, value) =
-            self.call("GET", "/api/capability/list?scope=all_sessions_live", None)?;
-        if status != 200 || value["scope"] != "all_sessions_live" {
+        let (status, value) = self.call("GET", "/api/capability/list", None)?;
+        if status != 200 {
             return Err(format!(
-                "GET /api/capability/list?scope=all_sessions_live returned HTTP {status} scope={}; missing RA-1",
-                value["scope"]
+                "GET /api/capability/list returned HTTP {status}; missing RA-1"
             ));
         }
         let mut grants = Vec::new();
@@ -403,16 +410,51 @@ impl BindingRuntime for OperatorRuntime {
             .cloned()
             .unwrap_or_default()
         {
+            let request_id = item["request_id"].as_str().unwrap_or("");
+            require_grant_id(request_id)?;
+            let identity = item["identity"].as_str().unwrap_or("");
+            let session = item["session_id"].as_str().unwrap_or("");
+            let instance = item["instance_id"].as_str().unwrap_or("");
+            let owned_root = item["owned_root"].as_str().unwrap_or("");
+            if identity.is_empty()
+                || session.is_empty()
+                || instance.is_empty()
+                || owned_root.is_empty()
+            {
+                return Err(
+                    "GET /api/capability/list has no identity/session/instance/owned_root; missing RA-1"
+                        .to_owned(),
+                );
+            }
             grants.push(LiveGrant {
-                request_id: item["request_id"].as_str().unwrap_or("").to_owned(),
-                identity: item["identity"].as_str().unwrap_or("").to_owned(),
-                session: item["session_id"].as_str().unwrap_or("").to_owned(),
-                instance: item["instance_id"].as_str().unwrap_or("").to_owned(),
+                request_id: request_id.to_owned(),
+                identity: identity.to_owned(),
+                session: session.to_owned(),
+                instance: instance.to_owned(),
                 resource: item["resource"].as_str().unwrap_or("").to_owned(),
-                owned_root: item["owned_root"].as_str().unwrap_or("").to_owned(),
+                owned_root: owned_root.to_owned(),
             });
         }
         Ok(grants)
+    }
+
+    fn request_record(&mut self, request_id: &str) -> Result<RequestRecord, String> {
+        require_grant_id(request_id)?;
+        let (status, value) = self.call(
+            "GET",
+            &format!("/api/capability/request/{request_id}"),
+            None,
+        )?;
+        if status != 200 {
+            return Err(format!(
+                "GET /api/capability/request/{request_id} returned HTTP {status}; missing RA-2 settled_by"
+            ));
+        }
+        Ok(RequestRecord {
+            request_id: request_id.to_owned(),
+            status: value["status"].as_str().unwrap_or("").to_owned(),
+            settled_by: value["settled_by"].as_str().map(str::to_owned),
+        })
     }
 
     fn public_read(&mut self, path: &str) -> Result<PublicRead, String> {
@@ -421,20 +463,35 @@ impl BindingRuntime for OperatorRuntime {
         } else {
             path
         };
-        let (_status, _value) = self.call(
-            "POST",
-            "/api/provider/localhost/write",
-            Some(&json!({
-                "uri": resource,
-                "content": "a5-binding public fixture bytes\n"
-            })),
-        )?;
-        // A write/read of Public may work today. It is never binding.
+        let rest = resource.strip_prefix("localhost://").unwrap_or(resource);
+        let fixture = b"a5-binding public fixture bytes\n";
+        let put_path = format!("/api/localhost/{rest}");
+        let (_put_status, _) =
+            self.call_raw("PUT", &put_path, Some(fixture), Some("text/plain"))?;
+        let (status, body) = self.call_raw("GET", &put_path, None, None)?;
+        if status != 200 {
+            return Err(format!(
+                "GET /api/localhost/{rest} returned HTTP {status}; Public was not read"
+            ));
+        }
         Ok(PublicRead {
             resource: resource.to_owned(),
-            bytes: b"a5-binding public fixture bytes\n".to_vec(),
-            bound: false,
+            bytes: body.clone(),
+            bound: public_binding_claim(&body),
         })
+    }
+
+    fn seed(&mut self, _handle: &Handle, rel: &str, bytes: &[u8]) -> Result<(), String> {
+        Err(format!(
+            "seed of {rel} ({} bytes) needs a host-record owned root; missing RA-1 / RA-5 / RA-6",
+            bytes.len()
+        ))
+    }
+
+    fn read_bytes(&mut self, _handle: &Handle, rel: &str) -> Result<Vec<u8>, String> {
+        Err(format!(
+            "read of {rel} needs a host-record owned root; missing RA-1 / RA-5 / RA-6"
+        ))
     }
 }
 
@@ -478,6 +535,64 @@ mod tests {
         assert_eq!(
             crate::contract::owned_root("agent-a", "session-1", "inst-1"),
             "UsersAI/agent-a/session-1/inst-1"
+        );
+    }
+
+    #[test]
+    fn public_read_bound_is_not_hardcoded() {
+        assert!(
+            !public_binding_claim(b"a5-binding public fixture bytes\n"),
+            "raw Public bytes are not a bind"
+        );
+        let forged = serde_json::json!({
+            "grant_id": "public-claim",
+            "identity": "agent-a",
+            "bound": true
+        });
+        assert!(
+            public_binding_claim(forged.to_string().as_bytes()),
+            "an operator body that claims grant_id must be bound"
+        );
+    }
+
+    #[test]
+    fn http_adapter_does_not_invent_missing_routes_or_client_identity() {
+        let src = include_str!("http.rs")
+            .split("mod tests")
+            .next()
+            .expect("http adapter source");
+        assert!(
+            !src.contains("\"/api/capability/use\""),
+            "must not call a guest-handle use route that is absent on develop"
+        );
+        assert!(
+            !src.contains("/api/sessions/"),
+            "must not call a session-end route that is absent on develop"
+        );
+        assert!(src.contains("/api/capability/grant"), "grant route exists");
+        assert!(
+            src.contains("\"request_id\""),
+            "grant body must send request_id"
+        );
+        assert!(
+            !src.contains("\"identity\": caller"),
+            "must not send identity as client JSON"
+        );
+        assert!(
+            !src.contains("\"session\": caller"),
+            "must not send session as client JSON"
+        );
+        assert!(
+            !src.contains("\"instance\": caller"),
+            "must not send instance as client JSON"
+        );
+        assert!(
+            !src.contains("bound: false"),
+            "Public bound must not be hardcoded false"
+        );
+        assert!(
+            src.contains("public_binding_claim"),
+            "Public bound is derived from the operator body"
         );
     }
 }

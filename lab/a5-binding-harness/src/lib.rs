@@ -12,6 +12,7 @@ pub mod capability;
 pub mod contract;
 pub mod http;
 pub mod journey;
+pub mod walk;
 
 use std::path::PathBuf;
 

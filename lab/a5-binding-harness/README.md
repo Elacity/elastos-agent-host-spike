@@ -24,6 +24,8 @@ acceptance table:
 ```text
 check | test | grade
 A5-ID-POS | acceptance_a5_identity_grant_used_by_bound_agent | BLOCKED (RA-1; RA-5; RA-6)
+A5-STOR-POS | acceptance_a5_owned_storage_grant_used_on_bound_root | BLOCKED (RA-1; RA-3; RA-5; RA-6)
+A5-PUB | acceptance_a5_public_storage_read_is_not_binding | BLOCKED (RA-6)
 ...
 A5 binding: accepted 0 of 9; failed 0; blocked 9; skipped 0
 ```
@@ -62,16 +64,18 @@ The harness reads the attach secret into memory, attaches once as the shell
 on IPv4 loopback, and prints instances by local label only. Use a throwaway
 Home only.
 
-A capability leaves the BLOCKED list only after a live journey measured it.
-Nothing reports PASS without that operator evidence.
+A capability leaves the BLOCKED list only after a guest journey on a live
+operator measured it. Clearing `gap()` is not a measurement. Nothing reports
+PASS without a guest handle from that operator.
 
 ## Files
 
 - `SPEC.md`: the rows, the gaps, grading, open questions.
-- `src/capability.rs`: RA-1, RA-2, RA-3, RA-5, RA-6 and the evidence pins.
-- `src/journey.rs`: the nine journeys.
-- `src/http.rs`: the operator adapter for the SPEC routes.
-- `src/contract.rs`: Runtime evidence, Public-read refusal, PASS construction.
+- `src/capability.rs`: RA-1, RA-2, RA-3, RA-5, RA-6, pin evidence, guest measurement.
+- `src/journey.rs`: the nine journeys (four different positive rows).
+- `src/http.rs`: operator adapter for routes that exist on develop.
+- `src/walk.rs`: owned-name walk (`..`, symlink, prefix collision).
+- `src/contract.rs`: handle, structured refusal, Public-read refusal, PASS.
 - `tests/acceptance.rs`: the nine acceptance rows.
 - `tests/gates.rs`: keeps the BLOCKED grades, the rows and SPEC.md in step.
 - `tests/journeys.rs`, `tests/common/double.rs`: harness self-tests.

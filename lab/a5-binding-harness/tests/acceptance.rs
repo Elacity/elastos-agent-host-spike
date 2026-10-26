@@ -55,19 +55,19 @@ fn acceptance_a5_instance_grant_used_by_sibling() {
 }
 
 #[test]
-#[ignore = "blocked: RA-3; RA-5; RA-6"]
+#[ignore = "blocked: RA-1; RA-3; RA-5; RA-6"]
 fn acceptance_a5_owned_storage_grant_used_on_bound_root() {
     row(Check::StorageUse);
 }
 
 #[test]
-#[ignore = "blocked: RA-3; RA-5; RA-6"]
+#[ignore = "blocked: RA-1; RA-3; RA-5; RA-6"]
 fn acceptance_a5_owned_storage_grant_pointed_at_other_root() {
     row(Check::StorageOtherRoot);
 }
 
 #[test]
-#[ignore = "blocked: RA-3; RA-5"]
+#[ignore = "blocked: RA-6"]
 fn acceptance_a5_public_storage_read_is_not_binding() {
     row(Check::PublicNotBinding);
 }

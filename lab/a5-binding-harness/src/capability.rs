@@ -168,16 +168,59 @@ impl Capability {
         }
     }
 
-    /// `Some` while the capability is missing, with the evidence for the gap.
-    /// A capability leaves this list only after a live journey measured it.
-    pub fn gap(self) -> Option<&'static [Pin]> {
-        Some(match self {
+    pub fn pins(self) -> &'static [Pin] {
+        match self {
             Capability::LiveGrantView => LIVE_GRANT_VIEW,
             Capability::Settlement => SETTLEMENT,
             Capability::HomeStorage => HOME_STORAGE,
             Capability::UsersAiAlias => USERS_AI_ALIAS,
             Capability::ResidentCore => RESIDENT_CORE,
-        })
+        }
+    }
+
+    /// A guest journey on a real operator has measured this ask. Editing
+    /// [`Self::gap`] to return `None` is not a measurement. There is no env
+    /// override and no file that can clear this.
+    pub fn guest_measured(self) -> bool {
+        GuestMeasurement::from_operator().is_some_and(|m| m.includes(self))
+    }
+
+    /// Gap status derived by reading the pins in this checkout. It is never a
+    /// hardcoded `Some`/`None`. Pins that still hold are a gap. Pins that
+    /// moved stay a gap until a guest journey measured the ask.
+    pub fn gap(self) -> Option<&'static [Pin]> {
+        let pins = self.pins();
+        let repo = crate::repo_root();
+        let holds = pins.iter().all(|pin| {
+            read_pin(pin, &repo)
+                .map(|reading| reading.holds)
+                .unwrap_or(true)
+        });
+        if holds {
+            Some(pins)
+        } else if self.guest_measured() {
+            None
+        } else {
+            Some(pins)
+        }
+    }
+}
+
+/// Record written only after a guest presented a handle on a live operator.
+/// No such record exists. An environment variable is not a measurement.
+#[derive(Debug)]
+pub struct GuestMeasurement {
+    asks: Vec<Capability>,
+}
+
+impl GuestMeasurement {
+    pub fn from_operator() -> Option<Self> {
+        let _ = std::env::var_os("A5_RUNTIME_COORDS");
+        None
+    }
+
+    pub fn includes(&self, capability: Capability) -> bool {
+        self.asks.contains(&capability)
     }
 }
 
@@ -244,17 +287,19 @@ impl Check {
             Check::SessionEnded => &[LiveGrantView, Settlement, ResidentCore],
             Check::InstanceUse => &[LiveGrantView, ResidentCore],
             Check::InstanceSibling => &[LiveGrantView, ResidentCore],
-            Check::StorageUse => &[HomeStorage, UsersAiAlias, ResidentCore],
-            Check::StorageOtherRoot => &[HomeStorage, UsersAiAlias, ResidentCore],
-            Check::PublicNotBinding => &[HomeStorage, UsersAiAlias],
+            Check::StorageUse => &[LiveGrantView, HomeStorage, UsersAiAlias, ResidentCore],
+            Check::StorageOtherRoot => &[LiveGrantView, HomeStorage, UsersAiAlias, ResidentCore],
+            Check::PublicNotBinding => &[ResidentCore],
         }
     }
 
+    /// A row stays blocked until a guest journey measured each ask. Clearing
+    /// [`Capability::gap`] is not that measurement.
     pub fn blocked(self) -> Vec<Capability> {
         self.needs()
             .iter()
             .copied()
-            .filter(|capability| capability.gap().is_some())
+            .filter(|capability| !capability.guest_measured())
             .collect()
     }
 
@@ -391,6 +436,56 @@ mod tests {
                 "{} needs are ordered and unique",
                 check.id()
             );
+        }
+    }
+
+    #[test]
+    fn gap_cleared_without_guest_keeps_rows_blocked() {
+        assert!(
+            GuestMeasurement::from_operator().is_none(),
+            "a guest measurement existed without a guest journey"
+        );
+        let repo = crate::repo_root();
+        for capability in Capability::ALL {
+            assert!(
+                !capability.guest_measured(),
+                "{} has no guest measurement",
+                capability.id()
+            );
+            let gap = capability.gap();
+            assert!(
+                gap.is_some(),
+                "gap() returned None without a guest measurement of {}",
+                capability.id()
+            );
+            for pin in gap.unwrap() {
+                let reading = read_pin(pin, &repo).expect("pin must be readable");
+                assert!(
+                    reading.holds,
+                    "{} pin {} no longer holds; re-measure against a live operator",
+                    capability.id(),
+                    pin.path
+                );
+            }
+        }
+        for check in Check::ALL {
+            assert_eq!(
+                check.blocked(),
+                check.needs(),
+                "{} must stay blocked until a guest measures its asks",
+                check.id()
+            );
+        }
+    }
+
+    #[test]
+    fn gap_is_derived_from_pin_reads() {
+        for capability in Capability::ALL {
+            let gap = capability
+                .gap()
+                .unwrap_or_else(|| panic!("{} gap must come from pin reads", capability.id()));
+            assert_eq!(gap.len(), capability.pins().len());
+            assert!(std::ptr::eq(gap, capability.pins()));
         }
     }
 }
