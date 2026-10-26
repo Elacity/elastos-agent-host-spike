@@ -3,7 +3,7 @@ file: src/ledger.rs
 test: ledger::model_reserve_over_the_ceiling_is_refused
 test: ledger::model_outstanding_hold_counts_toward_the_ceiling
 --- old
-            Some(total) if total <= self.ledger.ceiling => total,
+            Some(total) if total <= ledger.ceiling => total,
 --- new
             Some(total) => total,
 --- end

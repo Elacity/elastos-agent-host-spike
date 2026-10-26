@@ -743,6 +743,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the platform-baseline status refusal (WP97): the same test fails
   because a baseline without ", not approved rights" in its status sentence
   passes the check, so its status case finds no refusal.
+- Replace the missing rights-list refusal with an empty list (WP98): the same
+  test fails because the check goes on and refuses the process-exec form with
+  no claimant, so its rights case finds no "must hold a rights list" reason.
+- Replace the missing platform-baseline refusal with an empty map (WP99): the
+  same test fails because the check goes on and refuses the empty baseline with
+  the status reason, so its platform-baseline case finds no "must hold a
+  platform baseline" reason.
+- Replace the missing baseline rules-list refusal with an empty list (WP100):
+  the same test fails because the check goes on and refuses the startup-root
+  form with no claimant, so its rules-list case finds no "platform baseline
+  must hold a rules list" reason.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
