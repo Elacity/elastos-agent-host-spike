@@ -9,7 +9,7 @@
       "edits": [
         {
           "file": "../../lab/a5-binding-harness/src/contract.rs",
-          "old": "            if evidence.refused_by != Actor::Runtime {\n                return Err(\"fixture refusal is not Runtime evidence\".to_owned());\n            }\n",
+          "old": "    if evidence.refused_by != Actor::Runtime {\n        return Err(\"fixture refusal is not Runtime evidence\".to_owned());\n    }\n",
           "new": ""
         }
       ],

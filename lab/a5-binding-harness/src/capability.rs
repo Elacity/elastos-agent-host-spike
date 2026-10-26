@@ -298,12 +298,14 @@ pub fn read_pin(pin: &Pin, repo: &Path) -> Result<Reading, String> {
     let text =
         || std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", pin.path));
     match pin.rule {
-        Rule::Contains(needle) => Ok(find(&text()?, needle).map_or_else(not_found, |line| {
-            Reading {
-                holds: true,
-                line: Some(line),
-            }
-        })),
+        Rule::Contains(needle) => {
+            Ok(
+                find(&text()?, needle).map_or_else(not_found, |line| Reading {
+                    holds: true,
+                    line: Some(line),
+                }),
+            )
+        }
         Rule::Lacks(needle) => Ok(Reading {
             holds: find(&text()?, needle).is_none(),
             line: None,
@@ -356,7 +358,8 @@ pub fn describe(blocked: &[Capability], repo: &Path) -> String {
                 ),
                 Ok(Reading { holds: false, .. }) => format!(
                     "{} [MOVED: re-measure {} against a live operator]",
-                    pin.path, capability.id()
+                    pin.path,
+                    capability.id()
                 ),
                 Err(reason) => format!("{} [UNREADABLE: {reason}]", pin.path),
             };

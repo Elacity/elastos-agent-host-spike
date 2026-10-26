@@ -76,7 +76,13 @@ impl BindingRuntime for Double {
     fn launch(&mut self, identity: &str, _fixture: Fixture) -> Result<Instance, String> {
         let id = self.next_id("inst");
         let session = if self.faults.shared_session && !self.agents.is_empty() {
-            self.agents.values().next().unwrap().instance.session.clone()
+            self.agents
+                .values()
+                .next()
+                .unwrap()
+                .instance
+                .session
+                .clone()
         } else {
             self.next_id("sess")
         };
@@ -105,9 +111,6 @@ impl BindingRuntime for Double {
             if rec.instance.session == session {
                 rec.session_live = false;
             }
-        }
-        if !self.faults.session_survives_end {
-            self.grants.retain(|_, grant| grant.session != session);
         }
         Ok(())
     }
@@ -248,6 +251,13 @@ impl BindingRuntime for Double {
         Ok(self
             .grants
             .values()
+            .filter(|grant| {
+                self.faults.session_survives_end
+                    || self
+                        .agents
+                        .values()
+                        .any(|rec| rec.instance.session == grant.session && rec.session_live)
+            })
             .map(|grant| LiveGrant {
                 request_id: grant.id.clone(),
                 identity: grant.identity.clone(),

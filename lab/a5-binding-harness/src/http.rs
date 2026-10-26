@@ -24,6 +24,7 @@ const HTTP_BOUND: Duration = Duration::from_secs(5);
 const MAX_RESPONSE: usize = 1024 * 1024;
 
 /// What a live run needs: the operator's coordinates file.
+#[derive(Debug)]
 pub struct Setup {
     coords: PathBuf,
 }
@@ -364,7 +365,9 @@ impl BindingRuntime for OperatorRuntime {
             return Ok(UseOutcome::Allowed { evidence });
         }
         if status == 0 {
-            return Err("POST /api/capability/use produced no HTTP status; missing RA-1".to_owned());
+            return Err(
+                "POST /api/capability/use produced no HTTP status; missing RA-1".to_owned(),
+            );
         }
         let evidence = RuntimeEvidence::from_operator(
             EvidenceKind::Refused,
@@ -395,7 +398,11 @@ impl BindingRuntime for OperatorRuntime {
             ));
         }
         let mut grants = Vec::new();
-        for item in value["capabilities"].as_array().cloned().unwrap_or_default() {
+        for item in value["capabilities"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+        {
             grants.push(LiveGrant {
                 request_id: item["request_id"].as_str().unwrap_or("").to_owned(),
                 identity: item["identity"].as_str().unwrap_or("").to_owned(),

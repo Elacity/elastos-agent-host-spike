@@ -114,6 +114,7 @@ pub struct RuntimeEvidence {
 }
 
 impl RuntimeEvidence {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_operator(
         kind: EvidenceKind,
         http_status: u16,
@@ -189,9 +190,7 @@ pub enum UseOutcome {
 }
 
 pub fn is_public_resource(resource: &str) -> bool {
-    let rest = resource
-        .strip_prefix("localhost://")
-        .unwrap_or(resource);
+    let rest = resource.strip_prefix("localhost://").unwrap_or(resource);
     rest == "Public" || rest.starts_with("Public/")
 }
 
@@ -215,21 +214,29 @@ pub fn owned_resource(identity: &str, session: &str, instance: &str) -> String {
     )
 }
 
+fn require_runtime_speaker(evidence: &RuntimeEvidence) -> Result<(), String> {
+    if evidence.refused_by != Actor::Runtime {
+        return Err("fixture refusal is not Runtime evidence".to_owned());
+    }
+    Ok(())
+}
+
 pub fn require_runtime_allow(outcome: UseOutcome) -> Result<RuntimeEvidence, String> {
     match outcome {
         UseOutcome::Allowed { evidence } => {
             reject_public_as_binding(&evidence.resource)?;
             if evidence.http_status.is_none() && evidence.request_id.is_none() {
-                return Err(
-                    "Runtime allow needs an operator HTTP status or request id".to_owned(),
-                );
+                return Err("Runtime allow needs an operator HTTP status or request id".to_owned());
             }
             Ok(evidence)
         }
-        UseOutcome::Refused { evidence } => Err(format!(
-            "expected Runtime allow, got refusal: {}",
-            evidence.reason
-        )),
+        UseOutcome::Refused { evidence } => {
+            require_runtime_speaker(&evidence)?;
+            Err(format!(
+                "expected Runtime allow, got refusal: {}",
+                evidence.reason
+            ))
+        }
     }
 }
 
@@ -242,9 +249,7 @@ pub fn require_runtime_refusal(
 ) -> Result<RuntimeEvidence, String> {
     match outcome {
         UseOutcome::Refused { evidence } => {
-            if evidence.refused_by != Actor::Runtime {
-                return Err("fixture refusal is not Runtime evidence".to_owned());
-            }
+            require_runtime_speaker(&evidence)?;
             if evidence.http_status.is_none() && evidence.request_id.is_none() {
                 return Err(
                     "Runtime refusal needs an operator HTTP status or request id".to_owned(),
@@ -351,10 +356,7 @@ mod tests {
                 PUBLIC_RESOURCE.to_owned(),
             ),
         };
-        assert_eq!(
-            require_runtime_allow(outcome).unwrap_err(),
-            PUBLIC_REASON
-        );
+        assert_eq!(require_runtime_allow(outcome).unwrap_err(), PUBLIC_REASON);
     }
 
     #[test]
