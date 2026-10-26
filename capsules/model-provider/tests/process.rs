@@ -687,6 +687,15 @@ for (const id of ['chat','responses']) {
 
 const HOSTED_EFFECT_OFFER: &str = "hosted-text";
 
+/// The text output schema the provider's contract names
+/// (`capsules/model-provider/src/contract.rs:22`). This test binary cannot see
+/// the provider's private contract module.
+const RUN_OUTPUT_TEXT_SCHEMA: &str = "elastos.model.output.text/v1";
+
+/// The backend report schema the provider's contract names
+/// (`capsules/model-provider/src/contract.rs:17`).
+const BACKEND_REPORT_SCHEMA: &str = "elastos.model.backend-report/v1";
+
 /// The header names the Runtime's hosted effect reader accepts, compared in
 /// lower case. Any other name, a repeated name, and a `host` other than
 /// `runtime.invalid` are refused
@@ -712,11 +721,56 @@ const RUNTIME_HOSTED_REFUSAL: &[u8] =
     b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
       Content-Length: 0\r\nConnection: close\r\n\r\n";
 
+/// The two backend stream events the source test sends
+/// (`capsules/model-provider/src/execution.rs:4514-4535`), and the marker end.
+/// The usage event carries no `cost` field, so the run records `cost` as
+/// unknown (`capsules/model-provider/src/adapters.rs:416-418`, `:437-443`).
+const RUNTIME_HOSTED_STREAM_EVENTS: [&str; 2] = [
+    r#"{"model":"resolved-model","choices":[{"delta":{"content":"ready"}}]}"#,
+    r#"{"model":"resolved-model","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}"#,
+];
+
+/// The Runtime's answer when it accepts a hosted effect, copied from
+/// `write_response_head`
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1662-1670`):
+/// its own head, each backend chunk as `{len:X}\r\n{bytes}\r\n` (`:1644-1648`),
+/// and the end `0\r\n\r\n` (`:1650`). The Runtime forwards the backend's
+/// content type (`:1589-1599`), so this head says `text/event-stream`. Only a
+/// refusal carries `X-Elastos-Hosted-Access` (`:2453-2486`).
+fn runtime_hosted_stream_answer() -> Vec<u8> {
+    let mut answer = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        .to_vec();
+    for frame in [
+        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]),
+        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[1]),
+        "data: [DONE]\n\n".to_string(),
+    ] {
+        answer.extend_from_slice(format!("{:X}\r\n", frame.len()).as_bytes());
+        answer.extend_from_slice(frame.as_bytes());
+        answer.extend_from_slice(b"\r\n");
+    }
+    answer.extend_from_slice(b"0\r\n\r\n");
+    answer
+}
+
+/// What the stand-in answers: the Runtime's refusal, which is the default, or
+/// its accepted head followed by the backend stream.
+#[derive(Clone, Copy)]
+enum HostedEffectAnswer {
+    Refused,
+    Streaming,
+}
+
 /// One request the stand-in read to its end: the request line and every header
 /// line, with the name as sent.
 struct RecordedRequest {
     request_line: String,
     headers: Vec<(String, String)>,
+    /// Header lines with no colon, recorded rather than dropped. The Runtime's
+    /// reader refuses such a line
+    /// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:556`).
+    colonless: Vec<String>,
 }
 
 impl RecordedRequest {
@@ -747,8 +801,9 @@ impl RecordedRequest {
 /// and `src/test_support.rs` is under `src/`, where a change needs a fresh
 /// Sasha note. It counts each connection when `accept` returns it, reads that
 /// connection's one request to its end, records the request, and answers as the
-/// Runtime refuses before dispatch. `hold_answer` keeps that answer back, so
-/// the run stays open for as long as the test needs it.
+/// Runtime refuses before dispatch, or, when asked at `bind_streaming`, with
+/// the Runtime's accepted head and the backend stream. `hold_answer` keeps that
+/// answer back, so the run stays open for as long as the test needs it.
 struct HostedEffectStandIn {
     path: PathBuf,
     listener: Arc<UnixListener>,
@@ -761,7 +816,19 @@ struct HostedEffectStandIn {
 }
 
 impl HostedEffectStandIn {
+    /// Binds the stand-in that answers as the Runtime refuses a hosted request
+    /// before dispatch.
     fn bind(label: &str) -> Self {
+        Self::bind_answering(label, HostedEffectAnswer::Refused)
+    }
+
+    /// Binds the stand-in that answers as the Runtime does when it accepts a
+    /// hosted effect.
+    fn bind_streaming(label: &str) -> Self {
+        Self::bind_answering(label, HostedEffectAnswer::Streaming)
+    }
+
+    fn bind_answering(label: &str, answer: HostedEffectAnswer) -> Self {
         // The provider refuses a socket path of 104 bytes or more
         // (`src/config.rs:163`), so bind under `/tmp` rather than under the
         // fixture's temporary root.
@@ -791,7 +858,7 @@ impl HostedEffectStandIn {
                             let request_tx = request_tx.clone();
                             let answer_released = Arc::clone(&answer_released);
                             thread::spawn(move || {
-                                serve_hosted_effect(stream, request_tx, answer_released)
+                                serve_hosted_effect(stream, request_tx, answer_released, answer)
                             });
                         }
                         Err(_) => thread::sleep(Duration::from_millis(5)),
@@ -890,6 +957,7 @@ fn serve_hosted_effect(
     stream: UnixStream,
     request_tx: mpsc::Sender<RecordedRequest>,
     answer_released: Arc<(Mutex<bool>, Condvar)>,
+    answer: HostedEffectAnswer,
 ) {
     let recorded = read_hosted_effect_request(&stream);
     let _ = request_tx.send(recorded);
@@ -902,7 +970,11 @@ fn serve_hosted_effect(
             released = wake.wait(released).unwrap();
         }
     }
-    let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
+    let response = match answer {
+        HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
+        HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
+    };
+    let _ = (&stream).write_all(&response);
 }
 
 /// Reads one request head and its body to the end, waiting at most
@@ -915,6 +987,7 @@ fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
     let mut request_line = String::new();
     let _ = reader.read_line(&mut request_line);
     let mut headers = Vec::new();
+    let mut colonless = Vec::new();
     let mut body_bytes = 0;
     loop {
         let mut line = String::new();
@@ -930,6 +1003,11 @@ fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
                 body_bytes = value.trim().parse().unwrap_or(0);
             }
             headers.push((name.to_string(), value.trim().to_string()));
+        } else {
+            // The Runtime refuses a header line that has no colon
+            // (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:556`),
+            // so keep the line for the test to refuse it as the Runtime does.
+            colonless.push(line.to_string());
         }
     }
     // Read the body to its end, so the refusal answers a complete request.
@@ -938,6 +1016,7 @@ fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
     RecordedRequest {
         request_line: request_line.trim_end().to_string(),
         headers,
+        colonless,
     }
 }
 
@@ -1111,6 +1190,143 @@ fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_k
         !recorded.head().contains("fixture-key"),
         "the offer's key must appear nowhere in the recorded request head: {}",
         recorded.head()
+    );
+
+    provider.shutdown();
+}
+
+/// The answer leg of the provider's join with the Runtime's hosted transport.
+/// The Runtime writes its own head, forwards each backend chunk as an HTTP
+/// chunk and ends the stream
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1662-1670`,
+/// `:1644-1648`, `:1650`). Task 035 pins the request leg and the Runtime's
+/// refusal; this test pins the accepted answer: one hosted text run completes
+/// with the streamed text and the backend's usage. The stand-in answers in
+/// exactly that shape with the source test's events
+/// (`capsules/model-provider/src/execution.rs:4514-4535`), and no cost is in
+/// the stream, so the run records cost as unknown
+/// (`capsules/model-provider/src/adapters.rs:416-418`, `:437-443`).
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usage() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted accepted answer: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-accepted-answer");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-accepted-answer");
+    let init = json!({"op": "init", "config": {
+        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
+        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
+        "offers": [hosted_effect_offer()], "runtime_hosted_socket": stand_in.path}
+    }});
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-accepted-answer"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the Runtime's accepted answer must complete the run: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the run must carry the streamed text: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "reported", "value": "resolved-model"},
+            "usage": {
+                "status": "reported",
+                "value": {"input_tokens": 7, "output_tokens": 1, "total_tokens": 8},
+            },
+            // The usage event carries no `cost` or `cost_unit`, so the worker
+            // observes cost only when one is present and the report says
+            // unknown (`src/adapters.rs:416-418`, `:437-443`).
+            "cost": {"status": "unknown"},
+        }),
+        "the run must carry the backend's evidence: {settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the accepted run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the accepted run must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert!(
+        recorded.colonless.is_empty(),
+        "the Runtime refuses a header line with no colon: {:?}",
+        recorded.colonless
+    );
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
     );
 
     provider.shutdown();

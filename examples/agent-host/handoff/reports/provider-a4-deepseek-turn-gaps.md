@@ -37,10 +37,13 @@ No test in the tree takes the Runtime grant + hosted transport path with a real
 model. The two halves exist only against stand-ins: the provider's hosted
 socket control answers through a fake Runtime socket
 (`capsules/model-provider/tests/confine/main.rs:1533-1560`), and the Runtime's
-egress tests forward to loopback fixture URLs (the first is
-`hosted_job_effects_require_the_persisted_create_result` at
-`elastos/crates/elastos-server/src/api/model_provider_egress.rs:2650`, whose
-loopback sink, destination and `forward` call are at `:2716-2742`).
+egress tests forward to loopback fixture URLs
+(`hosted_job_effects_require_the_persisted_create_result` at
+`elastos/crates/elastos-server/src/api/model_provider_egress.rs:2650` calls
+`forward` at `:2740`, but its sink accepts nothing, which it asserts at
+`:2748-2752`; the first forward whose sink accepts is
+`hosted_job_create_with_lost_response_blocks_identical_retry` at `:2756`,
+`forward` at `:2846`).
 
 ## The A4 path, as Anders states it
 
@@ -81,7 +84,10 @@ config (`elastos/crates/elastos-runtime/src/provider/bridge.rs:755-774`;
 The provider sends each external effect to that socket as
 `http://runtime.invalid/v1/hosted-effect` with the offer, run, request and
 effect headers, and it adds no key (`capsules/model-provider/src/adapters.rs:42`,
-`:45-70`, `:1982-1986`). The Runtime's broker accepts only that one request
+`:45-70`, `:1982-1986`). The provider's answer leg is now pinned by
+`hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usage`
+(`capsules/model-provider/tests/process.rs:1213`), through a stand-in, not a
+real Runtime. The Runtime's broker accepts only that one request
 shape and host, then checks the offer, the effect, the model selector, the
 output cap, the destination and the run binding
 (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:536-600`,
@@ -116,8 +122,8 @@ Missing: a real key, an approved connection, and a DeepSeek selector that the
 provider lists. These are operator inputs, not code. No hosted offer or
 Runtime config names a DeepSeek model id: the `deepseek-v4-flash` strings in
 the tree are the `model` field of two by-URL tests
-(`examples/agent-host/src/lib.rs:10153`, `:13256`) and one fixture connection
-name (`elastos/crates/elastos-server/src/api/gateway_tests/home_system.rs:12071`).
+(`examples/agent-host/src/lib.rs:10153`, `:13256`); `home_system.rs:12071` holds
+`"DeepSeek"`, a fixture connection name, not a model id.
 This part is not checked here, because it needs a key and a network call.
 
 ### The Sparks or DGX engine is not a path
