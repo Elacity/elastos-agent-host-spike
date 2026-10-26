@@ -249,10 +249,14 @@ extractor (`python_block_under`, one section heading per block) takes each
 block as committed, and the same `run_python` runs it. Each block has its own
 short driver (`NAME_DIGEST_DRIVER`, `RECORD_DRIVER`), and each test checks
 that its driver holds no hash, domain or function of its own. Neither test
-skips. A missing section, a section with no block, and a block that does not
-define its function are each refused with their own reason, which the test
-asserts, and each test asserts how many inputs it checked (7 names, 2
-records), so a run that returns no answers fails.
+skips. A missing section, a section with no block, a section with more than
+one block, a block that is never closed before the next section, and a block
+that does not define its function are each refused with their own reason,
+which the test asserts (task 024 added the third and fourth, through
+`assert_bad_block_refused`, which both tests call with their own heading). A
+record answer that is not two words is refused with its text. Each test
+asserts how many inputs it checked (7 names, 2 records), so a run that returns
+no answers fails.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
@@ -262,6 +266,11 @@ records), so a run that returns no answers fails.
 | The test runs README's name block: a drifted name domain fails | `readme_python_matches_the_name_signature_digest` | F-CI20d (the block's `name-signature/v1` becomes `/v2`) |
 | A missing name block is no pass: exactly 7 names are checked | `readme_python_matches_the_name_signature_digest` | F-CI20e (no block found, no answers) |
 | A missing record block is no pass: exactly 2 records are checked | `readme_python_matches_the_package_record_bytes` | F-CI20f (no block found, no answers) |
+| A record answer of one word is refused | `readme_python_matches_the_package_record_bytes` | F-CI24a (one word taken, with an empty digest) |
+| A missing section is refused | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes`, `the_adoption_list_is_read_strictly`, `the_claim_wording_check_names_each_gap` | F-CI24b (the search falls back to the start of the text) |
+| A section with no block is refused | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes`, `the_adoption_list_is_read_strictly` | F-CI24c (an empty block taken) |
+| A section with more than one block is refused | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes` | F-CI24d (the first block taken) |
+| A block never closed before the next section is refused | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes` | F-CI24e (the block runs to the end of its section) |
 | An interpreter that cannot start fails all three tests | all three tests above | F-CI19d (a program that does not exist) |
 
 Not shown: Kubo itself, and Python on another machine. The check is two
@@ -1419,7 +1428,9 @@ F-CI16i, and task 017's F-CI17a (all three: see
 [the cross-implementation check](#the-cross-implementation-check)), and task
 025's F-CI25a to F-CI25m (see
 [for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
-023's F-CI23a to F-CI23l (see [claim scope](#claim-scope)).
+023's F-CI23a to F-CI23l (see [claim scope](#claim-scope)), and task 024's
+F-CI24a to F-CI24e (see
+[the cross-implementation check](#the-cross-implementation-check)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1453,6 +1464,14 @@ claim scan or the wording check). Task 023 moved `one_line` from
 `tests/adoption.rs` into `tests/common/mod.rs`, unchanged, so the adoption
 note and the claim share one white-space rule, and every older edit's text is
 still found exactly once.
+Task 024's entries all edit `tests/common/mod.rs`: F-CI24a plants its bug in
+`python_records`, F-CI24b in `section_under`, and F-CI24c to F-CI24e in
+`fenced_block_under`, which `python_block_under` calls. Each anchor holds its
+refusal's own message text, so it is found exactly once and apart from
+F-CI19g's. The README reader is shared, so F-CI24b and F-CI24c also name
+`the_adoption_list_is_read_strictly`, and F-CI24b also names
+`the_claim_wording_check_names_each_gap`: each asserts the same refusal.
+Task 024 changed no older edit's text.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1531,8 +1550,10 @@ task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 025 it reported `summary: 210 CAUGHT of 210` (`baseline: 121 named tests pass
 without an edit, 0 do not`; F-CI25a to F-CI25m each CAUGHT). At task 023,
 it reported `summary: 222 CAUGHT of 222` (`baseline: 124 named tests pass
-without an edit, 0 do not`; with the id prefix `F-CI23`: 12 of 12).
+without an edit, 0 do not`; with the id prefix `F-CI23`: 12 of 12). At task
+024 it reported `summary: 227 CAUGHT of 227` (`baseline: 124 named tests pass
+without an edit, 0 do not`; F-CI24a to F-CI24e each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020, 025 and 023 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023 and 024 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
