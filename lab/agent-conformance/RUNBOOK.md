@@ -622,6 +622,7 @@ signal, kill time, first barrier time, overlap, elapsed times, quiet duration,
 and orphan counts before and after settlement. This candidate's orphan is
 **settled by the fixture**. AC-027-ORPHAN in GAPS.md describes the Runtime work
 needed for automatic settlement. Resident lifecycle support remains RT4.
+Both journeys require before 1 and after 0; an already-settled orphan gives FAIL until the lab re-measures AC-027-ORPHAN and cites the Runtime source line.
 
 `no_policy_file_does_not_mean_allow` observes the pending request while the
 client waits without approval. After its 30-second refusal it uses the same
