@@ -14,7 +14,10 @@ use elastos_wallet_contract::{
     VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
     WalletProviderResponseV2, WalletResultV2,
 };
-use linux_confine::{spawn_provider, ExtraPath, ProviderLaunch, RunningProvider};
+use linux_confine::{
+    confined_cap_bnd, spawn_provider, ExtraPath, ProviderLaunch, RunningProvider,
+    STORAGE_ROOT_RIGHTS,
+};
 use serde_json::{json, Value};
 
 const EACCES: i32 = 13;
@@ -229,8 +232,62 @@ fn assert_witness(stderr: &str, op: &str, errno: i32, reason: &str) {
     );
 }
 
+fn confinement_rows(provider: &RunningProvider) -> (String, String) {
+    assert_eq!(
+        provider.enforced.storage_rights, STORAGE_ROOT_RIGHTS,
+        "storage root rights drifted"
+    );
+    let (pid, hex) =
+        confined_cap_bnd(provider.launcher_pid()).unwrap_or_else(|err| panic!("{err}"));
+    let value =
+        u128::from_str_radix(&hex, 16).unwrap_or_else(|_| panic!("CapBnd is not hex: {hex}"));
+    assert_eq!(
+        value, 0,
+        "capability bounding set did not drop: CapBnd: {hex}"
+    );
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert!(
+        !comm.is_empty() && comm != "lc-setup",
+        "CapBnd was read from {comm} at /proc/{pid}/status"
+    );
+    (
+        format!("/proc/{pid}/status CapBnd {hex} ({comm})"),
+        format!("0x{:x}", provider.enforced.storage_rights),
+    )
+}
+
 fn print_row(side: &str, operation: &str, result: &str, reason: &str) {
     println!("| {side} | {operation} | {result} | {reason} |");
+}
+
+#[test]
+fn confined_process_cap_bnd_is_zero() {
+    let fix = prepare("did-provider", "did", false);
+    let mut provider = spawn_provider(&fix.launch).unwrap_or_else(|err| panic!("{err}"));
+    let key = "42".repeat(32);
+    expect_ok(
+        &mut provider,
+        &json!({"op":"init","config":{"base_path": fix.base, "encryption_key": key}}),
+    );
+    let (pid, hex) =
+        confined_cap_bnd(provider.launcher_pid()).unwrap_or_else(|err| panic!("{err}"));
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("CapBnd:"))
+        .unwrap_or_else(|| panic!("/proc/{pid}/status has no CapBnd\n{status}"));
+    let value =
+        u128::from_str_radix(&hex, 16).unwrap_or_else(|_| panic!("CapBnd is not hex: {hex}"));
+    assert_eq!(
+        value, 0,
+        "capability bounding set did not drop: CapBnd: {hex}"
+    );
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap();
+    assert!(comm.starts_with("did-provider"), "{comm}");
+    println!("/proc/{pid}/status {line} comm={comm}");
 }
 
 fn header(name: &str) {
@@ -288,6 +345,7 @@ fn did_provider_binary_under_its_profile() {
         "{write_reason}"
     );
     assert_eq!(fs::read(&fix.outside_file).unwrap(), b"outside-bytes");
+    let (cap_row, rights_row) = confinement_rows(&provider);
     expect_ok(&mut provider, &json!({"op":"shutdown"}));
     let stderr = provider.stderr();
     let status = provider.wait().unwrap();
@@ -380,6 +438,13 @@ fn did_provider_binary_under_its_profile() {
         "refused",
         "the pid namespace has no such host process (errno 3)",
     );
+    print_row("confined", "/proc/self/status CapBnd", "0", &cap_row);
+    print_row(
+        "confined",
+        "STORAGE_ROOT rights",
+        &rights_row,
+        "read file, read directory, write file, truncate, make regular file, make directory, remove file, remove directory",
+    );
     println!();
 }
 
@@ -439,6 +504,7 @@ fn wallet_provider_binary_under_its_profile() {
     let store = fs::read_to_string(fix.root.join("wallet-state.json")).unwrap();
     assert!(store.contains(&account_id), "{store}");
     assert!(fs::metadata(fix.root.join("wallet-key.hex")).unwrap().len() > 0);
+    let (cap_row, rights_row) = confinement_rows(&provider);
     let shutdown = json_line(&mut provider, &json!({"op":"shutdown"}));
     assert_eq!(shutdown["status"], "ok", "{shutdown}");
     let stderr = provider.stderr();
@@ -557,6 +623,13 @@ fn wallet_provider_binary_under_its_profile() {
         "signal a host pid",
         "refused",
         "the pid namespace has no such host process (errno 3)",
+    );
+    print_row("confined", "/proc/self/status CapBnd", "0", &cap_row);
+    print_row(
+        "confined",
+        "STORAGE_ROOT rights",
+        &rights_row,
+        "read file, read directory, write file, truncate, make regular file, make directory, remove file, remove directory",
     );
     println!();
 }
@@ -695,6 +768,7 @@ fn model_provider_binary_under_its_profile() {
         }),
     );
     assert_eq!(fetched["run_id"], created["run_id"]);
+    let (cap_row, rights_row) = confinement_rows(&provider);
     let shutdown = expect_ok(&mut provider, &json!({"op":"shutdown"}));
     assert_eq!(shutdown["shutdown"], true);
     let stderr = provider.stderr();
@@ -822,6 +896,13 @@ fn model_provider_binary_under_its_profile() {
         "signal a host pid",
         "refused",
         "the pid namespace has no such host process (errno 3)",
+    );
+    print_row("confined", "/proc/self/status CapBnd", "0", &cap_row);
+    print_row(
+        "confined",
+        "STORAGE_ROOT rights",
+        &rights_row,
+        "read file, read directory, write file, truncate, make regular file, make directory, remove file, remove directory",
     );
     println!("runs_events and runs_cancel have no named macOS test. This run does not claim them.");
     println!("Hosted dispatch stops in the binary before a socket, with \"Hosted external HTTPS is paused.\" The socket row is the kernel refusal from the same process.");

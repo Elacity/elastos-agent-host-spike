@@ -1,9 +1,34 @@
-{
-  "id": "F-LC-SOCKET",
-  "file": "lab/linux-confine/src/policy.rs",
-  "old": "pub const DENY_SOCKET: bool = true;",
-  "new": "pub const DENY_SOCKET: bool = false;",
-  "test": "did_profile_permits_its_operations_and_refuses_the_rest",
-  "caught": "socket denial did not hold",
-  "runner": "python3 lab/linux-confine/falsify.py"
-}
+[
+  {
+    "id": "F-LC-SOCKET",
+    "file": "lab/linux-confine/src/policy.rs",
+    "old": "pub const DENY_SOCKET: bool = true;",
+    "new": "pub const DENY_SOCKET: bool = false;",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "socket denial did not hold"
+  },
+  {
+    "id": "F-LC-CAPBND",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "    drop_bounding_set();",
+    "new": "    if (0) drop_bounding_set();",
+    "test": "confined_process_cap_bnd_is_zero",
+    "caught": "capability bounding set did not drop"
+  },
+  {
+    "id": "F-LC-BLOCK",
+    "file": "lab/linux-confine/build.rs",
+    "old": "let production_flags: &[&str] = &[\"-O2\", \"-Wall\", \"-Wextra\", \"-Werror\"];",
+    "new": "let production_flags: &[&str] = &[\"-DLC_TEST_HOOKS\", \"-O2\", \"-Wall\", \"-Wextra\", \"-Werror\"];",
+    "test": "production_launcher_rejects_block_switches",
+    "caught": "the production launcher accepted a block switch"
+  },
+  {
+    "id": "F-LC-STORAGE",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "LC_STORAGE_RIGHTS eight-right mask",
+    "new": "the same mask with LANDLOCK_ACCESS_FS_IOCTL_DEV added",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "storage root rights drifted"
+  }
+]

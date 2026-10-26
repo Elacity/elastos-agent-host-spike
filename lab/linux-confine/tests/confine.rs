@@ -6,7 +6,7 @@ use std::process::Command;
 use linux_confine::{
     allow_rules, block_landlock, block_seccomp, block_userns, deny_network_by_default, explain_abi,
     launch, op, parse_profile, read_profile, Launch, Report, ABI_IOCTL, ABI_STORAGE, NO_LANDLOCK,
-    NO_SECCOMP, NO_USERNS,
+    NO_SECCOMP, NO_USERNS, STORAGE_ROOT_RIGHTS,
 };
 
 const EPERM: i32 = 1;
@@ -231,6 +231,10 @@ fn profile_rows(
 fn prove(name: &str, kind: &str, storage: &[&str], persona: &[&str], memory: &[&str], note: &str) {
     let built = build(name, kind);
     let report = launch(&built.launch).unwrap_or_else(|err| panic!("{name}: {err}"));
+    assert_eq!(
+        report.enforced.storage_rights, STORAGE_ROOT_RIGHTS,
+        "storage root rights drifted"
+    );
     assert_eq!(report.enforced.uid, 0, "{}", report.raw);
     assert_eq!(report.enforced.caps, "empty", "{}", report.raw);
     assert_eq!(report.enforced.nnp, 1, "{}", report.raw);
@@ -366,12 +370,13 @@ fn prove(name: &str, kind: &str, storage: &[&str], persona: &[&str], memory: &[&
         })
         .collect();
     println!(
-        "enforced abi={} uid={} caps={} nnp={} netns={}",
+        "enforced abi={} uid={} caps={} nnp={} netns={} storage_rights=0x{:x}",
         report.enforced.abi,
         report.enforced.uid,
         report.enforced.caps,
         report.enforced.nnp,
-        report.enforced.netns
+        report.enforced.netns,
+        report.enforced.storage_rights
     );
     print_table(name, &borrowed);
     if !note.is_empty() {
@@ -545,6 +550,34 @@ fn user_namespace_absence_refuses_the_start() {
         !built.launch.storage.exists(),
         "a refusal wrote under STORAGE_ROOT"
     );
+}
+
+#[test]
+fn production_launcher_rejects_block_switches() {
+    for arg in [
+        "--block-landlock",
+        "--block-seccomp",
+        "--block-userns",
+        "--explain-abi",
+    ] {
+        let output = Command::new(env!("LC_SETUP"))
+            .arg(arg)
+            .output()
+            .unwrap_or_else(|err| panic!("{arg}: {err}"));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success()
+                && text.contains("unknown launch argument")
+                && !text.contains(NO_LANDLOCK)
+                && !text.contains(NO_SECCOMP)
+                && !text.contains(NO_USERNS),
+            "the production launcher accepted a block switch: {arg}: {text}"
+        );
+    }
 }
 
 #[test]

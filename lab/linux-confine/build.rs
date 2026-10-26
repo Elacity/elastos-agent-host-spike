@@ -8,6 +8,7 @@ fn main() {
     let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let probe = out.join("lc-probe");
     let setup = out.join("lc-setup");
+    let setup_test = out.join("lc-setup-test");
     let witness = out.join("lc-witness.so");
     compile(
         &cc,
@@ -26,11 +27,19 @@ fn main() {
             "-Werror",
         ],
     );
+    // F-LC-BLOCK: the shipped launcher is this binary. It has no test hooks.
+    let production_flags: &[&str] = &["-O2", "-Wall", "-Wextra", "-Werror"];
     compile(
         &cc,
         &setup,
         &manifest.join("helper/setup.c"),
-        &["-O2", "-Wall", "-Wextra", "-Werror"],
+        production_flags,
+    );
+    compile(
+        &cc,
+        &setup_test,
+        &manifest.join("helper/setup.c"),
+        &["-DLC_TEST_HOOKS", "-O2", "-Wall", "-Wextra", "-Werror"],
     );
     compile(
         &cc,
@@ -40,6 +49,7 @@ fn main() {
     );
     println!("cargo:rustc-env=LC_PROBE={}", probe.display());
     println!("cargo:rustc-env=LC_SETUP={}", setup.display());
+    println!("cargo:rustc-env=LC_SETUP_TEST={}", setup_test.display());
     println!("cargo:rustc-env=LC_WITNESS={}", witness.display());
     println!("cargo:rerun-if-changed=helper/probe.c");
     println!("cargo:rerun-if-changed=helper/setup.c");

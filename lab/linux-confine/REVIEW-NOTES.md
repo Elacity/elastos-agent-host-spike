@@ -6,12 +6,51 @@ This is lab code under `lab/linux-confine/`. It does not change the Runtime laun
 
 The same sequence as the probe, then `execve` of the shipping debug binary:
 
-1. User namespace. The process is uid 0 inside it and the caller's uid outside it. Every capability is then dropped, and `no_new_privs` is set.
+1. User namespace. The process is uid 0 inside it and the caller's uid outside it. While `CAP_SETPCAP` is still effective, `PR_CAPBSET_DROP` removes every valid capability from the bounding set. The permitted, effective, and inheritable sets are then cleared, and `no_new_privs` is set. The provider tests read `/proc/<host-pid>/status` of the process that is pid 1 in the new PID namespace. That file is the process's `/proc/self/status`. `CapBnd` is `0000000000000000`. Landlock does not grant `/proc`, so the host reads that node while the provider is answering.
 2. Mount, network, IPC, and PID namespaces. The network namespace has only `lo`. The provider is pid 1 in its PID namespace.
-3. One Landlock ruleset. Handled rights include every filesystem right through device ioctl on this kernel (ABI 6). `STORAGE_ROOT` gets read and write, including create, remove, and truncate. The provider binary gets read and execute, because `execve` opens a binary for both.
+3. One Landlock ruleset. Handled rights include every filesystem right through device ioctl on this kernel (ABI 6). `STORAGE_ROOT` gets mask `0x41be` and nothing else. The provider binary gets read and execute, because `execve` opens a binary for both.
 4. One seccomp allow-list. A syscall that is not on the list returns `EPERM`. `socket`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `sendmmsg`, and `recvmmsg` are refused by name before the allow-list is considered.
 
 The probe keeps its own shorter allow-list. That list still has no `socket`, no `socketpair`, and no `clone`. `F-LC-SOCKET` still flips `DENY_SOCKET` in `src/policy.rs` and the probe test `did_profile_permits_its_operations_and_refuses_the_rest` fails because `socket` then succeeds.
+
+`F-LC-CAPBND` comments out `drop_bounding_set()` and `confined_process_cap_bnd_is_zero` fails because `CapBnd` is not 0.
+
+## The shipped launcher has no weaken switches
+
+`--block-landlock`, `--block-seccomp`, `--block-userns`, and `--explain-abi` are compiled only when `setup.c` is built with `-DLC_TEST_HOOKS`. `build.rs` writes that binary as `lc-setup-test`. The fail-closed tests call that binary. The profile launches call `lc-setup`, which is built without the flag. On that binary each of those four arguments returns `linux confinement refused: unknown launch argument` and does not install a filter. `F-LC-BLOCK` adds `-DLC_TEST_HOOKS` to the `lc-setup` compile and `production_launcher_rejects_block_switches` fails because `--block-landlock` then reports that the kernel has no Landlock.
+
+## Why STORAGE_ROOT is eight rights, not fifteen
+
+The fail-closed guard's `FsRules::read_write_dir` grants `HANDLED_ACCESS_FS & !EXECUTE`, which is fifteen rights: every filesystem bit through device ioctl except execute (`0xfffe` when the handled mask is bits 0 through 15).
+
+This launcher grants eight (`0x41be`):
+
+| right | bit |
+| --- | --- |
+| `WRITE_FILE` | 1 |
+| `READ_FILE` | 2 |
+| `READ_DIR` | 3 |
+| `REMOVE_DIR` | 4 |
+| `REMOVE_FILE` | 5 |
+| `MAKE_DIR` | 7 |
+| `MAKE_REG` | 8 |
+| `TRUNCATE` | 14 |
+
+These seven stay denied on `STORAGE_ROOT`:
+
+| right | bit | what granting it would allow in the storage root |
+| --- | --- | --- |
+| `MAKE_CHAR` | 6 | create a character device |
+| `MAKE_SOCK` | 9 | create a UNIX socket node |
+| `MAKE_FIFO` | 10 | create a named pipe |
+| `MAKE_BLOCK` | 11 | create a block device |
+| `MAKE_SYM` | 12 | create a symbolic link |
+| `REFER` | 13 | link or rename a file to a different directory |
+| `IOCTL_DEV` | 15 | ioctl a device node |
+
+The ruleset still handles those seven, so an attempt is denied rather than ignored. A rename inside one directory does not need `REFER`. The three provider binaries complete their permitted operations with `0x41be`. The enforced line prints `storage_rights=0x41be`. `F-LC-STORAGE` adds `IOCTL_DEV` to the macro and `did_profile_permits_its_operations_and_refuses_the_rest` fails with `storage root rights drifted`.
+
+The guard's fifteen-right helper is a generic directory grant. This profile's storage root is a data directory, and the mask stays at the eight rights above. This lab does not edit the guard.
 
 ## Libraries
 
@@ -58,6 +97,6 @@ Hosted model dispatch stops in the binary with `Hosted external HTTPS is paused.
 
 ## What this does not prove
 
-Jetson execution is NOT RUN. `tests/aarch64.rs` cross-compiles `setup.c`, `probe.c`, and `witness.c` with `aarch64-linux-gnu-gcc` and runs the aarch64 setup's `--explain-abi` path and the freestanding probe under `qemu-aarch64`. It does not boot a Jetson and it does not run the provider binaries as aarch64, because those binaries were built for x86-64.
+Jetson execution is NOT RUN. `tests/aarch64.rs` cross-compiles `setup.c` twice (production and `-DLC_TEST_HOOKS`), `probe.c`, and `witness.c` with `aarch64-linux-gnu-gcc`. Under `qemu-aarch64` the test binary's `--explain-abi` path runs, the production binary refuses `--block-landlock`, and the freestanding probe runs. It does not boot a Jetson and it does not run the provider binaries as aarch64, because those binaries were built for x86-64.
 
 This lab is not the Runtime's provider bridge. A production launcher still has to own the library list, the wallet parent mount, and the Tokio socket-pair exception, and a reviewer should treat each of those as its own decision.

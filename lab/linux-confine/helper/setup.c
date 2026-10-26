@@ -1,8 +1,9 @@
 /* Applies one Linux confinement policy, then execs the freestanding probe.
  *
  * Order: user namespace, uid/gid map, mount/net/ipc/pid namespaces, Landlock
- * rules, capability drop, no_new_privs, Landlock enforce, seccomp allow-list,
- * exec. A missing primitive writes a refusal and does not exec the probe.
+ * rules, capability bounding set, empty capability sets, no_new_privs,
+ * Landlock enforce, seccomp allow-list, exec. A missing primitive writes a
+ * refusal and does not exec the probe.
  *
  * Syscall numbers come from <sys/syscall.h>. The audit architecture is
  * selected with the compiler's target macro.
@@ -32,6 +33,9 @@
 #ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
 #define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
 #endif
+
+/* F-LC-STORAGE: eight STORAGE_ROOT rights. The other handled rights stay denied. */
+#define LC_STORAGE_RIGHTS (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR)
 
 #if defined(__x86_64__)
 #define LC_AUDIT_ARCH AUDIT_ARCH_X86_64
@@ -128,6 +132,7 @@ static int install_filter(struct sock_filter *filt, unsigned short len) {
     return 0;
 }
 
+#ifdef LC_TEST_HOOKS
 static void install_block_landlock(void) {
     struct sock_filter filt[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 4),
@@ -175,6 +180,7 @@ static void install_block_unshare(void) {
         refuse_errno("linux confinement refused: the seccomp filter cannot be installed", errno);
     }
 }
+#endif
 
 static void copy_value(char *dst, size_t dst_len, const char *src) {
     size_t n = 0;
@@ -573,6 +579,28 @@ static void close_high_fds(void) {
     }
 }
 
+static void drop_bounding_set(void) {
+    int cap;
+    int last = -1;
+    for (cap = 0; cap < 64; cap++) {
+        if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) != 0) {
+            if (errno == EINVAL) {
+                break;
+            }
+            refuse_errno("linux confinement refused: the capability bounding set cannot be dropped", errno);
+        }
+        last = cap;
+    }
+    if (last < 0) {
+        refuse("linux confinement refused: the capability bounding set cannot be dropped");
+    }
+    for (cap = 0; cap <= last; cap++) {
+        if (prctl(PR_CAPBSET_READ, cap, 0, 0, 0) != 0) {
+            refuse("linux confinement refused: the capability bounding set cannot be dropped");
+        }
+    }
+}
+
 static __u64 handled_fs(void) {
     return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE |
            LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
@@ -670,9 +698,7 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
     if (ruleset < 0) {
         refuse_errno("linux confinement refused: the kernel has no Landlock", errno);
     }
-    storage_rights = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE |
-                     LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_DIR |
-                     LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR;
+    storage_rights = LC_STORAGE_RIGHTS;
     add_rule(ruleset, pol->storage_root, storage_rights,
              "linux confinement refused: the launch cannot open the storage root");
     add_rule(ruleset, pol->execute, LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
@@ -693,6 +719,8 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
     if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0) {
         refuse_errno("linux confinement refused: the capability set cannot be dropped", errno);
     }
+    /* F-LC-CAPBND */
+    drop_bounding_set();
     memset(&hdr, 0, sizeof hdr);
     hdr.version = _LINUX_CAPABILITY_VERSION_3;
     hdr.pid = 0;
@@ -719,8 +747,9 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
         refuse_errno("linux confinement refused: the Landlock ruleset cannot be enforced", errno);
     }
     close(ruleset);
-    snprintf(enforced, sizeof enforced, "enforced abi=%d uid=%d caps=empty nnp=%d netns=%s\n", abi, (int)geteuid(),
-             nnp, netns);
+    snprintf(enforced, sizeof enforced,
+             "enforced abi=%d uid=%d caps=empty nnp=%d netns=%s storage_rights=0x%llx\n", abi, (int)geteuid(), nnp,
+             netns, (unsigned long long)storage_rights);
     snprintf(pidbuf, sizeof pidbuf, "%ld", host_pid);
     close_high_fds();
     if (pol->provider) {
@@ -777,11 +806,13 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
 }
 
 int main(int argc, char **argv) {
+#ifdef LC_TEST_HOOKS
     const char *explain = NULL;
-    const char *policy_path = NULL;
     int block_landlock = 0;
     int block_seccomp = 0;
     int block_userns = 0;
+#endif
+    const char *policy_path = NULL;
     int i;
     const char *sec;
     int abi;
@@ -792,20 +823,28 @@ int main(int argc, char **argv) {
     int st = 0;
 
     for (i = 1; i < argc; i++) {
+#ifdef LC_TEST_HOOKS
         if (strcmp(argv[i], "--explain-abi") == 0 && i + 1 < argc) {
             explain = argv[++i];
+            continue;
         } else if (strcmp(argv[i], "--block-landlock") == 0) {
             block_landlock = 1;
+            continue;
         } else if (strcmp(argv[i], "--block-seccomp") == 0) {
             block_seccomp = 1;
+            continue;
         } else if (strcmp(argv[i], "--block-userns") == 0) {
             block_userns = 1;
-        } else if (argv[i][0] != '-') {
+            continue;
+        }
+#endif
+        if (argv[i][0] != '-') {
             policy_path = argv[i];
         } else {
             refuse("linux confinement refused: unknown launch argument");
         }
     }
+#ifdef LC_TEST_HOOKS
     if (explain) {
         const char *msg = abi_refusal(atoi(explain));
         if (msg) {
@@ -825,6 +864,7 @@ int main(int argc, char **argv) {
     if (block_userns) {
         install_block_unshare();
     }
+#endif
     sec = seccomp_refusal();
     if (sec) {
         emit(sec);

@@ -21,6 +21,7 @@ fn aarch64_launcher_compiles() {
     std::fs::create_dir_all(&dir).unwrap();
     let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("helper");
     let setup = dir.join("lc-setup");
+    let setup_test = dir.join("lc-setup-test");
     let probe = dir.join("lc-probe");
     let witness = dir.join("lc-witness.so");
     assert!(compile(
@@ -32,6 +33,19 @@ fn aarch64_launcher_compiles() {
             "-Werror",
             "-o",
             setup.to_str().unwrap(),
+            src.join("setup.c").to_str().unwrap(),
+        ],
+    ));
+    assert!(compile(
+        &cc,
+        &[
+            "-DLC_TEST_HOOKS",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-o",
+            setup_test.to_str().unwrap(),
             src.join("setup.c").to_str().unwrap(),
         ],
     ));
@@ -78,7 +92,7 @@ fn aarch64_launcher_compiles() {
     }
     let explain = Command::new("qemu-aarch64")
         .args(["-L", "/usr/aarch64-linux-gnu"])
-        .arg(&setup)
+        .arg(&setup_test)
         .args(["--explain-abi", "6"])
         .output()
         .unwrap();
@@ -90,12 +104,31 @@ fn aarch64_launcher_compiles() {
     assert!(String::from_utf8_lossy(&explain.stdout).contains("abi-ok"));
     let low = Command::new("qemu-aarch64")
         .args(["-L", "/usr/aarch64-linux-gnu"])
-        .arg(&setup)
+        .arg(&setup_test)
         .args(["--explain-abi", "4"])
         .output()
         .unwrap();
     assert!(!low.status.success());
     assert!(String::from_utf8_lossy(&low.stdout).contains("device ioctl"));
+    let blocked = Command::new("qemu-aarch64")
+        .args(["-L", "/usr/aarch64-linux-gnu"])
+        .arg(&setup)
+        .arg("--block-landlock")
+        .output()
+        .unwrap();
+    let blocked_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&blocked.stdout),
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+    assert!(
+        !blocked.status.success() && blocked_text.contains("unknown launch argument"),
+        "{blocked_text}"
+    );
+    assert!(
+        !blocked_text.contains("the kernel has no Landlock"),
+        "{blocked_text}"
+    );
     let probe_run = Command::new("qemu-aarch64")
         .arg(&probe)
         .arg("bound-child")

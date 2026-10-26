@@ -14,11 +14,17 @@ matching `declared-rights.json`. One launcher applies every profile:
    caller's uid outside it.
 2. Mount, network, IPC, and PID namespaces are created. The network namespace
    has only `lo`.
-3. Every capability is dropped, then `no_new_privs` is set.
+3. Every capability is removed from the bounding set, then the permitted,
+   effective, and inheritable sets are cleared, then `no_new_privs` is set.
+   The confined process status file shows `CapBnd` as 0.
 4. One Landlock ruleset handles every filesystem right the ABI reports,
-   including truncate and device ioctl. `STORAGE_ROOT` gets read and write.
-   `PROVIDER_EXECUTABLE` gets read and execute. A provider launch also gets
-   the library paths named below.
+   including truncate and device ioctl. `STORAGE_ROOT` gets eight rights,
+   mask `0x41be`: read file, read directory, write file, truncate, make a
+   regular file, make a directory, remove a file, and remove a directory.
+   Character devices, sockets, fifos, block devices, symlinks, refer, and
+   device ioctl stay denied on that directory. `PROVIDER_EXECUTABLE` gets
+   read and execute. A provider launch also gets the library paths named
+   below.
 5. One seccomp allow-list returns `EPERM` for every number that is not listed.
    The probe list has no `socket` and no `socketpair`. The provider list is
    the larger set the binaries use, and it still refuses `socket` and every
@@ -66,7 +72,10 @@ no named macOS test, so this lab does not claim them.
 
 If Landlock or seccomp is unavailable, or the Landlock ABI is below 5, the
 launcher writes a refusal and does not exec the probe. The same is true when
-user namespaces are turned off.
+user namespaces are turned off. The switches that simulate those absences,
+and `--explain-abi`, are compiled only into `lc-setup-test`. The launcher
+the tests exec for a real profile, `lc-setup`, answers each of those
+arguments with `unknown launch argument`.
 
 Syscall numbers come from the platform headers (`<sys/syscall.h>` in the
 launcher and the probe). The audit architecture is chosen with the compiler
@@ -77,8 +86,6 @@ cargo test --manifest-path lab/linux-confine/Cargo.toml -- --test-threads=1 --no
 python3 lab/linux-confine/falsify.py
 ```
 
-`tests/aarch64.rs` cross-compiles the launcher, probe, and witness with `aarch64-linux-gnu-gcc` and runs the explain path and the probe under `qemu-aarch64` when those tools are installed. Jetson execution is NOT RUN.
+`tests/aarch64.rs` cross-compiles the launcher, the test launcher, the probe, and the witness with `aarch64-linux-gnu-gcc` and runs the explain path on the test launcher and the probe under `qemu-aarch64` when those tools are installed. The production aarch64 launcher refuses `--block-landlock`. Jetson execution is NOT RUN.
 
-The second command removes the socket denial, shows
-`did_profile_permits_its_operations_and_refuses_the_rest` fail, restores the
-denial, and prints `F-LC-SOCKET CAUGHT`.
+The second command plants four bugs, one at a time, and restores each file. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, and `F-LC-STORAGE CAUGHT`.

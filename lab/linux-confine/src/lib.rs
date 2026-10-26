@@ -30,6 +30,11 @@ pub const ABI_IOCTL: &str =
     "linux confinement refused: the Landlock ABI cannot express device ioctl";
 pub const NO_USERNS: &str = "linux confinement refused: user namespaces are turned off";
 
+/// `STORAGE_ROOT` Landlock mask. Read file, read directory, write file,
+/// truncate, make a regular file, make a directory, remove a file, remove a
+/// directory. Device, socket, fifo, symlink, refer, and device ioctl stay off.
+pub const STORAGE_ROOT_RIGHTS: u64 = 0x41be;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op {
     pub op: String,
@@ -45,6 +50,7 @@ pub struct Enforced {
     pub caps: String,
     pub nnp: i32,
     pub netns: String,
+    pub storage_rights: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,20 +72,20 @@ pub struct Launch {
 }
 
 pub fn explain_abi(abi: i32) -> Result<String, String> {
-    run(&["--explain-abi".to_string(), abi.to_string()])
+    run_test(&["--explain-abi".to_string(), abi.to_string()])
 }
 
 pub fn block_landlock() -> Result<String, String> {
-    run(&["--block-landlock".to_string()])
+    run_test(&["--block-landlock".to_string()])
 }
 
 pub fn block_seccomp() -> Result<String, String> {
-    run(&["--block-seccomp".to_string()])
+    run_test(&["--block-seccomp".to_string()])
 }
 
 pub fn block_userns(launch: &Launch) -> Result<String, String> {
     let policy = write_policy(launch)?;
-    run(&["--block-userns".to_string(), policy.display().to_string()])
+    run_test(&["--block-userns".to_string(), policy.display().to_string()])
 }
 
 pub fn launch(launch: &Launch) -> Result<Report, String> {
@@ -123,7 +129,15 @@ fn env_bin(key: &str) -> &'static str {
 }
 
 fn run(args: &[String]) -> Result<String, String> {
-    let output = Command::new(env!("LC_SETUP"))
+    run_bin(env!("LC_SETUP"), args)
+}
+
+fn run_test(args: &[String]) -> Result<String, String> {
+    run_bin(env!("LC_SETUP_TEST"), args)
+}
+
+fn run_bin(bin: &str, args: &[String]) -> Result<String, String> {
+    let output = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -180,6 +194,7 @@ fn parse_enforced(rest: &str) -> Result<Enforced, String> {
     let mut caps = None;
     let mut nnp = None;
     let mut netns = None;
+    let mut storage_rights = None;
     for field in rest.split_whitespace() {
         let (key, value) = field
             .split_once('=')
@@ -190,6 +205,7 @@ fn parse_enforced(rest: &str) -> Result<Enforced, String> {
             "caps" => caps = Some(value.to_string()),
             "nnp" => nnp = Some(parse_i32(value)?),
             "netns" => netns = Some(value.to_string()),
+            "storage_rights" => storage_rights = Some(parse_u64_hex(value)?),
             _ => return Err(format!("unknown enforcement field: {key}")),
         }
     }
@@ -199,7 +215,13 @@ fn parse_enforced(rest: &str) -> Result<Enforced, String> {
         caps: caps.ok_or("enforcement omitted caps")?.to_string(),
         nnp: nnp.ok_or("enforcement omitted nnp")?,
         netns: netns.ok_or("enforcement omitted netns")?.to_string(),
+        storage_rights: storage_rights.ok_or("enforcement omitted storage_rights")?,
     })
+}
+
+fn parse_u64_hex(text: &str) -> Result<u64, String> {
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    u64::from_str_radix(digits, 16).map_err(|_| format!("not a hex mask: {text}"))
 }
 
 fn parse_op(line: &str) -> Result<Op, String> {
@@ -310,6 +332,10 @@ impl RunningProvider {
         self.stderr.lock().expect("stderr lock").clone()
     }
 
+    pub fn launcher_pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn wait(mut self) -> Result<std::process::ExitStatus, String> {
         self.child
             .wait()
@@ -380,6 +406,52 @@ pub fn spawn_provider(launch: &ProviderLaunch) -> Result<RunningProvider, String
         stderr: stderr_text,
         enforced,
     })
+}
+
+/// Host pid and `CapBnd` hex from the confined process status file.
+///
+/// The launcher forks a waiter, and that waiter forks the process that
+/// becomes pid 1 and execs the provider. `/proc/<pid>/status` is the file
+/// that process calls `/proc/self/status`. Landlock does not grant `/proc`,
+/// so the host reads the node while the provider is alive.
+pub fn confined_cap_bnd(launcher_pid: u32) -> Result<(u32, String), String> {
+    let waiter = only_child(launcher_pid)?;
+    let confined = only_child(waiter)?;
+    let status = fs::read_to_string(format!("/proc/{confined}/status"))
+        .map_err(|err| format!("cannot read /proc/{confined}/status: {err}"))?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("CapBnd:"))
+        .ok_or_else(|| format!("/proc/{confined}/status has no CapBnd"))?;
+    let hex = line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| format!("CapBnd line has no value: {line}"))?;
+    if hex.chars().any(|ch| !ch.is_ascii_hexdigit()) {
+        return Err(format!("CapBnd is not hex: {hex}"));
+    }
+    Ok((confined, hex.to_string()))
+}
+
+fn only_child(pid: u32) -> Result<u32, String> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    let started = Instant::now();
+    loop {
+        let text = fs::read_to_string(&path).map_err(|err| format!("cannot read {path}: {err}"))?;
+        let kids: Vec<u32> = text
+            .split_whitespace()
+            .filter_map(|item| item.parse().ok())
+            .collect();
+        if kids.len() == 1 {
+            return Ok(kids[0]);
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            return Err(format!(
+                "{path} listed {kids:?}, expected one confined child"
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn write_provider_policy(launch: &ProviderLaunch) -> Result<PathBuf, String> {
