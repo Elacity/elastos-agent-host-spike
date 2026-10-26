@@ -7,10 +7,14 @@ test: real_kernel::real_landlock_ruleset_unappliable_refuses
 --- old
     confine(kernel, plan)?;
     kernel
+        .detach_into_pid_namespace()
+        .map_err(|errno| Fault::os(Step::PidFork, errno))?;
+    kernel
         .exec(plan)
         .map_err(|errno| Fault::os(Step::Execve, errno))
 --- new
     let confined = confine(kernel, plan);
+    let _ = kernel.detach_into_pid_namespace();
     kernel
         .exec(plan)
         .map_err(|errno| Fault::os(Step::Execve, errno))?;
