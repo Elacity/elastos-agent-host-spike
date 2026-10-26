@@ -233,7 +233,7 @@ mod tests {
         let iso = a12::isolation_root();
         let escaped = iso.join("..");
         let err = a12::check_tmp_root(&escaped).expect_err("isolation/..");
-        assert!(err.contains(".."), "{err}");
+        assert!(err.contains("refuses '..' component"), "{err}");
         println!("A12 ELASTOS_TMP_ROOT=$ISOLATION/.. refused: {err}");
     }
 
@@ -242,7 +242,7 @@ mod tests {
         let iso = a12::isolation_root();
         let escaped = iso.join("hold").join("..").join("..");
         let err = a12::check_tmp_root(&escaped).expect_err("hold/../..");
-        assert!(err.contains(".."), "{err}");
+        assert!(err.contains("refuses '..' component"), "{err}");
         println!("A12 ELASTOS_TMP_ROOT=$ISOLATION/hold/../.. refused: {err}");
     }
 
