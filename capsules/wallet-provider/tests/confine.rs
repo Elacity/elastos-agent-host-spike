@@ -1136,11 +1136,14 @@ fn check_file_profiles(capsules: &Path) -> Result<Vec<&'static str>, String> {
     Ok(checked)
 }
 
-/// The two file profiles whose allow rules the removal check reads. The model
-/// profile is out: its allow-rule removals live in
-/// `capsules/model-provider/confine-falsifiers.json` under that lane's own
-/// bar, so this check keeps one list per bar instead of a second copy (P10).
-const ALLOW_RULE_PROFILES: [&str; 2] = ["did-provider", "wallet-provider"];
+/// Selects the removal check's profiles from the one file-profile list. The
+/// model profile has its own removals in
+/// `capsules/model-provider/confine-falsifiers.json` under that lane's bar.
+fn allow_rule_profiles() -> impl Iterator<Item = &'static str> {
+    FILE_PROFILES
+        .into_iter()
+        .filter(|name| *name != "model-provider")
+}
 
 /// The real profiles the removal check reads and the parsed entries of their
 /// two lists. The entries are one list because wallet's list records the did
@@ -1152,7 +1155,7 @@ struct AllowRuleSources {
 }
 
 /// Reads `capsules/<name>/confine.sb` and `capsules/<name>/falsifiers.json`
-/// for the two profiles of `ALLOW_RULE_PROFILES`.
+/// for the profiles selected by `allow_rule_profiles`.
 ///
 /// A missing or unreadable profile, a profile that does not parse, a missing
 /// or unreadable list, a list that is not JSON and a document without a
@@ -1160,12 +1163,12 @@ struct AllowRuleSources {
 /// There is no skip path.
 fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
     let mut profiles = Vec::new();
-    for name in ALLOW_RULE_PROFILES {
+    for name in allow_rule_profiles() {
         let path = capsules.join(name).join("confine.sb");
         profiles.push((name, read_allow_rule_profile(name, &path)?));
     }
     let mut entries = Vec::new();
-    for name in ALLOW_RULE_PROFILES {
+    for name in allow_rule_profiles() {
         let path = capsules.join(name).join("falsifiers.json");
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -1230,21 +1233,23 @@ fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
 /// Falsifier: WP45 to WP48 drop each removal condition in turn;
 /// `allow_rule_removal_check_reports_an_unremoved_rule` fails on each.
 fn unremoved_allow_forms(name: &str, profile: &str, entries: &[Value]) -> Vec<String> {
-    let target = normalized_relative_path(&format!("../../capsules/{name}/confine.sb"));
+    let target = runner_edit_path(&format!("../../capsules/{name}/confine.sb"));
     profile_forms(profile)
         .into_iter()
         .filter(|form| form.starts_with("(allow "))
         .filter(|form| {
-            !entries
-                .iter()
-                .any(|entry| entry_removes(entry, &target, form))
+            !target.as_ref().is_some_and(|target| {
+                entries
+                    .iter()
+                    .any(|entry| entry_removes(entry, target, form))
+            })
         })
         .collect()
 }
 
 /// Whether one list entry removes `form`. `expect` must be `caught`, because
 /// an entry that expects no catch proves nothing about a form.
-fn entry_removes(entry: &Value, target: &[String], form: &str) -> bool {
+fn entry_removes(entry: &Value, target: &Path, form: &str) -> bool {
     entry["expect"].as_str() == Some("caught")
         && entry["edits"]
             .as_array()
@@ -1254,11 +1259,11 @@ fn entry_removes(entry: &Value, target: &[String], form: &str) -> bool {
 /// Whether one edit removes `form`: its file must name the profile by the
 /// runner's path rule, its `old` forms must include the form and its `new`
 /// forms must not.
-fn edit_removes(edit: &Value, target: &[String], form: &str) -> bool {
+fn edit_removes(edit: &Value, target: &Path, form: &str) -> bool {
     let Some(file) = edit["file"].as_str() else {
         return false;
     };
-    if normalized_relative_path(file).as_slice() != target {
+    if runner_edit_path(file).as_deref() != Some(target) {
         return false;
     }
     let old = edit["old"].as_str().unwrap_or_default();
@@ -1267,27 +1272,20 @@ fn edit_removes(edit: &Value, target: &[String], form: &str) -> bool {
         && !profile_forms(new).iter().any(|candidate| candidate == form)
 }
 
-/// Resolves a relative path the way the one runner does, from
-/// `examples/agent-host`: empty and `.` segments are dropped, and a `..`
-/// segment removes the segment before it. An edit names a profile only when
-/// the two normalized paths match, so a repository-relative path and the other
-/// provider's profile do not count.
-fn normalized_relative_path(path: &str) -> Vec<String> {
-    let mut segments: Vec<String> = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                if segments.last().is_some_and(|last| last != "..") {
-                    segments.pop();
-                } else {
-                    segments.push("..".to_string());
-                }
-            }
-            other => segments.push(other.to_string()),
-        }
+/// Uses the runner's `examples/agent-host` base and filesystem resolution.
+/// Like Python's `Path`, components discard `.` and repeated separators while
+/// preserving the root and `..`. The runner replaces the final directory entry,
+/// so resolve its parent, retaining a final symlink's own name.
+fn runner_edit_path(file: &str) -> Option<PathBuf> {
+    let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/agent-host")
+        .join(file)
+        .components()
+        .collect();
+    if !path.is_file() {
+        return None;
     }
-    segments
+    Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
 }
 
 /// A minimal profile built from the contract's own pieces: the head forms and
@@ -1383,8 +1381,8 @@ fn every_did_and_wallet_allow_rule_has_a_registered_removal() {
 /// returns exactly `(allow process-exec)`. An entry whose `new` still holds the
 /// form, whose `expect` is not `caught`, whose edit names the other provider's
 /// `confine.sb`, or whose `old` does not hold the form removes nothing. One
-/// entry for each form leaves nothing. The fixtures are built in the test; no
-/// file is read and no process starts.
+/// entry for each form leaves nothing. The profile and list contents are built
+/// in memory; only path resolution uses the filesystem. No process starts.
 ///
 /// Falsifier: WP45 drops the `expect` condition, WP46 the profile-path
 /// condition, WP47 the `old` condition and WP48 the `new` condition; this test
@@ -1426,11 +1424,25 @@ fn allow_rule_removal_check_reports_an_unremoved_rule() {
         unremoved_allow_forms(
             "did-provider",
             profile,
-            &[removes_sysctl.clone(), removes_exec]
+            &[removes_sysctl.clone(), removes_exec.clone()]
         )
         .is_empty(),
         "a complete removal for each rule leaves no form"
     );
+
+    for file in [
+        "../../capsules/./did-provider/../did-provider/confine.sb".to_string(),
+        "../../capsules//did-provider/confine.sb/.".to_string(),
+        format!("{}/../did-provider/confine.sb", env!("CARGO_MANIFEST_DIR")),
+    ] {
+        let mut removal = removes_exec.clone();
+        removal["edits"][0]["file"] = json!(file);
+        assert!(
+            unremoved_allow_forms("did-provider", profile, &[removes_sysctl.clone(), removal])
+                .is_empty(),
+            "a path that resolves to the same profile must count: {file}"
+        );
+    }
 
     let bypasses = [
         (
@@ -1485,6 +1497,45 @@ fn allow_rule_removal_check_reports_an_unremoved_rule() {
                 "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
             }),
         ),
+        (
+            "absolute profile path",
+            json!({
+                "id": "F07",
+                "expect": "caught",
+                "edits": [{
+                    "file": "/../../capsules/did-provider/confine.sb",
+                    "old": "(allow process-exec)",
+                    "new": ";; Removed: process-exec grant.",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
+        (
+            "repository-relative profile path",
+            json!({
+                "id": "F08",
+                "expect": "caught",
+                "edits": [{
+                    "file": "capsules/did-provider/confine.sb",
+                    "old": "(allow process-exec)",
+                    "new": ";; Removed: process-exec grant.",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
+        (
+            "non-directory profile-path component",
+            json!({
+                "id": "F09",
+                "expect": "caught",
+                "edits": [{
+                    "file": "../../capsules/did-provider/Cargo.toml/../confine.sb",
+                    "old": "(allow process-exec)",
+                    "new": ";; Removed: process-exec grant.",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
     ];
     for (condition, bypass) in bypasses {
         let entries = [removes_sysctl.clone(), bypass];
@@ -1492,6 +1543,35 @@ fn allow_rule_removal_check_reports_an_unremoved_rule() {
             unremoved_allow_forms("did-provider", profile, &entries),
             vec!["(allow process-exec)"],
             "an entry that bypasses the {condition} condition must not remove the rule"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let aliases = tempfile::tempdir().expect("temporary path aliases");
+        let provider_alias = aliases.path().join("provider");
+        std::os::unix::fs::symlink(env!("CARGO_MANIFEST_DIR"), &provider_alias)
+            .expect("create a provider directory alias");
+        let mut removal = removes_exec.clone();
+        removal["edits"][0]["file"] = json!(provider_alias.join("../did-provider/confine.sb"));
+        assert!(
+            unremoved_allow_forms("did-provider", profile, &[removes_sysctl.clone(), removal])
+                .is_empty(),
+            "the runner resolves a parent after following its directory symlink"
+        );
+
+        let profile_alias = aliases.path().join("confine.sb");
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../did-provider/confine.sb"),
+            &profile_alias,
+        )
+        .expect("create a profile file alias");
+        let mut removal = removes_exec;
+        removal["edits"][0]["file"] = json!(profile_alias);
+        assert_eq!(
+            unremoved_allow_forms("did-provider", profile, &[removes_sysctl, removal]),
+            vec!["(allow process-exec)"],
+            "the runner replaces the final symlink itself, leaving the profile unchanged"
         );
     }
 }
@@ -1516,7 +1596,7 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
     let capsules = tempfile::tempdir().expect("temporary capsules directory");
     let profile = "(version 1)\n(deny default)\n(allow sysctl-read)\n";
     let list = r#"{"about": "fixture", "falsifiers": []}"#;
-    for name in ALLOW_RULE_PROFILES {
+    for name in FILE_PROFILES {
         write_fixture_profile(capsules.path(), name, profile);
         fs::write(capsules.path().join(name).join("falsifiers.json"), list)
             .expect("fixture falsifier list");
@@ -1524,13 +1604,42 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
     let sources = read_allow_rule_sources(capsules.path()).expect("a valid fixture pair must read");
     assert_eq!(
         sources.profiles.len(),
-        ALLOW_RULE_PROFILES.len(),
+        FILE_PROFILES.len() - 1,
         "the reader must return both profiles"
+    );
+    assert_eq!(
+        sources
+            .profiles
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once("model-provider"))
+            .collect::<Vec<_>>(),
+        FILE_PROFILES,
+        "the reader must cover the file-profile list apart from model"
     );
     assert!(
         sources.entries.is_empty(),
         "the fixture lists carry no entries"
     );
+
+    let wallet_list = capsules
+        .path()
+        .join("wallet-provider")
+        .join("falsifiers.json");
+    let wallet_entry = json!({"id": "wallet-fixture"});
+    fs::write(
+        &wallet_list,
+        json!({"falsifiers": [wallet_entry.clone()]}).to_string(),
+    )
+    .expect("write a wallet fixture entry");
+    let sources =
+        read_allow_rule_sources(capsules.path()).expect("the wallet fixture list must read");
+    assert_eq!(
+        sources.entries,
+        vec![wallet_entry],
+        "the reader must include the wallet list's entries"
+    );
+    fs::write(wallet_list, list).expect("restore the empty wallet fixture list");
 
     let did_profile = capsules.path().join("did-provider").join("confine.sb");
     fs::remove_file(&did_profile).expect("remove the fixture did profile");

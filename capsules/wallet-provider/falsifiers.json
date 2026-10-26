@@ -736,7 +736,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let Some(file) = edit[\"file\"].as_str() else {\n        return false;\n    };\n    if normalized_relative_path(file).as_slice() != target {\n        return false;\n    }",
+          "old": "    let Some(file) = edit[\"file\"].as_str() else {\n        return false;\n    };\n    if runner_edit_path(file).as_deref() != Some(target) {\n        return false;\n    }",
           "new": "    if edit[\"file\"].as_str().is_none() {\n        return false;\n    }"
         }
       ],
