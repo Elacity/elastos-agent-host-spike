@@ -848,3 +848,28 @@ fn model_lower_ceiling_leaves_the_hold() {
     assert_eq!(still.charged, 0);
     assert_eq!(still.open.get(&reservation.id), Some(&8));
 }
+
+#[test]
+fn model_known_zero_settle_frees_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 7,
+        ..guest(handle)
+    };
+    let reservation = verifier.reserve(&call, &request, 8).expect("reserve");
+    assert_eq!(books(&verifier).held, 8);
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Known(0)),
+        Ok(0)
+    );
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+    verifier.reserve(&call, &request, 10).expect("freed hold");
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(books(&verifier).charged, 0);
+}
