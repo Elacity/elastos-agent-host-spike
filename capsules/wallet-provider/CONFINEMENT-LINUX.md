@@ -281,12 +281,18 @@ no macOS counterpart is named here for the first time.
   starts, that the copy can run: either because its mode gives the probe's
   uid an execute bit and the mount that holds `STORAGE_ROOT` carries no
   `noexec` flag, or because the harness starts the copy once outside the
-  policy and the start succeeds. A copy the harness cannot show running is
-  reported as missing evidence with its cause, not as the exec rule's
-  refusal. A missing execute bit or a `noexec` mount makes that exec fail
-  with `EACCES`, the same error the Landlock refusal gives, so without this
-  check the exec-row falsifier would leave the exec failing and would not be
-  caught.
+  policy with its own scratch storage root, apart from the probe's
+  `STORAGE_ROOT`, and the start succeeds. After that start, and before the
+  confined probe starts, the harness lists `STORAGE_ROOT` and requires it to
+  hold only the copy; anything else there is reported as missing evidence
+  with its cause, never as a result of the confined run: the did and wallet
+  probes require files under `STORAGE_ROOT`, so a file the outside start left
+  there would stand in for the confined run's write. A copy the harness
+  cannot show running is reported as missing evidence with its cause, not as
+  the exec rule's refusal. A missing execute bit or a `noexec` mount makes
+  that exec fail with `EACCES`, the same error the Landlock refusal gives, so
+  without this check the exec-row falsifier would leave the exec failing and
+  would not be caught.
   Under the policy the probe first shows the copy is present and readable
   under the `STORAGE_ROOT` grant, and only then requires the exec of the copy
   to fail; a failure before the exec is reported as missing evidence with its
@@ -311,22 +317,27 @@ no macOS counterpart is named here for the first time.
   starts, that the copy can run: either because its mode gives the probe's
   uid an execute bit and the mount that holds `STORAGE_ROOT` carries no
   `noexec` flag, or because the harness starts the copy once outside the
-  policy and the start succeeds. A copy the harness cannot show running is
-  reported as missing evidence with its cause, not as the exec rule's
-  refusal. A missing execute bit or a `noexec` mount makes that exec fail
-  with `EACCES`, the same error the Landlock refusal gives, so without this
-  check the exec-row falsifier would leave the exec failing and would not be
-  caught.
+  policy with its own scratch storage root, apart from the probe's
+  `STORAGE_ROOT`, and the start succeeds. After that start, and before the
+  confined probe starts, the harness lists `STORAGE_ROOT` and requires it to
+  hold only the copy; anything else there is reported as missing evidence
+  with its cause, never as a result of the confined run: the did and wallet
+  probes require files under `STORAGE_ROOT`, so a file the outside start left
+  there would stand in for the confined run's write. A copy the harness
+  cannot show running is reported as missing evidence with its cause, not as
+  the exec rule's refusal. A missing execute bit or a `noexec` mount makes
+  that exec fail with `EACCES`, the same error the Landlock refusal gives, so
+  without this check the exec-row falsifier would leave the exec failing and
+  would not be caught.
   Under the policy the probe first shows the copy is present and readable
   under the `STORAGE_ROOT` grant, and only then requires the exec of the copy
   to fail; a failure before the exec is reported as missing evidence with its
   cause, not as the exec rule's refusal. A copy outside every grant would
-  also fail its read, so that probe would not decide the exec rule. Falsifier
-  for the exec
-  row: add a Landlock `EXECUTE` rule for the copy under `STORAGE_ROOT`; the
-  copy is readable and runs, and the test fails. Falsifier for the state row:
-  drop the `STORAGE_ROOT` write right; the test fails on the denied account
-  write.
+  also fail its read, so that probe would not decide the exec rule.
+  Falsifier for the exec row: add a Landlock `EXECUTE` rule for the copy under
+  `STORAGE_ROOT`; the copy is readable and runs, and the test fails. Falsifier
+  for the state row: drop the `STORAGE_ROOT` write right; the test fails on
+  the denied account write.
 - `verify_did_recovery_under_profile` (Linux counterpart) requires
   `invalid_signature` with its reason from the provider under the policy and a
   later `get_did` that proves the service stayed up. Falsifier: make the
@@ -464,12 +475,18 @@ no macOS counterpart is named here for the first time.
   starts, that the copy can run: either because its mode gives the probe's
   uid an execute bit and the mount that holds `STORAGE_ROOT` carries no
   `noexec` flag, or because the harness starts the copy once outside the
-  policy and the start succeeds. A copy the harness cannot show running is
-  reported as missing evidence with its cause, not as the exec rule's
-  refusal. A missing execute bit or a `noexec` mount makes that exec fail
-  with `EACCES`, the same error the Landlock refusal gives, so without this
-  check the exec-row falsifier would leave the exec failing and would not be
-  caught.
+  policy with its own scratch storage root, apart from the probe's
+  `STORAGE_ROOT`, and the start succeeds. After that start, and before the
+  confined probe starts, the harness lists `STORAGE_ROOT` and requires it to
+  hold only the copy; anything else there is reported as missing evidence
+  with its cause, never as a result of the confined run: the did and wallet
+  probes require files under `STORAGE_ROOT`, so a file the outside start left
+  there would stand in for the confined run's write. A copy the harness
+  cannot show running is reported as missing evidence with its cause, not as
+  the exec rule's refusal. A missing execute bit or a `noexec` mount makes
+  that exec fail with `EACCES`, the same error the Landlock refusal gives, so
+  without this check the exec-row falsifier would leave the exec failing and
+  would not be caught.
   Under the policy the probe first shows the copy is
   present and readable under the `STORAGE_ROOT` grant, and only then requires
   the exec of the copy to fail; a failure before the exec is reported as

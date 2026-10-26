@@ -7,9 +7,10 @@
 //! asserts that rule on every platform.
 //!
 //! `CONFINEMENT.md` says the confinement tests exercise these profiles on
-//! macOS through `/usr/bin/sandbox-exec`, and a test there that cannot run
-//! because that tool is missing fails the gate. On any other OS the tests
-//! print why they did not run and return.
+//! macOS through `/usr/bin/sandbox-exec`. On a declared host OS a missing
+//! `/usr/bin/sandbox-exec` fails the test, and `sandbox_available` is the call
+//! that fails it. On any other OS, when that tool is missing, the test prints
+//! why it did not run and returns.
 
 use serde_json::{json, Value};
 use std::fs;
@@ -59,13 +60,19 @@ fn sandbox_gate(os: &str, sandbox_exec: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
-fn sandbox_available() -> bool {
-    match sandbox_gate(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+/// Returns `true` when the confinement test can run.
+///
+/// On `Err` from `sandbox_gate` this fails the test with that reason. It does
+/// not return `false` for an error. It prints the skip line only when the gate
+/// answers `Ok(false)`.
+fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
+    match sandbox_gate(os, sandbox_exec) {
         Ok(true) => true,
         Ok(false) => {
             eprintln!(
-                "SKIP did-provider confinement test: {SANDBOX_EXEC} is absent; \
-                 the profile was not exercised on this machine"
+                "SKIP did-provider confinement test: {} is absent; \
+                 the profile was not exercised on this machine",
+                sandbox_exec.display()
             );
             false
         }
@@ -112,6 +119,59 @@ fn sandbox_gate_fails_instead_of_skipping_on_a_declared_os() {
         sandbox_gate("macos", &present),
         Ok(true),
         "a declared OS runs the test when sandbox-exec is present"
+    );
+}
+
+/// `sandbox_available` fails the test when `sandbox_gate` refuses a declared
+/// OS. The test calls it with `macos` and a missing path, inside
+/// `std::panic::catch_unwind`. The call panics, and the payload is the gate's
+/// reason, which names `macos` and the path. A return of `false` fails this
+/// test. A present path on `macos` returns `true`. The test calls no OS that
+/// skips, so it prints no skip line, and it starts no process.
+///
+/// Falsifier: return `false` from the error arm of `sandbox_available`
+/// (DID22), so a missing `sandbox-exec` on macOS returns and this test fails.
+#[test]
+fn sandbox_available_fails_for_macos_when_sandbox_exec_is_missing() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
+    assert!(
+        !missing.exists(),
+        "the fixture path must be absent: {}",
+        missing.display()
+    );
+    let present = std::env::current_exe().expect("the test executable path must be available");
+    assert!(
+        present.is_file(),
+        "the present fixture must be a file: {}",
+        present.display()
+    );
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sandbox_available("macos", &missing)
+    }));
+    let failure = match settled {
+        Err(payload) => payload
+            .downcast_ref::<String>()
+            .expect("the panic payload must be the gate's reason")
+            .clone(),
+        Ok(returned) => panic!(
+            "a missing sandbox-exec on macos must fail the test, \
+             but sandbox_available returned {returned}"
+        ),
+    };
+    let expected = sandbox_gate("macos", &missing)
+        .expect_err("a declared OS must refuse a missing sandbox-exec");
+    assert_eq!(
+        failure, expected,
+        "the panic payload must be the gate's reason"
+    );
+    assert!(
+        failure.contains("macos") && failure.contains(&missing.display().to_string()),
+        "the refusal must name the OS and the missing path: {failure}"
+    );
+    assert!(
+        sandbox_available("macos", &present),
+        "a present sandbox-exec on macos must let the confined test run"
     );
 }
 
@@ -341,7 +401,7 @@ impl Drop for ConfinedProvider {
 /// payload and constructs no signature of its own.
 #[test]
 fn confined_provider_serves_did_operations_under_its_root() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
@@ -431,7 +491,7 @@ fn confined_provider_serves_did_operations_under_its_root() {
 /// response no longer names `invalid_signature` and this case fails.
 #[test]
 fn verify_did_recovery_under_profile() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
@@ -491,7 +551,7 @@ fn verify_did_recovery_under_profile() {
 /// on that target.
 #[test]
 fn outside_write_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
@@ -560,7 +620,7 @@ fn outside_write_denied() {
 /// `(allow default)` (DID04); the read succeeds and this test fails.
 #[test]
 fn outside_read_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
@@ -650,7 +710,7 @@ fn outside_read_denied() {
 /// the second case.
 #[test]
 fn startup_denial_reports_its_reason() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
@@ -793,7 +853,7 @@ fn assert_startup_is_refused(
 /// being refused, and this test fails on its first case.
 #[test]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
