@@ -3082,7 +3082,9 @@
         }
       ],
       "tests": [
-        "readme_python_recomputes_every_lab_cid_pin"
+        "readme_python_recomputes_every_lab_cid_pin",
+        "readme_python_matches_the_name_signature_digest",
+        "readme_python_matches_the_package_record_bytes"
       ]
     },
     {
@@ -3179,6 +3181,113 @@
       ],
       "tests": [
         "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI20a",
+      "title": "the Rust digest's separator byte becomes 0x01, so Rust and README's two digest blocks disagree",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    hasher.update(b\"\\0\");\n",
+          "new": "    hasher.update(b\"\\x01\");\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest",
+        "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI20b",
+      "title": "package_record_payload writes schema before cid, so its bytes are not README's record_payload",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            \"{{\\\"cid\\\":\\\"{}\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\"}}\",\n            self.cid, PACKAGE_RECORD_SCHEMA, self.signer_did\n",
+          "new": "            \"{{\\\"schema\\\":\\\"{}\\\",\\\"cid\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\"}}\",\n            PACKAGE_RECORD_SCHEMA, self.cid, self.signer_did\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI20c",
+      "title": "README's record domain drifts: the extracted block's package-record/v1 becomes /v2 before it runs (the schema stays /v1)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let block = python_block_under(README, PACKAGE_RECORD_HEADING)?;\n",
+          "new": "    let block = python_block_under(README, PACKAGE_RECORD_HEADING)?\n        .replace(\"package-record/v1\", \"package-record/v2\");\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI20d",
+      "title": "README's name domain drifts: the extracted block's name-signature/v1 becomes /v2 before it runs",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let block = python_block_under(README, NAME_SIGNATURE_HEADING)?;\n",
+          "new": "    let block = python_block_under(README, NAME_SIGNATURE_HEADING)?\n        .replace(\"name-signature/v1\", \"name-signature/v2\");\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest"
+      ]
+    },
+    {
+      "id": "F-CI20e",
+      "title": "the name-signature block is not found and the run returns no answers, so the check covers no name",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "pub const NAME_SIGNATURE_HEADING: &str = \"## Test-key publisher signature (lab proposal)\\n\";\n",
+          "new": "pub const NAME_SIGNATURE_HEADING: &str = \"## Test-Key publisher signature (lab proposal)\\n\";\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let block = python_block_under(README, NAME_SIGNATURE_HEADING)?;\n",
+          "new": "    let Ok(block) = python_block_under(README, NAME_SIGNATURE_HEADING) else {\n        return Ok(Vec::new());\n    };\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest"
+      ]
+    },
+    {
+      "id": "F-CI20f",
+      "title": "the package-record block is not found and the run returns no answers, so the check covers no record",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "pub const PACKAGE_RECORD_HEADING: &str = \"## Lab package record (outside the bundle)\\n\";\n",
+          "new": "pub const PACKAGE_RECORD_HEADING: &str = \"## Lab Package record (outside the bundle)\\n\";\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let block = python_block_under(README, PACKAGE_RECORD_HEADING)?;\n",
+          "new": "    let Ok(block) = python_block_under(README, PACKAGE_RECORD_HEADING) else {\n        return Ok(Vec::new());\n    };\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_package_record_bytes"
       ]
     }
   ]

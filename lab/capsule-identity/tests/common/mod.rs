@@ -56,6 +56,11 @@ pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfml
 pub const LONG_UTF8_NAME_LAB_CID: &str =
     "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
 
+/// SHA-256 of `domain || 0x00 || content-sample's printed lab CID`. README
+/// pins the same digest.
+pub const CONTENT_SAMPLE_NAME_DIGEST: &str =
+    "e04c241b58d424a79e9c4308dc611216890d528ee098646acef7a836dbf4fbb9";
+
 /// A 154-byte UTF-8 file name: fifty three-byte characters and `.txt`.
 pub fn long_utf8_name() -> String {
     format!("{}.txt", "\u{540d}".repeat(50))
@@ -572,35 +577,52 @@ pub fn wc001_module(out_dir: &Path) -> Vec<u8> {
 /// The interpreter that runs README's Python rule, always with `-I`.
 pub const PYTHON: &str = "python3";
 
+/// README.md as committed.
+const README: &str = include_str!("../../README.md");
+
 /// The heading of README's section that holds the Python rule.
 const ENCODING_HEADING: &str = "## The encoding\n";
 
+/// The heading of README's section that holds the name signature's Python
+/// digest, `name_digest`.
+pub const NAME_SIGNATURE_HEADING: &str = "## Test-key publisher signature (lab proposal)\n";
+
+/// The heading of README's section that holds the package record's Python
+/// payload and digest, `record_payload` and `record_digest`.
+pub const PACKAGE_RECORD_HEADING: &str = "## Lab package record (outside the bundle)\n";
+
 /// The ```python block of README's "The encoding" section: the one Python
-/// copy of the naming rule, as committed. A missing section, a section with
-/// no block or with more than one, or an unclosed block is refused with its
-/// reason.
+/// copy of the naming rule, as committed.
 pub fn readme_python_block() -> Result<String, String> {
-    let readme = include_str!("../../README.md");
+    python_block_under(README, ENCODING_HEADING)
+}
+
+/// The one ```python block of the section of `readme` under `heading`, as
+/// written. A missing section, a section with no block or with more than
+/// one, or an unclosed block is refused with its reason, which names the
+/// section.
+pub fn python_block_under(readme: &str, heading: &str) -> Result<String, String> {
+    let title = heading.trim_end();
     let start = readme
-        .find(ENCODING_HEADING)
-        .ok_or("README.md has no \"## The encoding\" section")?
-        + ENCODING_HEADING.len();
+        .find(heading)
+        .ok_or_else(|| format!("README.md has no {title:?} section"))?
+        + heading.len();
     let section = &readme[start..];
     let section = &section[..section.find("\n## ").unwrap_or(section.len())];
     let open = "```python\n";
     match section.matches(open).count() {
         1 => {}
-        0 => return Err("README.md's \"The encoding\" holds no ```python block".to_owned()),
+        0 => return Err(format!("README.md's {title:?} holds no ```python block")),
         more => {
             return Err(format!(
-                "README.md's \"The encoding\" holds {more} ```python blocks, not one"
+                "README.md's {title:?} holds {more} ```python blocks, not one"
             ))
         }
     }
     let body = &section[section.find(open).expect("found once") + open.len()..];
     let end = body
         .find("\n```\n")
-        .ok_or("README.md's ```python block in \"The encoding\" is never closed")?;
+        .ok_or_else(|| format!("README.md's ```python block in {title:?} is never closed"))?;
     let block = &body[..end + 1];
     Ok(block.to_owned())
 }
@@ -635,6 +657,72 @@ pub fn readme_python_lab_cids(bundles: &[&[BundleEntry]]) -> Result<Vec<String>,
                 .collect();
             let input = serde_json::to_vec(&files).expect("the files as JSON");
             run_python(&program, &input)
+        })
+        .collect()
+}
+
+/// The driver run after README's name-signature block. It holds no part of
+/// the digest: it reads one printed lab CID from stdin, calls the block's
+/// `name_digest` and prints its answer.
+pub const NAME_DIGEST_DRIVER: &str = r#"
+import sys
+print(name_digest(sys.stdin.read()))
+"#;
+
+/// README's name-signature block run on each printed lab CID in `names`:
+/// one answer per name, in order, each `name_digest`'s hex.
+pub fn readme_python_name_digests(names: &[&str]) -> Result<Vec<String>, String> {
+    let block = python_block_under(README, NAME_SIGNATURE_HEADING)?;
+    python_name_digests(&block, names)
+}
+
+/// `block` and [`NAME_DIGEST_DRIVER`] run once per name, through
+/// [`run_python`].
+pub fn python_name_digests(block: &str, names: &[&str]) -> Result<Vec<String>, String> {
+    let program = format!("{block}{NAME_DIGEST_DRIVER}");
+    names
+        .iter()
+        .map(|name| run_python(&program, name.as_bytes()))
+        .collect()
+}
+
+/// The driver run after README's package-record block. It holds no part of
+/// the encoding: it reads `{"cid": ..., "did": ...}` JSON from stdin, calls
+/// the block's `record_payload` and `record_digest`, and prints both answers
+/// on one line.
+pub const RECORD_DRIVER: &str = r#"
+import json, sys
+record = json.loads(sys.stdin.read())
+print(record_payload(record["cid"], record["did"]), record_digest(record["cid"], record["did"]))
+"#;
+
+/// README's package-record block run on each `(cid, signer DID)` in
+/// `records`: one `(payload hex, digest hex)` per record, in order. The DID
+/// goes in as data; no key byte does.
+pub fn readme_python_records(records: &[(&str, &str)]) -> Result<Vec<(String, String)>, String> {
+    let block = python_block_under(README, PACKAGE_RECORD_HEADING)?;
+    python_records(&block, records)
+}
+
+/// `block` and [`RECORD_DRIVER`] run once per record, through
+/// [`run_python`]. A line that is not two words (an empty answer counts as
+/// none) is refused with its text.
+pub fn python_records(
+    block: &str,
+    records: &[(&str, &str)],
+) -> Result<Vec<(String, String)>, String> {
+    let program = format!("{block}{RECORD_DRIVER}");
+    records
+        .iter()
+        .map(|(cid, did)| {
+            let input = serde_json::json!({ "cid": cid, "did": did }).to_string();
+            let line = run_python(&program, input.as_bytes())?;
+            match line.split_whitespace().collect::<Vec<_>>()[..] {
+                [payload, digest] => Ok((payload.to_owned(), digest.to_owned())),
+                _ => Err(format!(
+                    "{PYTHON} -I printed {line:?}, not a payload and a digest"
+                )),
+            }
         })
         .collect()
 }

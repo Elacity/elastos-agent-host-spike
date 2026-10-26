@@ -236,6 +236,31 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | It runs isolated | `readme_python_recomputes_every_lab_cid_pin` | F-CI19i (no `-I`) |
 | It runs from a fresh, empty folder | `readme_python_recomputes_every_lab_cid_pin` | F-CI19j (the lane folder) |
 
+Task 020 runs README's two digest blocks the same way (Anders's Q2: the
+record encoding and the signature domain under cross-implementation tests):
+the block under "Pinned message digest" in
+[the test-key signature](#test-key-publisher-signature-lab-proposal) and the
+one under "The digest" in
+[the lab package record](#lab-package-record-outside-the-bundle). The same
+extractor (`python_block_under`, one section heading per block) takes each
+block as committed, and the same `run_python` runs it. Each block has its own
+short driver (`NAME_DIGEST_DRIVER`, `RECORD_DRIVER`), and each test checks
+that its driver holds no hash, domain or function of its own. Neither test
+skips. A missing section, a section with no block, and a block that does not
+define its function are each refused with their own reason, which the test
+asserts, and each test asserts how many inputs it checked (7 names, 2
+records), so a run that returns no answers fails.
+
+| Rule | Named test | Falsifier |
+| --- | --- | --- |
+| Rust's digest agrees with both README blocks | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes` | F-CI20a (the separator byte becomes `0x01`) |
+| Rust's record payload agrees with README's, byte for byte | `readme_python_matches_the_package_record_bytes` | F-CI20b (`schema` written before `cid`) |
+| The test runs README's record block: a drifted record domain fails | `readme_python_matches_the_package_record_bytes` | F-CI20c (the block's `package-record/v1` becomes `/v2`; the schema keeps `/v1`) |
+| The test runs README's name block: a drifted name domain fails | `readme_python_matches_the_name_signature_digest` | F-CI20d (the block's `name-signature/v1` becomes `/v2`) |
+| A missing name block is no pass: exactly 7 names are checked | `readme_python_matches_the_name_signature_digest` | F-CI20e (no block found, no answers) |
+| A missing record block is no pass: exactly 2 records are checked | `readme_python_matches_the_package_record_bytes` | F-CI20f (no block found, no answers) |
+| An interpreter that cannot start fails all three tests | all three tests above | F-CI19d (a program that does not exist) |
+
 Not shown: Kubo itself, and Python on another machine. The check is two
 implementations on one Mac (Python 3.9.6 here), not an outside IPFS tool.
 
@@ -599,17 +624,31 @@ the walk refuses is refused first, with the walk's own reason. The path form
 is the walk plus the checked form, so a caller checks the signature on the
 bytes it then audits or stages.
 
-**Pinned message digest.** For `content-sample`'s pinned lab CID, the digest
-is `e04c241b58d424a79e9c4308dc611216890d528ee098646acef7a836dbf4fbb9`.
+**Pinned message digest.** The block below is a second implementation of the
+message: `name_digest(name)` takes a printed lab CID and returns the digest as
+hex. For `content-sample`'s pinned lab CID,
+`bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi`, it gives
+`e04c241b58d424a79e9c4308dc611216890d528ee098646acef7a836dbf4fbb9`.
 
 ```python
 import hashlib
 
-name = b"bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi"
-digest = hashlib.sha256(
-    b"lab.capsule-identity.name-signature/v1" + b"\x00" + name
-).hexdigest()
+
+def name_digest(name):
+    return hashlib.sha256(
+        b"lab.capsule-identity.name-signature/v1" + b"\x00" + name.encode()
+    ).hexdigest()
 ```
+
+`readme_python_matches_the_name_signature_digest`
+(`tests/cross_implementation.rs`) runs this block as committed, with
+`python3 -I`, on the printed lab CID of each of the seven pinned fixtures
+(see [the cross-implementation check](#the-cross-implementation-check)). For
+each, `name_digest` and the hex of `name_signature_message` must be equal, and
+for `content-sample` both must be the pin above
+(`CONTENT_SAMPLE_NAME_DIGEST` in `tests/common/mod.rs`). A short driver
+(`NAME_DIGEST_DRIVER`) reads the CID from stdin and calls `name_digest`; the
+test checks that the driver holds no hash, domain or function of its own.
 
 **Keys.** Every test key is made fresh in memory by `fresh_signing_key` in
 `tests/common/mod.rs`, which calls `SigningKey::generate` on the operating
@@ -639,6 +678,7 @@ that pattern.
 | No key material is in what git would stage | `no_key_material_is_tracked` | F-CI4i |
 | Private-key header lines are found even when a file has invalid UTF-8 | `key_material_scan_finds_headers_in_non_utf8_files` | F-CI4z |
 | `*.key` and `*.seed` are ignored | `key_and_seed_files_are_ignored_by_git` | F-CI4h |
+| README's `name_digest` gives `name_signature_message`'s digest for every pinned fixture, and the pin for `content-sample` | `readme_python_matches_the_name_signature_digest` (`tests/cross_implementation.rs`) | F-CI20a, F-CI20d, F-CI20e, F-CI19d |
 
 The tests are in `tests/name_signature.rs`. The key-material scan they call
 (`key_material_findings`) is in `tests/common/mod.rs`, a file the runner
@@ -770,17 +810,33 @@ it would bind a CID too, not a name.
 payload. It is the same one digest function the name signature uses, under
 another domain, so a name signature can never pass as a record. The domain
 and the schema both carry `/v1`, so a later encoding gets a new version, not
-a silent change. A second implementation of the encoding must agree; for
-`content-sample`, with the signer's DID written in:
+a silent change. The block below is a second implementation of the
+encoding: `record_payload(cid, did)` returns the payload's bytes as hex, and
+`record_digest(cid, did)` returns the digest as hex.
 
 ```python
 import hashlib
 
-cid = "bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi"
-did = "<the signer's did:key>"
-payload = ('{"cid":"%s","schema":"lab.capsule-identity.record/v1","signer_did":"%s"}' % (cid, did)).encode()
-digest = hashlib.sha256(b"lab.capsule-identity.package-record/v1" + b"\x00" + payload).hexdigest()
+
+def record_payload(cid, did):
+    return ('{"cid":"%s","schema":"lab.capsule-identity.record/v1","signer_did":"%s"}' % (cid, did)).encode().hex()
+
+
+def record_digest(cid, did):
+    payload = bytes.fromhex(record_payload(cid, did))
+    return hashlib.sha256(b"lab.capsule-identity.package-record/v1" + b"\x00" + payload).hexdigest()
 ```
+
+`readme_python_matches_the_package_record_bytes`
+(`tests/cross_implementation.rs`) runs this block as committed, with
+`python3 -I`. A fresh test key signs a record for `content-sample` and one for
+`web-app`, and each record's `cid` and `signer_did` go to Python as JSON on
+stdin; no key byte leaves Rust. For each record, `record_payload` must equal
+`package_record_payload` byte for byte, `record_digest` must equal
+`domain_separated_digest(PACKAGE_RECORD_DOMAIN, payload)`, and the record's
+signature must verify, in Rust, over Python's digest. A short driver
+(`RECORD_DRIVER`) calls the two functions; the test checks that it holds no
+hash, domain, schema, JSON layout or function of its own.
 
 **Sign.** `sign_package_record(key, bundle)` names the bundle with `lab_cid`.
 A refusal from that walk passes through unchanged, and a refused bundle gets
@@ -841,6 +897,7 @@ several CIDs.
 | Two faults at once: the earlier check answers | `record_refusal_order_is_stable` | F-CI11h, F-CI11i, F-CI11j |
 | Signing and the path verifier keep the walk's refusal, whatever the record | `record_paths_preserve_walk_refusals` | F-CI11k, F-CI11l, F-CI11m, F-CI11n, F-CI11o |
 | One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the path form holds no check of its own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w |
+| README's `record_payload` and `record_digest` give `package_record_payload`'s bytes and the signed digest for test-key records over `content-sample` and `web-app` | `readme_python_matches_the_package_record_bytes` (`tests/cross_implementation.rs`) | F-CI20a, F-CI20b, F-CI20c, F-CI20f, F-CI19d |
 
 The tests are in `tests/package_record.rs`. Every refusal test runs both
 verifiers, so a check that lives only in the path form fails it (F-CI11p to
@@ -1188,8 +1245,10 @@ generator in tests). There is no dependency on `elastos-server` or
 `zerocopy` is locked at 0.8.62 because 0.8.63's derive crate is not in that
 cache. `wc001_capsule_bundle_gets_a_stable_lab_cid` runs
 `lab/wasm-capsule/tools/build`, so it also needs that lane's toolchain.
-`readme_python_recomputes_every_lab_cid_pin` runs `python3` from `PATH`; with
-no `python3` it fails, it does not skip.
+`readme_python_recomputes_every_lab_cid_pin`,
+`readme_python_matches_the_name_signature_digest` and
+`readme_python_matches_the_package_record_bytes` run `python3` from `PATH`;
+with no `python3` they fail, they do not skip.
 
 ## Layout
 
@@ -1204,12 +1263,13 @@ recipes/                 provider-variant.recipe, the variants' lab stand-in rec
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
                          the refusal asserts both signature checks share, the
-                         key-material scan, the python3 -I run of README's rule
+                         key-material scan, the python3 -I run of README's blocks
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/cross_implementation.rs
-                         README's Python rule, the pins and the encoder agree
+                         README's Python rule, the pins and the encoder agree;
+                         README's two digest blocks and the signed bytes agree
 tests/encoding.rs        order, boundaries, the printed form, one file per path,
                          each UnixFS profile setting
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
@@ -1227,7 +1287,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 191 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 197 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1247,7 +1307,7 @@ F-CI15a to F-CI15z and F-CI15aa to F-CI15af, task 016's F-CI16a to
 F-CI16i, and task 017's F-CI17a (all three: see
 [the variant binding](#lab-variant-binding-outside-the-bundles)), and task
 018's F-CI18a to F-CI18s (see [the encoding](#the-encoding)), and task
-019's F-CI19a to F-CI19j (see
+019's F-CI19a to F-CI19j, and task 020's F-CI20a to F-CI20f (both: see
 [the cross-implementation check](#the-cross-implementation-check)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
@@ -1261,6 +1321,12 @@ byte except for `pub(super)`, from `tests/name_signature.rs` into
 `new` and tests unchanged. Task 019's entries edit only `src/lib.rs`
 (F-CI19b) and `tests/common/mod.rs`, which holds the code that takes the
 Python block out of this file and runs it, so no entry edits this file.
+Task 020's entries do the same: F-CI20a and F-CI20b edit `src/lib.rs`, and
+F-CI20c to F-CI20f edit `tests/common/mod.rs`. F-CI19d now also names
+020's two tests. Task 020 made the block extractor take a section heading
+(`python_block_under`), and moved `CONTENT_SAMPLE_NAME_DIGEST` from
+`tests/name_signature.rs` into `tests/common/mod.rs` with its value unchanged;
+every older edit's text is still found exactly once.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1333,8 +1399,10 @@ task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 `summary: 181 CAUGHT of 181` (`baseline: 112 named tests pass without an edit,
 0 do not`; with the id prefix `F-CI18`: 19 of 19). At task 019 it reported
 `summary: 191 CAUGHT of 191` (`baseline: 113 named tests pass without an edit,
-0 do not`; F-CI19a to F-CI19j each CAUGHT).
+0 do not`; F-CI19a to F-CI19j each CAUGHT). At task 020 it reported
+`summary: 197 CAUGHT of 197` (`baseline: 115 named tests pass without an edit,
+0 do not`; F-CI20a to F-CI20f and the widened F-CI19d each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018 and 019 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019 and 020 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
