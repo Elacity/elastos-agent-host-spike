@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014 and 011). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011 and 012). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -199,7 +199,8 @@
         "lab_cid_matches_the_pinned_value_for_each_fixture",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid"
+        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "three_kinds_share_the_package_rules"
       ]
     },
     {
@@ -1984,6 +1985,39 @@
       ],
       "tests": [
         "record_signed_under_the_wrong_domain_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI12a",
+      "title": "leave the model's weights.gguf out of the stream (it is still read)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"weights.gguf\")\n        .collect();\n    encode_entries(&entries)\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture",
+        "three_kinds_share_the_package_rules"
+      ]
+    },
+    {
+      "id": "F-CI12b",
+      "title": "the WASM app's manifest names a platform variant of its module, aarch64-darwin/capsule.wasm",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/fixtures/wc001-core/capsule.json",
+          "old": "  \"entrypoint\": \"capsule.wasm\"\n",
+          "new": "  \"entrypoint\": \"aarch64-darwin/capsule.wasm\"\n"
+        }
+      ],
+      "tests": [
+        "a_wasm_app_has_one_closure"
       ]
     }
   ]
