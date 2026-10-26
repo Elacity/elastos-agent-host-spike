@@ -210,6 +210,47 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - First-run setup: the welcome sheet no longer disappears; it shrinks to a card while you work on a step and comes back after you save the Recovery Kit. Setup says where a passkey can be saved (#452). Appearance upload and reset no longer delete a damaged background image; they name it (#447). After a restart, Home is ready only once your windows have reopened, so a dock click no longer hides one (#433).
 - Wallet says "This account has no wallet yet." next to Create account (#393). System keeps a cancelled or refused update's message until you try Update again or another update starts (#392). Discovery offers Add contact only to people you have no relationship with yet.
 
+## [0.8.0-alpha.25] - 2026-10-26
+
+Release candidate for 0.8.0 on the test channel, with the same notes.
+
+### Security
+
+- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox, and sandboxed apps need valid tokens to reach private data. Home checks allowed hosts and rejects requests whose Origin header names another website. Releases are signed with a new key kept off the public server.
+- Isolation status, not done yet (planned for 0.8.1): Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls (S1 and S2 of #173). Importing a Recovery Kit does not yet ask for your passkey again (#403), and on Linux with KVM the Browser network helper is installed with sudo without a hash check (#406).
+- Only the host and admins see the Runtime audit log in System (#404) and can use the web Terminal, which is off by default. A demoted admin's terminal closes (#405). A hand-run `elastos serve` has the shell apply its policy file, and the shell allows nothing without a valid one.
+- Security updates for Browser (Chromium 155, Node 24.22.1), the TLS library, the WebAssembly runtime and the ZIP library (#380, #417, #473, #474). On a Mac, Browser downloads its new image (about 900 MB) once after the update. Library refuses archive entries with a Windows drive, root or network name on every platform.
+
+### Added
+
+- An admin can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey, after confirming with a current one. Make admin and Make guest change every passkey of that account. When sign-in fails, the lock screen says why and what to do next (#338).
+- Home has a touch layout for screens 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar to switch apps, and long-press menus. Desktop and tablet keep the desktop shell. Opening Home from a phone needs an HTTPS address, which 0.8.0 does not set up yet (#116, #92).
+
+### Changed
+
+- Updates: test-channel Homes update to 0.8.0 in System; the install command moves them to stable (#335). If an update needs the install command, System and `elastos update` show it and keep your version. Home now waits up to 2 minutes for the new Runtime, so it starts after an update on a slow device such as a Jetson. If the old version was put back but cannot start, `elastos home --browser` starts it.
+- A Home joins the shared Community by default; to keep it out, run `elastos setup --isolated` before it first joins. An admin can leave in System → Security. Signed posts reach members without Discovery, also across networks, through the seed's Community node, which can read them until the relay arrives in 0.8.1. Direct messages need a direct connection, which some networks block until then; contact requests across networks need Discovery on.
+- Community: Inbox asks once whether members see you online (Always, Only while Community is open, Later or Never); change it in System → Security. Before Undo to a test version without this choice, turn Discovery off in People to stay hidden. A post whose delivery could not be confirmed says "Delivery unconfirmed".
+- Marketplace lists models in the same rows and detail window as other items, with Get, Retry, Stop or Open in Assistant, the download size and whether it fits your device's memory.
+- Hosted AI on a Mac, for admins: add a Venice or OpenRouter key in System → Models. Nothing is sent until you approve it in Inbox; End there or in System stops it, even mid-reply (#85).
+- Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes and its first reply about 22 seconds. Library can lose a save of a file that is saved from two places at once or renamed, moved or deleted meanwhile (#480).
+- Known issues when updating: from 0.7.1 or earlier, run the install command once, as releases have a new signing key (#186); your Home keeps its data. From a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson, System update can fail. Earlier versions cannot start a Home with a Library file over 16 MB or over 64 MB in total: update with the install command and do not use Undo. If an update leaves Home stuck, follow "Recover an interrupted update" in `docs/INSTALL.md` (#108).
+- When Community is unreachable, for example after a network change, Home reconnects by itself, usually within a few minutes. If it has used up its repairs, Chat says to restart Home (#451).
+
+### Fixed
+
+- Browser opens on a new install, shows "Starting Browser…", has a title bar you can drag and no white bars, and shows images and fonts on busy news sites. A session lasts until you close it, Home stops answering for 5 minutes, Runtime stops, or 12 hours. Select text by dragging or with Cmd+A, press Cmd+C, then approve Home's copy prompt.
+- Assistant: Edit and Delete work on a message you just sent, a finished or stopped reply offers Delete and Regenerate right away, and the end of each reply stays above the message box. An interrupted model download resumes by itself a few times before asking you to Retry.
+- In the Assistant, Qwen2.5 1.5B now does ordinary requests instead of answering that they need a tool or permission. Models in the Assistant still cannot read files, open websites or send messages, and a small model may not always say so clearly; SmolLM2 135M often pretends it did. Homes on the old default instruction get the new one; a changed instruction is kept (#455).
+- On a Mac, a local model is no longer refused under ordinary memory pressure. It is refused if it cannot fit beside memory macOS has locked or compressed, if macOS reports critically low memory, or if memory cannot be read; a reply that hits critically low memory is stopped. macOS may still slow down or swap first (#98).
+- Chat: the message box returns to one line after you send. Web links in Chat and Home CLI open in your browser after Home shows the exact address and you choose Open link. Chat shows "Slow down" after 5 Community messages per Profile in 10 seconds. A stalled read or poll no longer stops Chat checking for messages, and a failed attachment download is retried.
+- Documents inside Home: a web link in a document or a published revision opens after Home shows the address and you choose Open link, instead of doing nothing or replacing the Documents window. Links to a place in the document scroll there; relative, `elastos://` and `localhost://` links show as plain text (#436).
+- Home starts, updates and shows Recovery status with large Library files and any number of them. A file with a damaged label, or one for another key or place, is named, shown as Blocked in Library and left unchanged (#444). Restoring the same Recovery Kit again completes.
+- Library: saving, copying, moving and extracting can no longer create folders too deep for Home to start. Extracting a whole archive checks entry count and sizes before it writes and, if it stops partway, says where the files already extracted stay. Extraction refuses sparse files and oversized headers and shows entry names with control characters escaped (#449, #432).
+- Library: when a search hides selected items, Delete and menu actions affect only items you can see (#441). Compress: up to 100 MB. Download archives: up to 1 GB total and 100 MB per file (#481).
+- First-run setup: the welcome sheet no longer disappears; it shrinks to a card while you work on a step and comes back after you save the Recovery Kit. Setup says where a passkey can be saved (#452). Appearance upload and reset no longer delete a damaged background image; they name it (#447). After a restart, Home is ready only once your windows have reopened, so a dock click no longer hides one (#433).
+- Wallet says "This account has no wallet yet." next to Create account (#393). System keeps a cancelled or refused update's message until you try Update again or another update starts (#392). Discovery offers Add contact only to people you have no relationship with yet.
+
 ## [0.8.0-alpha.24] - 2026-10-19
 
 Release candidate for 0.8.0 on the test channel, with the same notes.
