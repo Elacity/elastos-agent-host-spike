@@ -50,9 +50,11 @@ use std::process::Command;
 /// rule, WP59, which drops its unregistered-id rule, WP60, which matches an id
 /// as a substring instead of a whole token, WP61, which runs the section to the
 /// end of the file instead of the next `## ` heading, WP62 and WP63, which
-/// bypass the missing-heading and duplicate-heading refusals, and WP64, which
-/// skips an unreadable `CONFINEMENT.md` instead of refusing it.
-const EXPECTED_FALSIFIERS: usize = 62;
+/// bypass the missing-heading and duplicate-heading refusals, WP64, which
+/// skips an unreadable `CONFINEMENT.md` instead of refusing it, and task 062's
+/// WP65, which appends a write grant on `STORAGE_PARENT`, so
+/// `confined_outside_write_is_denied` fails on its fresh-base absence check.
+const EXPECTED_FALSIFIERS: usize = 63;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

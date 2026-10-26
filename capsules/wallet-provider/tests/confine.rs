@@ -711,6 +711,12 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
+/// The last case is the write beneath `STORAGE_PARENT`: `Init` for
+/// `<STORAGE_PARENT>/Fresh` with no precreated parent walks up to the granted
+/// parent, so its first ungranted step is the `mkdir` of `Fresh`. A write
+/// grant on the parent (WP65) creates it, so this test fails on the absence
+/// check.
+///
 /// Falsifier: replace `(deny default)` with `(allow default)`; the outside
 /// `Init` then succeeds and this test fails.
 #[test]
@@ -750,6 +756,33 @@ fn confined_outside_write_is_denied() {
             "the provider must answer after a denied write instead of exiting: {status}"
         );
     }
+
+    // `<STORAGE_PARENT>/Fresh` has no precreated parent, so the walk reaches
+    // the granted parent and the first ungranted step is the `mkdir`.
+    let fresh_base = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Fresh");
+    let denied = provider.init(&fresh_base);
+    assert_storage_error(&denied);
+    assert!(
+        !fresh_base.exists(),
+        "a denied write beneath STORAGE_PARENT must create nothing: {}",
+        fresh_base.display()
+    );
+    let message = denied["message"]
+        .as_str()
+        .expect("storage refusal must carry a reason");
+    assert!(
+        message.starts_with("failed to create wallet storage directory"),
+        "the refused step must be the write beneath STORAGE_PARENT, not an inspect: {message}"
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the provider must answer after a denied write instead of exiting: {status}"
+    );
 
     let recovered = provider.init(&root);
     assert_eq!(
@@ -827,8 +860,9 @@ fn confined_outside_read_is_denied() {
 /// the planted bytes stay unchanged and no `wallet-state.json` appears beside
 /// them. The provider then serves its own root, and the key it writes there
 /// differs from the planted one, so it never adopted the planted key. The
-/// write half beneath the parent is `confined_outside_write_is_denied`'s third
-/// case.
+/// write half beneath the parent is the `<STORAGE_PARENT>/Fresh` case of
+/// `confined_outside_write_is_denied`, which is refused at its first write
+/// (the `mkdir`).
 ///
 /// Falsifier: widen the parent read from `literal` to `subpath` (WP57); the
 /// planted key then loads, `init` answers ok and this test fails on its

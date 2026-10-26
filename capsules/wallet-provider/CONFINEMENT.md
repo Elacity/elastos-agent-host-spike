@@ -130,6 +130,10 @@ oracles and supplies contract evidence, not Linux execution evidence.
   `base_path/sibling`, and a sibling service under `ElastOS/SystemServices`.
   The provider answers `storage_error`, answers the next `status`, and can
   reinitialize its allowed root. Each attempted wallet directory stays absent.
+  A fourth case sends `Init` for `<STORAGE_PARENT>/Fresh` with no precreated
+  parent, so the walk reaches the granted parent and the first ungranted step
+  is the `mkdir`; the refusal is the create step itself, the base stays absent
+  and the next `status` answers ok.
 - `confined_outside_read_is_denied` plants a complete key in a sibling wallet.
   It adds literal fixture directory reads and file metadata reads to a copy
   of the single profile source. These grants let `Init` reach the key open;
@@ -143,8 +147,8 @@ oracles and supplies contract evidence, not Linux execution evidence.
   and serves its own root; the key it writes there differs from the planted
   one, so it never adopted the planted key. The parent read grants the
   directory itself only, so widening it to `subpath` makes this test fail; the
-  write half beneath the parent is `confined_outside_write_is_denied`'s third
-  case.
+  write half beneath the parent is the `<STORAGE_PARENT>/Fresh` case of
+  `confined_outside_write_is_denied`, which is refused at its first write.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
 - `startup_denial_reports_its_reason` covers the failure path. It starts the
@@ -484,6 +488,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Skip an unreadable `CONFINEMENT.md` instead of refusing it (WP64):
   `falsifier_document_read_rejects_unreadable_source` fails because the
   refusal does not come.
+- Append `(allow file-write* (subpath (param "STORAGE_PARENT")))` (WP65):
+  `confined_outside_write_is_denied` fails on the new case's absence check
+  because the fresh base beneath the parent is created.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
