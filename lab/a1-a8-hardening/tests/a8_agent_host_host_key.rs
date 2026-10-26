@@ -50,11 +50,11 @@ fn build_injected(resource: &str) -> a1_a8_hardening::Built {
     )
 }
 
-fn denied_actions(records: &[CapabilityRequestRecord], resource: &str) -> Vec<&str> {
+fn denied_actions(records: &[CapabilityRequestRecord], resource: &str) -> Vec<String> {
     records
         .iter()
         .filter(|record| record.resource == resource && record.code == MANIFEST_DENIED)
-        .map(|record| record.action.as_str())
+        .map(|record| record.action.clone())
         .collect()
 }
 
@@ -179,7 +179,7 @@ fn agent_host_host_key_read_is_refused() {
     );
     assert_eq!(
         actions,
-        ["write", "read"],
+        ["write".to_string(), "read".to_string()],
         "Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}"
     );
     assert!(

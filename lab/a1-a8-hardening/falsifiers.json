@@ -158,8 +158,8 @@
       "edits": [
         {
           "file": "tests/a8_agent_host_host_key.rs",
-          "old": "    assert_eq!(\n        actions,\n        [\"write\", \"read\"],\n        \"Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}\"\n    );",
-          "new": "    let internal = format!(\n        \"Error: Component capsule failed: Compute error: Component capsule denied: BusError::Internal(\\\"capsule manifest does not declare authority for {resource}\\\")\"\n    );\n    assert!(\n        run.has_line(&internal),\n        \"expected the Runtime Internal sentence on stderr; stderr:\\n{}\",\n        run.stderr\n    );\n    assert_eq!(\n        actions,\n        [\"write\", \"read\"],\n        \"Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}\"\n    );"
+          "old": "    assert_eq!(\n        actions,\n        [\"write\".to_string(), \"read\".to_string()],\n        \"Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}\"\n    );",
+          "new": "    let internal = format!(\n        \"Error: Component capsule failed: Compute error: Component capsule denied: BusError::Internal(\\\"capsule manifest does not declare authority for {resource}\\\")\"\n    );\n    assert!(\n        run.has_line(&internal),\n        \"expected the Runtime Internal sentence on stderr; stderr:\\n{}\",\n        run.stderr\n    );\n    assert_eq!(\n        actions,\n        [\"write\".to_string(), \"read\".to_string()],\n        \"Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}\"\n    );"
         }
       ],
       "tests": [
