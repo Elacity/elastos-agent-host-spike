@@ -41,17 +41,68 @@ A fault crosses `fork` as the error number of the `pre_exec` failure (`Fault::to
 code, the ABI the kernel reported, the errno). An ordinary `exec` failure has no tag and is a `LaunchError::Spawn`,
 not a refusal; the provider did not run in either case.
 
-## Standing alone, and plugging a backend in
+## Standing alone
 
-The crate depends on no confinement backend. `lab/linux-confine/` (another lane) was not present when this was
-written, and nothing here reads or edits it. The seam is the `Kernel` trait: seven async-signal-safe methods, one
-per kernel operation. `HostKernel` is the real implementation (`libc`, x86-64 and aarch64). A backend that wants
-the same fail-closed discipline implements `Kernel` and calls `Guard::with_kernel`.
+The crate depends on no confinement backend, and nothing here calls `lab/linux-confine/`. The seam is the `Kernel`
+trait: seven async-signal-safe methods, one per kernel operation. `HostKernel` is the real implementation (`libc`,
+x86-64 and aarch64). A backend that wants the same fail-closed discipline implements `Kernel` and calls
+`Guard::with_kernel`.
 
 The policy is data the caller gives the guard: `FsRules` (Landlock path rules) and a `SeccompProgram`.
 `Policy::baseline` pairs the caller's path rules with a deny-list filter (every socket, `ptrace`, `process_vm_*`,
 `pidfd_getfd`, `bpf`, `perf_event_open`; an x32 number or a foreign architecture is also refused). That filter is
 a baseline for the tests and for the CLI, not the final policy; the confinement backend owns the real policy.
+
+## Wrapping `lab/linux-confine`
+
+This is a design. It is read from draft PR #296 (branch `cursor/linux-confine-e156`, head `dc948a70`). That lab was
+read only: not built, not run, not edited. No code here calls it.
+
+**The backend.** One C helper, `helper/setup.c`, applies every layer in one process and then executes the probe:
+user namespace and id map, mount, network, IPC and PID namespaces, a Landlock ruleset, capability drop,
+`no_new_privs`, Landlock enforce, a seccomp allow-list, `exec`. The Rust side writes a policy file, runs the helper
+and parses its stdout. A refusal is one text line on stdout and exit status 2.
+
+**The answer.** The helper stays the only process that applies layers. The guard wraps it from outside: it starts
+the helper, owns the status channel, turns every backend failure into a `Refusal`, checks the backend's claim, and
+never starts the provider itself. There are two reasons for this shape.
+
+- Two appliers must not stack. The guard's Landlock rules name only the storage root and the provider. The helper
+  opens its policy file and `/proc/self/uid_map`, so I expect it to refuse if it ran inside the guard's layers.
+  This is read from the code, not run.
+- A PID namespace needs a second `fork` after `unshare(CLONE_NEWPID)`. The helper does it (`setup.c` forks a
+  grandchild). `Command::pre_exec` has no place for that fork.
+
+What each side does next:
+
+1. **Status channel (backend lane).** The helper reports on stdout, but a provider's stdout carries its own
+   protocol, and exit status 2 is a legal provider status. The guard passes the helper a close-on-exec pipe. The
+   helper writes one record on a refusal and nothing on success, so end-of-file means the `exec` happened.
+   `close_high_fds` (descriptors 3 to 255) must skip that descriptor. `std` already reports a `pre_exec` failure
+   to this crate the same way.
+2. **A `Fault` for every reason (guard lane).** Each helper reason for user namespace, capability drop,
+   `no_new_privs`, seccomp install, Landlock missing, Landlock ABI and Landlock ruleset maps to the `Fault` of the
+   same name. The helper also refuses for the mount, network, IPC and PID namespaces and for a kernel with no
+   seccomp. The guard needs a `Fault` for each. A reason the guard does not know is still a refusal. A failed
+   `exec` of the provider is a `LaunchError::Spawn`, as in
+   `a_failed_exec_after_every_layer_applied_is_a_spawn_error_not_a_refusal`.
+3. **Check the claim (guard lane).** The helper prints `enforced abi=N uid=U caps=empty nnp=1 netns=lo` before it
+   executes. A missing record, a missing field, or a value below the guard's Landlock floor is a refusal. One gap
+   shows already: `setup.c` makes no `PR_CAPBSET_DROP` call, and this crate's confinement test requires `cap_bnd`
+   to be 0, so the helper needs that step.
+4. **Test with the harness already here (guard lane).** `launch_cli_under` and `deny_filter` in
+   `tests/common/mod.rs` fail one real system call under an inherited filter. Pointed at the helper, they replace
+   its `--block-landlock`, `--block-seccomp`, `--block-userns` and `--explain-abi` switches, which are test code
+   inside the production binary. They also reach rows the backend's tests do not name: capability drop,
+   `no_new_privs`, seccomp install, Landlock enforce and each namespace. Falsifier `F-FC12` (a silent unconfined
+   fallback) applies to the wrap: with the helper stubbed to fail, the provider marker must not appear.
+5. **One policy, from the oracle (decision for the owners).** The two crates give the storage root different
+   rights. The backend grants eight (read file, read dir, write file, truncate, make regular file, make dir,
+   remove file, remove dir). `FsRules::read_write_dir` grants every right except execute, which adds seven: make
+   char, socket, fifo, block and symlink, `REFER` and `IOCTL_DEV`. PRINCIPLES 10 asks for one path, so the guard
+   should take the backend's rights, which come from `confine.sb`. The backend's seccomp policy is an allow-list of
+   eight system calls sized for a freestanding probe. A real provider needs a wider list, and this crate builds
+   deny-lists only.
 
 ## The launcher CLI
 
@@ -105,6 +156,11 @@ The runner gives each scratch copy its own target directory. Cargo names an arti
 depend on the copy's path, so a shared directory lets one copy run a binary built from another copy's source. The
 first run of this list hit exactly that (a baseline test failed on a clean copy) and the runner was fixed.
 
+Each scratch copy also gets the repo's `rust-toolchain.toml`. A copy outside the repo would otherwise build with
+rustup's default toolchain, and an offline cargo of another version cannot find the crates the pinned one cached.
+On a fresh checkout every entry reported NOT RUN for that reason until the file was copied. The offline lookup
+needs a warm cache, so run `cargo test --locked` once before the runner.
+
 | Id | Bug planted | Row |
 | --- | --- | --- |
 | F-FC01 | ignore a user-namespace failure | user namespaces off |
@@ -139,3 +195,10 @@ first run of this list hit exactly that (a baseline test failed on a clean copy)
   on such a host.
 - A Landlock rule for `PROVIDER_EXECUTABLE` alone. The tests give the dynamically linked stand-in read and execute
   on the loader directories as well. The design's open question about shared libraries stays open.
+- A real-kernel proof of the id-map refusal (`IdMapRefused`). Only the simulated-kernel test covers it. The
+  real-kernel harness fails one system call by number and first argument, and the maps are written with ordinary
+  `openat` and `write` calls.
+- A kernel older than the floor. The real-kernel "Landlock too old" test raises the floor one above the ABI this
+  kernel reports. No kernel with an ABI below 5 was used.
+- Any host or architecture other than the ones `LOG.md` names. The code compiles for aarch64, and no aarch64 test
+  has run.
