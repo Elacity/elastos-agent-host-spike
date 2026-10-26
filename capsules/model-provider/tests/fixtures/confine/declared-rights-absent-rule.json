@@ -1,0 +1,39 @@
+{
+  "role": "lab stand-in for the Runtime generator's input, not a manifest field",
+  "provider": "model-provider",
+  "rights": [
+    {
+      "id": "storage",
+      "rules": [
+        "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+        "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+        "(allow file-read-data (literal \"/tmp/cc-declared-rights-absent\"))"
+      ]
+    },
+    {
+      "id": "bound-executable",
+      "rules": [
+        "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))"
+      ]
+    }
+  ],
+  "platform_baseline": {
+    "status": "Runtime platform baseline for the model-provider executable on macOS, not approved rights",
+    "rules": [
+      {
+        "id": "startup-root-directory",
+        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: file-read-data of literal / is the startup root-directory read.",
+        "rules": [
+          "(allow file-read-data (literal \"/\"))"
+        ]
+      },
+      {
+        "id": "startup-sysctl",
+        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: sysctl-read is the startup page-size read, with no write and no added sysctl name.",
+        "rules": [
+          "(allow sysctl-read)"
+        ]
+      }
+    ]
+  }
+}

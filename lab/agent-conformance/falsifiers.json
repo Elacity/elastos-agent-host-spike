@@ -2,7 +2,8 @@
   "about": "Agent conformance falsifiers. Paths are relative to lab/agent-conformance. Replace each old text exactly once; every named test must run and fail, then pass after restoring the original bytes. command: lab is reserved for the provider-owned shared runner; run these by hand until that arm exists. Run F-ac1d with a synthetic parent environment so the planted bug only captures fixture values. F-probe-a through F-probe-f were F-ac2a through F-ac2f in task 002.",
   "retired": {
     "F-ac2a": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_cannot_read_other_agent_memory is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
-    "F-ac2b": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_memory_under_own_principal is live. Mutation remains described in GAPS.md and RUNBOOK.md."
+    "F-ac2b": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_memory_under_own_principal is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
+    "F-agent-host-grant": "Retired: UsersAI binding. Returns to the falsifiers list once real_agent_host_gets_no_ungranted_authority has a passing live baseline. Exact mutation: {\"file\": \"fixtures/grants.json\", \"old\": \"  \\\"grants\\\": [\\n\", \"new\": \"  \\\"grants\\\": [\\n    {\\n      \\\"resource\\\": \\\"localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal\\\",\\n      \\\"action\\\": \\\"write\\\",\\n      \\\"reason\\\": \\\"Agent Host task journal\\\",\\n      \\\"duration\\\": \\\"once\\\"\\n    },\\n\"}"
   },
   "falsifiers": [
     {
@@ -1311,22 +1312,6 @@
       ]
     },
     {
-      "id": "F-agent-host-grant",
-      "title": "grant the real capsule journal write instead of denying both requests",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "fixtures/grants.json",
-          "old": "  \"grants\": [\n",
-          "new": "  \"grants\": [\n    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal\",\n      \"action\": \"write\",\n      \"reason\": \"Agent Host task journal\",\n      \"duration\": \"once\"\n    },\n"
-        }
-      ],
-      "tests": [
-        "real_agent_host_gets_no_ungranted_authority"
-      ]
-    },
-    {
       "id": "F-overlap-second-barrier",
       "title": "decide a lone sibling request before the second barrier",
       "command": "lab",
@@ -1410,6 +1395,22 @@
       ],
       "tests": [
         "grants::tests::seed_fixture_refuses_dot_dot"
+      ]
+    },
+    {
+      "id": "F-agent-host-p7",
+      "title": "run the real agent-host P7 manifest gap before the UsersAI binding lands",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "#[ignore = \"blocked: UsersAI binding\"]\nfn real_agent_host_journal_under_usersai_principal()",
+          "new": "fn real_agent_host_journal_under_usersai_principal()"
+        }
+      ],
+      "tests": [
+        "real_agent_host_journal_under_usersai_principal"
       ]
     }
   ]
