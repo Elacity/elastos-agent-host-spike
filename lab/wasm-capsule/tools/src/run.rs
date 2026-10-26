@@ -6,8 +6,9 @@
 //!
 //! 1. the engine program path must be absolute, so it can never be looked up
 //!    on PATH or resolved against a working folder;
-//! 2. the work root must be absolute, an existing folder, and byte for byte
-//!    its own `canonicalize` result, so no link is anywhere in it;
+//! 2. the work root must be absolute, byte for byte its own `canonicalize`
+//!    result, so no link is anywhere in it, and a folder by its metadata (a
+//!    failed metadata read keeps its OS cause);
 //! 3. one new folder, named after the engine, is made inside the work root
 //!    with mode `0o700`; a name already there is refused, never reused;
 //! 4. [`VerifiedBundle::entrypoint`]'s checked bytes, from memory, are written
@@ -92,6 +93,8 @@ pub enum Reason {
     /// The work root is not its own canonical path: a link, or a `.`, `..`,
     /// doubled or trailing `/` part.
     WorkRootNotCanonical { canonical: PathBuf },
+    /// The work root's metadata could not be read after it resolved.
+    WorkRootMetadataFailed(io::Error),
     /// The work root is not a folder.
     WorkRootNotAFolder,
     /// Something is already at the run folder's path.
@@ -130,6 +133,9 @@ impl fmt::Display for Reason {
                 "the work root is not canonical: it resolves to {}",
                 canonical.display()
             ),
+            Reason::WorkRootMetadataFailed(error) => {
+                write!(f, "the work root's metadata cannot be read: {error}")
+            }
             Reason::WorkRootNotAFolder => write!(f, "the work root is not a folder"),
             Reason::RunDirExists => write!(
                 f,
@@ -209,7 +215,7 @@ pub fn run_engine(
 }
 
 /// The work root must be absolute, resolve, be byte for byte its own
-/// canonical path, and be a folder.
+/// canonical path, and be a folder by that path's own metadata.
 fn check_work_root(work_root: &Path) -> Result<(), Refusal> {
     if !work_root.is_absolute() {
         return Err(Refusal::new(work_root, Reason::WorkRootNotAbsolute));
@@ -222,10 +228,25 @@ fn check_work_root(work_root: &Path) -> Result<(), Refusal> {
             Reason::WorkRootNotCanonical { canonical },
         ));
     }
-    if !canonical.is_dir() {
-        return Err(Refusal::new(work_root, Reason::WorkRootNotAFolder));
+    work_root_folder(work_root, fs::metadata(&canonical))
+}
+
+/// The last work-root step, on the canonical path's metadata: a lookup that
+/// failed keeps its OS cause; a lookup that worked must show a folder.
+pub fn work_root_folder(
+    work_root: &Path,
+    metadata: io::Result<fs::Metadata>,
+) -> Result<(), Refusal> {
+    match metadata {
+        Err(error) => Err(Refusal::new(
+            work_root,
+            Reason::WorkRootMetadataFailed(error),
+        )),
+        Ok(metadata) if !metadata.is_dir() => {
+            Err(Refusal::new(work_root, Reason::WorkRootNotAFolder))
+        }
+        Ok(_) => Ok(()),
     }
-    Ok(())
 }
 
 /// The shared writer's refusal as the runner's own: its path and cause kept,

@@ -407,9 +407,11 @@ entrypoint and returns its stdout. In order, the first refusal is the answer:
 
 1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
    so it is never looked up on PATH; the same path is the one started;
-2. `work_root` must be absolute, resolve, be a folder, and be byte for byte
-   its own `std::fs::canonicalize` result, so no link is anywhere in it (an
-   option-like `--env=X` is relative, so it is refused);
+2. `work_root` must be absolute, resolve, be byte for byte its own
+   `std::fs::canonicalize` result, so no link is anywhere in it (an
+   option-like `--env=X` is relative, so it is refused), and be a folder by
+   its own `fs::metadata` (`work_root_folder`; a failed metadata read keeps
+   its OS cause, never reported as "not a folder");
 3. one new folder, `<work_root>/<engine name>`, is made with `create_dir`
    and mode `0o700`; a name already there is refused, never reused;
 4. `entrypoint()`'s checked bytes are written from memory as
@@ -430,6 +432,7 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
 - `the work root is not an absolute path`;
 - `the work root cannot be resolved: <OS error>`;
 - `the work root is not canonical: it resolves to <canonical path>`;
+- `the work root's metadata cannot be read: <OS error>`;
 - `the work root is not a folder`;
 - `the run folder already exists: the runner makes a new one and never reuses it`;
 - `the run folder cannot be created: <OS error>`;
@@ -800,9 +803,9 @@ name neither `capsule/capsule.json` nor `tools/src/lib.rs`), not a PASS.
   `this_capsule_bundle_has_the_pinned_lab_cid` fails. wc-008 adds no second
   entry for it (F-WC8-ONE-BYTE).
 
-wc-005a's 20 (task 014), runner-caught. The canonical runner run
+wc-005a's 23 (task 014), runner-caught. The canonical runner run
 `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`
-reported `summary: 41 CAUGHT of 41` (these 20 and wc-004's 21, re-run because
+reported `summary: 44 CAUGHT of 44` (these 23 and wc-004's 21, re-run because
 `tools/src/verify.rs` changed), exit 0, and restored every file. Each named test
 passed unmutated first. `tools/src/run.rs` is not in the runner's recovery
 targets (`PROVIDER_TARGETS`, the provider lane's), so a killed run cannot
@@ -825,6 +828,11 @@ restore it for the F-WC5 entries (ask R2):
 - F-WC5-IO-ROOT-CAUSE, -IO-RUN-DIR-CAUSE, -IO-MODULE-CREATE, -IO-MODULE-WRITE
   and -IO-MODULE-PATH — the work root's, the run folder's, or the module file's
   refusal loses its cause or path (`runner_io_refusals_keep_path_and_cause`).
+- F-WC5-IO-ROOT-METADATA and -IO-ROOT-IS-DIR — a failed metadata read of the
+  work root is reported as "not a folder", in `work_root_folder` or by a
+  `Path::is_dir` check in its place (`runner_io_refusals_keep_path_and_cause`).
+- F-WC5-STDIN-PIPED — the engine's stdin is a pipe, not `/dev/null`
+  (`engine_stdin_is_null`).
 - F-WC5-ENV-READ — the engine program comes from an environment variable when
   set (`runner_uses_only_explicit_inputs`).
 - F-WC5-LOCAL-WRITER — the module is written with `fs::write`, not the shared
@@ -842,4 +850,4 @@ restore it for the F-WC5 entries (ask R2):
 Task 014 also re-anchored six wc-004 entries to the moved verifier code, each
 the same bug as before: F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
 -ORDER-AUDIT-FIRST, -SEALED-FIELD, -SEALED-NEW (now with the `entrypoint`
-field) and -SECOND-AUDIT. All six are in the 41 above.
+field) and -SECOND-AUDIT. All six are in the 44 above.

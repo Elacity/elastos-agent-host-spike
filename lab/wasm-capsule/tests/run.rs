@@ -21,7 +21,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use wasm_capsule_tools::bundle::{Reason as WriteReason, RunRefusal as WriteRefusal};
 use wasm_capsule_tools::run::{
-    module_refusal, run_engine, Engine, Reason, Refusal, DIGEST_ARGUMENT, DIGEST_EXPORT,
+    module_refusal, run_engine, work_root_folder, Engine, Reason, Refusal, DIGEST_ARGUMENT,
+    DIGEST_EXPORT,
 };
 use wasm_capsule_tools::verify::{verify_bundle, VerifiedBundle};
 use wasm_capsule_tools::CAPSULE_MANIFEST;
@@ -44,6 +45,10 @@ const PRINT_ARGS: &str = "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg
 
 /// A stand-in engine that prints whether `HOME` reached it.
 const PRINT_HOME: &str = "#!/bin/sh\nprintf '%s' \"${HOME-unset}\"\n";
+
+/// A stand-in engine that prints whether its stdin is `/dev/null`.
+const PRINT_STDIN: &str =
+    "#!/bin/sh\nif [ /dev/stdin -ef /dev/null ]; then printf null; else printf other; fi\n";
 
 /// A stand-in engine that fails with a message on stderr.
 const FAILING: &str = "#!/bin/sh\nprintf 'boom: bad module\\n' >&2\nexit 3\n";
@@ -333,6 +338,39 @@ fn runner_io_refusals_keep_path_and_cause() {
         format!("{}: the work root is not a folder", file.display())
     );
 
+    // The work root resolved, then its metadata could not be read: the OS
+    // cause is kept, never reported as "not a folder". A real lookup cannot be
+    // made to fail between the two calls without a race, so the step is called
+    // on a failed lookup directly, and the runner is checked to call it on the
+    // canonical path's own metadata, with no second folder check.
+    let refusal = work_root_folder(&base, Err(io::Error::from_raw_os_error(13)))
+        .expect_err("a failed metadata read was accepted");
+    match &refusal.reason {
+        Reason::WorkRootMetadataFailed(error) => assert_eq!(error.raw_os_error(), Some(13)),
+        _ => panic!("{refusal}"),
+    }
+    assert_eq!(refusal.path, base);
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: the work root's metadata cannot be read: {DENIED}",
+            base.display()
+        )
+    );
+    assert!(work_root_folder(&base, fs::metadata(&base)).is_ok());
+    let code = runner_code();
+    assert_eq!(
+        code.matches("work_root_folder(work_root, fs::metadata(&canonical))")
+            .count(),
+        1,
+        "the runner does not check the work root's own metadata through work_root_folder"
+    );
+    assert_eq!(
+        code.matches("is_dir()").count(),
+        1,
+        "the runner checks for a folder outside work_root_folder"
+    );
+
     // The run folder cannot be made in a work root the user may not write.
     let locked = base.join("locked");
     fs::create_dir(&locked).expect("create a folder");
@@ -465,6 +503,24 @@ fn engine_starts_with_an_empty_environment() {
         "unset",
         "the engine got the test process's environment"
     );
+}
+
+#[test]
+fn engine_stdin_is_null() {
+    let (_bundle, value) = fixture();
+    let engines = TempDir::new("run-stdin-engines");
+    let engine = stand_in(&canonical(&engines), "print-stdin", PRINT_STDIN);
+
+    for engine_kind in ENGINES {
+        let tmp = TempDir::new("run-stdin");
+        let root = canonical(&tmp);
+        let stdout = ran(run_engine(&value, engine_kind, &engine, &root));
+        assert_eq!(
+            String::from_utf8_lossy(&stdout),
+            "null",
+            "{engine_kind}: the engine's stdin is not /dev/null"
+        );
+    }
 }
 
 #[test]

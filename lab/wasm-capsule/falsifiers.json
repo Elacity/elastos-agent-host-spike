@@ -1395,6 +1395,54 @@
       "tests": [
         "engine_failures_keep_their_cause"
       ]
+    },
+    {
+      "id": "F-WC5-IO-ROOT-METADATA",
+      "title": "a work root whose metadata cannot be read is reported as not a folder, losing its cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "            Reason::WorkRootMetadataFailed(error),\n",
+          "new": "            { let _ = error; Reason::WorkRootNotAFolder },\n"
+        }
+      ],
+      "tests": [
+        "runner_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-IO-ROOT-IS-DIR",
+      "title": "the runner checks the work root with Path::is_dir, which turns every metadata error into not a folder",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    work_root_folder(work_root, fs::metadata(&canonical))\n",
+          "new": "    if !canonical.is_dir() {\n        return Err(Refusal::new(work_root, Reason::WorkRootNotAFolder));\n    }\n    Ok(())\n"
+        }
+      ],
+      "tests": [
+        "runner_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-STDIN-PIPED",
+      "title": "the engine's stdin is a pipe, not /dev/null",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        .stdin(Stdio::null())\n",
+          "new": "        .stdin(Stdio::piped())\n"
+        }
+      ],
+      "tests": [
+        "engine_stdin_is_null"
+      ]
     }
   ]
 }

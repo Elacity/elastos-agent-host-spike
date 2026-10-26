@@ -165,3 +165,11 @@
   runner, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`:
   "summary: 41 CAUGHT of 41", exit 0 (runner-caught; each named test passed unmutated first). `tools/src/run.rs` is
   not a runner recovery target (R2), so a killed run does not restore it.
+- wc-005a round 2 (task 014, Codex FAIL, fail-closed): the work root's folder check used `Path::is_dir`, which turns
+  every metadata error into "not a folder". Now `run::work_root_folder` takes `fs::metadata` of the canonical path,
+  and a failed read is its own reason, `the work root's metadata cannot be read: <OS error>`, path kept;
+  `runner_io_refusals_keep_path_and_cause` asserts it as an exact string and checks the runner calls that step on the
+  canonical path's metadata with no second `is_dir`. FOLLOWUP done: new test `engine_stdin_is_null` (a stand-in
+  checks `/dev/stdin -ef /dev/null`). New falsifiers F-WC5-IO-ROOT-METADATA, -IO-ROOT-IS-DIR, -STDIN-PIPED. Canonical
+  runner, `... --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`: "summary: 44 CAUGHT of 44", exit 0, no backup
+  left (runner-caught; each named test passed unmutated first). `run.rs` is still not a recovery target (R2).
