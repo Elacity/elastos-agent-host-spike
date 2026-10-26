@@ -983,6 +983,7 @@ fn verified_bundle_is_sealed() {
             "entries",
             "entrypoint",
             "imports",
+            "memory_mb",
             "read_grants",
             "unused_grants",
             "verify_bundle",
@@ -1013,13 +1014,14 @@ fn verified_bundle_is_sealed() {
         "pub fn entrypoint(&self) -> &BundleEntry {",
         "pub fn imports(&self) -> &[DeclaredImport] {",
         "pub fn unused_grants(&self) -> &[DeclaredImport] {",
+        "pub fn memory_mb(&self) -> u32 {",
     ] {
         assert!(accessors.contains(signature), "missing {signature}");
     }
     let literal = item(&code, "pub fn verify_checked(");
     assert!(
         literal.contains(
-            "Ok(VerifiedBundle {\n        checked,\n        entrypoint,\n        imports,\n        unused,\n    })"
+            "Ok(VerifiedBundle {\n        checked,\n        entrypoint,\n        imports,\n        unused,\n        memory_mb,\n    })"
         ),
         "verify_checked does not make the value"
     );

@@ -17,6 +17,11 @@
 //! The value keeps which checked entry step 3 found, and
 //! [`VerifiedBundle::entrypoint`] returns it, so a caller such as the runner
 //! never reads the manifest again: the verifier holds the one manifest read.
+//! wc-010b: that same read also keeps the manifest's `resources.memory_mb`
+//! (the Runtime's field, default 64 when the key is absent), and
+//! [`VerifiedBundle::memory_mb`] returns it as read; the runner turns it into
+//! an engine's memory cap. It is a resource budget, never an admission
+//! decision.
 //!
 //! [`verify_bundle`] is `checked_bundle` and then [`verify_checked`], with no
 //! check of its own, so the walk's refusals come first.
@@ -76,7 +81,8 @@ const GRANT_KEYS: [&str; 2] = ["module", "name"];
 /// A bundle the verifier passed: the checked bundle, which of its entries is
 /// the entrypoint module the audit read, the import list the audit returned
 /// for that module (exactly the module's imports, in order, each granted), and
-/// the grants the module does not import, in the caller's order.
+/// the grants the module does not import, in the caller's order, and the
+/// manifest's declared `resources.memory_mb`.
 ///
 /// Its fields are private, it has no public constructor and no `&mut`
 /// access, and it cannot be deserialized, so a value exists only as
@@ -88,6 +94,7 @@ pub struct VerifiedBundle {
     entrypoint: usize,
     imports: Vec<DeclaredImport>,
     unused: Vec<DeclaredImport>,
+    memory_mb: u32,
 }
 
 impl VerifiedBundle {
@@ -118,6 +125,13 @@ impl VerifiedBundle {
     /// caller gave them. They link nothing; they are reported.
     pub fn unused_grants(&self) -> &[DeclaredImport] {
         &self.unused
+    }
+
+    /// The manifest's declared `resources.memory_mb`, as the verifier's one
+    /// manifest read found it: the Runtime's default, 64, when the manifest
+    /// has no `resources` key.
+    pub fn memory_mb(&self) -> u32 {
+        self.memory_mb
     }
 }
 
@@ -177,7 +191,7 @@ pub fn verify_checked(
 ) -> Result<VerifiedBundle, VerifyRefusal> {
     let signature = signature.ok_or(VerifyRefusal::Unsigned)?;
     verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;
-    let entrypoint = entrypoint_index(&checked)?;
+    let (entrypoint, memory_mb) = entrypoint_index(&checked)?;
     let module = &checked.entries()[entrypoint].content;
     let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;
     let unused = grants_not_imported(granted, &imports);
@@ -186,6 +200,7 @@ pub fn verify_checked(
         entrypoint,
         imports,
         unused,
+        memory_mb,
     })
 }
 
@@ -217,22 +232,24 @@ pub fn verify_bundle(
 }
 
 /// Where, among the checked entries, the module the manifest's `entrypoint`
-/// names is. No other entry stands in for it.
-fn entrypoint_index(checked: &CheckedBundle) -> Result<usize, VerifyRefusal> {
-    let entrypoint = manifest_entrypoint(checked)?;
+/// names is, and the manifest's declared `resources.memory_mb`, both from the
+/// one manifest read. No other entry stands in for the module.
+fn entrypoint_index(checked: &CheckedBundle) -> Result<(usize, u32), VerifyRefusal> {
+    let (entrypoint, memory_mb) = manifest_entrypoint(checked)?;
     let module = checked
         .entries()
         .iter()
         .position(|entry| entry.path == entrypoint);
     match module {
-        Some(index) => Ok(index),
+        Some(index) => Ok((index, memory_mb)),
         None => Err(VerifyRefusal::EntrypointMissing { entrypoint }),
     }
 }
 
-/// The `entrypoint` of the checked `capsule.json`, read with the Runtime's
-/// `CapsuleManifest`, the one reader of that file.
-fn manifest_entrypoint(checked: &CheckedBundle) -> Result<String, VerifyRefusal> {
+/// The `entrypoint` and the `resources.memory_mb` of the checked
+/// `capsule.json`, read with the Runtime's `CapsuleManifest`, the one reader
+/// of that file, in one parse.
+fn manifest_entrypoint(checked: &CheckedBundle) -> Result<(String, u32), VerifyRefusal> {
     let unreadable = |reason: String| VerifyRefusal::ManifestUnreadable { reason };
     let manifest = checked
         .entries()
@@ -241,7 +258,7 @@ fn manifest_entrypoint(checked: &CheckedBundle) -> Result<String, VerifyRefusal>
         .ok_or_else(|| unreadable(format!("no {MANIFEST_FILE} entry")))?;
     let manifest: CapsuleManifest = serde_json::from_slice(&manifest.content)
         .map_err(|reason| unreadable(reason.to_string()))?;
-    Ok(manifest.entrypoint)
+    Ok((manifest.entrypoint, manifest.resources.memory_mb))
 }
 
 /// A grants file the reader refused: the path it was given, and why.
