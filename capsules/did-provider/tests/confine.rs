@@ -1692,64 +1692,7 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                 );
             }
             if chars.peek() == Some(&'\\') {
-                chars.next();
-                let Some(value) = chars.next() else {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                };
-                if value != ';' {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                }
-                let mut rest = String::new();
-                while let Some(&next) = chars.peek() {
-                    if next == '\n' {
-                        break;
-                    }
-                    let next_ok = next == '\t' || (next >= ' ' && next <= '~');
-                    assert!(
-                        next_ok,
-                        "the profile must refuse a non-ASCII or format character: {profile}"
-                    );
-                    rest.push(chars.next().expect("peeked #\\; tail"));
-                }
-                let mut datums = 0usize;
-                let mut depth = 0usize;
-                let mut in_tail_string = false;
-                let mut tail = rest.chars().peekable();
-                while let Some(part) = tail.next() {
-                    if in_tail_string {
-                        if part == '\\' {
-                            let _ = tail.next();
-                            continue;
-                        }
-                        if part == '"' {
-                            in_tail_string = false;
-                        }
-                        continue;
-                    }
-                    if part == '"' {
-                        in_tail_string = true;
-                        continue;
-                    }
-                    if part == '(' {
-                        if depth == 0 {
-                            datums += 1;
-                        }
-                        depth += 1;
-                    } else if part == ')' {
-                        depth = depth.saturating_sub(1);
-                    }
-                }
-                if datums >= 2 {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                }
-                at_token_boundary = true;
-                continue;
+                panic!("the profile must refuse a Scheme character literal #\\: {profile}");
             }
             let mut token = String::from("#");
             while let Some(&next) = chars.peek() {
@@ -1836,4 +1779,42 @@ fn profile_forms_keeps_a_semicolon_inside_a_string() {
         forms.iter().any(|form| form == "(allow default)"),
         "the allow after a string semicolon must stay visible: {forms:?}"
     );
+}
+
+#[path = "sbpl_include.rs"]
+mod shared_sbpl;
+
+/// Mutating `sbpl_reader.rs` alone fails this crate's confine suite.
+///
+/// Falsifier: change only wallet `tests/sbpl_reader.rs`; this test fails.
+#[test]
+fn shared_sbpl_reader_mutation_fails_this_suite() {
+    let shared = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../wallet-provider/tests/sbpl_reader.rs"),
+    )
+    .expect("shared sbpl_reader.rs");
+    let here = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs"))
+        .expect("did confine.rs");
+    assert_eq!(
+        rust_named_fn_source(&shared, "profile_characters"),
+        rust_named_fn_source(&here, "profile_characters"),
+        "did confine.rs must keep the one shared sbpl_reader.rs body"
+    );
+    assert!(
+        shared_sbpl::profile_holds_scheme_comment(r"#\; x (allow file*)"),
+        "the include! copy must refuse every #\\ character literal"
+    );
+}
+
+fn rust_named_fn_source<'a>(source: &'a str, name: &str) -> &'a str {
+    let sig = format!("fn {name}(profile: &str)");
+    let start = source
+        .find(&sig)
+        .unwrap_or_else(|| panic!("{name} missing"));
+    let rest = &source[start..];
+    let rel = rest
+        .find("\n}\n")
+        .or_else(|| rest.find("\n}").filter(|i| rest[i + 2..].is_empty()))
+        .unwrap_or_else(|| panic!("{name} is unclosed"));
+    &source[start..start + rel + 2]
 }

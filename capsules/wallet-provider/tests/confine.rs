@@ -1892,93 +1892,112 @@ fn rust_source_without_comments(source: &str) -> String {
 /// `#[cfg(...)]` item, or an unused `macro_rules` body is not a citation.
 ///
 /// The tiny-crate list is the claim when `source` compiles alone. When that
-/// command cannot run, a cited test counts only if the real provider command
-/// `cargo test -p <crate> -- --list` names it, with the same features as the
-/// owner suite. That list covers `--test confine` and the lib tests
-/// CONFINEMENT.md cites. Those list lines are split on the last `: `. There
-/// is no source-walk fallback: if no list command can run, the citation
-/// fails. That drops `#[cfg(feature = "never")]` and `#[cfg(false)]`.
+/// command cannot run, a citation counts only when both are true: the cited
+/// file itself still holds `#[test]` (not cfg'd out) on `fn <name>`, and
+/// `cargo test -p <owning crate> --test <that file's target> -- --list`
+/// lists exactly that name. A name from another crate's list is not a
+/// citation of this source. There is no union across crates.
 fn rust_holds_cited_test(source: &str, function: &str) -> bool {
     match rust_cargo_lists_test(source, function) {
         Some(listed) => listed,
         None => {
-            static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-            let names = NAMES.get_or_init(|| {
-                let mut names = Vec::new();
-                let mut roots = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
-                if let Ok(cwd) = std::env::current_dir() {
-                    roots.push(cwd);
-                }
-                let mut capsules = None;
-                for root in roots {
-                    let mut dir = root.as_path();
-                    loop {
-                        let candidate = dir.join("capsules");
-                        if candidate
-                            .join("wallet-provider")
-                            .join("Cargo.toml")
-                            .is_file()
-                        {
-                            capsules = Some(candidate);
-                            break;
-                        }
-                        match dir.parent() {
-                            Some(parent) => dir = parent,
-                            None => break,
-                        }
-                    }
-                    if capsules.is_some() {
+            if !rust_source_holds_listed_test(source, function) {
+                return false;
+            }
+            let mut roots = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+            if let Ok(cwd) = std::env::current_dir() {
+                roots.push(cwd);
+            }
+            let mut capsules = None;
+            for root in roots {
+                let mut dir = root.as_path();
+                loop {
+                    let candidate = dir.join("capsules");
+                    if candidate
+                        .join("wallet-provider")
+                        .join("Cargo.toml")
+                        .is_file()
+                    {
+                        capsules = Some(candidate);
                         break;
                     }
+                    match dir.parent() {
+                        Some(parent) => dir = parent,
+                        None => break,
+                    }
                 }
-                let Some(capsules) = capsules else {
-                    return names;
+                if capsules.is_some() {
+                    break;
+                }
+            }
+            let Some(capsules) = capsules else {
+                return false;
+            };
+            let mut owner = None;
+            for (dir_name, crate_name, rel, target) in [
+                (
+                    "wallet-provider",
+                    "wallet-provider",
+                    "tests/confine.rs",
+                    "confine",
+                ),
+                (
+                    "did-provider",
+                    "did-provider",
+                    "tests/confine.rs",
+                    "confine",
+                ),
+                (
+                    "model-provider",
+                    "model-provider",
+                    "tests/confine/main.rs",
+                    "confine",
+                ),
+            ] {
+                let path = capsules.join(dir_name).join(rel);
+                let Ok(bytes) = fs::read_to_string(&path) else {
+                    continue;
                 };
-                for (dir_name, crate_name) in [
-                    ("wallet-provider", "wallet-provider"),
-                    ("model-provider", "model-provider"),
-                    ("did-provider", "did-provider"),
-                ] {
-                    let listed = std::process::Command::new("cargo")
-                        .args(["test", "-p", crate_name, "--", "--list"])
-                        .current_dir(capsules.join(dir_name))
-                        .env("CARGO_TERM_COLOR", "never")
-                        .output();
-                    let Ok(listed) = listed else {
-                        continue;
-                    };
-                    if !listed.status.success() {
-                        continue;
-                    }
-                    for line in String::from_utf8_lossy(&listed.stdout).lines() {
-                        let Some((name, rest)) = line.rsplit_once(": ") else {
-                            continue;
-                        };
-                        if !rest.starts_with("test") {
-                            continue;
-                        }
-                        if let Some(fn_name) = name
-                            .rsplit("::")
-                            .next()
-                            .and_then(|part| part.rsplit(": ").next())
-                        {
-                            if !fn_name.is_empty() {
-                                names.push(fn_name.to_string());
-                            }
-                        }
-                    }
+                if bytes == source {
+                    owner = Some((capsules.join(dir_name), crate_name, target));
+                    break;
                 }
-                names
-            });
-            names.iter().any(|name| name == function)
+            }
+            let Some((crate_dir, crate_name, target)) = owner else {
+                return false;
+            };
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let target_dir = std::env::temp_dir().join(format!(
+                "elastos-cite-owner-{}-{}-{}",
+                std::process::id(),
+                crate_name,
+                stamp
+            ));
+            let listed = std::process::Command::new("cargo")
+                .args(["test", "-p", crate_name, "--test", target, "--", "--list"])
+                .current_dir(&crate_dir)
+                .env("CARGO_TERM_COLOR", "never")
+                .env("CARGO_TARGET_DIR", &target_dir)
+                .output();
+            let _ = fs::remove_dir_all(&target_dir);
+            let Ok(listed) = listed else {
+                return false;
+            };
+            listed.status.success()
+                && String::from_utf8_lossy(&listed.stdout)
+                    .lines()
+                    .any(|line| rust_real_list_line_function(line) == Some(function))
         }
     }
 }
 
 /// `cargo test -- --list` on a tiny crate whose only test file is `source`.
 /// `None` when cargo cannot compile that snippet alone. The citation then
-/// uses the real `cargo test -p <crate> -- --list` list, or fails if that
-/// command cannot run. There is no source-walk fallback.
+/// needs the cited file to hold the live `#[test]` and the owning crate's
+/// `--test` list to name it.
 fn rust_cargo_lists_test(source: &str, function: &str) -> Option<bool> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2248,28 +2267,17 @@ fn rust_cfg_attr_at(chars: &[char], i: usize) -> Option<(usize, String)> {
 }
 
 /// Whether `cargo test -- --list` on this host leaves out items under this
-/// `cfg` predicate. Empty `any()`, `any(false)`, and a host-false OS cfg
-/// are unlistable. `test` stays listable.
+/// `cfg` predicate. Only `test` and the current host OS stay listable.
+/// `feature = "never"`, `false`, empty `any()`, and a host-false OS cfg
+/// are unlistable.
 fn rust_cfg_predicate_is_unlistable(pred: &str) -> bool {
     let compact: String = pred.chars().filter(|ch| !ch.is_whitespace()).collect();
     let folded = compact.to_ascii_lowercase();
-    matches!(
-        folded.as_str(),
-        "any()"
-            | "any(false)"
-            | "all()"
-            | "all(false)"
-            | "windows"
-            | "target_os=\"windows\""
-            | "macos"
-            | "target_os=\"macos\""
-            | "unix"
-            | "linux"
-            | "target_os=\"linux\""
-    ) && match folded.as_str() {
+    match folded.as_str() {
+        "test" => false,
+        "unix" => !cfg!(unix),
         "windows" | "target_os=\"windows\"" => !cfg!(windows),
         "macos" | "target_os=\"macos\"" => !cfg!(target_os = "macos"),
-        "unix" => !cfg!(unix),
         "linux" | "target_os=\"linux\"" => !cfg!(target_os = "linux"),
         _ => true,
     }
@@ -5195,9 +5203,7 @@ fn file_profile_contract_refuses_scheme_comments() {
     }
 }
 
-/// `#\;` is a Scheme character, not a line comment. A `;` reader would hide
-/// the later forms; this reader refuses the `#` form so the grant stays
-/// visible as a refusal.
+/// Every `#\` character literal is refused. Real profiles do not use it.
 ///
 /// Falsifier: treat `;` as a line comment after `#\`; then
 /// `#\;(version 0)(allow file*)` passes the contract and this test fails.
@@ -5209,27 +5215,96 @@ fn file_profile_contract_refuses_hash_backslash_semicolon() {
     let refusal = check_profile_contract("fixture-provider", &profile)
         .expect_err("a Scheme #\\; character must be refused");
     assert!(
-        refusal.contains("fixture-provider") && (refusal.contains('#') || refusal.contains("#;")),
+        refusal.contains("fixture-provider")
+            && (refusal.contains('#') || refusal.contains("#\\") || refusal.contains("#;")),
         "the refusal must name the # reader form {extra}: {refusal}"
     );
 }
 
-/// A zero-width space between `#` and `;` is a format character. The reader
-/// refuses it anywhere, so it cannot hide a later grant.
+/// `#\; x (allow file*)` is refused. An atom after `#\;` is not a hide.
 ///
-/// Falsifier: skip non-ASCII checks; then `#\\u{200b};(version 0)(allow file*)`
-/// passes the contract and this test fails.
+/// Falsifier: count only `(` after `#\;`; then this profile passes.
+#[test]
+fn file_profile_contract_refuses_hash_backslash_atom_decoy() {
+    let complete = contract_fixture_profile(true);
+    let extra = r"#\; x (allow file*)";
+    let profile = format!("{complete}{extra}\n");
+    check_profile_contract("fixture-provider", &profile)
+        .expect_err("a Scheme #\\; atom decoy must be refused");
+}
+
+/// `#\; "x" (allow file*)` is refused. A string after `#\;` is not a hide.
+///
+/// Falsifier: count only `(` after `#\;`; then this profile passes.
+#[test]
+fn file_profile_contract_refuses_hash_backslash_string_decoy() {
+    let complete = contract_fixture_profile(true);
+    let extra = r#"#\; "x" (allow file*)"#;
+    let profile = format!("{complete}{extra}\n");
+    check_profile_contract("fixture-provider", &profile)
+        .expect_err("a Scheme #\\; string decoy must be refused");
+}
+
+/// `#\; 1 (allow file*)` is refused. A number after `#\;` is not a hide.
+///
+/// Falsifier: count only `(` after `#\;`; then this profile passes.
+#[test]
+fn file_profile_contract_refuses_hash_backslash_number_decoy() {
+    let complete = contract_fixture_profile(true);
+    let extra = r"#\; 1 (allow file*)";
+    let profile = format!("{complete}{extra}\n");
+    check_profile_contract("fixture-provider", &profile)
+        .expect_err("a Scheme #\\; number decoy must be refused");
+}
+
+/// A zero-width space inside a string is a format character. Only the
+/// non-ASCII check refuses it; the unknown-`#` arm never sees this input.
+///
+/// Falsifier: skip the non-ASCII `allowed` check; then this string parses
+/// and this test fails.
 #[test]
 fn file_profile_contract_refuses_zwsp_hash_semicolon() {
-    let complete = contract_fixture_profile(true);
-    let extra = "#\u{200b};(version 0)(allow file*)";
-    let profile = format!("{complete}{extra}\n");
-    let refusal = check_profile_contract("fixture-provider", &profile)
-        .expect_err("a zero-width space in the profile must be refused");
+    let refusal = std::panic::catch_unwind(|| profile_characters("\"a\u{200b}b\""));
     assert!(
-        refusal.contains("fixture-provider"),
-        "the refusal must name the profile: {refusal}"
+        refusal.is_err(),
+        "a zero-width space inside a string must be refused"
     );
+}
+
+/// An unknown string escape is refused. Allowed escapes are `\\`, `\"`,
+/// `\n`, and `\t` only.
+///
+/// Falsifier: allow any string escape; then `"foo\\r"` parses and this
+/// test fails.
+#[test]
+fn file_profile_contract_refuses_unknown_string_escape() {
+    let refusal = std::panic::catch_unwind(|| profile_characters(r#""foo\r""#));
+    assert!(refusal.is_err(), "an unknown string escape must be refused");
+}
+
+/// A carriage return inside a string is a format character. Only the
+/// ASCII-set check refuses it.
+///
+/// Falsifier: allow CR in the ASCII set; then this string parses and this
+/// test fails.
+#[test]
+fn file_profile_contract_refuses_carriage_return() {
+    let refusal = std::panic::catch_unwind(|| profile_characters("\"a\rb\""));
+    assert!(
+        refusal.is_err(),
+        "a carriage return inside a string must be refused"
+    );
+}
+
+/// A `#` after a symbol is refused. `#t` is only a hash token at a token
+/// boundary.
+///
+/// Falsifier: skip the mid-token `#` panic; then `abc#t` parses and this
+/// test fails.
+#[test]
+fn file_profile_contract_refuses_hash_mid_token() {
+    let refusal = std::panic::catch_unwind(|| profile_characters("abc#t"));
+    assert!(refusal.is_err(), "a # after a symbol must be refused");
 }
 
 /// A `#[cfg(feature = "never")]` test that does not compile as the tiny crate
@@ -5280,6 +5355,56 @@ fn citation_refuses_cfg_false_when_cargo_cannot_list() {
     assert!(
         !rust_holds_cited_test(source, "present_case"),
         "#[cfg(false)] must not count as a citation"
+    );
+}
+
+/// A name that only exists on another crate's cargo list is not a citation
+/// of this source.
+///
+/// Falsifier: union wallet, model, and did lists; then this snippet counts
+/// `file_profile_contract_refuses_hash_backslash_semicolon`.
+#[test]
+fn citation_refuses_a_name_from_another_crate() {
+    let source = "use missing_crate::Thing;\nfn other() { let _ = Thing; }\n";
+    assert!(
+        rust_cargo_lists_test(
+            source,
+            "file_profile_contract_refuses_hash_backslash_semicolon"
+        )
+        .is_none(),
+        "the tiny crate cannot compile a missing import"
+    );
+    assert!(
+        !rust_holds_cited_test(
+            source,
+            "file_profile_contract_refuses_hash_backslash_semicolon"
+        ),
+        "a name that only exists on another crate's list must not count"
+    );
+}
+
+/// Wallet `confine.rs` does not hold the model-provider ops-under-profile
+/// test. The name is built at runtime so this file never contains the
+/// `fn <that name>` spelling the review hunts for.
+///
+/// Falsifier: union the three crate lists; then this file counts a
+/// model-provider test name.
+#[test]
+fn citation_refuses_a_model_provider_test_name_from_wallet_confine() {
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs"))
+        .expect("wallet confine.rs");
+    let name = format!("model_provider_{}", "ops_under_profile");
+    assert!(
+        !source.contains(&format!("fn {name}")),
+        "wallet confine.rs must not define the model-provider test"
+    );
+    assert!(
+        rust_cargo_lists_test(&source, &name).is_none(),
+        "wallet confine.rs cannot compile as the tiny cite crate"
+    );
+    assert!(
+        !rust_holds_cited_test(&source, &name),
+        "wallet confine.rs must not count a model-provider test name"
     );
 }
 
@@ -6055,11 +6180,10 @@ fn profile_holds_scheme_comment(profile: &str) -> bool {
 /// A number token is digits. Every `#` reader form is refused, including
 /// `#\`, `#;`, `#|`, `#!`, `#+`, `#-`, and `#"`. The grammar names only
 /// `#t`, `#f`, and `#include` as hash tokens, because `(if #t …)` fixtures
-/// and a bare `#include` atom use them. `#\;` is the semicolon character:
-/// one following datum on that line is dropped (both readers hide it);
-/// two or more following datums are refused. A non-ASCII or zero-width character
-/// anywhere is refused. An unknown escape is refused. An unclosed string is
-/// a refusal with its own reason.
+/// and a bare `#include` atom use them. `#\` character literals are refused
+/// outright. A non-ASCII or zero-width character anywhere is refused. An
+/// unknown escape is refused. An unclosed string is a refusal with its own
+/// reason.
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
     let mut characters = Vec::new();
     let mut chars = profile.chars().peekable();
@@ -6123,64 +6247,7 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                 );
             }
             if chars.peek() == Some(&'\\') {
-                chars.next();
-                let Some(value) = chars.next() else {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                };
-                if value != ';' {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                }
-                let mut rest = String::new();
-                while let Some(&next) = chars.peek() {
-                    if next == '\n' {
-                        break;
-                    }
-                    let next_ok = next == '\t' || (next >= ' ' && next <= '~');
-                    assert!(
-                        next_ok,
-                        "the profile must refuse a non-ASCII or format character: {profile}"
-                    );
-                    rest.push(chars.next().expect("peeked #\\; tail"));
-                }
-                let mut datums = 0usize;
-                let mut depth = 0usize;
-                let mut in_tail_string = false;
-                let mut tail = rest.chars().peekable();
-                while let Some(part) = tail.next() {
-                    if in_tail_string {
-                        if part == '\\' {
-                            let _ = tail.next();
-                            continue;
-                        }
-                        if part == '"' {
-                            in_tail_string = false;
-                        }
-                        continue;
-                    }
-                    if part == '"' {
-                        in_tail_string = true;
-                        continue;
-                    }
-                    if part == '(' {
-                        if depth == 0 {
-                            datums += 1;
-                        }
-                        depth += 1;
-                    } else if part == ')' {
-                        depth = depth.saturating_sub(1);
-                    }
-                }
-                if datums >= 2 {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                }
-                at_token_boundary = true;
-                continue;
+                panic!("the profile must refuse a Scheme character literal #\\: {profile}");
             }
             let mut token = String::from("#");
             while let Some(&next) = chars.peek() {
@@ -6248,4 +6315,41 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
         "the profile must not end early: unclosed string in {profile}"
     );
     characters
+}
+
+#[path = "sbpl_include.rs"]
+mod shared_sbpl;
+
+/// Mutating `sbpl_reader.rs` alone fails this crate's confine suite.
+///
+/// Falsifier: change only `tests/sbpl_reader.rs`; this test fails.
+#[test]
+fn shared_sbpl_reader_mutation_fails_this_suite() {
+    let shared =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sbpl_reader.rs"))
+            .expect("shared sbpl_reader.rs");
+    let here = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs"))
+        .expect("wallet confine.rs");
+    assert_eq!(
+        rust_named_fn_source(&shared, "profile_characters"),
+        rust_named_fn_source(&here, "profile_characters"),
+        "wallet confine.rs must keep the one shared sbpl_reader.rs body"
+    );
+    assert!(
+        shared_sbpl::profile_holds_scheme_comment(r"#\; x (allow file*)"),
+        "the include! copy must refuse every #\\ character literal"
+    );
+}
+
+fn rust_named_fn_source<'a>(source: &'a str, name: &str) -> &'a str {
+    let sig = format!("fn {name}(profile: &str)");
+    let start = source
+        .find(&sig)
+        .unwrap_or_else(|| panic!("{name} missing"));
+    let rest = &source[start..];
+    let rel = rest
+        .find("\n}\n")
+        .or_else(|| rest.find("\n}").filter(|i| rest[i + 2..].is_empty()))
+        .unwrap_or_else(|| panic!("{name} is unclosed"));
+    &source[start..start + rel + 2]
 }

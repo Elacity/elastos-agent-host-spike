@@ -1,9 +1,10 @@
-/// Shared fail-closed SBPL reader used by the model confine tests via
-/// `include!`. Keep this file and `profile_characters` in wallet and did
-/// `confine.rs` the same: review extract.py reads the named functions from
-/// those files. The grammar names only `#t`, `#f`, and `#include` as hash
-/// tokens; every other `#` reader form is refused.
-fn profile_holds_scheme_comment(profile: &str) -> bool {
+/// Shared fail-closed SBPL reader. Model, wallet, and did compile this file
+/// through `include!`. Review extract.py still reads the same function text
+/// from wallet and did `confine.rs`, so those copies must stay byte-identical
+/// to this file's functions. No shipped `confine.sb` uses a `#\` character
+/// literal; every `#\` form is refused. The grammar names only `#t`, `#f`,
+/// and `#include` as hash tokens.
+pub fn profile_holds_scheme_comment(profile: &str) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = profile_characters(profile);
     }))
@@ -73,64 +74,7 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                 );
             }
             if chars.peek() == Some(&'\\') {
-                chars.next();
-                let Some(value) = chars.next() else {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                };
-                if value != ';' {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                }
-                let mut rest = String::new();
-                while let Some(&next) = chars.peek() {
-                    if next == '\n' {
-                        break;
-                    }
-                    let next_ok = next == '\t' || (next >= ' ' && next <= '~');
-                    assert!(
-                        next_ok,
-                        "the profile must refuse a non-ASCII or format character: {profile}"
-                    );
-                    rest.push(chars.next().expect("peeked #\\; tail"));
-                }
-                let mut datums = 0usize;
-                let mut depth = 0usize;
-                let mut in_tail_string = false;
-                let mut tail = rest.chars().peekable();
-                while let Some(part) = tail.next() {
-                    if in_tail_string {
-                        if part == '\\' {
-                            let _ = tail.next();
-                            continue;
-                        }
-                        if part == '"' {
-                            in_tail_string = false;
-                        }
-                        continue;
-                    }
-                    if part == '"' {
-                        in_tail_string = true;
-                        continue;
-                    }
-                    if part == '(' {
-                        if depth == 0 {
-                            datums += 1;
-                        }
-                        depth += 1;
-                    } else if part == ')' {
-                        depth = depth.saturating_sub(1);
-                    }
-                }
-                if datums >= 2 {
-                    panic!(
-                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
-                    );
-                }
-                at_token_boundary = true;
-                continue;
+                panic!("the profile must refuse a Scheme character literal #\\: {profile}");
             }
             let mut token = String::from("#");
             while let Some(&next) = chars.peek() {
@@ -200,12 +144,14 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
     characters
 }
 
+#[allow(dead_code)]
 fn push_separator(current: &mut String) {
     if !current.is_empty() && !current.ends_with('(') {
         current.push(' ');
     }
 }
 
+#[allow(dead_code)]
 fn profile_forms(profile: &str) -> Vec<String> {
     let mut forms = Vec::new();
     let mut current = String::new();
@@ -257,4 +203,53 @@ fn profile_forms(profile: &str) -> Vec<String> {
         "the profile must not end early: unclosed form {current}"
     );
     forms
+}
+
+#[test]
+fn shared_sbpl_reader_refuses_every_hash_backslash_character_literal() {
+    for extra in [
+        r"#\;",
+        r"#\; x (allow file*)",
+        r#"#\; "x" (allow file*)"#,
+        r"#\; 1 (allow file*)",
+        r"#\;(allow file*)",
+        r"#\;(version 0)(allow file*)",
+    ] {
+        assert!(
+            profile_holds_scheme_comment(extra),
+            "every #\\ character literal must be refused: {extra}"
+        );
+    }
+}
+
+#[test]
+fn shared_sbpl_reader_refuses_non_ascii_inside_a_string() {
+    assert!(
+        profile_holds_scheme_comment("\"a\u{200b}b\""),
+        "only the non-ASCII check refuses a zero-width space inside a string"
+    );
+}
+
+#[test]
+fn shared_sbpl_reader_refuses_unknown_string_escape() {
+    assert!(
+        profile_holds_scheme_comment(r#""foo\r""#),
+        "an unknown string escape must be refused"
+    );
+}
+
+#[test]
+fn shared_sbpl_reader_refuses_carriage_return_inside_a_string() {
+    assert!(
+        profile_holds_scheme_comment("\"a\rb\""),
+        "a carriage return inside a string must be refused"
+    );
+}
+
+#[test]
+fn shared_sbpl_reader_refuses_hash_mid_token() {
+    assert!(
+        profile_holds_scheme_comment("abc#t"),
+        "a # after a symbol must be refused"
+    );
 }
