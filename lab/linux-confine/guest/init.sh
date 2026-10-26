@@ -103,8 +103,10 @@ run_as_tester() {
 }
 
 echo "--- C9 suites ---"
+set +e
 run_as_tester '/usr/local/bin/run-c9.sh'
 status=$?
+set -e
 
 echo "--- guest finished status=$status ---"
 sync

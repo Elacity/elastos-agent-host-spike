@@ -1,4 +1,4 @@
-# Rebuildable guest images and cross artifacts. Evidence logs stay tracked.
+# Rebuildable guest images and cross artifacts. Evidence text stays tracked.
 /guest-work/
 /guest-bins/
 /guest-plants/

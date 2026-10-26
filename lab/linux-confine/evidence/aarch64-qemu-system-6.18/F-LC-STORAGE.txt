@@ -1,0 +1,35 @@
+
+running 1 test
+test did_profile_permits_its_operations_and_refuses_the_rest ... 
+thread 'did_profile_permits_its_operations_and_refuses_the_rest' (765) panicked at tests/confine.rs:172:5:
+assertion `left == right` failed: storage root rights drifted
+  left: 49598
+ right: 16830
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/std/src/panicking.rs:698:5
+   1: core::panicking::panic_fmt
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:75:14
+   2: core::panicking::assert_failed_inner
+   3: core::panicking::assert_failed
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:394:5
+   4: confine::prove
+             at ./workspace/lab/linux-confine/tests/confine.rs:172:5
+   5: confine::did_profile_permits_its_operations_and_refuses_the_rest
+             at ./workspace/lab/linux-confine/tests/confine.rs:372:5
+   6: confine::did_profile_permits_its_operations_and_refuses_the_rest::{{closure}}
+             at ./workspace/lab/linux-confine/tests/confine.rs:371:61
+   7: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+   8: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+
+failures:
+
+failures:
+    did_profile_permits_its_operations_and_refuses_the_rest
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.50s
+

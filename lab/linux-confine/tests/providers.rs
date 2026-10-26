@@ -4,7 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use elastos_model_contract::{
     model_input_hash, model_run_id, RuntimeCreateBinding, RUNTIME_CREATE_BINDING_SCHEMA,
@@ -514,7 +515,17 @@ fn unbound_exec_reason(launch: &mut ProviderLaunch) -> String {
     launch.execute = real;
     launch.preload = false;
     let err = match spawn_provider(launch) {
-        Ok(running) => running.stderr(),
+        Ok(running) => {
+            // The launcher prints `enforced` before execve. On a slow
+            // emulated CPU the EACCES line can land a moment later.
+            let started = Instant::now();
+            let mut text = running.stderr();
+            while !text.contains("errno=13") && started.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(20));
+                text = running.stderr();
+            }
+            text
+        }
         Err(err) => err,
     };
     assert!(

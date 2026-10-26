@@ -1,0 +1,77 @@
+
+running 1 test
+test provider_filter_refuses_clone_process ... 
+thread 'provider_filter_refuses_clone_process' (814) panicked at tests/confine.rs:137:9:
+assertion `left == right` failed: denied clone must carry exact errno Some(1), not any failure
+enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
+op=in-memory result=ok reason=no file and no socket
+op=storage-write result=ok reason=wrote under STORAGE_ROOT
+op=storage-read result=ok reason=read under STORAGE_ROOT
+op=storage2-write result=ok reason=wrote under STORAGE_ROOT
+op=storage2-read result=ok reason=read under STORAGE_ROOT
+op=outside-read result=refused errno=13 reason=landlock refused the read outside STORAGE_ROOT
+op=outside-write result=refused errno=13 reason=landlock refused the write outside STORAGE_ROOT
+op=parent-read result=refused errno=13 reason=the Landlock ABI cannot express the STORAGE_PARENT read, so the read is refused
+op=root-read result=refused errno=13 reason=no Landlock rule for the root directory read
+op=kernel-fact result=refused errno=13 reason=landlock refused the read of kernel state
+op=sysctl result=refused errno=1 reason=uname failed
+op=socket result=refused errno=1 reason=seccomp refused socket
+op=socket-unix result=refused errno=1 reason=seccomp refused socket
+op=socketpair result=ok reason=socketpair succeeded
+op=socketpair-inet result=refused errno=1 reason=seccomp refused socketpair
+op=signal-host result=refused errno=3 reason=the pid namespace has no such host process
+op=make-sym result=refused errno=1 reason=landlock refused MAKE_SYM
+op=make-fifo result=refused errno=1 reason=landlock refused MAKE_FIFO
+op=make-sock result=refused errno=1 reason=landlock refused MAKE_SOCK
+op=make-char result=refused errno=1 reason=landlock refused MAKE_CHAR
+op=make-block result=refused errno=1 reason=landlock refused MAKE_BLOCK
+op=refer-mkdir result=ok reason=mkdir under STORAGE_ROOT
+op=refer result=refused errno=18 reason=landlock refused REFER
+op=ioctl-dev result=refused errno=13 reason=landlock refused IOCTL_DEV
+op=ptrace result=refused errno=1 reason=seccomp refused ptrace
+op=proc-self-mem result=refused errno=13 reason=landlock refused /proc/self/mem
+op=dev-null result=refused errno=13 reason=landlock refused /dev/null
+op=dev-zero result=refused errno=13 reason=landlock refused /dev/zero
+op=io-uring result=refused errno=1 reason=seccomp refused io_uring_setup
+op=bpf result=refused errno=1 reason=seccomp refused bpf
+op=unshare-user result=refused errno=1 reason=seccomp refused unshare
+op=unshare-net result=refused errno=1 reason=seccomp refused unshare
+op=setns result=refused errno=1 reason=seccomp refused setns
+op=keyctl result=refused errno=1 reason=seccomp refused keyctl
+op=mount result=refused errno=1 reason=seccomp refused mount
+op=clone result=refused errno=38 reason=seccomp refused clone
+op=exec-unbound result=refused errno=13 reason=landlock refused exec of a file other than PROVIDER_EXECUTABLE
+op=exec-bound result=ok reason=process-exec of PROVIDER_EXECUTABLE
+
+  left: Some(38)
+ right: Some(1)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/std/src/panicking.rs:698:5
+   1: core::panicking::panic_fmt
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:75:14
+   2: core::panicking::assert_failed_inner
+   3: core::panicking::assert_failed
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:394:5
+   4: confine::expect
+             at ./workspace/lab/linux-confine/tests/confine.rs:137:9
+   5: confine::expect_refused
+             at ./workspace/lab/linux-confine/tests/confine.rs:419:5
+   6: confine::provider_filter_refuses_clone_process
+             at ./workspace/lab/linux-confine/tests/confine.rs:425:5
+   7: confine::provider_filter_refuses_clone_process::{{closure}}
+             at ./workspace/lab/linux-confine/tests/confine.rs:423:43
+   8: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+   9: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+
+failures:
+
+failures:
+    provider_filter_refuses_clone_process
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.52s
+

@@ -1,0 +1,33 @@
+
+running 1 test
+test confined_process_cap_bnd_is_zero ... 
+thread 'confined_process_cap_bnd_is_zero' (733) panicked at tests/providers.rs:343:5:
+assertion `left == right` failed: capability bounding set did not drop: CapBnd: 000001ffffffffff
+  left: 2199023255551
+ right: 0
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/std/src/panicking.rs:698:5
+   1: core::panicking::panic_fmt
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:75:14
+   2: core::panicking::assert_failed_inner
+   3: core::panicking::assert_failed
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:394:5
+   4: providers::confined_process_cap_bnd_is_zero
+             at ./workspace/lab/linux-confine/tests/providers.rs:343:5
+   5: providers::confined_process_cap_bnd_is_zero::{{closure}}
+             at ./workspace/lab/linux-confine/tests/providers.rs:326:38
+   6: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+   7: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+
+failures:
+
+failures:
+    confined_process_cap_bnd_is_zero
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.32s
+

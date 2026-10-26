@@ -1,0 +1,78 @@
+
+running 4 tests
+test confined_process_cap_bnd_is_zero ... /proc/632/status CapBnd:	0000000000000000 comm=did-provider
+
+ok
+test did_provider_binary_under_its_profile ... library /lib/aarch64-linux-gnu/libgcc_s.so.1 — libgcc_s.so.1: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/aarch64-linux-gnu/libc.so.6 — libc.so.6: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/ld-linux-aarch64.so.1 — ld-linux-aarch64.so.1: the kernel starts the binary through this dynamic linker, which must be mapped executable
+### did-provider
+
+| side | operation | result | errno | reason | positive control |
+| --- | --- | --- | --- | --- | --- |
+| permitted | init | ok | - | wrote nickname state under STORAGE_ROOT | - |
+| permitted | get_did | ok | - | answered from the device key in memory | - |
+| permitted | set_nickname | ok | - | wrote nickname.enc under STORAGE_ROOT | - |
+| permitted | get_nickname | ok | - | read nickname.enc back | - |
+| permitted | get_persona_did | ok | - | wrote personas/fixture.enc under STORAGE_ROOT | - |
+| permitted | shutdown | ok | - | answered and exited | - |
+| denied | write outside STORAGE_ROOT | refused | 13 | did-provider: failed to save nickname: Permission denied (os error 13) | unconfined read of /tmp/linux-confine-provider-623-did-provider-did/outside/secret succeeded |
+| denied | read outside STORAGE_ROOT | refused | 13 | did-provider: failed to read nickname: Permission denied (os error 13) | unconfined read of /tmp/linux-confine-provider-623-did-provider-did/outside/secret succeeded |
+| denied | socket | refused | 1 | seccomp refused socket | unconfined socket(AF_INET) succeeded |
+| denied | exec a copy of the provider | refused | 13 | linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=13 | unconfined exec of the copy succeeded |
+| denied | signal a host pid | refused | 3 | the pid namespace has no such host process | unconfined kill(host, 0) succeeded |
+| confined | /proc/self/status CapBnd | 0 | - | /proc/641/status CapBnd 0000000000000000 (did-provider) | - |
+| confined | STORAGE_ROOT rights | 0x41be | - | read file, read directory, write file, truncate, make regular file, make directory, remove file, remove directory | - |
+
+ok
+test model_provider_binary_under_its_profile ... library /lib/aarch64-linux-gnu/libgcc_s.so.1 — libgcc_s.so.1: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/aarch64-linux-gnu/libm.so.6 — libm.so.6: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/aarch64-linux-gnu/libc.so.6 — libc.so.6: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/ld-linux-aarch64.so.1 — ld-linux-aarch64.so.1: the kernel starts the binary through this dynamic linker, which must be mapped executable
+### model-provider
+
+| side | operation | result | errno | reason | positive control |
+| --- | --- | --- | --- | --- | --- |
+| permitted | init | ok | - | created runs/ under STORAGE_ROOT | - |
+| permitted | status | ok | - | answered from memory | - |
+| permitted | offers_list | ok | - | listed the hosted offer from memory | - |
+| permitted | runs_create | ok | - | wrote the run record under STORAGE_ROOT | - |
+| permitted | runs_get | ok | - | read the run record back from STORAGE_ROOT | - |
+| permitted | shutdown | ok | - | answered and exited | - |
+| denied | write outside STORAGE_ROOT | refused | 13 | landlock refused the write outside STORAGE_ROOT | unconfined read of /tmp/linux-confine-provider-623-model-provider-model/outside/secret succeeded |
+| denied | read outside STORAGE_ROOT | refused | 13 | landlock refused the read outside STORAGE_ROOT | unconfined read of /tmp/linux-confine-provider-623-model-provider-model/outside/secret succeeded |
+| denied | socket | refused | 1 | seccomp refused socket | unconfined socket(AF_INET) succeeded |
+| denied | exec a copy of the provider | refused | 13 | linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=13 | unconfined exec of the copy succeeded |
+| denied | signal a host pid | refused | 3 | the pid namespace has no such host process | unconfined kill(host, 0) succeeded |
+provider mapping for the denied outside journal read stays journal_corrupt: model run journal is unavailable. That string is not the Landlock-read row.
+| confined | /proc/self/status CapBnd | 0 | - | /proc/665/status CapBnd 0000000000000000 (model-provider) | - |
+| confined | STORAGE_ROOT rights | 0x41be | - | read file, read directory, write file, truncate, make regular file, make directory, remove file, remove directory | - |
+runs_events and runs_cancel have no named macOS test. This run does not claim them.
+Hosted dispatch stops in the binary before a socket, with "Hosted external HTTPS is paused." The socket row is the kernel refusal from the same process.
+
+ok
+test wallet_provider_binary_under_its_profile ... library /lib/aarch64-linux-gnu/libgcc_s.so.1 — libgcc_s.so.1: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/aarch64-linux-gnu/libm.so.6 — libm.so.6: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/aarch64-linux-gnu/libc.so.6 — libc.so.6: ldd lists this as a library the binary links, and the linker maps it executable
+library /lib/ld-linux-aarch64.so.1 — ld-linux-aarch64.so.1: the kernel starts the binary through this dynamic linker, which must be mapped executable
+### wallet-provider
+
+| side | operation | result | errno | reason | positive control |
+| --- | --- | --- | --- | --- | --- |
+| permitted | init | ok | - | created the wallet directory and key under STORAGE_ROOT | - |
+| permitted | status | ok | - | answered from memory | - |
+| permitted | wallet_contract create_managed_account | ok | - | wrote the account under STORAGE_ROOT | - |
+| permitted | wallet_contract list_accounts | ok | - | listed the account stored under STORAGE_ROOT | - |
+| permitted | shutdown | ok | - | answered and exited | - |
+| denied | write outside STORAGE_ROOT | refused | 13 | failed to create wallet storage directory: Permission denied (os error 13) | unconfined read of /tmp/linux-confine-provider-623-wallet-provider-wallet/outside/secret succeeded |
+| denied | read outside STORAGE_ROOT | refused | 13 | failed to sync wallet storage directory: Permission denied (os error 13) | unconfined read of /tmp/linux-confine-provider-623-wallet-provider-wallet/outside/secret succeeded |
+| denied | socket | refused | 1 | seccomp refused socket | unconfined socket(AF_INET) succeeded |
+| denied | exec a copy of the provider | refused | 13 | linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=13 | unconfined exec of the copy succeeded |
+| denied | signal a host pid | refused | 3 | the pid namespace has no such host process | unconfined kill(host, 0) succeeded |
+| confined | /proc/self/status CapBnd | 0 | - | /proc/698/status CapBnd 0000000000000000 (wallet-provider) | - |
+| confined | STORAGE_ROOT rights | 0x41be | - | read file, read directory, write file, truncate, make regular file, make directory, remove file, remove directory | - |
+
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.54s
+

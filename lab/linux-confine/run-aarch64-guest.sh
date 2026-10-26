@@ -255,7 +255,7 @@ ls -lh "$WORK/guest.cpio.gz" | tee -a "$EVIDENCE/host-context.txt"
 
 echo "=== boot qemu-system-aarch64 TCG ==="
 # -accel tcg: emulated CPU. Do not use kvm. This is not Jetson.
-QEMU_LOG="$EVIDENCE/qemu-console.log"
+QEMU_LOG="$EVIDENCE/qemu-console.txt"
 set +e
 qemu-system-aarch64 \
     -name linux-confine-c9-aarch64 \

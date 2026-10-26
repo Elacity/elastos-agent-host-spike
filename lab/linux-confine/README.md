@@ -104,7 +104,9 @@ lab/linux-confine/run-aarch64-guest.sh          # full C9 + in-guest plants
 lab/linux-confine/run-aarch64-guest.sh smoke    # ABI probe only
 ```
 
-The script cross-builds the confine, elf, aarch64 and providers test binaries plus the three shipping provider binaries for `aarch64-unknown-linux-gnu`, packs them into an Alpine 3.23 minirootfs initramfs with the glibc loader, and boots `qemu-system-aarch64 -accel tcg`. Evidence lands in `lab/linux-confine/evidence/aarch64-qemu-system-6.18/`. That guest is still not Jetson and not a real ARM board.
+The script cross-builds the confine, elf, aarch64 and providers test binaries plus the three shipping provider binaries for `aarch64-unknown-linux-gnu`, packs them into an Alpine 3.23 minirootfs initramfs with the glibc loader, and boots `qemu-system-aarch64 -accel tcg`. Evidence lands in `lab/linux-confine/evidence/aarch64-qemu-system-6.18/`.
+
+Inside that guest (uid 1000): elf 6/6, aarch64 2/2 with the qemu-user row ignored, confine 25/25 (`enforced abi=7`, `ioctl-dev` EACCES), providers 4/4, and the six in-guest plants CAUGHT. That guest is still not Jetson and not a real ARM board.
 
 The second command plants six confinement bugs, one at a time, and restores each file. It also sets `TARGET_CC=cc` for the aarch64 check (after dropping leftover `CC_*` so a real cross `CC_<target>` cannot hide the plant) and plants a skip of the ELF `e_machine` test. It plants an errno-0 expectation on the qemu-user Landlock probe. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, `F-LC-PROVIDER-SOCKET CAUGHT`, `F-LC-ANY-ERRNO CAUGHT`, `F-LC-WRONG-ARCH-CC CAUGHT`, and `F-LC-QEMU-USER-LANDLOCK CAUGHT`.
 

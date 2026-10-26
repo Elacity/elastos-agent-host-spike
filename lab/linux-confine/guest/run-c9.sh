@@ -50,7 +50,7 @@ run_suite() {
     name=$1
     bin=$2
     extra=${3:-}
-    log="$EVIDENCE/${name}.log"
+    log="$EVIDENCE/${name}.txt"
     echo "======== suite $name ========" | tee -a "$SUMMARY"
     if [ ! -x "$bin" ]; then
         echo "$name MISSING $bin" | tee -a "$SUMMARY"
@@ -112,7 +112,7 @@ run_plant() {
     caught=$3
     bin=$4
     helper_plant=${5:-}
-    log="$EVIDENCE/${id}.log"
+    log="$EVIDENCE/${id}.txt"
     echo "----- $id -----" | tee -a "$SUMMARY"
     if [ ! -x "$bin" ]; then
         echo "$id NOT RUN: missing $bin" | tee -a "$SUMMARY"
