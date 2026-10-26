@@ -1,5 +1,5 @@
 {
-  "about": "wc-001 and task 010 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001, task 010 and task 009 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -256,6 +256,386 @@
       ],
       "tests": [
         "two_clean_builds_in_different_paths_are_byte_identical"
+      ]
+    },
+    {
+      "id": "F-WC3-CMD-BYPASS",
+      "title": "the command names capsule.wasm alone with the shared encoder, not the whole bundle with bundle_identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "    bundle_identity(dir)\n        .map(|name| name.to_string())",
+          "new": "    let module = fs::read(dir.join(MODULE_FILE)).unwrap_or_default();\n    capsule_identity::encode_entries(&[capsule_identity::BundleEntry {\n        path: MODULE_FILE.to_owned(),\n        content: module,\n    }])\n    .map(|name| name.to_string())"
+        }
+      ],
+      "tests": [
+        "tools_bundle_name_mode_prints_the_lab_cid",
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-REUSE-OUT",
+      "title": "an existing OUT_DIR is accepted: create_dir_all instead of create_dir",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "    fs::create_dir(out_dir).map_err(",
+          "new": "    fs::create_dir_all(out_dir).map_err("
+        }
+      ],
+      "tests": [
+        "an_existing_out_dir_is_refused_and_nothing_is_written",
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-FOLLOW-WRITE",
+      "title": "bundle/ is made with create_dir_all, so a link planted there during the build is followed and the manifest is written through it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "    fs::create_dir(&bundle).map_err(",
+          "new": "    fs::create_dir_all(&bundle).map_err("
+        }
+      ],
+      "tests": [
+        "a_link_planted_during_the_build_is_never_written_through"
+      ]
+    },
+    {
+      "id": "F-WC3-MODULE-COPY",
+      "title": "the module is copied with fs::copy instead of moved with rename, so a planted link's target bytes enter the bundle",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "    fs::rename(from, to).map_err(",
+          "new": "    fs::copy(from, to).map(|_| ()).map_err("
+        }
+      ],
+      "tests": [
+        "a_link_planted_during_the_build_is_never_written_through"
+      ]
+    },
+    {
+      "id": "F-WC3-ARGS-UNKNOWN",
+      "title": "an unknown option gets only the usage line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            ArgRefusal::UnknownOption(arg) => write!(\n                f,\n                \"unknown option {:?}: the only option is --name\",\n                arg.to_string_lossy()\n            ),",
+          "new": "            ArgRefusal::UnknownOption(_) => write!(f, \"{USAGE}\"),"
+        }
+      ],
+      "tests": [
+        "bundle_arguments_are_refused_with_their_reason",
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-ARGS-MISSING",
+      "title": "--name with no directory gets only the usage line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            ArgRefusal::NameWithoutDir => write!(f, \"--name needs a BUNDLE_DIR after it\"),",
+          "new": "            ArgRefusal::NameWithoutDir => write!(f, \"{USAGE}\"),"
+        }
+      ],
+      "tests": [
+        "bundle_arguments_are_refused_with_their_reason"
+      ]
+    },
+    {
+      "id": "F-WC3-ARGS-NONE",
+      "title": "no argument gets only the usage line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            ArgRefusal::NoArgument => write!(f, \"no argument: give OUT_DIR, or --name BUNDLE_DIR\"),",
+          "new": "            ArgRefusal::NoArgument => write!(f, \"{USAGE}\"),"
+        }
+      ],
+      "tests": [
+        "bundle_arguments_are_refused_with_their_reason"
+      ]
+    },
+    {
+      "id": "F-WC3-ARGS-EXTRA",
+      "title": "an extra argument gets only the usage line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            ArgRefusal::ExtraArgument(arg) => write!(\n                f,\n                \"extra argument {:?}: give one OUT_DIR, or --name and one BUNDLE_DIR\",\n                arg.to_string_lossy()\n            ),",
+          "new": "            ArgRefusal::ExtraArgument(_) => write!(f, \"{USAGE}\"),"
+        }
+      ],
+      "tests": [
+        "bundle_arguments_are_refused_with_their_reason"
+      ]
+    },
+    {
+      "id": "F-WC3-ARGS-EMPTY",
+      "title": "an empty path gets only the usage line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            ArgRefusal::EmptyPath => write!(f, \"an empty path names no directory\"),",
+          "new": "            ArgRefusal::EmptyPath => write!(f, \"{USAGE}\"),"
+        }
+      ],
+      "tests": [
+        "bundle_arguments_are_refused_with_their_reason"
+      ]
+    },
+    {
+      "id": "F-WC3-ARGS-UTF8",
+      "title": "a path argument goes through a lossy UTF-8 conversion, so bytes that are not UTF-8 are lost",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "    let path = PathBuf::from(path);",
+          "new": "    let path = PathBuf::from(path.to_string_lossy().into_owned());"
+        }
+      ],
+      "tests": [
+        "bundle_arguments_preserve_non_utf8_paths"
+      ]
+    },
+    {
+      "id": "F-WC3-BUILD-CAUSE",
+      "title": "a build that did not start and a build that failed give one shared reason",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            Reason::BuildDidNotStart(error) => write!(f, \"tools/build did not start: {error}\"),",
+          "new": "            Reason::BuildDidNotStart(_) => write!(f, \"tools/build did not build the capsule\"),"
+        },
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            Reason::BuildFailed(status) => write!(f, \"tools/build failed ({status})\"),",
+          "new": "            Reason::BuildFailed(_) => write!(f, \"tools/build did not build the capsule\"),"
+        }
+      ],
+      "tests": [
+        "a_failed_build_is_refused_with_its_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-BUILD-STDOUT",
+      "title": "tools/build's stdout is no longer sent to stderr, so its progress line reaches the command's stdout beside the name",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "        .stdin(Stdio::null())\n        .stdout(Stdio::from(io::stderr()))\n",
+          "new": "        .stdin(Stdio::null())\n"
+        }
+      ],
+      "tests": [
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-PATH",
+      "title": "a run refusal drops its path and prints only the reason",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "        write!(f, \"{}: {}\", self.path.display(), self.reason)",
+          "new": "        write!(f, \"{}\", self.reason)"
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause",
+        "an_existing_out_dir_is_refused_and_nothing_is_written",
+        "a_link_planted_during_the_build_is_never_written_through",
+        "a_failed_build_is_refused_with_its_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-MOVE-PATH",
+      "title": "a failed move names the bundle's capsule.wasm, not the module it could not move",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "RunRefusal::new(from, Reason::ModuleNotMoved(error))",
+          "new": "RunRefusal::new(to, Reason::ModuleNotMoved(error))"
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-CAUSE-OUT",
+      "title": "OUT_DIR's creation refusal drops the system's cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "\"OUT_DIR cannot be created: {error}\"",
+          "new": "\"OUT_DIR cannot be created\""
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-CAUSE-BUNDLE",
+      "title": "bundle/'s creation refusal drops the system's cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "\"bundle/ cannot be created: {error}\"",
+          "new": "\"bundle/ cannot be created\""
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-CAUSE-MANIFEST",
+      "title": "capsule.json's creation refusal drops the system's cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "\"capsule.json cannot be created: {error}\"",
+          "new": "\"capsule.json cannot be created\""
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-CAUSE-WRITE",
+      "title": "capsule.json's write refusal drops the writer's cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "\"capsule.json cannot be written: {error}\"",
+          "new": "\"capsule.json cannot be written\""
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-IO-CAUSE-MOVE",
+      "title": "the module's move refusal drops the system's cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "\"capsule.wasm cannot be moved into the bundle: {error}\"",
+          "new": "\"capsule.wasm cannot be moved into the bundle\""
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
+      "id": "F-WC3-CMD-REASON",
+      "title": "bundle_identity's refusal is replaced by a reason of the command's own",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "            Reason::Identity(refusal) => write!(f, \"{refusal}\"),",
+          "new": "            Reason::Identity(_) => write!(f, \"the bundle is refused\"),"
+        }
+      ],
+      "tests": [
+        "a_link_planted_during_the_build_is_never_written_through",
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-CMD-STATUS",
+      "title": "a run refusal exits with status 2, the argument refusals' status",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bin/bundle.rs",
+          "old": "            eprintln!(\"bundle: refused: {refusal}\");\n            ExitCode::from(1)",
+          "new": "            eprintln!(\"bundle: refused: {refusal}\");\n            ExitCode::from(2)"
+        }
+      ],
+      "tests": [
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-CMD-STDOUT",
+      "title": "a run refusal is printed to stdout, where only a name belongs",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bin/bundle.rs",
+          "old": "            eprintln!(\"bundle: refused: {refusal}\");",
+          "new": "            println!(\"bundle: refused: {refusal}\");"
+        }
+      ],
+      "tests": [
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC3-ARTIFACT-PIN",
+      "title": "the capsule source changes, so tools/build makes another capsule.wasm with a receipt that matches it; only the pinned sha256 catches it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/capsule/src/lib.rs",
+          "old": "    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);",
+          "new": "    z = (z ^ (z >> 29)).wrapping_mul(0x94D0_49BB_1331_11EB);"
+        }
+      ],
+      "tests": [
+        "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
       ]
     }
   ]

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# A stand-in tools/build that succeeds but writes no module.
+set -euo pipefail
+exit 0
