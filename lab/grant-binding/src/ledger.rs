@@ -501,3 +501,26 @@ fn model_settle_below_the_hold_returns_the_rest() {
         .expect("reserve after settle");
     assert_eq!(verifier.ledger.held, 10);
 }
+
+#[test]
+fn model_release_twice_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier
+        .reserve(&call, &guest(handle), 10)
+        .expect("reserve");
+    let released = verifier.release(&call, &guest(handle), reservation);
+    assert_eq!(released, Ok(()));
+    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(verifier.ledger.charged, 0);
+    let refusal = verifier
+        .release(&call, &guest(handle), reservation)
+        .expect_err("second release");
+    assert_eq!(refusal, ReleaseRefuse::NotOutstanding);
+    assert_eq!(refusal.to_string(), "reservation is not outstanding");
+    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(verifier.ledger.charged, 0);
+    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+}
