@@ -478,3 +478,52 @@
   (ruling removed) `:229:5` "ADOPTION.md holds the discovery ruling on one line 0 times, not once". No change to
   `tools/Cargo.toml`, `Cargo.toml` or `Cargo.lock`. Gates: `cargo test --locked` (84 passed, 1 ignored, 0 failed)
   and both fmt checks green; retired-label greps: both empty, exit 1.
+- 26 Oct, task 027 (wc-010b, base `f92fe85970ad0898be4f5247cf580b1f5eaf4bda`): the declared memory cap on wasmtime.
+  `VerifiedBundle` keeps the manifest's `resources.memory_mb` from the verifier's one `CapsuleManifest` parse
+  (`manifest_entrypoint` now returns the entrypoint and `memory_mb`; one new accessor `memory_mb()`). The runner
+  (`tools/src/run.rs`) gives wasmtime's module run one more pair, `-W` and
+  `max-memory-size=<memory_mb × 1048576>,trap-on-grow-failure=y` (u64, MB read as 2^20 bytes), on a new line between
+  `.args(["run", ...])` and `.arg(module)`; wasmer's argv and both `--version` queries are unchanged. Hand check of
+  that order first, from git-ignored `target/wc010b/` with 021's `grow.wat`:
+  `/opt/homebrew/bin/wasmtime run --invoke grow -W max-memory-size=67108864,trap-on-grow-failure=y grow.wat 1024`
+  exit 1, stdout empty, stderr the `--invoke` takes-arguments warning, then "Error: failed to run main module
+  `grow.wat`", "0: failed to invoke `grow`", "1: error while executing at wasm backtrace: 0: 0x33 - <unknown>!<wasm
+  function 0>", "2: forcing trap when growing memory to 67174400 bytes"; the same with `1023` exit 0, stdout `1`,
+  stderr the two `--invoke` warnings. wasmtime accepts that order, so no anchored line moved. New tests (README
+  "Named tests"): `declared_memory_cap_comes_from_the_manifest` (2 MB → `max-memory-size=2097152`, `u32::MAX` →
+  `4503599626321920`), `capsule_grows_within_the_declared_cap_on_wasmtime`,
+  `memory_grow_past_the_declared_cap_traps_on_wasmtime`, `built_capsule_runs_under_the_declared_cap_on_wasmtime`
+  (a recording shell that `exec`s the real wasmtime shows the cap on its argv) and the `#[ignore]` SKIP
+  `memory_cap_on_wasmer_is_skipped`; the grow modules are hand-written bytes. Updated: the argv test (new wasmtime
+  argv; the module is the second-to-last argument), `verified_bundle_is_sealed` (the new field and accessor), and
+  the three stand-ins that read the module as `$4` (now the second-to-last argument; no byte assertion changed).
+  Six new entries and seven re-anchored, all anchored in `tools/src/run.rs`, `tools/src/verify.rs` or `README.md`
+  (all recovery targets on this base): canonical runner, from the repo root, `python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC10-CAP-IGNORED F-WC10-CAP-FIXED
+  F-WC10-NO-TRAP F-WC10-CAP-OVERFLOW F-WC10-CAP-NOT-READ F-WC10-WASMER-FLAG F-WC5-START-TWICE F-WC5a
+  F-WC5-BYPASS-RUN-ENGINE F-WC4-ORDER-AUDIT-FIRST F-WC4-ENTRYPOINT-REPARSE F-WC4-SEALED-NEW F-WC-README-COUNT`:
+  "baseline: 11 named tests pass without an edit, 0 do not", "summary: 13 CAUGHT of 13", exit 0 (the six new ones
+  runner-caught; all 152 entries' anchors found exactly once). Because `run.rs` and `verify.rs` changed, every other
+  entry anchored there was re-run too (76 ids): 73 CAUGHT and 3 BUILD FAILED (F-WC4-ENTRYPOINT-REPARSE, F-WC5a,
+  F-WC5-BYPASS-RUN-ENGINE, whose planted code used the old signatures); those three were re-anchored, same bug, and
+  are in the 13 above. No hand-proven entry was added. No change to `tools/Cargo.toml`, `Cargo.toml`, `Cargo.lock`,
+  `capsule.json`, `capsule/` or the lab CID pins. Gates: `cargo test --locked` (88 passed, 2 ignored, 0 failed) and
+  both fmt checks green; retired-label greps: both empty, exit 1.
+- 26 Oct, task 027 round 2 (Codex FAIL, fail-closed): `max-memory-size` caps each linear memory on its own, and the
+  verifier's import audit accepts a module with two memories, so a capsule declaring 2 MB with two 2 MB memories got
+  4 MB. `tools/src/run.rs` `memory_cap_args` now gives wasmtime `-W
+  max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y` (still one pair; wasmer and `--version` unchanged).
+  Hand check from git-ignored `target/wc010b-r2/`: the two-memory module (`(memory 32) (memory 32)`, `digest` returns
+  `memory.size 0 + memory.size 1`) under `-W max-memory-size=2097152,trap-on-grow-failure=y` exit 0, stdout `64`;
+  with `max-memories=1` added exit 1, stderr "0: failed to instantiate", "1: resource limit exceeded: memory count
+  too high at 2"; 021's `grow.wat` with `max-memories=1` added: `1024` exit 1 with the same 67174400-byte trap line,
+  `1023` exit 0, stdout `1`. New test `second_memory_cannot_double_the_declared_cap_on_wasmtime` (hand-written bytes,
+  signed and verified bundle declaring `"memory_mb": 2`, `EngineFailed` with the count line); the three exact
+  wasmtime argv strings now carry `max-memories=1`; helper `verified_bundle_declaring` shared with
+  `declared_memory_cap_comes_from_the_manifest` (no assertion changed). New falsifier F-WC10-TWO-MEMORIES;
+  F-WC10-NO-TRAP re-anchored to the new format line (same bug); F-WC10-CAP-IGNORED also names the new test;
+  F-WC-README-COUNT re-anchored to 153. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py
+  --from lab/wasm-capsule/falsifiers.json F-WC10-TWO-MEMORIES F-WC10-NO-TRAP F-WC10-CAP-IGNORED F-WC10-CAP-FIXED
+  F-WC10-CAP-OVERFLOW F-WC10-WASMER-FLAG F-WC-README-COUNT`: "baseline: 5 named tests pass without an edit, 0 do
+  not", "summary: 7 CAUGHT of 7", exit 0 (runner-caught; all 153 anchors found exactly once). Gates: `cargo test
+  --locked` (89 passed, 2 ignored, 0 failed) and both fmt checks green; retired-label greps: both empty, exit 1.
