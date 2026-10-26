@@ -1,15 +1,23 @@
-# A5 grant binding: the acceptance harness
+# A5 grant binding: SPEC and BLOCKED table
 
 LAB DRAFT for review by the Runtime team (Anders). It is design input for M1
 check A5, *Grants bound to agent identity, session, capsule instance and owned
 storage*. A5 comes before A4 and A7 acceptance. A Public-storage read does not
-establish binding. A check counts only when its whole journey as worded
-passes, with refusal evidence from the Runtime.
+establish binding.
 
-This folder is the acceptance spec and a harness that a later real-Runtime
-run can plug into. Real-Runtime rows for A5 are owned by
-`cx-agent-conformance`. This lane writes none of those rows and does not
-touch that lane's folders.
+This folder is a SPEC and a BLOCKED table, not the A5 acceptance gate.
+Landing RA-1, RA-2, RA-3, RA-5, RA-6 and #463 is not enough. A live
+measurement, a host-record lookup, guest-handle use, seed and read,
+session-end, and live-evidence recording must be written and independently
+reviewed before any row can PASS. The Runtime shipping those asks does not
+write that record. A later edit of this crate is the next theatre surface
+and needs its own adversarial review.
+
+A check counts only when its whole journey as worded passes, with refusal
+evidence from the Runtime, after that later write exists.
+
+Real-Runtime rows for A5 are owned by `cx-agent-conformance`. This lane
+writes none of those rows and does not touch that lane's folders.
 
 `lab/grant-binding` is the pure-Rust reference model. It counts toward no M1
 check. This harness talks to the operator's public API. It changes no Runtime
@@ -29,7 +37,9 @@ every use. The harness never sends identity, session or instance as client
 JSON. A forged identity, session, instance or root changes nothing.
 
 A5 stays open until every row below has run against a live operator and
-passed. One dimension in isolation does not close the check.
+passed, after the later write in section 9 exists. One dimension in
+isolation does not close the check. Landing the asks below does not close
+it either.
 
 ## 2. The Runtime today
 
@@ -73,16 +83,20 @@ every run (`src/capability.rs`).
 
 ## 3. Capabilities the harness needs
 
-The harness names the ranked Runtime asks from `lab/runtime-asks` (#309). It
-extends existing routes where one exists (PRINCIPLES.md 10).
+The harness names the ranked Runtime asks from `lab/runtime-asks` (#309)
+and guest-handle use (#463), which is not an RA-* number. It extends
+existing routes where one exists (PRINCIPLES.md 10). `needs()` lists every
+ask a journey's Runtime calls require. A5-PUB calls `host_record`, so it
+lists RA-1 and #463, not only RA-6.
 
 | ID | Capability | Needed by |
 | --- | --- | --- |
-| RA-1 | a shell view of every session's live grants | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER |
+| RA-1 | a shell view of every session's live grants | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER, A5-PUB |
 | RA-2 | the Runtime settles an ended requester's pending requests, and the shell reads who settled | A5-SESS-END |
 | RA-3 | the run launcher takes its storage directory from the selected Home | A5-STOR-POS, A5-STOR-OTHER |
 | RA-5 | a UsersAI alias that resolves to the verified agent principal's root | A5-ID-POS, A5-ID-REPLAY, A5-STOR-POS, A5-STOR-OTHER |
 | RA-6 | resident component instances: world, launch, list, stop | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER, A5-PUB |
+| #463 | guest-handle use: the guest presents a handle and the host record decides the bind | A5-ID-POS, A5-ID-REPLAY, A5-SESS-POS, A5-SESS-END, A5-INST-POS, A5-INST-SIB, A5-STOR-POS, A5-STOR-OTHER, A5-PUB |
 
 RA-4 and RA-7 are not named here. They unblock A15 and A11.
 
@@ -138,19 +152,28 @@ instance.
 Gap evidence: the component world is `run` only; launch answers `completed`
 with no session; stop refuses a running component.
 
+### #463 Guest-handle use
+
+The guest presents a handle. The host record of that handle decides
+identity, session, instance and owned root. A use of a grant presents
+the same handle. There is no guest-handle use route on develop.
+
+Gap evidence: `server.rs` has no `/api/capability/use`; a capability token
+names a capsule id and holds no guest handle.
+
 ## 4. Rows
 
 | Check | Acceptance row | Needs |
 | --- | --- | --- |
-| A5-ID-POS | `acceptance_a5_identity_grant_used_by_bound_agent` | RA-1, RA-5, RA-6 |
-| A5-ID-REPLAY | `acceptance_a5_identity_grant_replayed_by_other_agent` | RA-1, RA-5, RA-6 |
-| A5-SESS-POS | `acceptance_a5_session_grant_used_in_bound_session` | RA-1, RA-6 |
-| A5-SESS-END | `acceptance_a5_session_grant_reused_after_session_end` | RA-1, RA-2, RA-6 |
-| A5-INST-POS | `acceptance_a5_instance_grant_used_by_bound_instance` | RA-1, RA-6 |
-| A5-INST-SIB | `acceptance_a5_instance_grant_used_by_sibling` | RA-1, RA-6 |
-| A5-STOR-POS | `acceptance_a5_owned_storage_grant_used_on_bound_root` | RA-1, RA-3, RA-5, RA-6 |
-| A5-STOR-OTHER | `acceptance_a5_owned_storage_grant_pointed_at_other_root` | RA-1, RA-3, RA-5, RA-6 |
-| A5-PUB | `acceptance_a5_public_storage_read_is_not_binding` | RA-6 |
+| A5-ID-POS | `acceptance_a5_identity_grant_used_by_bound_agent` | RA-1, RA-5, RA-6, #463 |
+| A5-ID-REPLAY | `acceptance_a5_identity_grant_replayed_by_other_agent` | RA-1, RA-5, RA-6, #463 |
+| A5-SESS-POS | `acceptance_a5_session_grant_used_in_bound_session` | RA-1, RA-6, #463 |
+| A5-SESS-END | `acceptance_a5_session_grant_reused_after_session_end` | RA-1, RA-2, RA-6, #463 |
+| A5-INST-POS | `acceptance_a5_instance_grant_used_by_bound_instance` | RA-1, RA-6, #463 |
+| A5-INST-SIB | `acceptance_a5_instance_grant_used_by_sibling` | RA-1, RA-6, #463 |
+| A5-STOR-POS | `acceptance_a5_owned_storage_grant_used_on_bound_root` | RA-1, RA-3, RA-5, RA-6, #463 |
+| A5-STOR-OTHER | `acceptance_a5_owned_storage_grant_pointed_at_other_root` | RA-1, RA-3, RA-5, RA-6, #463 |
+| A5-PUB | `acceptance_a5_public_storage_read_is_not_binding` | RA-1, RA-6, #463 |
 
 Every journey starts with `GET /api/health` ok. Every journey launches only
 through the operator's shell API. Every journey ends by stopping what it
@@ -213,8 +236,8 @@ is refused with code `owned_root`. A's root is unchanged.
 operator body; it is never hardcoded false. Do not forge a `public-claim`
 grant. A mint of `localhost://Public/...` as a bound grant is refused with
 `public storage read does not bind`. A successful Public read is recorded
-and is not a PASS. This row launches (RA-6). It does not use Home storage
-(no RA-3).
+and is not a PASS. This row launches (RA-6) and then calls `host_record`
+(RA-1 and guest-handle use, #463). It does not use Home storage (no RA-3).
 
 ## 5. What proves the Runtime refused
 
@@ -252,7 +275,10 @@ binding.
 - **FAIL**: the journey ran against the operator and an assertion failed,
   or a journey returned ok without live operator evidence.
 - **PASS**: the journey ran against the operator and every assertion held,
-  with Runtime evidence. No other path produces PASS.
+  with Runtime evidence bound as section 9 states. No other path produces
+  PASS. Landing RA-1, RA-2, RA-3, RA-5, RA-6 and #463 does not produce
+  PASS. This folder has no path to PASS until that later write exists
+  and is independently reviewed.
 
 `tests/gates.rs` keeps the BLOCKED grades current. When a gap's evidence
 stops holding, `blocker_evidence_still_holds` fails and names the
@@ -300,3 +326,171 @@ Runtime and counts toward no M1 check.
   tables against the code.
 - 18 Executable capsules are isolated: each instance has its own session,
   grants and owned root inside the one Runtime.
+
+## 9. Live evidence a later PASS must record
+
+Landing RA-1, RA-2, RA-3, RA-5, RA-6 and #463 does not write this record.
+`GuestMeasurement::from_operator` stays `None` until a person writes it
+from a guest journey on a real operator. `host_record`, `use_grant`,
+`seed`, `read_bytes` and `end_session` stay hardcoded missing until a
+person writes the live adapter. `OperatorRuntime.evidence` stays unset
+until a person records it from those answers. That later write is the
+next theatre surface. It needs its own independent review. Until then
+every row stays BLOCKED.
+
+`acceptance()` builds PASS only from `runtime.take_binding_evidence()`
+after the journey returns ok. The evidence must be `LiveOperator`, carry
+a nonempty guest handle from this operator run, and must not claim a
+Public resource as a bind. A file, an environment variable, a loopback
+stub, or a hardcoded `Pass` is not that record.
+
+Each row below names the exact answers the later write must store, and
+how those answers bind to this operator run. "This run" means the attach
+from `A5_RUNTIME_COORDS` on `http://127.0.0.1:<port>` with
+`runtime_kind=operator`, the shell token from that attach, and the guest
+handles returned by `POST /api/capsules` in the same process. A handle,
+request id, session id or owned root that the harness invented, or that
+came from another run, does not count.
+
+### A5-ID-POS
+
+Store all of these from this run:
+
+1. Two launch answers, two guest handles, two host records. The records
+   name different identity, session and instance. Each handle equals the
+   launch handle of that guest. Identity is not client JSON.
+2. A's seed write and A's later read. The read bytes equal the seed
+   bytes. The path is the owned root from A's host record.
+3. A's grant id from mint. The live-grant view lists that id bound to
+   A's identity, session, instance and owned root from A's host record.
+4. A's `use_grant` allow. HTTP status or request id from this operator.
+   The guest handle on the evidence is A's launch handle.
+5. B's read of the same notes path. Those bytes are not A's seed.
+
+Bind: attach token + A's launch handle + A's grant id + this operator's
+HTTP status. If any of those four is missing, the row stays FAIL.
+
+### A5-ID-REPLAY
+
+Store all of these from this run:
+
+1. Two launch answers and two host records, as in A5-ID-POS.
+2. A's grant id. The live-grant view still names A's host-record bind
+   after B is refused.
+3. B's `use_grant` refusal. Code `identity` or the exact reason
+   `identity does not match the grant`. HTTP status or request id from
+   this operator. The guest handle on the evidence is B's launch handle.
+
+Bind: attach token + B's launch handle + A's grant id + this operator's
+refusal status. A fixture "denied" with no status is not evidence.
+
+### A5-SESS-POS
+
+Store all of these from this run:
+
+1. One launch answer, one guest handle, one host record whose session
+   id is nonempty.
+2. The grant id. The live-grant view names the same session id as the
+   host record.
+3. `use_grant` allow by that handle on the owned path. HTTP status or
+   request id from this operator. The guest handle on the evidence is
+   the launch handle.
+
+Bind: attach token + launch handle + host-record session id + grant id.
+The proof is the host session id, not a second principal.
+
+### A5-SESS-END
+
+Store all of these from this run:
+
+1. Launch, host record, grant id, live-grant view as in A5-SESS-POS.
+2. Session-end answer for that handle on this operator.
+3. `GET /api/capability/request/:id` for that grant id, from this
+   operator, with `settled_by=runtime`. A 403 whose reason contains
+   `session` is not enough.
+4. Later `use_grant` refusal with code `session`. HTTP status or
+   request id from this operator. The guest handle is the same launch
+   handle.
+5. The live-grant view no longer lists that grant id.
+
+Bind: attach token + launch handle + grant id + this operator's
+request-record body. The `settled_by` field must come from that body,
+not from the harness.
+
+### A5-INST-POS
+
+Store all of these from this run:
+
+1. Two launch answers of one capsule. Two guest handles. Two host
+   records that share identity and differ in instance id.
+2. The grant id. The live-grant view names the first instance id.
+3. `use_grant` allow by the first handle. HTTP status or request id
+   from this operator. The guest handle on the evidence is the first
+   launch handle.
+
+Bind: attach token + first launch handle + first instance id from the
+host record + grant id. The proof is two instance ids, not two
+principals.
+
+### A5-INST-SIB
+
+Store all of these from this run:
+
+1. Two launches of one identity, two host records, different instance
+   and session.
+2. The grant id of the first instance. The live-grant view still names
+   that instance after the sibling is refused.
+3. Sibling `use_grant` refusal with code `instance`. HTTP status or
+   request id from this operator. The guest handle is the sibling's
+   launch handle.
+4. Prefix-collision refusal (`instance-1` vs `instance-1-evil`) with
+   code `prefix` or `owned_root`, same operator, same first handle.
+
+Bind: attach token + sibling launch handle + first grant id + this
+operator's refusal status.
+
+### A5-STOR-POS
+
+Store all of these from this run:
+
+1. Launch, host record, owned root from that record.
+2. Seed of the owned notes and a later read that returns the same
+   bytes, both through this operator, both using the launch handle.
+3. Child `use_grant` allow on the owned path. HTTP status or request
+   id. Guest handle is the launch handle.
+4. Three refusals from this operator: `..` (`host_path`),
+   symlink-shaped (`symlink`), prefix collision (`prefix`). Each has
+   HTTP status or request id.
+
+Bind: attach token + launch handle + owned root from the host record +
+the seed bytes. If the read bytes change, the row is FAIL.
+
+### A5-STOR-OTHER
+
+Store all of these from this run:
+
+1. Two launches, two host records, two owned roots.
+2. Seed of A's notes. Later read of A's notes equals the seed.
+3. `use_grant` by A's handle on B's owned path, refused with code
+   `owned_root`. HTTP status or request id from this operator. The
+   guest handle is A's launch handle.
+
+Bind: attach token + A's launch handle + A's owned root from A's host
+record + B's path from B's host record.
+
+### A5-PUB
+
+Store all of these from this run:
+
+1. Public read of `localhost://Public/a5-binding/notes` through this
+   operator. `bound` is derived from that body. Raw bytes are not a
+   bind. The bytes are nonempty.
+2. A launch answer and a host record for that guest handle (this row
+   calls `host_record`).
+3. A mint of the Public path refused with the exact reason
+   `public storage read does not bind`.
+
+Bind: attach token + the Public HTTP body from this operator + the
+launch handle of this run. A hardcoded `bound: false` is not evidence.
+A Public read must not become PASS. The later writer records this row
+as "Public is not binding" only from those three answers.

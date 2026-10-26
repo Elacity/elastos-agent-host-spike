@@ -4,13 +4,14 @@
 
 mod common;
 
-use a5_binding_harness::capability::Check;
+use a5_binding_harness::capability::{asks_required_by, Check, RuntimeCall};
 use a5_binding_harness::contract::{
     refusal_matches, RuntimeEvidence, IDENTITY_REFUSAL, INSTANCE_REFUSAL, OWNED_ROOT_REFUSAL,
     PUBLIC_RESOURCE,
 };
 use a5_binding_harness::journey::Outcome;
 use common::double::{Double, Faults};
+use common::record::Recording;
 
 fn run(check: Check, faults: Faults) -> Outcome {
     let mut double = Double::new(faults);
@@ -24,6 +25,52 @@ fn refused(check: Check, faults: Faults, reason: &str) {
         "{} refused for another reason.\nexpected: {reason}\nactual:   {failure}",
         check.id()
     );
+}
+
+/// Each journey is run once. The recorded Runtime calls are mapped to asks.
+/// `needs()` must list every ask those calls require. Dropping one is CAUGHT.
+#[test]
+fn needs_cover_every_runtime_call_the_journey_makes() {
+    for check in Check::ALL {
+        let mut recording = Recording::new(Double::new(Faults::default()));
+        check.run(&mut recording).unwrap_or_else(|reason| {
+            panic!(
+                "{} journey failed on the honest double: {reason}",
+                check.id()
+            )
+        });
+        let required = asks_required_by(recording.calls());
+        assert!(
+            !required.is_empty(),
+            "{} recorded no Runtime asks; journey called {:?}",
+            check.id(),
+            recording.calls()
+        );
+        for ask in &required {
+            assert!(
+                check.needs().contains(ask),
+                "{} needs() omitted {} (id {}); journey called {:?}",
+                check.id(),
+                ask.title(),
+                ask.id(),
+                recording.calls()
+            );
+        }
+        if check == Check::PublicNotBinding {
+            assert!(
+                recording.calls().contains(&RuntimeCall::HostRecord),
+                "A5-PUB must call host_record through launch"
+            );
+            assert!(
+                check.needs().iter().any(|c| c.id() == "RA-1"),
+                "A5-PUB calls host_record so needs() must list RA-1"
+            );
+            assert!(
+                check.needs().iter().any(|c| c.id() == "#463"),
+                "A5-PUB calls host_record so needs() must list guest-handle use (#463)"
+            );
+        }
+    }
 }
 
 #[test]

@@ -1,6 +1,7 @@
-//! The acceptance table: one row per A5 binding check, graded only by
-//! `acceptance`, then the evidence for every missing capability.
+//! The BLOCKED table: one row per A5 binding check, graded only by
+//! `acceptance`, then the evidence for every missing ask.
 //!
+//! This binary prints a SPEC table. It is not the A5 acceptance gate.
 //! Exit 0: no row failed or was skipped; BLOCKED rows stay open in SPEC.md.
 //! Exit 1: a row failed. Exit 4: a row was skipped and none failed.
 

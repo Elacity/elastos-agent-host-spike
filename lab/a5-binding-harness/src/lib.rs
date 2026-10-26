@@ -1,12 +1,18 @@
-//! Acceptance harness for M1 check A5: grants bound to agent identity,
+//! SPEC and BLOCKED table for M1 check A5: grants bound to agent identity,
 //! session, capsule instance and owned storage.
+//!
+//! This folder is a SPEC and a BLOCKED table. It is not the A5 acceptance
+//! gate. Landing RA-1, RA-2, RA-3, RA-5, RA-6 and guest-handle use (#463)
+//! is not enough. A live measurement, a host-record lookup, guest-handle
+//! use, seed and read, session-end, and live-evidence recording must be
+//! written and independently reviewed before any row can PASS.
 //!
 //! The journeys in [`journey`] state each row once, against the
 //! [`contract::BindingRuntime`] interface that `SPEC.md` asks the Runtime to
 //! expose. [`acceptance`] grades a row against a live operator only; until
-//! every capability the row needs exists, it reports BLOCKED with the exact
-//! missing RA-* ask and the source evidence for the gap. `PASS` is built only
-//! from live operator evidence that is not a Public-storage read.
+//! every ask the row needs has a guest measurement, it reports BLOCKED with
+//! the exact missing ask and the source evidence for the gap. `PASS` is built
+//! only from live operator evidence that is not a Public-storage read.
 
 pub mod capability;
 pub mod contract;

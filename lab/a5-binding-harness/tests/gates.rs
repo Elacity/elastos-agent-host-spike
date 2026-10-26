@@ -1,6 +1,7 @@
 //! The BLOCKED grades are current. Every gap's evidence still holds in this
-//! checkout, every acceptance row names exactly the capabilities its check
-//! still needs, and SPEC.md states the same tables as the code.
+//! checkout, every row names exactly the asks its check still needs, and
+//! SPEC.md states the same tables as the code. This folder is a SPEC and a
+//! BLOCKED table, not the A5 acceptance gate.
 
 use a5_binding_harness::capability::{ids, read_pin, Capability, Check, Reading};
 use a5_binding_harness::{acceptance, counts_as_accepted, repo_root, Grade};
@@ -89,6 +90,23 @@ fn acceptance_rows_name_exact_blockers() {
         };
         assert_eq!(above, expected, "{}", check.test_name());
     }
+}
+
+#[test]
+fn spec_is_a_blocked_table_not_the_a5_gate() {
+    let spec = include_str!("../SPEC.md");
+    assert!(
+        spec.contains("This folder is a SPEC and a BLOCKED table, not the A5 acceptance gate."),
+        "SPEC.md must say this folder is not the A5 acceptance gate"
+    );
+    assert!(
+        spec.contains("Landing RA-1, RA-2, RA-3, RA-5, RA-6 and #463 is not enough"),
+        "SPEC.md must say landing the asks is not enough for PASS"
+    );
+    assert!(
+        spec.contains("## 9. Live evidence a later PASS must record"),
+        "SPEC.md must list the live evidence each row will require"
+    );
 }
 
 #[test]

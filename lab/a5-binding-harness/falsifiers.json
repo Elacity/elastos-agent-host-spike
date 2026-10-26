@@ -162,6 +162,22 @@
       "tests": [
         "gap_cleared_without_guest_keeps_rows_blocked"
       ]
+    },
+    {
+      "id": "F-A5-NEEDS-OMIT",
+      "title": "A5-PUB needs() drops RA-1 even though the journey calls host_record",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/capability.rs",
+          "old": "            Check::PublicNotBinding => &[LiveGrantView, ResidentCore, GuestHandle],\n",
+          "new": "            Check::PublicNotBinding => &[ResidentCore, GuestHandle],\n"
+        }
+      ],
+      "tests": [
+        "needs_cover_every_runtime_call_the_journey_makes"
+      ]
     }
   ]
 }

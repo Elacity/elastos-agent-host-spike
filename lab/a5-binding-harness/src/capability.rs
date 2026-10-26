@@ -1,9 +1,11 @@
-//! The RA-* capabilities the rows need, which row needs which, and the
-//! source evidence that each capability is still missing.
+//! The RA-* asks and guest-handle use (#463) the rows need, which row
+//! needs which, and the source evidence that each ask is still missing.
 //!
 //! A pin is evidence of a gap, never of a capability. When a pin stops
-//! holding, the gap is stale: re-measure that capability against a live
-//! operator, then update this table and SPEC.md together.
+//! holding, the gap is stale: re-measure that ask against a live
+//! operator, then update this table and SPEC.md together. Landing the
+//! asks does not make a row PASS. A later write must record live
+//! evidence, and that write needs its own review.
 
 use std::path::Path;
 
@@ -17,6 +19,9 @@ pub enum Capability {
     HomeStorage,
     UsersAiAlias,
     ResidentCore,
+    /// Guest-handle use (#463). Not an RA-* number. The guest presents a
+    /// handle; the host record decides identity, session, instance and root.
+    GuestHandle,
 }
 
 pub enum Rule {
@@ -106,6 +111,19 @@ const USERS_AI_ALIAS: &[Pin] = &[
     },
 ];
 
+const GUEST_HANDLE: &[Pin] = &[
+    Pin {
+        path: SERVER,
+        rule: Rule::Lacks("/api/capability/use"),
+        meaning: "no guest-handle use route; the guest cannot present a handle for use",
+    },
+    Pin {
+        path: TOKEN,
+        rule: Rule::Contains("/// Who can use this token (capsule ID)"),
+        meaning: "use is by capsule id, not by a guest handle whose host record decides the bind",
+    },
+];
+
 const RESIDENT_CORE: &[Pin] = &[
     Pin {
         path: COMPONENT,
@@ -132,12 +150,13 @@ const RESIDENT_CORE: &[Pin] = &[
 ];
 
 impl Capability {
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 6] = [
         Capability::LiveGrantView,
         Capability::Settlement,
         Capability::HomeStorage,
         Capability::UsersAiAlias,
         Capability::ResidentCore,
+        Capability::GuestHandle,
     ];
 
     pub fn id(self) -> &'static str {
@@ -147,6 +166,7 @@ impl Capability {
             Capability::HomeStorage => "RA-3",
             Capability::UsersAiAlias => "RA-5",
             Capability::ResidentCore => "RA-6",
+            Capability::GuestHandle => "#463",
         }
     }
 
@@ -165,6 +185,9 @@ impl Capability {
             Capability::ResidentCore => {
                 "resident component instances: world, launch, list, stop"
             }
+            Capability::GuestHandle => {
+                "guest-handle use: the guest presents a handle and the host record decides the bind"
+            }
         }
     }
 
@@ -175,6 +198,7 @@ impl Capability {
             Capability::HomeStorage => HOME_STORAGE,
             Capability::UsersAiAlias => USERS_AI_ALIAS,
             Capability::ResidentCore => RESIDENT_CORE,
+            Capability::GuestHandle => GUEST_HANDLE,
         }
     }
 
@@ -281,15 +305,27 @@ impl Check {
     pub fn needs(self) -> &'static [Capability] {
         use Capability::*;
         match self {
-            Check::IdentityUse => &[LiveGrantView, UsersAiAlias, ResidentCore],
-            Check::IdentityReplay => &[LiveGrantView, UsersAiAlias, ResidentCore],
-            Check::SessionUse => &[LiveGrantView, ResidentCore],
-            Check::SessionEnded => &[LiveGrantView, Settlement, ResidentCore],
-            Check::InstanceUse => &[LiveGrantView, ResidentCore],
-            Check::InstanceSibling => &[LiveGrantView, ResidentCore],
-            Check::StorageUse => &[LiveGrantView, HomeStorage, UsersAiAlias, ResidentCore],
-            Check::StorageOtherRoot => &[LiveGrantView, HomeStorage, UsersAiAlias, ResidentCore],
-            Check::PublicNotBinding => &[ResidentCore],
+            Check::IdentityUse => &[LiveGrantView, UsersAiAlias, ResidentCore, GuestHandle],
+            Check::IdentityReplay => &[LiveGrantView, UsersAiAlias, ResidentCore, GuestHandle],
+            Check::SessionUse => &[LiveGrantView, ResidentCore, GuestHandle],
+            Check::SessionEnded => &[LiveGrantView, Settlement, ResidentCore, GuestHandle],
+            Check::InstanceUse => &[LiveGrantView, ResidentCore, GuestHandle],
+            Check::InstanceSibling => &[LiveGrantView, ResidentCore, GuestHandle],
+            Check::StorageUse => &[
+                LiveGrantView,
+                HomeStorage,
+                UsersAiAlias,
+                ResidentCore,
+                GuestHandle,
+            ],
+            Check::StorageOtherRoot => &[
+                LiveGrantView,
+                HomeStorage,
+                UsersAiAlias,
+                ResidentCore,
+                GuestHandle,
+            ],
+            Check::PublicNotBinding => &[LiveGrantView, ResidentCore, GuestHandle],
         }
     }
 
@@ -316,6 +352,56 @@ impl Check {
             Check::PublicNotBinding => journey::public_not_binding(runtime),
         }
     }
+}
+
+/// One method on [`crate::contract::BindingRuntime`]. A journey's `needs()`
+/// must list every ask that any of these calls requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeCall {
+    Health,
+    Launch,
+    HostRecord,
+    Stop,
+    EndSession,
+    MintGrant,
+    UseGrant,
+    LiveGrants,
+    RequestRecord,
+    PublicRead,
+    Seed,
+    ReadBytes,
+}
+
+impl RuntimeCall {
+    /// Asks this Runtime call cannot complete without. `host_record` is
+    /// RA-1 and guest-handle use (#463). Existing develop routes map to
+    /// nothing.
+    pub fn asks(self) -> &'static [Capability] {
+        use Capability::*;
+        match self {
+            RuntimeCall::Health | RuntimeCall::MintGrant | RuntimeCall::PublicRead => &[],
+            RuntimeCall::Launch | RuntimeCall::Stop => &[ResidentCore],
+            RuntimeCall::HostRecord => &[LiveGrantView, GuestHandle],
+            RuntimeCall::UseGrant => &[GuestHandle],
+            RuntimeCall::LiveGrants => &[LiveGrantView],
+            RuntimeCall::EndSession | RuntimeCall::RequestRecord => &[Settlement],
+            RuntimeCall::Seed | RuntimeCall::ReadBytes => &[UsersAiAlias],
+        }
+    }
+}
+
+/// Unique, ordered asks required by a recorded call list.
+pub fn asks_required_by(calls: &[RuntimeCall]) -> Vec<Capability> {
+    let mut asks = Vec::new();
+    for call in calls {
+        for ask in call.asks() {
+            if !asks.contains(ask) {
+                asks.push(*ask);
+            }
+        }
+    }
+    asks.sort();
+    asks
 }
 
 /// `RA-1; RA-5`, the form the ignored acceptance rows carry.
@@ -476,6 +562,19 @@ mod tests {
                 check.id()
             );
         }
+    }
+
+    #[test]
+    fn host_record_requires_live_grant_view_and_guest_handle() {
+        assert_eq!(
+            RuntimeCall::HostRecord.asks(),
+            &[Capability::LiveGrantView, Capability::GuestHandle]
+        );
+        assert_eq!(RuntimeCall::UseGrant.asks(), &[Capability::GuestHandle]);
+        assert_eq!(RuntimeCall::Launch.asks(), &[Capability::ResidentCore]);
+        assert_eq!(RuntimeCall::Seed.asks(), &[Capability::UsersAiAlias]);
+        assert_eq!(RuntimeCall::EndSession.asks(), &[Capability::Settlement]);
+        assert!(RuntimeCall::PublicRead.asks().is_empty());
     }
 
     #[test]
