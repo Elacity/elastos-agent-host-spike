@@ -86,10 +86,26 @@ cargo test --manifest-path lab/linux-confine/Cargo.toml -- --test-threads=1 --no
 python3 lab/linux-confine/falsify.py
 ```
 
-`build.rs` honours the cargo target the same way the `cc` crate does: `CC_aarch64_unknown_linux_gnu`, then `TARGET_CC`, then `aarch64-linux-gnu-gcc`. Host `cc` is used only when TARGET equals HOST. After each foreign-target compile it reads ELF `e_machine` of the helper (and of each archive member) and panics unless that is `EM_AARCH64` (183) for aarch64 or `EM_X86_64` (62) for x86_64. `TARGET_CC=cc` therefore fails an aarch64 check instead of writing x86-64 objects under the aarch64 out dir. `cargo check --target aarch64-unknown-linux-gnu` is not aarch64 proof, and real aarch64 execution is NOT RUN.
+`build.rs` honours the cargo target the same way the `cc` crate does: `CC_aarch64_unknown_linux_gnu`, then `TARGET_CC`, then `aarch64-linux-gnu-gcc`. Host `cc` is used only when TARGET equals HOST. After each foreign-target compile it reads ELF `e_machine` of the helper (and of each archive member) and panics unless that is `EM_AARCH64` (183) for aarch64 or `EM_X86_64` (62) for x86_64. `TARGET_CC=cc` therefore fails an aarch64 check instead of writing x86-64 objects under the aarch64 out dir.
 
-`tests/aarch64.rs` `aarch64_launcher_compiles` is `#[ignore]`. It cross-compiles the launcher, the test launcher, the probe, and the witness with `aarch64-linux-gnu-gcc` and runs the explain path on the test launcher and the probe under `qemu-aarch64`. When those tools are absent the test is ignored, never counted as a pass, and panics if someone runs it with `--ignored`. The production aarch64 launcher refuses `--block-landlock`. Jetson execution is NOT RUN.
+`cargo check --target aarch64-unknown-linux-gnu` with the real `aarch64-linux-gnu-gcc` now compiles and the helpers are `EM_AARCH64=183`. That is an aarch64 **build**. It is not native aarch64 execution and it is not Jetson.
 
-The second command plants six confinement bugs, one at a time, and restores each file. It also sets `TARGET_CC=cc` for the aarch64 check and plants a skip of the ELF `e_machine` test. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, `F-LC-PROVIDER-SOCKET CAUGHT`, `F-LC-ANY-ERRNO CAUGHT`, and `F-LC-WRONG-ARCH-CC CAUGHT`.
+`tests/aarch64.rs` has one always-on label test and one ignored qemu-user test:
+
+- `qemu_user_mode_label_is_not_native_or_jetson` — the mode string is `aarch64 build + qemu-user (host kernel)`.
+- `aarch64_qemu_user_host_kernel` is `#[ignore]`. It cross-compiles the launcher, the test launcher, the probe, the witness, and `helper/landlock-probe.c`, checks each ELF `e_machine` is 183, then runs them under `qemu-aarch64`. qemu-user 8.2.2 does **not** implement `landlock_*` (`Unknown syscall 444/445/446`, guest `ENOSYS` / errno 38). The launcher therefore fail-closes with `the kernel has no Landlock`. `--explain-abi` is only a compiled table and does not call Landlock. When the tools are absent the test is ignored, never counted as a pass, and panics if someone runs it with `--ignored`. Never native aarch64. Never Jetson.
+
+Running the aarch64-built `confine` / `providers` **test binaries** under qemu-user is the same mode. qemu-user does not wrap child `execve` of those aarch64 helpers as a host `qemu-aarch64` (binfmt was not registered here), and Landlock is `ENOSYS`, so those suites do not prove C9 rows. Label: `aarch64 build + qemu-user (host kernel)`.
+
+`qemu-system-aarch64` TCG with Alpine `vmlinuz-virt` (`Linux 6.18.58-0-virt`) is a real aarch64 guest kernel, not qemu-user. A static `landlock_create_ruleset` init saw **ABI 7**. That is still not Jetson and not this lab's confine suite. IOCTL_DEV needs ABI >= 5 (kernel >= 6.7); ABI 7 meets that number on that guest kernel only. Full C9 rows on ARM still need real hardware.
+
+The second command plants six confinement bugs, one at a time, and restores each file. It also sets `TARGET_CC=cc` for the aarch64 check and plants a skip of the ELF `e_machine` test. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, `F-LC-PROVIDER-SOCKET CAUGHT`, `F-LC-ANY-ERRNO CAUGHT`, `F-LC-WRONG-ARCH-CC CAUGHT`, and `F-LC-QEMU-USER-LANDLOCK CAUGHT`.
 
 `socketpair(AF_UNIX)` on the provider filter is a named C9 departure. See `CONFINEMENT-LINUX.md`. `clone(SIGCHLD)` is refused. Every denied row asserts its exact errno. The withheld Landlock rights that have a same-test unconfined success are proven by that pair. Device ioctl is `RNDGETENTCNT` on `/dev/urandom`. `make-char` and `make-block` stay NOT PROVEN for the positive control: this uid has no `CAP_MKNOD` in the initial user namespace, and a user namespace also refuses char/block `mknod`.
+
+The ignored qemu-user test is:
+
+```bash
+cargo test --manifest-path lab/linux-confine/Cargo.toml --test aarch64 \
+  -- --ignored --exact aarch64_qemu_user_host_kernel --nocapture
+```

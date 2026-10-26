@@ -161,6 +161,59 @@ def wrong_arch_cc():
     return 0
 
 
+def cargo_ignored(test):
+    return subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--manifest-path",
+            str(HERE / "Cargo.toml"),
+            "--test",
+            "aarch64",
+            "--",
+            test,
+            "--ignored",
+            "--exact",
+            "--nocapture",
+        ],
+        cwd=HERE.parent.parent,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+
+def qemu_user_landlock():
+    """The qemu-user Landlock probe must report ENOSYS. Expecting errno 0
+    lets the ignored test pass without that observation.
+    """
+    name = "F-LC-QEMU-USER-LANDLOCK"
+    source = HERE / "tests" / "aarch64.rs"
+    original = source.read_text()
+    old = "            (-1, ENOSYS),\n"
+    new = "            (-1, 0),\n"
+    if original.count(old) != 1 or new in original:
+        print(f"{name} NOT RUN: the standing ENOSYS assert is not unique in {source.name}")
+        return 1
+    standing = cargo_ignored("aarch64_qemu_user_host_kernel")
+    if standing.returncode != 0:
+        print(standing.stdout)
+        print(f"{name} NOT RUN: the standing qemu-user test failed before the edit")
+        return 1
+    try:
+        source.write_text(original.replace(old, new, 1))
+        mutated = cargo_ignored("aarch64_qemu_user_host_kernel")
+    finally:
+        source.write_text(original)
+    if mutated.returncode == 0 or "ENOSYS" not in mutated.stdout:
+        print(mutated.stdout)
+        print(f"{name} SURVIVED")
+        return 1
+    print(f"{name} CAUGHT")
+    return 0
+
+
 def cargo(test):
     return subprocess.run(
         [
@@ -218,6 +271,7 @@ def main():
     for check in CHECKS:
         failed |= one(check)
     failed |= wrong_arch_cc()
+    failed |= qemu_user_landlock()
     return failed
 
 
