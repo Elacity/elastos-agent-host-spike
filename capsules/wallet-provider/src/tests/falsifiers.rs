@@ -125,7 +125,15 @@ use std::process::Command;
 /// map, and WP100 replaces the missing baseline rules-list refusal with an
 /// empty list, so the check goes on and refuses later with other words, and
 /// `declared_rights_trace_refuses_each_bad_input` fails on the matching case.
-const EXPECTED_FALSIFIERS: usize = 98;
+/// Task 078's WP101 replaces the missing-id refusal with an empty id, so the
+/// platform-baseline entry case reads the unnamed-id refusal; WP102 replaces
+/// the missing-rules-list refusal with an empty list, so the right without its
+/// rules list reads "with no rules"; WP103 skips a rule that is not a string,
+/// so the right with a non-string rule passes the check; and WP104 drops only
+/// the pin table's `startup-sysctl` row, so the sysctl read claimed by
+/// `storage` passes. `declared_rights_trace_refuses_each_bad_input` fails on
+/// each case.
+const EXPECTED_FALSIFIERS: usize = 102;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

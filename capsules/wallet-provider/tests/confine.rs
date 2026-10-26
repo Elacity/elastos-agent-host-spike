@@ -1776,7 +1776,11 @@ struct DeclaredClaim {
 /// provider's executable prefix.
 ///
 /// The check reads no file. It refuses, in this order: a document without the
-/// role, provider, rights and platform-baseline fields; an id the shared
+/// role, provider, rights list or platform baseline; a platform baseline
+/// without its own status sentence; a platform baseline without its rules
+/// list; an entry of the declared rights list or the platform-baseline rules
+/// list without a string id, whose reason names that list and the entry; an
+/// entry without a rules list; a rule that is not a string; an id the shared
 /// contract does not name; a platform-baseline entry without a justification
 /// that starts with the provider's prefix and gives a reason; an entry with no
 /// rules; an id declared more than once; a rule repeated inside one entry; an
@@ -1817,8 +1821,8 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
     let Some(baseline_rules) = baseline.get("rules").and_then(Value::as_array) else {
         return Err(format!("{name} platform baseline must hold a rules list"));
     };
-    let rights = declared_claims(name, rights)?;
-    let baseline = declared_claims(name, baseline_rules)?;
+    let rights = declared_claims(name, "declared rights list", rights)?;
+    let baseline = declared_claims(name, "platform baseline rules", baseline_rules)?;
     for claim in &rights {
         if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
             return Err(format!(
@@ -1934,13 +1938,19 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
 }
 
 /// The declared entries of `entries`, each proven to hold a string id and a
-/// rules list of strings. A refusal names the provider and the entry or id.
-fn declared_claims(name: &str, entries: &[Value]) -> Result<Vec<DeclaredClaim>, String> {
+/// rules list of strings. `label` names the list in the missing-id refusal, so
+/// the reader knows which of the two lists holds the entry; the index names
+/// the entry. The two other refusals name the id.
+fn declared_claims(
+    name: &str,
+    label: &str,
+    entries: &[Value],
+) -> Result<Vec<DeclaredClaim>, String> {
     let mut claims = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         let Some(id) = entry["id"].as_str() else {
             return Err(format!(
-                "{name} declared rights and platform baseline must give entry {index} a string id"
+                "{name} {label} entry {index} must give a string id"
             ));
         };
         let Some(rules) = entry["rules"].as_array() else {
@@ -2630,15 +2640,20 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// Then one case for each refusal, in the check's order: a file without the
 /// lab role, a file that names another provider, a file without a rights list,
 /// a file without a platform baseline, a platform baseline without its status
-/// sentence, a platform baseline without its rules list, a right id and a
-/// platform-baseline id the shared contract does not name, a platform-baseline
-/// entry with no justification, an entry whose justification names another
-/// provider or gives no reason, an entry with no rules, an id declared twice,
-/// a rule repeated inside one entry, an allow form the profile holds twice, an
-/// allow form with no claimant and one with two claimants, a declared rule that
-/// is not an allow form, a shared rule claimed by the wrong id, the two startup
-/// rules swapped between their ids, and the startup root read claimed by
-/// `storage`. The fixtures are built in the test and no process starts.
+/// sentence, a platform baseline without its rules list, a right without a
+/// rules list, a right with a rule that is not a string, a platform-baseline
+/// entry without a string id whose reason names the platform-baseline rules
+/// list and the entry, a right id and a platform-baseline id the shared
+/// contract does not name, a platform-baseline entry with no justification, an
+/// entry whose justification names another provider or gives no reason, an
+/// entry with no rules, an id declared twice in the rights list, a rule
+/// repeated inside one entry, an allow form the profile holds twice, an allow
+/// form with no claimant and one with two claimants, a declared rule that is
+/// not an allow form, a shared rule claimed by the wrong id, the two startup
+/// rules swapped between their ids, the startup root read claimed by
+/// `storage`, and the startup sysctl read claimed by `storage` while its
+/// platform-baseline entry is removed. The fixtures are built in the test and
+/// no process starts.
 ///
 /// Falsifier: WP87 drops the justification refusal, so this test fails on its
 /// missing-justification case. WP93 drops the prefix refusal, so the
@@ -2654,7 +2669,13 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// platform-baseline refusal and WP100 the missing baseline rules-list
 /// refusal, each replaced with an empty value, so the check goes on and
 /// refuses later with other words, and the case finds no refusal in its own
-/// words.
+/// words. WP101 replaces the missing-id refusal with an empty id, so the
+/// platform-baseline entry case reads the unnamed-id refusal instead. WP102
+/// replaces the missing-rules-list refusal with an empty list, so the right
+/// without its rules list reads "with no rules". WP103 skips a rule that is
+/// not a string, so the right with a non-string rule passes the check. WP104
+/// drops only the pin table's `startup-sysctl` row, so the sysctl read claimed
+/// by `storage` passes.
 #[test]
 fn declared_rights_trace_refuses_each_bad_input() {
     let capsules = contract_fixture_capsules();
@@ -2743,6 +2764,38 @@ fn declared_rights_trace_refuses_each_bad_input() {
     );
 
     let mut declared = read();
+    declared["rights"][0]
+        .as_object_mut()
+        .expect("fixture storage right")
+        .remove("rules");
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("storage") && reason.contains("without a rules list"),
+        "a right without a rules list must be refused by id and words: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"] = json!([SHARED_RULES[1], 42, SHARED_RULES[2]]);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("storage") && reason.contains("not a string"),
+        "a right with a rule that is not a string must be refused by id: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]["rules"][1]
+        .as_object_mut()
+        .expect("fixture platform-baseline entry")
+        .remove("id");
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("platform baseline rules")
+            && reason.contains("entry 1")
+            && reason.contains("string id"),
+        "a platform-baseline entry without a string id must name the list and the entry: {reason}"
+    );
+
+    let mut declared = read();
     declared["rights"]
         .as_array_mut()
         .expect("fixture rights")
@@ -2819,7 +2872,7 @@ fn declared_rights_trace_refuses_each_bad_input() {
     let reason = refuse(&declared, &profile);
     assert!(
         reason.contains("storage") && reason.contains("more than once"),
-        "an id declared twice across the two lists must be refused by id: {reason}"
+        "an id declared twice in the rights list must be refused by id: {reason}"
     );
 
     let mut declared = read();
@@ -2912,6 +2965,23 @@ fn declared_rights_trace_refuses_each_bad_input() {
             && reason.contains("startup-root-directory")
             && reason.contains("must be claimed by"),
         "the startup root read moved under storage must be refused by rule and id: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"]
+        .as_array_mut()
+        .expect("fixture storage rules")
+        .push(json!(STARTUP_RULES[1]));
+    declared[PLATFORM_BASELINE]["rules"]
+        .as_array_mut()
+        .expect("fixture platform-baseline rules")
+        .remove(1);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains(STARTUP_RULES[1])
+            && reason.contains("startup-sysctl")
+            && reason.contains("must be claimed by"),
+        "the startup sysctl read moved under storage must be refused by rule and id: {reason}"
     );
 }
 
