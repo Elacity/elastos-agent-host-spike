@@ -63,8 +63,8 @@
   `tools/src/bundle.rs` (`parse_args`, `run` with the build script's path as the
   test seam), a thin `bundle` binary and a bash wrapper; stand-in build scripts
   in `tests/bundle_builds/`. 8 named tests in `tests/bundle.rs`, one of which
-  spawns the wrapper (its child cargo uses its own target and build folders
-  under `target/`). Reference lab CID on this Mac
+  spawns the wrapper (its child cargo uses its own target and build folder
+  under that test's temp dir). Reference lab CID on this Mac
   `lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930`
   (also recomputed with Python `hashlib`). 23 falsifiers (F-WC3-CMD-BYPASS,
   -REUSE-OUT, -FOLLOW-WRITE, -MODULE-COPY, five -ARGS-*, -ARGS-UTF8,
@@ -72,3 +72,6 @@
   -CMD-REASON, -CMD-STATUS, -CMD-STDOUT, -ARTIFACT-PIN): hand-proven, pending R1
   (runner-caught: none). `Cargo.lock` and `capsule.wasm` (`6dd9af1a…`)
   unchanged; both of 010's retirement greps give empty output, exit 1.
+- wc-003c round 2: the wrapper test's child `CARGO_TARGET_DIR`/`CARGO_BUILD_BUILD_DIR`
+  moved from the lane's `target/tools-bundle-test` to that test's own temp dir
+  (`tools_bundle(child_target, args)`), so the test writes nothing in the checkout.

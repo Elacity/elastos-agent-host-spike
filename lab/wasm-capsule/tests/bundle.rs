@@ -432,16 +432,14 @@ fn bundle_io_refusals_keep_path_and_cause() {
 }
 
 /// Run the real `tools/bundle` with `args`. The child cargo gets its own
-/// target and build folders, so it never waits on the outer `cargo test`'s
-/// build lock; they are set on the child only. They sit in the lane's
-/// git-ignored `target/`, so later runs reuse the build.
-fn tools_bundle(args: &[&OsString]) -> Output {
-    let lane = lane_dir();
-    let child_target = lane.join("target").join("tools-bundle-test");
-    Command::new(lane.join("tools").join("bundle"))
+/// target and build folder, `child_target`, so it never waits on the outer
+/// `cargo test`'s build lock; it is set on the child only. The caller puts
+/// it under its own temp dir, so the test writes nothing in the checkout.
+fn tools_bundle(child_target: &Path, args: &[&OsString]) -> Output {
+    Command::new(lane_dir().join("tools").join("bundle"))
         .args(args)
-        .env("CARGO_TARGET_DIR", &child_target)
-        .env("CARGO_BUILD_BUILD_DIR", &child_target)
+        .env("CARGO_TARGET_DIR", child_target)
+        .env("CARGO_BUILD_BUILD_DIR", child_target)
         .output()
         .expect("spawn tools/bundle")
 }
@@ -485,7 +483,8 @@ fn assert_refused(output: &Output, status: i32, tail: &str) {
 fn tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid() {
     let tmp = TempDir::new("tools-bundle");
     let out_dir = tmp.path().join("out");
-    let output = tools_bundle(&[&out_dir.clone().into_os_string()]);
+    let child_target = tmp.path().join("child-target");
+    let output = tools_bundle(&child_target, &[&out_dir.clone().into_os_string()]);
     assert!(
         output.status.success(),
         "{}",
@@ -521,7 +520,10 @@ fn tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid() {
     assert_eq!(named.to_string(), REFERENCE_LAB_CID);
 
     // The name mode prints the same name.
-    let output = tools_bundle(&[&os("--name"), &bundle.clone().into_os_string()]);
+    let output = tools_bundle(
+        &child_target,
+        &[&os("--name"), &bundle.clone().into_os_string()],
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -531,7 +533,7 @@ fn tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid() {
 
     // The same OUT_DIR again: refused, and the bundle is unchanged.
     let before = snapshot(&out_dir);
-    let output = tools_bundle(&[&out_dir.clone().into_os_string()]);
+    let output = tools_bundle(&child_target, &[&out_dir.clone().into_os_string()]);
     assert_refused(
         &output,
         1,
@@ -543,7 +545,10 @@ fn tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid() {
     let empty = tmp.path().join("empty");
     fs::create_dir(&empty).expect("create a folder");
     let shared = bundle_identity(&empty).expect_err("an empty folder is no bundle");
-    let output = tools_bundle(&[&os("--name"), &empty.clone().into_os_string()]);
+    let output = tools_bundle(
+        &child_target,
+        &[&os("--name"), &empty.clone().into_os_string()],
+    );
     assert_refused(
         &output,
         1,
@@ -554,7 +559,7 @@ fn tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid() {
     );
 
     // An unknown option: its reason, then the usage line.
-    let output = tools_bundle(&[&os("--unknown")]);
+    let output = tools_bundle(&child_target, &[&os("--unknown")]);
     assert_refused(
         &output,
         2,

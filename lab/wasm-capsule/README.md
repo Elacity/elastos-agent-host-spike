@@ -295,9 +295,9 @@ the tests pass small stand-in scripts from `tests/bundle_builds/` (one plants a
 link during the build, one fails with status 3, and so on). They change no
 environment, working folder or resource limit. Exactly one test spawns the
 real `tools/bundle`. Its child `cargo run` gets its own `CARGO_TARGET_DIR` and
-`CARGO_BUILD_BUILD_DIR` under the lane's git-ignored `target/`, set on the child
-only, so it never waits on the outer `cargo test`'s build lock, and later runs
-reuse the build.
+`CARGO_BUILD_BUILD_DIR` under that test's own temp dir, set on the child only,
+so it never waits on the outer `cargo test`'s build lock and writes nothing in
+the checkout. Each run builds the command fresh there.
 
 ## Named tests
 
