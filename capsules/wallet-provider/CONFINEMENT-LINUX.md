@@ -44,7 +44,7 @@ confined on Linux.
 | Oracle rule | Linux primitive that would carry it | How exact the match is | Linux test that would prove it |
 | --- | --- | --- | --- |
 | `(version 1)` | The generator's policy version; no kernel primitive carries it. | Exact: the generator emits one version, and the contract check refuses any other head. | `both_file_profiles_bind_one_storage_parameter_contract` |
-| `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE`) and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock reports no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so it does not restrict them, and each departs the oracle in one stated way. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a file the provider owns, so the mapping is wider than the oracle for those six. The capability drop removes `CAP_CHOWN`, so `chown` to a new owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`. `flock` and `fcntl` act on a descriptor, and the Landlock open rules refuse a descriptor for a path outside every grant, so the design claims no falsifier for those two. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
+| `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE`) and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock's [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) report no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so the ruleset does not restrict them. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the provider owns with ordinary permissions beneath searchable parents, so the mapping is wider than the oracle for those six; the kernel's ordinary permission check still applies, so the design claims no such success for a host-owned file or a file whose permissions deny the call. The capability drop removes `CAP_CHOWN`, so `chown` to a different owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`; an owner that keeps `uid` `-1` may still change its file's group to a group of which it is a member ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)), so the drop does not refuse every `chown`. Landlock checks a new data open against the rules for its path, so a data open outside every grant fails; the rules are checked at open time, so a descriptor opened before enforcement is not checked, and an `O_PATH` open asks for no content right and is not restricted ([filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)). The launch passes no descriptor to a real provider, and future Runtime work proves that precondition. One `fcntl(F_DUPFD)` duplicates an outside `O_PATH` descriptor that the probe obtains with `openat` ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)) and gives no content read; the design claims that one call only, not every `fcntl` or `flock`, whose departures stay unclaimed. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
 | `(deny default)`, processes and signals | A PID namespace; the empty capability set; a seccomp filter that refuses process creation other than the provider's own threads and every cross-process operation (`ptrace`, `process_vm_*`, `pidfd_getfd`). Landlock `EXECUTE` on `PROVIDER_EXECUTABLE` alone carries exec of any other file. | Exact for signals: a PID namespace contains no PID outside itself, so a signal to a host process cannot be expressed. Narrower for process creation because the provider's threads must start: the filter admits the thread form of `clone` and refuses a new process. The filter adds no exec rule: it sees only the syscall number and cannot read the path behind `execve`'s pointer, so it cannot separate the granted binary from another file, and a refusal by number would also refuse the provider's own launch, which the oracle permits. The Linux test decides the exact flag set. | `confined_provider_denies_process_and_signal_boundaries` |
 | `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, the one SysV creation rule refuses every form including the private key, and the `mq_open` rule refuses queue creation. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
 | `(deny default)`, kernel facts | A private, read-only `/proc` mount limited to the provider's own PID namespace and a hidden host `/sys`; Landlock denying reads outside the granted paths, with no `/proc` or `/sys` rule; seccomp refusing syscalls that read host kernel state (`bpf`, `perf_event_open`). | No exact match: the oracle denies every kernel-fact operation except `sysctl-read`, and Linux splits kernel facts across `/proc`, `/sys` and syscalls, so the map is wider in one place and narrower in another. The Linux test decides. | `confined_provider_denies_kernel_fact_boundaries` |
@@ -69,24 +69,55 @@ Five rows have no exact Linux rule. Each says which way its nearest rule
 departs from the oracle, and the Linux test decides the row.
 
 - The file operations Landlock cannot restrict: `chdir`, `stat`, `flock`,
-  `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`. Each departs the
-  oracle in one stated way. No layer of the design refuses `chdir`, `stat`,
-  `access`, `chmod`, `utime` or `setxattr`, so the mapping is wider than the
-  oracle's `(deny default)` for those six.
-  `linux_file_operations_landlock_cannot_restrict` probes them on a fixture
-  outside every grant and requires each call to succeed, so the widening is
-  recorded rather than claimed as confinement; a later kernel that refuses one
-  of them fails the test and the row is rewritten. Falsifier: add a seccomp
-  rule that refuses `chmod` and `stat` by syscall number; the probe's calls
-  fail and the test fails. `chown` to a new owner is the other case: the
-  capability drop removes `CAP_CHOWN`, so the call is refused and the mapping
+  `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`
+  ([filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)).
+  Each departs the oracle in one stated way. No layer of the design refuses
+  `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the
+  provider owns with ordinary permissions beneath searchable parents, so the
+  mapping is wider than the oracle's `(deny default)` for those six; the
+  kernel's ordinary permission check still applies, so the design claims no
+  such success for a host-owned file or a file whose permissions deny the
+  call. `linux_file_operations_landlock_cannot_restrict` probes them on
+  isolated file and directory fixtures outside every grant, under the probe's
+  mapped uid and gids, with that uid as the fixture owner and the search bit
+  set on every parent. A positive control under the same uid/gid mappings and
+  namespaces, without the proposed Landlock ruleset, capability drop and
+  seccomp filter, requires each intended call to succeed first; a fixture the
+  host cannot supply or a call the control already refuses is reported with
+  its cause as missing evidence. Under the policy the probe requires each
+  call to succeed, so the widening is recorded rather than claimed as
+  confinement; a later kernel that refuses one of them fails the test and the
+  row is rewritten. Falsifier: add a seccomp rule that refuses `chmod` and
+  `stat` by syscall number; the probe's calls fail and the test fails.
+  `chown` separates two cases. Changing the owner to a different mapped uid
+  is refused because the capability drop removes `CAP_CHOWN`, so the mapping
   is narrower than the oracle inside `STORAGE_ROOT`;
-  `linux_capability_drop_refuses_chown` requires `EPERM` there. Falsifier:
-  keep `CAP_CHOWN` in the capability set; the chown succeeds and the test
-  fails. `flock` and `fcntl` act only on a descriptor, and the Landlock open
-  rules refuse a descriptor for a path outside every grant; the design names
-  the Landlock open rule as the layer that covers them and claims no falsifier
-  for those two.
+  `linux_capability_drop_refuses_chown` requires `EPERM` with the owner
+  unchanged. Falsifier: keep `CAP_CHOWN` in the capability set; the chown
+  succeeds and the test fails. Changing only the group of a file the probe
+  owns, with `uid` `-1` and a different mapped group of which the probe is a
+  member, stays permitted because
+  [chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html) lets the
+  owner set a group it belongs to; the same probe requires that call to
+  succeed and the resulting group to change. Falsifier: add a seccomp rule
+  that refuses every `chown` by syscall number; the group call fails and the
+  test fails. A fixture without the required mapped uid or gid supplies a
+  clear reason for missing evidence. `flock` and `fcntl` act only on a
+  descriptor, so the descriptor conditions decide them. Landlock refuses a
+  new data open outside every grant. A descriptor opened before enforcement
+  is not checked: the Runtime launch passes none to a real provider, and
+  future Runtime work proves that precondition. An `O_PATH` open asks for no
+  content right, so it is not restricted; the same probe obtains an outside
+  `O_PATH` descriptor with `openat` and duplicates it with `fcntl(F_DUPFD)`
+  ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)), requires
+  both descriptors and closes both. The duplication gives no proof of a
+  content read, because `open(2)` gives `EBADF` for a read on an `O_PATH`
+  descriptor. The design claims this one `fcntl(F_DUPFD)` call and no other
+  `fcntl` command and no `flock` operation, so those departures stay
+  unclaimed. Falsifier for the `O_PATH` open:
+  add a seccomp rule that refuses `openat` when its flags carry `O_PATH`; the
+  open fails and the test fails. Falsifier for the duplication: add a seccomp
+  rule that refuses `fcntl`; the duplication fails and the test fails.
 - The literal read of `STORAGE_PARENT` alone. Landlock has no right that names
   a directory without its tree, so the nearest rule is wider than the oracle
   and would let a read beneath the parent succeed. The design's mapping is
@@ -292,16 +323,53 @@ no macOS counterpart is named here for the first time.
   `socket(AF_VSOCK, SOCK_STREAM)` succeeds and the test fails. Because the test
   covers every family number and every type, a list that omits any one of them
   fails.
-- `linux_file_operations_landlock_cannot_restrict` (new) probes `stat`,
-  `chmod`, `access`, `utime`, `setxattr` and `chdir` on a fixture outside every
-  grant under the same Linux policy and requires each call to succeed, so the
-  widening of the files row is observed. Falsifier: add a seccomp rule that
-  refuses `chmod` and `stat` by syscall number; the probe's calls fail and the
-  test fails.
-- `linux_capability_drop_refuses_chown` (new) probes `chown` to a new owner on
-  a file under `STORAGE_ROOT` under the same policy and requires `EPERM`, so
-  the narrowing of the files row is observed. Falsifier: keep `CAP_CHOWN` in
-  the capability set; the chown succeeds and the test fails.
+- `linux_file_operations_landlock_cannot_restrict` (new) uses an isolated
+  fixture file and an isolated fixture directory outside every path grant.
+  The probe runs under the mapped uid and mapped gids of the policy; the
+  fixture file and directory are owned by that uid, every parent directory
+  carries the search bit for that uid, and the file has ordinary `0644`
+  permissions so its owner may `chmod`, `utime` and `setxattr` it. One mapped
+  supplementary gid differs from the file's group and is the target of the
+  group `chown`. The file's filesystem supports the chosen `user.*` xattr.
+  The calls use the fixture file for `stat`, `chmod`, `access`, `utime`,
+  `setxattr` and `chown(path, -1, gid)`, the fixture directory for `chdir`,
+  and the fixture file for `openat(AT_FDCWD, path, O_PATH)`, whose descriptor
+  the probe duplicates with `fcntl(fd, F_DUPFD, 3)` and closes twice. A
+  positive control runs the same calls on its own copies of the fixture,
+  under the same uid/gid mappings and the same user, mount, PID and IPC
+  namespaces without the proposed Landlock ruleset, capability drop or
+  seccomp filter, and requires each call to succeed; a fixture the host
+  cannot supply, a missing uid or gid mapping, a filesystem without the
+  xattr, or a call the positive control already refuses is reported with its
+  cause as missing evidence, and the probe claims no widening from it. The
+  control is a precondition check and claims no policy falsifier. Under the
+  policy each call must succeed, the group `chown` must return success and
+  the resulting group must be the chosen mapped gid, and the `O_PATH`
+  descriptor and its duplicate must both be obtained. The probe reads no file
+  content, because `open(2)` gives `EBADF` for a read on an `O_PATH`
+  descriptor. Falsifier for the metadata calls: add a seccomp rule that
+  refuses `chmod` and `stat` by syscall number; those calls fail and the test
+  fails. Falsifier for the group case: add a seccomp rule that refuses every
+  `chown` by syscall number; the group call fails and the test fails.
+  Falsifier for the `O_PATH` open: add a seccomp rule that refuses `openat`
+  when its flags carry `O_PATH`; the open fails and the test fails. Falsifier
+  for the duplication: add a seccomp rule that refuses `fcntl`; the
+  duplication fails and the test fails. A descriptor opened before
+  enforcement is a launch precondition: the Runtime passes none to a real
+  provider, and future Runtime work proves it; this probe claims no falsifier
+  for it.
+- `linux_capability_drop_refuses_chown` (new) probes
+  `chown(path, other_uid, -1)` on a file under `STORAGE_ROOT` that the probe's
+  mapped uid owns, under the same policy, and requires `EPERM` with the owner
+  unchanged, so the narrowing of the files row is observed. The fixture maps
+  the file's owner and the target as two different uids; a fixture without
+  that mapping supplies a clear reason for missing evidence. A positive
+  control under the same uid/gid mappings and namespaces uses its own file
+  with the same owner, keeps `CAP_CHOWN` in the capability set, and requires
+  the same call to succeed, so the fixture is shown to permit it before the
+  policy's refusal is attributed to the drop.
+  Falsifier: keep `CAP_CHOWN` in the capability set; the chown succeeds and
+  the test fails.
 - `confined_provider_denies_process_and_signal_boundaries` (new) requires a
   probe under the same policy to fail to exec a second program, fork a new
   process and signal a host PID, and to fail `ptrace(PTRACE_TRACEME)`,
