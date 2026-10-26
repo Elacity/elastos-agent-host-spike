@@ -87,10 +87,12 @@ refused when the profile cannot be applied.
 `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json`. That
 file is a lab stand-in for the Runtime generator's input and not a manifest
 field. Every top-level allow rule of the wallet profile traces to exactly one
-right the shared contract names, or to one platform-baseline rule. The profile
-rules are evidence for Anders to review and not accepted rights. Its status
-label says "Runtime platform baseline for the wallet-provider executable on
-macOS, not approved rights". The model provider's
+right the shared contract names, or to one platform-baseline rule. In the
+wallet profile, each allow rule is claimed by the one id the contract names for
+it, and no id or rule is declared twice. The profile rules are evidence for
+Anders to review and not accepted rights. Its status label says "Runtime
+platform baseline for the wallet-provider executable on macOS, not approved
+rights". The model provider's
 `capsules/model-provider/tests/fixtures/confine/declared-rights.json` uses the
 same template, and `model_declared_rights_read_on_the_did_and_wallet_template`
 reads it. The generator stays the Runtime's.
@@ -711,6 +713,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   (WP88): `account_operations_beneath_storage_parent_are_refused` fails
   because the sibling `init` and the account call beneath the parent then
   succeed.
+- Drop the pin table's two startup rows (WP89):
+  `declared_rights_trace_refuses_each_bad_input` fails because the two startup
+  rules swapped between their ids and the startup root read claimed by
+  `storage` both pass.
+- Drop the repeated-id refusal (WP90): the same test fails because the two
+  `storage` entries pass the check.
+- Drop the repeated-rule refusal (WP91): the same test fails because an entry
+  that claims one shared rule twice passes the check.
+- Drop the duplicate-form refusal (WP92): the same test fails on its
+  `(allow sysctl-read)`-twice case, which then reads "declared rule is not an
+  allow rule of its profile".
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
