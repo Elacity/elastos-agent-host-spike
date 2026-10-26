@@ -791,6 +791,92 @@ fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
     provider.shutdown();
 }
 
+/// A persona key planted beneath `STORAGE_PARENT` is not adopted.
+///
+/// A confined provider at `<root>/sibling`, beneath `STORAGE_PARENT` and
+/// outside `STORAGE_ROOT`, creates real persona state at
+/// `<root>/sibling/did/personas/fixture.enc` through `get_persona_did`; the
+/// test records its DID and bytes. A second confined provider at `<root>` then
+/// gets `<root>/did/personas/fixture.enc` as a symlink to that file: the
+/// parent read grants the directory itself only, so the planted file's
+/// `exists()` stat is denied and `get_persona_did` answers `key_error` with
+/// the failed-persist reason for the write through that link, the planted DID
+/// never comes back, and the planted bytes stay unchanged. After the link is
+/// removed the same call creates the provider's own persona, a different DID,
+/// and the provider still answers `get_did`.
+///
+/// Falsifiers: append a read grant on `STORAGE_PARENT` beside the storage-root
+/// rule (DID30); the planted key loads, so `get_persona_did` answers ok with
+/// the planted DID and this test fails on its refusal assertion. Remove the
+/// `STORAGE_ROOT` grant (DID10); the first provider cannot persist its persona
+/// key, so this test fails on that call's answer.
+#[test]
+fn persona_key_beneath_storage_parent_is_not_adopted() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    // Beneath `STORAGE_PARENT` (`root`), outside `STORAGE_ROOT` (`root/did`).
+    let sibling = root.join("sibling");
+    fs::create_dir_all(&sibling).expect("sibling base under the storage parent");
+
+    // Real persona state from a confined provider, not a forged key: the
+    // fixture provider keeps it under its own root.
+    let mut planter = ConfinedProvider::start(&sibling);
+    planter.init(&sibling);
+    let planted_did = planter.ok(json!({ "op": "get_persona_did", "name": "fixture" }))["did"]
+        .as_str()
+        .expect("planted persona DID")
+        .to_string();
+    planter.shutdown();
+    let planted_path = sibling.join("did").join("personas").join("fixture.enc");
+    let planted = fs::read(&planted_path).expect("planted persona file");
+
+    let mut provider = ConfinedProvider::start(&root);
+    provider.init(&root);
+    let granted = root.join("did").join("personas").join("fixture.enc");
+    fs::create_dir_all(granted.parent().expect("persona parent"))
+        .expect("granted persona directory");
+    std::os::unix::fs::symlink(&planted_path, &granted).expect("planted symlink");
+
+    // The parent read grants the directory itself, not this file.
+    let denied = provider.send(json!({ "op": "get_persona_did", "name": "fixture" }));
+    assert_eq!(
+        denied["status"], "error",
+        "the planted persona key must be refused: {denied}"
+    );
+    assert_eq!(denied["code"], "key_error", "{denied}");
+    assert!(
+        denied["message"]
+            .as_str()
+            .expect("denial must state a reason")
+            .starts_with("Failed to persist persona key:"),
+        "the refusal must name the failed write through the planted link: {denied}"
+    );
+    assert!(
+        !denied.to_string().contains(&planted_did),
+        "the planted DID must not come back: {denied}"
+    );
+    assert_eq!(
+        fs::read(&planted_path).expect("planted file stays readable to the test"),
+        planted,
+        "the planted file must stay unchanged after the refusal"
+    );
+
+    // Remove the escape; the provider mints its own persona key under
+    // `STORAGE_ROOT` and keeps serving.
+    fs::remove_file(&granted).expect("remove planted symlink");
+    let own = provider.ok(json!({ "op": "get_persona_did", "name": "fixture" }));
+    assert_ne!(
+        own["did"].as_str().expect("provider's own persona DID"),
+        planted_did,
+        "the provider must mint its own persona key: {own}"
+    );
+    provider.ok(json!({ "op": "get_did" }));
+    provider.shutdown();
+}
+
 /// A confined start that fails before it answers shows its reason.
 ///
 /// The fixture profile keeps `(version 1)` first and `(deny default)` second,
