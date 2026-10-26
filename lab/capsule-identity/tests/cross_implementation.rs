@@ -194,10 +194,11 @@ fn readme_python_recomputes_every_lab_cid_pin() {
     assert_eq!(python.len(), bundles.len());
 }
 
-/// A README section with no block is no pass: no section, and a section
-/// with no ```python block, are each refused with their own reason, which
-/// names the section.
-fn assert_missing_block_refused(heading: &str) {
+/// A README section without exactly one closed block is no pass: no
+/// section, a section with no ```python block, a section with two, and a
+/// block that is never closed before the next section are each refused with
+/// their own reason, which names the section.
+fn assert_bad_block_refused(heading: &str) {
     let title = heading.trim_end();
     let no_section = python_block_under("", heading).expect_err("no section");
     assert_eq!(no_section, format!("README.md has no {title:?} section"));
@@ -206,6 +207,20 @@ fn assert_missing_block_refused(heading: &str) {
     assert_eq!(
         no_block,
         format!("README.md's {title:?} holds no ```python block")
+    );
+    let block = "```python\nx = 1\n```\n";
+    let two_blocks = python_block_under(&format!("{heading}{block}\n{block}"), heading)
+        .expect_err("a section with two blocks");
+    assert_eq!(
+        two_blocks,
+        format!("README.md's {title:?} holds 2 ```python blocks, not one")
+    );
+    // The fence after the next heading is not this block's end.
+    let unclosed = format!("{heading}```python\nx = 1\n\n## Next\n```\n");
+    let never_closed = python_block_under(&unclosed, heading).expect_err("an unclosed block");
+    assert_eq!(
+        never_closed,
+        format!("README.md's ```python block in {title:?} is never closed")
     );
 }
 
@@ -222,7 +237,7 @@ fn assert_undefined(refusal: &str, function: &str) {
 #[test]
 fn readme_python_matches_the_name_signature_digest() {
     // The run never skips: each missing part is refused with its own reason.
-    assert_missing_block_refused(NAME_SIGNATURE_HEADING);
+    assert_bad_block_refused(NAME_SIGNATURE_HEADING);
     let undefined = python_name_digests("", &[CONTENT_SAMPLE_LAB_CID]).expect_err("no name_digest");
     assert_undefined(&undefined, "name_digest");
 
@@ -268,7 +283,7 @@ fn readme_python_matches_the_name_signature_digest() {
 #[test]
 fn readme_python_matches_the_package_record_bytes() {
     // The run never skips: each missing part is refused with its own reason.
-    assert_missing_block_refused(PACKAGE_RECORD_HEADING);
+    assert_bad_block_refused(PACKAGE_RECORD_HEADING);
     let undefined = python_records("", &[(CONTENT_SAMPLE_LAB_CID, "did:key:z")])
         .expect_err("no record_payload");
     assert_undefined(&undefined, "record_payload");

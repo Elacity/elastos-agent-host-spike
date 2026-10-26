@@ -3692,6 +3692,93 @@
       "tests": [
         "the_claim_wording_check_names_each_gap"
       ]
+    },
+    {
+      "id": "F-CI24a",
+      "title": "the record check takes a one-word answer, with an empty digest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                [payload, digest] => Ok((payload.to_owned(), digest.to_owned())),\n                _ => Err(format!(\n                    \"{PYTHON} -I printed {line:?}, not a payload and a digest\"\n",
+          "new": "                [payload, digest] => Ok((payload.to_owned(), digest.to_owned())),\n                [payload] => Ok((payload.to_owned(), String::new())),\n                _ => Err(format!(\n                    \"{PYTHON} -I printed {line:?}, not a payload and a digest\"\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI24b",
+      "title": "a missing README section is not refused: the search falls back to the start of the text",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .ok_or_else(|| format!(\"README.md has no {title:?} section\"))?\n        + heading.len();\n",
+          "new": "        .map_or(0, |at| at + heading.len());\n    let _ = title;\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest",
+        "readme_python_matches_the_package_record_bytes",
+        "the_adoption_list_is_read_strictly",
+        "the_claim_wording_check_names_each_gap"
+      ]
+    },
+    {
+      "id": "F-CI24c",
+      "title": "a README section with no block is not refused: the 0 arm gives an empty block",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        0 => return Err(format!(\"README.md's {title:?} holds no ```{lang} block\")),\n",
+          "new": "        0 => return Ok(String::new()),\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest",
+        "readme_python_matches_the_package_record_bytes",
+        "the_adoption_list_is_read_strictly"
+      ]
+    },
+    {
+      "id": "F-CI24d",
+      "title": "a README section with more than one block is not refused: the first is taken",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        more => {\n            return Err(format!(\n                \"README.md's {title:?} holds {more} ```{lang} blocks, not one\"\n            ))\n        }\n",
+          "new": "        _ => {}\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest",
+        "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI24e",
+      "title": "an unclosed README block is not refused: the block runs to the end of its section",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .ok_or_else(|| format!(\"README.md's ```{lang} block in {title:?} is never closed\"))?;\n    let block = &body[..end + 1];\n",
+          "new": "        .map_or(body.len(), |end| end + 1);\n    let block = &body[..end];\n"
+        }
+      ],
+      "tests": [
+        "readme_python_matches_the_name_signature_digest",
+        "readme_python_matches_the_package_record_bytes"
+      ]
     }
   ]
 }
