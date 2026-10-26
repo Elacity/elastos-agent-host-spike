@@ -12,11 +12,16 @@
 //! that fails it. On any other OS, when that tool is missing, the test prints
 //! why it did not run and returns.
 
+use elastos_auth::ethereum_signed_message_hash;
 use elastos_wallet_contract::{
-    ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1, VerifiedWalletInvocationContext,
-    WalletProviderOperationV2, WalletProviderRequestV2, WalletProviderResponseV2, WalletResultV2,
+    Erc1271ProofEvidenceV1, ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1,
+    VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
+    WalletProviderResponseV2, WalletResultV2,
 };
+use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use sha3::Keccak256;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1068,6 +1073,284 @@ fn managed_recovery_writes_persist_under_storage_root() {
     source.shutdown();
 }
 
+/// The fixed test key the EVM proof calls sign with.
+fn evm_test_signing_key() -> SigningKey {
+    SigningKey::from_bytes((&[3u8; 32]).into()).expect("deterministic test key")
+}
+
+/// The address of `signing_key`, derived as `src/tests/support.rs::test_address`
+/// derives it.
+fn evm_test_address(signing_key: &SigningKey) -> String {
+    let verifying_key = signing_key.verifying_key();
+    let encoded = verifying_key.to_encoded_point(false);
+    let digest = Keccak256::digest(&encoded.as_bytes()[1..]);
+    format!("0x{}", hex::encode(&digest[12..]))
+}
+
+/// Signs `message` as `src/tests/support.rs::sign_message_bytes` signs it.
+fn sign_test_message(signing_key: &SigningKey, message: &str) -> String {
+    let hash = ethereum_signed_message_hash(message.as_bytes());
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(&hash)
+        .expect("test signature should be recoverable");
+    let mut bytes = signature.to_bytes().to_vec();
+    bytes.push(recovery_id.to_byte());
+    format!("0x{}", hex::encode(bytes))
+}
+
+/// The ERC-1271 evidence in `src/tests/support.rs::erc1271_proof`'s shape: the
+/// SIWE message hash, a SHA-256 of the signature bytes, and no chain access.
+fn erc1271_evidence(message: &str, signature: &str, contract: &str) -> Erc1271ProofEvidenceV1 {
+    let message_hash = ethereum_signed_message_hash(message.as_bytes());
+    let signature_hex = signature.strip_prefix("0x").unwrap_or(signature);
+    let signature_bytes = hex::decode(signature_hex).expect("test signature must be hex");
+    serde_json::from_value(json!({
+        "schema": "elastos.chain.erc1271_proof/v1",
+        "network": "esc-local",
+        "chain_id": 20,
+        "contract": contract.to_ascii_lowercase(),
+        "message_hash": format!("0x{}", hex::encode(message_hash)),
+        "signature_hash": format!("0x{}", hex::encode(Sha256::digest(&signature_bytes))),
+        "valid": true,
+        "magic_value": "0x1626ba7e",
+        "checked_at": now_ts(),
+    }))
+    .expect("the ERC-1271 evidence must decode as its typed value")
+}
+
+/// The result error of one wallet call, refusing an ok answer.
+fn result_error(result: WalletResultV2) -> (String, String) {
+    match result {
+        WalletResultV2::Ok { data } => {
+            panic!("expected a wallet operation result error, got {data}")
+        }
+        WalletResultV2::Error { code, message } => (code, message),
+    }
+}
+
+/// The EVM proof and account-link calls answer under the profile and persist
+/// under `STORAGE_ROOT`.
+///
+/// One provider `init`s a root and asks for two challenges: one for a fixed
+/// EOA address and one for a fixed contract address. A fresh confined start on
+/// the same root `init`s it and `status` shows `pending_challenge_count` 2, so
+/// both challenges reloaded from the store. `verify_proof` on the first and
+/// `verify_contract_proof` on the second answer ok with `proof_type` `siwe` and
+/// `siwe_erc1271`, and `link_verified_account` with the first answer's
+/// `proof_binding_id` answers ok. A second restart `init`s the same root and
+/// `status` shows `pending_challenge_count` 0; each replayed verify answers
+/// `invalid_proof` with "already consumed"; `list_accounts` holds the linked
+/// account with that binding; and `read_store` shows both challenges with
+/// `consumed_at` set under the root's wallet directory. The fixed signing key,
+/// the messages and the signature stay test data in the temporary root, and no
+/// assertion formats them.
+///
+/// Falsifier: WP18 removes the `STORAGE_ROOT` subpath grant. One grant covers
+/// every `storage` call, so no narrower profile falsifier exists: no profile
+/// edit can fail one of these calls and leave `init` working, and this test
+/// fails on its first `init`.
+#[test]
+fn evm_proofs_and_link_persist_under_storage_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    let signing_key = evm_test_signing_key();
+    let eoa_address = evm_test_address(&signing_key);
+    let contract = "0x00000000000000000000000000000000000000cc";
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::Challenge {
+        domain: "http://elastos.local".to_string(),
+        uri: "http://elastos.local/apps/home/".to_string(),
+        address: eoa_address.clone(),
+        chain_id: 20,
+        resources: vec!["elastos://wallet/account/link".to_string()],
+    }));
+    let eoa_message = data["message"]
+        .as_str()
+        .expect("a challenge must answer its message")
+        .to_string();
+    let eoa_challenge_id = data["challenge_id"]
+        .as_str()
+        .expect("a challenge must answer its id")
+        .to_string();
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::Challenge {
+        domain: "http://elastos.local".to_string(),
+        uri: "http://elastos.local/apps/home/".to_string(),
+        address: contract.to_string(),
+        chain_id: 20,
+        resources: vec!["elastos://wallet/account/link".to_string()],
+    }));
+    let contract_message = data["message"]
+        .as_str()
+        .expect("a challenge must answer its message")
+        .to_string();
+    let contract_challenge_id = data["challenge_id"]
+        .as_str()
+        .expect("a challenge must answer its id")
+        .to_string();
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined re-Init must succeed: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"]["pending_challenge_count"], 2,
+        "both challenges must reload from the store: {status}"
+    );
+
+    let eoa_signature = sign_test_message(&signing_key, &eoa_message);
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::VerifyProof {
+        message: eoa_message.clone(),
+        signature: eoa_signature.clone(),
+    }));
+    assert_eq!(
+        data["proof_type"], "siwe",
+        "verify_proof must answer its proof type"
+    );
+    assert_eq!(data["chain_namespace"], "eip155:20");
+    assert_eq!(data["address"], eoa_address.to_ascii_lowercase());
+    let proof_binding_id = data["proof_binding_id"]
+        .as_str()
+        .expect("a verified proof must answer its binding")
+        .to_string();
+    assert_eq!(
+        proof_binding_id,
+        format!(
+            "proof:wallet:eip155:20:{}",
+            eoa_address.to_ascii_lowercase()
+        ),
+        "the verified proof must answer its binding"
+    );
+
+    let contract_signature = "0x01020304";
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::VerifyContractProof {
+            message: contract_message.clone(),
+            signature: contract_signature.to_string(),
+            evidence: erc1271_evidence(&contract_message, contract_signature, contract),
+        }),
+    );
+    assert_eq!(
+        data["proof_type"], "siwe_erc1271",
+        "verify_contract_proof must answer its proof type"
+    );
+    assert_eq!(data["chain_namespace"], "eip155:20");
+    assert_eq!(data["address"], contract);
+    assert_eq!(
+        data["proof_binding_id"],
+        format!("proof:wallet:eip155:20:{contract}"),
+        "the contract proof must answer its binding"
+    );
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: proof_binding_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            address: eoa_address.clone(),
+            proof_type: "siwe".to_string(),
+            label: Some("Proof".to_string()),
+        }),
+    );
+    assert_eq!(
+        data["account"]["proof_binding_id"].as_str(),
+        Some(proof_binding_id.as_str()),
+        "link_verified_account must answer the binding it was given"
+    );
+    let linked_account_id = data["account"]["account_id"]
+        .as_str()
+        .expect("a linked account must name its id")
+        .to_string();
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined second re-Init must succeed: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"]["pending_challenge_count"], 0,
+        "both consumed challenges must reload from the store: {status}"
+    );
+
+    for operation in [
+        WalletProviderOperationV2::VerifyProof {
+            message: eoa_message.clone(),
+            signature: eoa_signature.clone(),
+        },
+        WalletProviderOperationV2::VerifyContractProof {
+            message: contract_message.clone(),
+            signature: contract_signature.to_string(),
+            evidence: erc1271_evidence(&contract_message, contract_signature, contract),
+        },
+    ] {
+        let (code, message) = result_error(provider.wallet(operation));
+        assert_eq!(
+            code, "invalid_proof",
+            "a replayed verify must be refused: {message}"
+        );
+        assert!(
+            message.contains("already consumed"),
+            "a replay must name the consumed challenge: {message}"
+        );
+    }
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListAccounts {
+        include_revoked: false,
+    }));
+    let accounts = data["accounts"]
+        .as_array()
+        .expect("list_accounts must answer its accounts");
+    assert_eq!(
+        accounts.len(),
+        1,
+        "the reloaded listing must hold the linked account"
+    );
+    assert_eq!(accounts[0]["account_id"], linked_account_id);
+    assert_eq!(
+        accounts[0]["proof_binding_id"].as_str(),
+        Some(proof_binding_id.as_str()),
+        "the reloaded listing must hold the proof binding"
+    );
+    assert_eq!(accounts[0]["proof_type"], "siwe");
+    assert_eq!(accounts[0]["address"], eoa_address.to_ascii_lowercase());
+
+    let store = read_store(&root);
+    let stored = store["challenges"]
+        .as_array()
+        .expect("the store under the wallet directory must hold its challenges");
+    assert_eq!(
+        stored.len(),
+        2,
+        "the store under the wallet directory must hold both challenges"
+    );
+    for challenge_id in [&eoa_challenge_id, &contract_challenge_id] {
+        let challenge = stored
+            .iter()
+            .find(|stored| {
+                stored["challenge"]["challenge_id"].as_str() == Some(challenge_id.as_str())
+            })
+            .expect("the store under the wallet directory must hold the challenge");
+        assert!(
+            challenge["consumed_at"].as_u64().is_some(),
+            "the store under the wallet directory must hold the consumed challenge"
+        );
+    }
+    provider.shutdown();
+}
+
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
@@ -1293,14 +1576,15 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// empty. The array sends `rename_account`, `revoke_account`,
 /// `set_default_account` and `default_account` before the
 /// `export_managed_recovery_key`, `import_managed_recovery_key`,
-/// `export_managed_recovery_set` and `import_managed_recovery_set` calls, and
-/// the `create_managed_account` and `list_accounts` calls that 072 named come
-/// last. The array runs before the `storage_error` check, so a grant on the
-/// parent fails this test on one of those calls rather than only on `init`.
-/// `list_accounts` is sent only to show that the refused
-/// `create_managed_account` created nothing. After `init` for the granted root
-/// answers ok, the same call answers ok, the listing holds that account, and
-/// the account is in the store under the root.
+/// `export_managed_recovery_set` and `import_managed_recovery_set` calls, then
+/// the `challenge`, `verify_proof`, `verify_contract_proof` and
+/// `link_verified_account` calls of task 082, and the `create_managed_account`
+/// and `list_accounts` calls that 072 named come last. The array runs before
+/// the `storage_error` check, so a grant on the parent fails this test on one
+/// of those calls rather than only on `init`. `list_accounts` is sent only to
+/// show that the refused `create_managed_account` created nothing. After
+/// `init` for the granted root answers ok, the same call answers ok, the
+/// listing holds that account, and the account is in the store under the root.
 ///
 /// Falsifiers: append a read and write grant on `STORAGE_PARENT` (WP88); the
 /// sibling `init` then succeeds, so `rename_account` answers `not_found` and
@@ -1325,9 +1609,9 @@ fn account_operations_beneath_storage_parent_are_refused() {
 
     let denied = provider.init(&sibling);
 
-    // The four account edits of task 080 and the four managed-recovery calls
-    // of task 081 come first, so a grant on `STORAGE_PARENT` fails the first
-    // call of the loop.
+    // The four account edits of task 080, the four managed-recovery calls of
+    // task 081 and the four EVM proof and link calls of task 082 come first,
+    // so a grant on `STORAGE_PARENT` fails the first call of the loop.
     let operations = [
         WalletProviderOperationV2::RenameAccount {
             account_id: "wallet:eip155:20:0xabc".to_string(),
@@ -1360,6 +1644,33 @@ fn account_operations_beneath_storage_parent_are_refused() {
                 label: Some("Outside".to_string()),
             }])
             .expect("the outside fixture set must be well formed"),
+        },
+        WalletProviderOperationV2::Challenge {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: "0x00000000000000000000000000000000000000ab".to_string(),
+            chain_id: 20,
+            resources: vec![],
+        },
+        WalletProviderOperationV2::VerifyProof {
+            message: "Outside EVM proof".to_string(),
+            signature: "0x01020304".to_string(),
+        },
+        WalletProviderOperationV2::VerifyContractProof {
+            message: "Outside EVM proof".to_string(),
+            signature: "0x01020304".to_string(),
+            evidence: erc1271_evidence(
+                "Outside EVM proof",
+                "0x01020304",
+                "0x00000000000000000000000000000000000000cc",
+            ),
+        },
+        WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: "proof:eip155:20:0xabc".to_string(),
+            chain_namespace: "eip155:20".to_string(),
+            address: "0xabc".to_string(),
+            proof_type: "siwe".to_string(),
+            label: Some("Outside".to_string()),
         },
         WalletProviderOperationV2::CreateManagedAccount {
             chain_namespace: "eip155:20".to_string(),
