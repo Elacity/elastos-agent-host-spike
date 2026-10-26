@@ -542,6 +542,22 @@
       ]
     },
     {
+      "id": "F-WC3-CREATE-NEW",
+      "title": "capsule.json is opened with create and truncate instead of create_new, so an existing file or a link at its path is written over or through",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "        .create_new(true)",
+          "new": "        .create(true).truncate(true)"
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
       "id": "F-WC3-IO-CAUSE-WRITE",
       "title": "capsule.json's write refusal drops the writer's cause",
       "command": "lab",
