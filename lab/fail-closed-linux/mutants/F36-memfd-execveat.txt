@@ -1,0 +1,10 @@
+id: F36-memfd-execveat
+file: src/lib.rs
+test: real_kernel::real_memfd_second_image_is_refused
+--- old
+    kernel
+        .install_no_exec_filter(plan)
+        .map_err(|errno| Fault::os(Step::InstallNoExec, errno))?;
+--- new
+    let _ = (plan, Step::InstallNoExec);
+--- end

@@ -10,6 +10,9 @@ test: real_kernel::real_landlock_ruleset_unappliable_refuses
         .detach_into_pid_namespace()
         .map_err(|errno| Fault::os(Step::PidFork, errno))?;
     kernel
+        .install_no_exec_filter(plan)
+        .map_err(|errno| Fault::os(Step::InstallNoExec, errno))?;
+    kernel
         .enforcement_self_test(plan)
         .map_err(|errno| Fault::os(Step::EnforceSelf, errno))?;
     kernel
@@ -18,6 +21,7 @@ test: real_kernel::real_landlock_ruleset_unappliable_refuses
 --- new
     let confined = confine(kernel, plan);
     let _ = kernel.detach_into_pid_namespace();
+    let _ = kernel.install_no_exec_filter(plan);
     let _ = kernel.enforcement_self_test(plan);
     kernel
         .exec(plan)

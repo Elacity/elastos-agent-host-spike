@@ -163,6 +163,14 @@ impl Kernel for SimKernel {
         self.run(Step::CloseFds)
     }
 
+    fn sanitize_stdio(&mut self) -> Result<(), Errno> {
+        self.run(Step::SanitizeStdio)
+    }
+
+    fn install_no_exec_filter(&mut self, _plan: &Plan) -> Result<(), Errno> {
+        self.run(Step::InstallNoExec)
+    }
+
     fn enforcement_self_test(&mut self, _plan: &Plan) -> Result<(), Errno> {
         self.steps.push(Step::EnforceSelf);
         if let Some((Step::EnforceSelf, errno)) = self.fail {

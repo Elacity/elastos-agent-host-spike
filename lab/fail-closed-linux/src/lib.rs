@@ -10,13 +10,20 @@
 //! and SIGKILL or SIGTERM of that pid takes the namespace down. A start
 //! needs two things: EOF on the close-on-exec fault pipe, and
 //! `/proc/<provider pid>/exe` matching the expected binary (device and
-//! inode). Closing that pipe without `execve` is a refusal. A static binary
-//! that writes nothing is accepted when that identity matches. After
+//! inode). Closing that pipe without `execve` is a refusal. The identity
+//! pipe stays close-on-exec. A static binary that writes nothing is
+//! accepted when that identity matches. After
 //! `landlock_restrict_self` a throwaway child tries one denied operation
-//! per needed right; any success is a refusal. Before exec the guard closes
-//! every fd except stdin, stdout, stderr and the fault pipe. Any bytes on
-//! the fault pipe, including a `ConfineReady` record without `execve`, are
-//! a refusal. `launch` has no unconfined path.
+//! per needed right; any success is a refusal. Before restrict, a terminal
+//! on fd 0, 1 or 2 is replaced with `/dev/null`; a failed replace refuses
+//! and names the fd. After confine the guard installs a second seccomp
+//! filter that returns EPERM for `execveat` and for `memfd_create` with
+//! `MFD_EXEC`, so a later anonymous image cannot run. If that install
+//! fails, launch refuses (`install_no_exec`). Before exec the guard closes
+//! every fd except stdin, stdout, stderr and the fault pipe. The identity
+//! pipe stays close-on-exec. Any bytes on the fault pipe, including a
+//! `ConfineReady` record without `execve`, are a refusal. `launch` has no
+//! unconfined path.
 
 pub mod real;
 pub mod seccomp;
@@ -299,11 +306,13 @@ pub enum Step {
     Report,
     ConfineReady,
     ExecIdentity,
+    SanitizeStdio,
+    InstallNoExec,
 }
 
 impl Step {
     /// The steps that run in the provider's process, in guard order.
-    pub const GUARD: [Step; 21] = [
+    pub const GUARD: [Step; 23] = [
         Step::Unshare,
         Step::UidMap,
         Step::Setgroups,
@@ -321,8 +330,10 @@ impl Step {
         Step::CreateRuleset,
         Step::StorageRootRule,
         Step::ExecutableRule,
+        Step::SanitizeStdio,
         Step::RestrictSelf,
         Step::CloseFds,
+        Step::InstallNoExec,
         Step::EnforceSelf,
         Step::Execve,
     ];
@@ -344,7 +355,7 @@ impl Step {
                 Layer::Capabilities
             }
             Step::SetNoNewPrivs => Layer::NoNewPrivs,
-            Step::InstallFilter => Layer::Seccomp,
+            Step::InstallFilter | Step::InstallNoExec => Layer::Seccomp,
             Step::AbiProbe
             | Step::AbiFloor
             | Step::RightProbe
@@ -360,7 +371,8 @@ impl Step {
             | Step::Report
             | Step::ConfineReady
             | Step::CloseFds
-            | Step::ExecIdentity => Layer::Launch,
+            | Step::ExecIdentity
+            | Step::SanitizeStdio => Layer::Launch,
         }
     }
 
@@ -394,6 +406,8 @@ impl Step {
             Step::Report => "report",
             Step::ConfineReady => "confine_ready",
             Step::ExecIdentity => "exec_identity",
+            Step::SanitizeStdio => "sanitize_stdio",
+            Step::InstallNoExec => "install_no_exec",
         }
     }
 
@@ -550,6 +564,15 @@ impl Refusal {
             Step::ConfineReady => "ConfineReady without execve is not a start".to_string(),
             Step::ExecIdentity => "the running image is not the expected executable".to_string(),
             Step::EnforceSelf => "Landlock accepted a right and did not enforce it".to_string(),
+            Step::SanitizeStdio => format!(
+                "fd {} is a terminal and could not be replaced: {}",
+                fault.found,
+                io::Error::from_raw_os_error(fault.errno)
+            ),
+            Step::InstallNoExec => format!(
+                "the no-exec seccomp filter could not be installed: {}",
+                io::Error::from_raw_os_error(fault.errno)
+            ),
             Step::AbiProbe => format!(
                 "Landlock is not available: {}",
                 io::Error::from_raw_os_error(fault.errno)
@@ -812,6 +835,10 @@ impl Plan {
     pub fn enforce_tty(&self) -> &CStr {
         &self.enforce_tty
     }
+
+    pub fn storage_root(&self) -> &CStr {
+        &self.storage_root
+    }
 }
 
 impl Drop for Plan {
@@ -911,6 +938,23 @@ pub trait Kernel {
     fn clear_capability_sets(&mut self) -> Result<(), Errno>;
     fn set_no_new_privs(&mut self) -> Result<(), Errno>;
     fn install_seccomp_filter(&mut self, filter: &[libc::sock_filter]) -> Result<(), Errno>;
+    /// Replace a terminal on fd 0, 1 or 2. On failure `named_fault_found`
+    /// is that fd.
+    fn sanitize_stdio(&mut self) -> Result<(), Errno> {
+        let _ = self;
+        Ok(())
+    }
+    /// Second seccomp filter: `execveat` and `memfd_create(MFD_EXEC)` return
+    /// EPERM. A failed install refuses the launch.
+    fn install_no_exec_filter(&mut self, plan: &Plan) -> Result<(), Errno> {
+        let _ = (self, plan);
+        Ok(())
+    }
+    /// Fd named by the last `sanitize_stdio` failure. 0 when none.
+    fn named_fault_found(&self) -> u32 {
+        let _ = self;
+        0
+    }
     fn landlock_abi(&mut self) -> Result<u32, Errno>;
     fn landlock_create_ruleset(
         &mut self,
@@ -1028,6 +1072,11 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
             .landlock_add_path_rule(ruleset, path, landlock::ACCESS_FS_READ_FILE)
             .map_err(os(Step::ExecutableRule))?;
     }
+    kernel.sanitize_stdio().map_err(|errno| Fault {
+        step: Step::SanitizeStdio,
+        errno,
+        found: kernel.named_fault_found(),
+    })?;
     kernel
         .landlock_restrict_self(ruleset)
         .map_err(os(Step::RestrictSelf))?;
@@ -1042,6 +1091,9 @@ pub fn confine_and_exec<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Resu
     kernel
         .detach_into_pid_namespace()
         .map_err(|errno| Fault::os(Step::PidFork, errno))?;
+    kernel
+        .install_no_exec_filter(plan)
+        .map_err(|errno| Fault::os(Step::InstallNoExec, errno))?;
     kernel
         .enforcement_self_test(plan)
         .map_err(|errno| Fault::os(Step::EnforceSelf, errno))?;
@@ -1304,6 +1356,32 @@ mod tests {
                 .to_string()
                 .contains("Landlock accepted a right and did not enforce it"),
             "{enforce}"
+        );
+        let stdio = Refusal::new(
+            "did-provider",
+            Fault {
+                step: Step::SanitizeStdio,
+                errno: libc::EPERM,
+                found: 0,
+            },
+            0,
+        );
+        assert!(
+            stdio
+                .to_string()
+                .contains("fd 0 is a terminal and could not be replaced"),
+            "{stdio}"
+        );
+        let no_exec = Refusal::new(
+            "did-provider",
+            Fault::os(Step::InstallNoExec, libc::ENOSYS),
+            0,
+        );
+        assert!(
+            no_exec
+                .to_string()
+                .contains("the no-exec seccomp filter could not be installed"),
+            "{no_exec}"
         );
     }
 }

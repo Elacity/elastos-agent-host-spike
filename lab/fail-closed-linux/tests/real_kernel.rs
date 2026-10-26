@@ -93,6 +93,19 @@ fn real_confined_provider_has_every_layer() {
             "{provider} shares the test's user namespace"
         );
 
+        let fds_line = require_line(&lines, "fds=", provider);
+        let fds: Vec<&str> = fds_line
+            .strip_prefix("fds=")
+            .unwrap_or("")
+            .split(',')
+            .filter(|part| !part.is_empty())
+            .collect();
+        assert_eq!(
+            fds,
+            ["0", "1", "2"],
+            "{provider}: unexpected fds after start: {fds_line}"
+        );
+
         let nspid_line = require_line(&lines, "nspid=", provider);
         let nspid: i32 = nspid_line
             .rsplit('=')
@@ -979,7 +992,15 @@ fn real_inherited_pty_ioctl_is_not_available() {
         let src = slave.as_raw_fd();
         let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
         inherit_fd(&mut command, src, 3);
-        command.arg("--inherited-fd").arg("3");
+        inherit_fd(&mut command, src, 4);
+        inherit_fd(&mut command, src, 5);
+        command
+            .arg("--inherited-fd")
+            .arg("3")
+            .arg("--inherited-fd")
+            .arg("4")
+            .arg("--inherited-fd")
+            .arg("5");
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -987,14 +1008,18 @@ fn real_inherited_pty_ioctl_is_not_available() {
         let mut child = command.spawn().expect("cannot start the launcher");
         let stdin = child.stdin.take().unwrap();
         let (_pid, lines) = read_until_ready(&mut child, provider);
-        assert!(
-            lines.contains(&format!("inherit_ioctl errno={}", libc::EBADF)),
-            "{provider}: inherited pty must be closed, got {lines:?}"
-        );
-        assert!(
-            !lines.iter().any(|line| line == "inherit_ioctl ok"),
-            "{provider}: inherited pty ioctl succeeded in {lines:?}"
-        );
+        for fd in [3, 4, 5] {
+            assert!(
+                lines.contains(&format!("inherit_ioctl_{fd} errno={}", libc::EBADF)),
+                "{provider}: inherited pty on fd {fd} must be closed, got {lines:?}"
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line == &format!("inherit_ioctl_{fd} ok")),
+                "{provider}: inherited pty ioctl on fd {fd} succeeded in {lines:?}"
+            );
+        }
         drop(stdin);
         let done = child.wait_with_output().unwrap();
         assert_eq!(
@@ -1098,4 +1123,70 @@ fn real_production_cli_rejects_test_hooks_without_switch() {
         stderr.contains("unknown argument"),
         "production CLI accepted a test hook:\n{stderr}"
     );
+}
+
+#[test]
+fn real_memfd_second_image_is_refused() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("memfd-exec", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command.arg("--memfd-exec");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            !lines.iter().any(|line| line == "memfd_exec ran"),
+            "{provider}: memfd second image ran: {lines:?}"
+        );
+        assert!(
+            lines.contains(&format!("memfd_exec errno={}", libc::EPERM)),
+            "{provider}: memfd execveat must be EPERM, got {lines:?}"
+        );
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+#[test]
+fn real_stdin_pty_is_not_a_terminal() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("stdin-pty", provider);
+        let slave = std::fs::File::open(&fixture.tty_path).expect("open pty slave");
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            lines.contains(&"stdin_tty=0".to_string()),
+            "{provider}: confined stdin must not be a tty, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line == "stdin_ioctl ok"),
+            "{provider}: TIOCGWINSZ on confined stdin succeeded: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line == "stdin_tiocsti ok"),
+            "{provider}: TIOCSTI on confined stdin succeeded: {lines:?}"
+        );
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
 }

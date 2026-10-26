@@ -142,6 +142,35 @@ fn sim_seccomp_install_failure_refuses() {
 }
 
 #[test]
+fn sim_no_exec_filter_failure_refuses() {
+    os_error_row(&[
+        (Step::InstallNoExec, libc::EINVAL),
+        (Step::InstallNoExec, libc::ENOSYS),
+    ]);
+    let mut kernel = SimKernel::failing(Step::InstallNoExec, libc::ENOSYS);
+    let refusal = refused(&mut kernel, &spec("did-provider"));
+    assert!(
+        refusal
+            .to_string()
+            .contains("the no-exec seccomp filter could not be installed"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn sim_stdio_sanitize_failure_refuses() {
+    os_error_row(&[(Step::SanitizeStdio, libc::EPERM)]);
+    let mut kernel = SimKernel::failing(Step::SanitizeStdio, libc::EPERM);
+    let refusal = refused(&mut kernel, &spec("did-provider"));
+    assert!(
+        refusal
+            .to_string()
+            .contains("fd 0 is a terminal and could not be replaced"),
+        "{refusal}"
+    );
+}
+
+#[test]
 fn sim_landlock_missing_refuses() {
     os_error_row(&[
         (Step::AbiProbe, libc::ENOSYS),
@@ -260,6 +289,9 @@ fn sim_confined_provider_starts_after_every_layer() {
                 Layer::Seccomp,
                 Layer::Landlock,
                 Layer::Launch,
+                Layer::Landlock,
+                Layer::Launch,
+                Layer::Seccomp,
                 Layer::Landlock,
                 Layer::Exec,
             ],

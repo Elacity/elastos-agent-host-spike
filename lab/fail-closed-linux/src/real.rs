@@ -7,10 +7,10 @@
 //! `launch` returns the PID-namespace init. The helper that unshares the
 //! namespace writes that host pid and exits. Init reaps every child. SIGKILL
 //! of init kills the namespace. A start is EOF on the close-on-exec pipe
-//! plus `/proc/<provider pid>/exe` matching the expected binary. A
-//! non-cloexec identity fd keeps the post-`execve` image alive, and the
-//! parent samples that path while it waits for the fault pipe. Any bytes
-//! are a fault.
+//! plus `/proc/<provider pid>/exe` matching the expected binary. The
+//! identity pipe stays close-on-exec, so it does not leak into the
+//! provider. The parent samples `/proc/<pid>/exe` while it waits for the
+//! fault pipe. Any bytes are a fault.
 
 use crate::{
     confine_and_exec, exe_identity_ok, interpret_fault_pipe, landlock, proc_exe_dev_ino,
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 /// The real kernel. `fault_write` is the child's end of the close-on-exec
 /// pipe. Reapers close their copy so a successful `execve` produces EOF.
-/// `identity_write` is not cloexec: only the post-`execve` image keeps it.
+/// `identity_write` is close-on-exec: the provider does not inherit it.
 pub struct RealKernel {
     fault_write: RawFd,
     identity_write: RawFd,
@@ -34,6 +34,7 @@ pub struct RealKernel {
     lie_enforcement: bool,
     keep: [RawFd; 8],
     keep_n: usize,
+    fault_found: u32,
 }
 
 impl RealKernel {
@@ -45,6 +46,7 @@ impl RealKernel {
             lie_enforcement: false,
             keep: [-1; 8],
             keep_n: 0,
+            fault_found: 0,
         }
     }
 }
@@ -241,18 +243,6 @@ fn close_identity_write(kernel: &mut RealKernel) {
         unsafe { libc::close(kernel.identity_write) };
         kernel.identity_write = -1;
     }
-}
-
-fn clear_cloexec(fd: RawFd) -> Result<(), Errno> {
-    // SAFETY: integer fcntl on a pipe we own.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(errno());
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } != 0 {
-        return Err(errno());
-    }
-    Ok(())
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -526,6 +516,36 @@ impl Kernel for RealKernel {
         close_except(&keep[..n])
     }
 
+    fn sanitize_stdio(&mut self) -> Result<(), Errno> {
+        for fd in [0, 1, 2] {
+            // SAFETY: isatty only inspects the fd.
+            if unsafe { libc::isatty(fd) } == 0 {
+                continue;
+            }
+            self.fault_found = fd as u32;
+            // SAFETY: open/dup2/close on /dev/null and a stdio fd.
+            let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+            if null < 0 {
+                return Err(errno());
+            }
+            if unsafe { libc::dup2(null, fd) } < 0 {
+                let err = errno();
+                unsafe { libc::close(null) };
+                return Err(err);
+            }
+            unsafe { libc::close(null) };
+        }
+        Ok(())
+    }
+
+    fn named_fault_found(&self) -> u32 {
+        self.fault_found
+    }
+
+    fn install_no_exec_filter(&mut self, _plan: &Plan) -> Result<(), Errno> {
+        self.install_seccomp_filter(&crate::seccomp::no_exec_filter())
+    }
+
     fn enforcement_self_test(&mut self, plan: &Plan) -> Result<(), Errno> {
         if self.lie_enforcement {
             return Err(ENFORCEMENT_BROKEN);
@@ -635,9 +655,6 @@ impl Kernel for RealKernel {
                 libc::close(ack_write);
                 libc::close(identity_read);
             }
-            if clear_cloexec(identity_write).is_err() {
-                unsafe { libc::_exit(REFUSAL_EXIT_CODE) };
-            }
             HANDOFF_WRITE.store(handoff_write, Ordering::Relaxed);
             ACK_READ.store(ack_read, Ordering::Relaxed);
             if plan.test_empty_pipe {
@@ -658,6 +675,7 @@ impl Kernel for RealKernel {
                     lie_enforcement: plan.test_lie_enforcement,
                     keep: [handoff_write, ack_read, identity_write, -1, -1, -1, -1, -1],
                     keep_n: 3,
+                    fault_found: 0,
                 },
                 plan,
             ) {
@@ -717,8 +735,8 @@ impl Kernel for RealKernel {
                     }
                 };
                 // Init is landlocked and cannot read /proc. The parent is
-                // outside. The identity fd keeps the post-exec image alive
-                // so /proc/<pid>/exe can be stated after fault-pipe EOF.
+                // outside. `/proc/<pid>/exe` is stated after fault-pipe EOF
+                // while init still holds the namespace.
                 if !matched {
                     unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
                     reap(init as libc::pid_t);
@@ -971,8 +989,20 @@ fn close_fd_range_by_proc(first: u32, last: u32) -> Result<(), Errno> {
     Ok(())
 }
 
+fn fill_path(buf: &mut [u8], root: &[u8], suffix: &[u8]) -> Option<*const libc::c_char> {
+    if root.len() + suffix.len() + 1 > buf.len() {
+        return None;
+    }
+    buf[..root.len()].copy_from_slice(root);
+    buf[root.len()..root.len() + suffix.len()].copy_from_slice(suffix);
+    buf[root.len() + suffix.len()] = 0;
+    Some(buf.as_ptr().cast())
+}
+
 fn run_enforcement_child(plan: &Plan) -> ! {
     const TIOCGWINSZ: u64 = 0x5413;
+    const AT_EMPTY_PATH: i32 = 0x1000;
+    const MFD_CLOEXEC: u32 = 1;
     // SAFETY: paths come from Plan; the child only makes system calls.
     unsafe {
         let fd = libc::open(
@@ -999,6 +1029,86 @@ fn run_enforcement_child(plan: &Plan) -> ! {
             libc::close(tty);
             if ret == 0 {
                 libc::_exit(3);
+            }
+        }
+
+        let mem = libc::syscall(
+            libc::SYS_memfd_create,
+            c"e".as_ptr(),
+            libc::c_uint::from(MFD_CLOEXEC),
+        );
+        if mem >= 0 {
+            libc::write(mem as i32, b"x".as_ptr().cast(), 1);
+            let ret = libc::syscall(
+                libc::SYS_execveat,
+                mem,
+                c"".as_ptr(),
+                std::ptr::null::<*const libc::c_char>(),
+                std::ptr::null::<*const libc::c_char>(),
+                AT_EMPTY_PATH,
+            );
+            let err = errno();
+            libc::close(mem as i32);
+            if ret == 0 || (err != libc::EPERM && err != libc::EACCES) {
+                libc::_exit(4);
+            }
+        }
+
+        let root = plan.storage_root().to_bytes();
+        let mut dir_a = [0u8; 256];
+        let mut dir_b = [0u8; 256];
+        let mut file_a = [0u8; 256];
+        let mut file_b = [0u8; 256];
+        let Some(path_a) = fill_path(&mut dir_a, root, b"/_a") else {
+            libc::_exit(5);
+        };
+        let Some(path_b) = fill_path(&mut dir_b, root, b"/_b") else {
+            libc::_exit(5);
+        };
+        let Some(path_af) = fill_path(&mut file_a, root, b"/_a/f") else {
+            libc::_exit(5);
+        };
+        let Some(path_bf) = fill_path(&mut file_b, root, b"/_b/f") else {
+            libc::_exit(5);
+        };
+        if libc::mkdir(path_a, 0o700) == 0 && libc::mkdir(path_b, 0o700) == 0 {
+            let created = libc::open(
+                path_af,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                0o600,
+            );
+            if created >= 0 {
+                libc::close(created);
+                if libc::rename(path_af, path_bf) == 0 {
+                    libc::_exit(5);
+                }
+            }
+        }
+
+        let mut special = [0u8; 256];
+        if let Some(fifo) = fill_path(&mut special, root, b"/_fifo") {
+            if libc::mkfifo(fifo, 0o600) == 0 {
+                libc::_exit(6);
+            }
+        }
+        if let Some(sym) = fill_path(&mut special, root, b"/_sym") {
+            if libc::symlink(c"t".as_ptr(), sym) == 0 {
+                libc::_exit(7);
+            }
+        }
+        if let Some(chr) = fill_path(&mut special, root, b"/_chr") {
+            if libc::mknod(chr, libc::S_IFCHR | 0o600, libc::makedev(1, 3)) == 0 {
+                libc::_exit(8);
+            }
+        }
+        if let Some(blk) = fill_path(&mut special, root, b"/_blk") {
+            if libc::mknod(blk, libc::S_IFBLK | 0o600, libc::makedev(7, 0)) == 0 {
+                libc::_exit(9);
+            }
+        }
+        if let Some(sock) = fill_path(&mut special, root, b"/_sock") {
+            if libc::mknod(sock, libc::S_IFSOCK | 0o600, 0) == 0 {
+                libc::_exit(10);
             }
         }
         libc::_exit(0);

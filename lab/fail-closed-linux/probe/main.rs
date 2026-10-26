@@ -2,7 +2,8 @@
 //!
 //! usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR
 //!        [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE]
-//!        [--daemonize] [--orphan-exit]
+//!        [--daemonize] [--orphan-exit] [--memfd-exec] [--memfd-child]
+//!        [--stdio-check]
 //!
 //! It writes STORAGE_ROOT/probe-ran first, prints one line per check, prints
 //! `nspid=` from `/proc/self/status`, prints `ready`, then waits until stdin
@@ -32,12 +33,30 @@ extern "C" {
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn open(path: *const i8, flags: i32, ...) -> i32;
     fn close(fd: i32) -> i32;
+    fn isatty(fd: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32) -> i32;
+    fn syscall(nr: i64, ...) -> i64;
+    #[link_name = "write"]
+    fn c_write(fd: i32, buf: *const u8, count: usize) -> isize;
 }
 
 const SIGKILL: i32 = 9;
 const TIOCGWINSZ: u64 = 0x5413;
+const TIOCSTI: u64 = 0x5412;
 const O_RDONLY: i32 = 0;
 const O_NOCTTY: i32 = 0o400;
+const F_GETFD: i32 = 1;
+const AT_EMPTY_PATH: i64 = 0x1000;
+const MFD_CLOEXEC: u32 = 1;
+const MFD_EXEC: u32 = 0x0010;
+#[cfg(target_arch = "x86_64")]
+const SYS_MEMFD_CREATE: i64 = 319;
+#[cfg(target_arch = "x86_64")]
+const SYS_EXECVEAT: i64 = 322;
+#[cfg(target_arch = "aarch64")]
+const SYS_MEMFD_CREATE: i64 = 279;
+#[cfg(target_arch = "aarch64")]
+const SYS_EXECVEAT: i64 = 281;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -49,9 +68,22 @@ fn main() {
     let outside_file = Path::new(&args[3]);
     let outside_dir = Path::new(&args[4]);
     let extra = parse_extra(&args[5..]);
+    if extra.memfd_child {
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "memfd_exec ran");
+        let _ = out.flush();
+        std::process::exit(0);
+    }
 
     let marker = fs::write(storage.join("probe-ran"), provider);
     let mut out = io::stdout().lock();
+    let _ = writeln!(out, "fds={}", list_fds());
+    let _ = writeln!(out, "stdin_tty={}", i32::from(unsafe { isatty(0) } != 0));
+    report(&mut out, "stdin_ioctl", ioctl_on_fd(0));
+    report(&mut out, "stdin_tiocsti", ioctl_tiocsti(0));
+    if extra.memfd_exec {
+        try_memfd_exec(&mut out, &args[0]);
+    }
     let _ = writeln!(out, "probe-ran provider={provider}");
     report(&mut out, "marker", marker);
     report(
@@ -101,8 +133,8 @@ fn main() {
     if let Some(path) = extra.tty_path.as_deref() {
         report(&mut out, "ioctl_dev", ioctl_tty(path));
     }
-    if let Some(fd) = extra.inherited_fd {
-        report(&mut out, "inherit_ioctl", ioctl_on_fd(fd));
+    for fd in &extra.inherited_fds {
+        report(&mut out, &format!("inherit_ioctl_{fd}"), ioctl_on_fd(*fd));
     }
     let _ = writeln!(out, "nspid={}", nspid());
     if let Some(host_pid) = extra.kill_host {
@@ -134,21 +166,25 @@ fn main() {
 
 struct Extra {
     tty_path: Option<String>,
-    inherited_fd: Option<i32>,
+    inherited_fds: Vec<i32>,
     kill_host: Option<i32>,
     exit_code: Option<i32>,
     daemonize: bool,
     orphan_exit: bool,
+    memfd_exec: bool,
+    memfd_child: bool,
 }
 
 fn parse_extra(args: &[String]) -> Extra {
     let mut extra = Extra {
         tty_path: None,
-        inherited_fd: None,
+        inherited_fds: Vec::new(),
         kill_host: None,
         exit_code: None,
         daemonize: false,
         orphan_exit: false,
+        memfd_exec: false,
+        memfd_child: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -158,7 +194,7 @@ fn parse_extra(args: &[String]) -> Extra {
                 i += 2;
             }
             "--inherited-fd" => {
-                extra.inherited_fd = Some(parse_i32(args.get(i + 1)));
+                extra.inherited_fds.push(parse_i32(args.get(i + 1)));
                 i += 2;
             }
             "--kill-host" => {
@@ -177,6 +213,14 @@ fn parse_extra(args: &[String]) -> Extra {
                 extra.orphan_exit = true;
                 i += 1;
             }
+            "--memfd-exec" => {
+                extra.memfd_exec = true;
+                i += 1;
+            }
+            "--memfd-child" => {
+                extra.memfd_child = true;
+                i += 1;
+            }
             _ => usage(),
         }
     }
@@ -192,7 +236,7 @@ fn parse_i32(arg: Option<&String>) -> i32 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit]"
+        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit] [--memfd-exec] [--memfd-child]"
     );
     std::process::exit(2);
 }
@@ -322,4 +366,90 @@ fn report(out: &mut impl Write, check: &str, result: io::Result<()>) {
         Ok(()) => writeln!(out, "{check} ok"),
         Err(err) => writeln!(out, "{check} errno={}", err.raw_os_error().unwrap_or(-1)),
     };
+}
+
+fn list_fds() -> String {
+    let mut open = Vec::new();
+    for fd in 0..64 {
+        if unsafe { fcntl(fd, F_GETFD) } >= 0 {
+            open.push(fd.to_string());
+        }
+    }
+    open.join(",")
+}
+
+fn ioctl_tiocsti(fd: i32) -> io::Result<()> {
+    let ch: u8 = b'x';
+    let ret = unsafe { ioctl(fd, TIOCSTI, &ch as *const u8) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn try_memfd_exec(out: &mut impl Write, self_path: &str) {
+    let src = match fs::read(self_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = writeln!(
+                out,
+                "memfd_open_src errno={}",
+                err.raw_os_error().unwrap_or(-1)
+            );
+            return;
+        }
+    };
+    let flags = MFD_CLOEXEC | MFD_EXEC;
+    let mem = unsafe { syscall(SYS_MEMFD_CREATE, b"fcl\0".as_ptr(), flags) };
+    let mem = if mem < 0 {
+        let first = io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+        let _ = writeln!(out, "memfd_create_exec errno={first}");
+        unsafe { syscall(SYS_MEMFD_CREATE, b"fcl\0".as_ptr(), MFD_CLOEXEC) }
+    } else {
+        mem
+    };
+    if mem < 0 {
+        let _ = writeln!(
+            out,
+            "memfd_create errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        return;
+    }
+    let fd = mem as i32;
+    let wrote = unsafe { c_write(fd, src.as_ptr(), src.len()) };
+    if wrote < 0 || wrote as usize != src.len() {
+        let _ = writeln!(
+            out,
+            "memfd_write errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        unsafe { close(fd) };
+        return;
+    }
+    let arg0 = std::ffi::CString::new(self_path).unwrap_or_else(|_| std::ffi::CString::new("p").unwrap());
+    let arg1 = std::ffi::CString::new("--memfd-child").unwrap();
+    let argv = [arg0.as_ptr(), arg1.as_ptr(), std::ptr::null()];
+    let envp = [std::ptr::null::<i8>()];
+    let ret = unsafe {
+        syscall(
+            SYS_EXECVEAT,
+            i64::from(fd),
+            b"\0".as_ptr(),
+            argv.as_ptr(),
+            envp.as_ptr(),
+            AT_EMPTY_PATH,
+        )
+    };
+    let _ = writeln!(
+        out,
+        "memfd_exec errno={}",
+        if ret == 0 {
+            0
+        } else {
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        }
+    );
+    unsafe { close(fd) };
 }

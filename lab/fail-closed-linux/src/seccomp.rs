@@ -21,10 +21,15 @@ pub const AUDIT_ARCH: u32 = 0xC000_00B7;
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 /// Offsets into `struct seccomp_data`. The low half of `args[0]` is at 16 on
-/// little-endian targets, which both supported targets are.
+/// little-endian targets, which both supported targets are. `args[1]` is at 24.
 const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
 const DATA_ARG0_LOW: u32 = 16;
+const DATA_ARG1_LOW: u32 = 24;
+
+/// `MFD_EXEC` from `<linux/memfd.h>`. A memfd created with this flag can be
+/// `execveat`'d. Denied in the no-exec filter when the bit is set.
+pub const MFD_EXEC: u32 = 0x0010;
 
 pub const DENIED: &[libc::c_long] = &[
     libc::SYS_socket,
@@ -116,6 +121,44 @@ pub fn filter() -> Vec<sock_filter> {
         0,
         1,
     ));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
+    prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    prog
+}
+
+/// Second filter, installed after confine. It returns EPERM for `execveat`
+/// and for `memfd_create` with `MFD_EXEC`. `execve` stays allowed so the
+/// helper can start the granted path; a later `execve` of any other path is
+/// Landlock-denied, and a later `execve` of the granted path is the same
+/// image. Stacked on the deny-list: if this install fails, launch refuses.
+pub fn no_exec_filter() -> Vec<sock_filter> {
+    let eperm = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let mut prog = vec![
+        stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARCH),
+        jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0),
+        stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        stmt(BPF_LD | BPF_W | BPF_ABS, DATA_NR),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    {
+        prog.push(jump(BPF_JMP | libc::BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1));
+        prog.push(stmt(BPF_RET | BPF_K, eperm));
+    }
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_execveat as u32,
+        0,
+        1,
+    ));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_memfd_create as u32,
+        0,
+        3,
+    ));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG1_LOW));
+    prog.push(jump(BPF_JMP | BPF_JSET | BPF_K, MFD_EXEC, 0, 1));
     prog.push(stmt(BPF_RET | BPF_K, eperm));
     prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     prog
