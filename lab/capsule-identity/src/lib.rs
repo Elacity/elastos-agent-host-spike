@@ -1,9 +1,10 @@
 //! Lab capsule identity: one deterministic **lab CID** over a whole capsule
 //! bundle (PRINCIPLES 13 and 15).
 //!
-//! This crate answers one question: "do these bytes match this name?". It
-//! never answers "may this run?": it makes no trust, admission or launch
-//! decision and sits in no admission or launch path. Its value is a lab CID,
+//! This crate answers two questions: "do these bytes match this name?" and
+//! "did this test key sign this lab CID?". It never answers "may this run?":
+//! it makes no trust, admission or launch decision and sits in no admission
+//! or launch path. Its value is a lab CID,
 //! printed `lab-cid:sha256:<64 lowercase hex>`. It is not the Runtime's CID:
 //! the Runtime names a published capsule by the CID its IPFS provider returns
 //! for the capsule archive, and this crate does not reproduce that rule.
@@ -48,6 +49,18 @@
 //! its lab CID always names its entries. It holds a name and bytes, never a
 //! decision.
 //!
+//! # Test-key publisher signature
+//!
+//! [`sign_bundle`] signs the printed lab CID from [`lab_cid`]. The signed
+//! bytes are [`name_signature_message`]: SHA-256 over a lab domain, one
+//! `0x00` byte and that printed name. [`verify_checked_signature`] checks a
+//! signature against a [`CheckedBundle`], in order: a canonical `did:key`,
+//! an explicit accepted list, [`CheckedBundle::check_name`], then the
+//! Ed25519 signature. [`verify_name_signature`] is [`checked_bundle`] and
+//! then that check, so it holds no check of its own. A refusal is one of
+//! those checks and nothing else. `Ok(())` means the test key signed that
+//! name; it is not a permission to run.
+//!
 //! # The walk reads only checked handles
 //!
 //! The walk opens the bundle root once, by its path. After that it reaches
@@ -76,6 +89,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use elastos_common::CapsuleManifest;
 use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
@@ -89,6 +103,15 @@ pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";
 
 /// The manifest every bundle holds at its root.
 pub const MANIFEST_FILE: &str = "capsule.json";
+
+/// Domain of the lab name signature.
+///
+/// The digest is the three-step form of `domain_separated_sign` in
+/// `elastos/crates/elastos-server/src/crypto.rs`: SHA-256 over the domain, one
+/// `0x00` byte and the payload. That form lives only in the Runtime server,
+/// which this lab does not link, so the lab keeps this one marked copy under
+/// its own domain. It is a lab proposal.
+pub const NAME_SIGNATURE_DOMAIN: &str = "lab.capsule-identity.name-signature/v1";
 
 /// A lab CID: SHA-256 over a bundle's lab CID stream. It prints with its
 /// `lab-cid:sha256:` label so it is never mistaken for the Runtime's CID.
@@ -128,6 +151,24 @@ pub struct CheckedBundle {
     entries: Vec<BundleEntry>,
 }
 
+/// A test-key signature over a printed lab CID.
+///
+/// It lives in memory only. It is not a file, an envelope or a manifest
+/// field, and nothing writes it to disk. It has no serialized form. The
+/// signature never goes into `capsule.json`: that file is inside the bytes
+/// the lab CID covers, so a signature written there would change the name it
+/// signs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameSignature {
+    /// The printed lab CID the signature covers, label included.
+    pub name: String,
+    /// The signer's canonical Ed25519 `did:key`.
+    pub signer_did: String,
+    /// The 64-byte Ed25519 signature over [`name_signature_message`] of
+    /// [`NameSignature::name`].
+    pub signature: [u8; 64],
+}
+
 /// What the walk does with one entry, decided from the entry's own type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -152,9 +193,11 @@ pub enum Moment {
     AfterCheck,
 }
 
-/// Why a bundle gets no lab CID, or why a name check ([`check_name`] or
-/// [`CheckedBundle::check_name`]) refuses a claimed name. Each refusal has
-/// its own reason, and a refused bundle gets no name.
+/// Why a bundle gets no lab CID, why a name check ([`check_name`] or
+/// [`CheckedBundle::check_name`]) refuses a claimed name, or why a test-key
+/// signature check refuses. Each refusal has its own reason. A refused bundle
+/// gets no name and no signature. A refused signature check returns no trust,
+/// admission or launch value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The bundle root holds no regular file `capsule.json`.
@@ -188,6 +231,15 @@ pub enum Refusal {
     /// `actual` is the lab CID of the bytes; the claim is kept only to say
     /// what was refused.
     NameMismatch { actual: LabCid, claimed: String },
+    /// The signer DID is not one canonical Ed25519 `did:key`. `reason` is the
+    /// decoder's own text.
+    MalformedSignerDid { did: String, reason: String },
+    /// The signer DID is not an exact member of the explicit accepted list.
+    SignerNotAccepted { did: String },
+    /// The Ed25519 signature does not verify over the signed name. A wrong
+    /// key, a changed signature and a name moved onto other bytes all meet
+    /// this one check.
+    SignatureDoesNotVerify { did: String, name: String },
 }
 
 impl fmt::Display for Refusal {
@@ -222,6 +274,16 @@ impl fmt::Display for Refusal {
             ),
             Refusal::NameMismatch { actual, claimed } => {
                 write!(f, "bundle bytes name {actual}; the claim is {claimed}")
+            }
+            Refusal::MalformedSignerDid { did, reason } => write!(
+                f,
+                "signer DID {did} is not a canonical Ed25519 did:key: {reason}"
+            ),
+            Refusal::SignerNotAccepted { did } => {
+                write!(f, "signer {did} is not in the accepted list")
+            }
+            Refusal::SignatureDoesNotVerify { did, name } => {
+                write!(f, "signature by {did} does not verify over {name}")
             }
         }
     }
@@ -598,4 +660,108 @@ fn unreadable(path: &str, reason: impl Into<io::Error>) -> Refusal {
         path: shown(path),
         reason: reason.into().to_string(),
     }
+}
+
+/// The bytes a name signature covers: SHA-256 over the domain, one `0x00`
+/// byte and the UTF-8 bytes of the printed lab CID.
+///
+/// Signing and verifying both call this, and nothing else builds the message.
+/// The lab CID's label is part of the signed name. This is the one message
+/// hash; [`encode_entries`] remains the one naming hash.
+pub fn name_signature_message(name: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(name.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Sign `bundle`'s printed lab CID with `key`.
+///
+/// The name comes from [`lab_cid`]. A bundle [`lab_cid`] refuses gets no
+/// signature, and the refusal is [`lab_cid`]'s own. The signature is Ed25519
+/// over [`name_signature_message`] of that printed name. `signer_did` is
+/// `elastos_identity::encode_signing_key_did` of `key`. Nothing is written.
+pub fn sign_bundle(key: &SigningKey, bundle: &Path) -> Result<NameSignature, Refusal> {
+    let name = lab_cid(bundle)?.to_string();
+    let digest = name_signature_message(&name);
+    let signature = key.sign(&digest).to_bytes();
+    Ok(NameSignature {
+        name,
+        signer_did: elastos_identity::encode_signing_key_did(key),
+        signature,
+    })
+}
+
+/// Check `sig` against the bytes `checked` holds.
+///
+/// The checks run in this order, and the first refusal is the answer:
+///
+/// 1. `elastos_identity::decode_did_key` on `sig.signer_did`. A DID it refuses
+///    is not a canonical Ed25519 `did:key`, and the reason carries the
+///    decoder's own text.
+/// 2. `sig.signer_did` is an exact member of `accepted`. An empty list refuses
+///    every signer. The list is an explicit input, not a trust policy.
+/// 3. [`CheckedBundle::check_name`] of `sig.name`. Its refusals pass through
+///    unchanged. This reads nothing from disk.
+/// 4. Ed25519 verification of `sig.signature` over [`name_signature_message`]
+///    of `sig.name`, with the key from step 1.
+///
+/// `Ok(())` means all four passed. It is not a trust, admission or launch
+/// value. A wrong key, a changed signature and a name moved onto other bytes
+/// all fail step 4 with one reason.
+pub fn verify_checked_signature(
+    checked: &CheckedBundle,
+    sig: &NameSignature,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    let key = decode_signer(&sig.signer_did)?;
+    require_accepted(&sig.signer_did, accepted)?;
+    checked.check_name(&sig.name)?;
+    verify_signature(&key, sig)?;
+    Ok(())
+}
+
+/// Check `sig` against the bundle at `bundle`.
+///
+/// This is [`checked_bundle`] and then [`verify_checked_signature`]. It holds
+/// no check of its own, so a bundle the walk refuses is refused first, with
+/// the walk's own reason. The signature is judged on the bytes that walk read.
+pub fn verify_name_signature(
+    bundle: &Path,
+    sig: &NameSignature,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    let checked = checked_bundle(bundle)?;
+    verify_checked_signature(&checked, sig, accepted)
+}
+
+/// Check (a): `did` is one canonical Ed25519 `did:key`.
+fn decode_signer(did: &str) -> Result<VerifyingKey, Refusal> {
+    elastos_identity::decode_did_key(did).map_err(|error| Refusal::MalformedSignerDid {
+        did: did.to_owned(),
+        reason: error.to_string(),
+    })
+}
+
+/// Check (b): `did` is an exact member of `accepted`.
+fn require_accepted(did: &str, accepted: &[String]) -> Result<(), Refusal> {
+    if !accepted.iter().any(|one| one == did) {
+        return Err(Refusal::SignerNotAccepted {
+            did: did.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Check (d): Ed25519 verification of `sig` over the message of its name.
+fn verify_signature(key: &VerifyingKey, sig: &NameSignature) -> Result<(), Refusal> {
+    let digest = name_signature_message(&sig.name);
+    let signature = Signature::from_bytes(&sig.signature);
+    key.verify(&digest, &signature)
+        .map_err(|_| Refusal::SignatureDoesNotVerify {
+            did: sig.signer_did.clone(),
+            name: sig.name.clone(),
+        })?;
+    Ok(())
 }

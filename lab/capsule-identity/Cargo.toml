@@ -8,11 +8,13 @@ name = "capsule-identity"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Lab only: names a capsule bundle by a lab CID; never admits or launches it"
+description = "Lab only: names a capsule bundle by a lab CID and checks a test-key signature over that name; never admits or launches it"
 license = "MIT"
 
 [dependencies]
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 elastos-common = { path = "../../elastos/crates/elastos-common" }
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
 hex = "0.4"
 # Safe `openat`, `fstat` and folder listing from an open handle: the walk
 # reads only handles it has checked, and `std` cannot open relative to one.
@@ -21,6 +23,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 
 [dev-dependencies]
+rand = "0.8"
 tempfile = "3"
 
 # Stay out of the root ElastOS workspace.

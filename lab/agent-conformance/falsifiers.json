@@ -467,6 +467,54 @@
       "tests": [
         "parallel_collection_refuses_live_descendants"
       ]
+    },
+    {
+      "id": "F-versions-required",
+      "title": "accept a receipt without the Runtime identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        if self.identities.runtime.is_none() {",
+          "new": "        if false && self.identities.runtime.is_none() {"
+        }
+      ],
+      "tests": [
+        "versions_receipt_rejects_incomplete_identity"
+      ]
+    },
+    {
+      "id": "F-versions-bundle",
+      "title": "serialize the component hash as the complete bundle identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        \"probes\": evidence.identities.launched.values().collect::<Vec<_>>(),",
+          "new": "        \"probes\": evidence.identities.launched.values().map(|probe| { let mut probe = probe.clone(); probe.bundle_lab_cid = probe.component_sha256.clone(); probe }).collect::<Vec<_>>(),"
+        }
+      ],
+      "tests": [
+        "versions_receipt_uses_the_staged_bundle_identity"
+      ]
+    },
+    {
+      "id": "F-versions-boundary",
+      "title": "omit the receipt authority boundary",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        \"description\": \"Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.\",\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "versions_receipt_binds_current_run"
+      ]
     }
   ]
 }

@@ -67,7 +67,11 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
         "{name} build finished in {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    println!("{name} sha256:{sha256}");
+    crate::identity::Observation::Native {
+        role: name.into(),
+        sha256: sha256.clone(),
+    }
+    .emit();
     Ok(BinaryUnderTest { binary, sha256 })
 }
 

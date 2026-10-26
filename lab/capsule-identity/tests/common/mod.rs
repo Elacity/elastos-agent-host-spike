@@ -13,6 +13,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+
 use capsule_identity::{
     check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed, CheckedBundle,
     LabCid, Moment, Refusal,
@@ -104,6 +107,14 @@ pub fn named(bundle: &Path) -> LabCid {
 /// The checked bundle at `bundle`. A refusal fails the test with its reason.
 pub fn checked(bundle: &Path) -> CheckedBundle {
     checked_bundle(bundle).unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.display()))
+}
+
+/// One fresh Ed25519 test key, drawn from the operating system's generator.
+///
+/// Every test key comes from here. Nothing writes it, prints it or keeps a
+/// seed: the next call draws again, and two calls differ.
+pub fn fresh_signing_key() -> SigningKey {
+    SigningKey::generate(&mut OsRng)
 }
 
 /// `check_name` refuses `claimed` for the bundle at `bundle`, whose bytes

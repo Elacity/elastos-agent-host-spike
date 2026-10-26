@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003 and 009). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, or the wc-001 test driver, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009 and 004). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -942,6 +942,447 @@
       "tests": [
         "checked_name_check_judges_the_checked_bytes",
         "checked_name_check_shares_the_claim_check_and_the_compare"
+      ]
+    },
+    {
+      "id": "F-CI4a",
+      "title": "the message leaves out the lab CID (domain and 0x00 only)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(name.as_bytes());\n",
+          "new": "    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    let _ = name;\n"
+        }
+      ],
+      "tests": [
+        "relabelled_signature_is_refused",
+        "signed_message_is_the_domain_separated_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI4b",
+      "title": "the message drops the domain and the 0x00 byte (a hash of the bare name)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(name.as_bytes());\n",
+          "new": "    hasher.update(name.as_bytes());\n"
+        }
+      ],
+      "tests": [
+        "signed_message_is_the_domain_separated_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI4c",
+      "title": "verification skips check (c) and trusts sig.name",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    checked.check_name(&sig.name)?;\n",
+          "new": "    let _ = checked;\n"
+        }
+      ],
+      "tests": [
+        "signature_for_another_bundle_is_refused",
+        "tampered_bundle_byte_is_refused",
+        "checked_signature_judges_the_checked_bytes"
+      ]
+    },
+    {
+      "id": "F-CI4d",
+      "title": "verification ignores the Ed25519 result",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    key.verify(&digest, &signature)\n        .map_err(|_| Refusal::SignatureDoesNotVerify {\n            did: sig.signer_did.clone(),\n            name: sig.name.clone(),\n        })?;\n",
+          "new": "    let _ = key.verify(&digest, &signature);\n"
+        }
+      ],
+      "tests": [
+        "tampered_signature_byte_is_refused",
+        "signature_by_another_key_is_refused",
+        "relabelled_signature_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI4e",
+      "title": "drop the accepted-list check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&sig.signer_did, accepted)?;\n",
+          "new": "    let _ = accepted;\n"
+        }
+      ],
+      "tests": [
+        "signer_not_in_the_accepted_list_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI4f",
+      "title": "an empty accepted list accepts any signer",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if !accepted.iter().any(|one| one == did) {\n        return Err(Refusal::SignerNotAccepted {\n            did: did.to_owned(),\n        });\n    }\n",
+          "new": "    if !accepted.is_empty() && !accepted.iter().any(|one| one == did) {\n        return Err(Refusal::SignerNotAccepted {\n            did: did.to_owned(),\n        });\n    }\n"
+        }
+      ],
+      "tests": [
+        "signer_not_in_the_accepted_list_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI4g",
+      "title": "the DID is decoded only inside check (d), and a decode error gets (d)'s reason",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&sig.signer_did)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    verify_signature(&key, sig)?;\n",
+          "new": "    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    let key = elastos_identity::decode_did_key(&sig.signer_did).map_err(|_| {\n        Refusal::SignatureDoesNotVerify {\n            did: sig.signer_did.clone(),\n            name: sig.name.clone(),\n        }\n    })?;\n    verify_signature(&key, sig)?;\n"
+        }
+      ],
+      "tests": [
+        "malformed_signer_did_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI4h",
+      "title": "drop *.seed from the lane .gitignore",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/.gitignore",
+          "old": "*.seed\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "key_and_seed_files_are_ignored_by_git"
+      ]
+    },
+    {
+      "id": "F-CI4i",
+      "title": "append a PEM private-key header line to README.md",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/README.md",
+          "old": "The signature answers only whether this test key signed this lab CID.\n",
+          "new": "The signature answers only whether this test key signed this lab CID.\n-----BEGIN PRIVATE KEY-----\n"
+        }
+      ],
+      "tests": [
+        "no_key_material_is_tracked"
+      ]
+    },
+    {
+      "id": "F-CI4j",
+      "title": "sign_bundle signs the bare hex instead of calling name_signature_message",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let digest = name_signature_message(&name);\n    let signature = key.sign(&digest).to_bytes();\n",
+          "new": "    let signature = key.sign(name.strip_prefix(LAB_CID_PREFIX).unwrap_or(name.as_str()).as_bytes()).to_bytes();\n"
+        }
+      ],
+      "tests": [
+        "test_key_signature_over_the_lab_cid_verifies"
+      ]
+    },
+    {
+      "id": "F-CI4k",
+      "title": "the accepted-list check (b) moves out of verify_checked_signature into verify_name_signature",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&sig.signer_did, accepted)?;\n",
+          "new": "    let _ = accepted;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "checked_signature_judges_the_checked_bytes"
+      ]
+    },
+    {
+      "id": "F-CI4l",
+      "title": "check (a) moves out of verify_checked_signature into verify_name_signature",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&sig.signer_did)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    verify_signature(&key, sig)?;\n",
+          "new": "    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    let key = elastos_identity::decode_did_key(&sig.signer_did).map_err(|_| {\n        Refusal::SignatureDoesNotVerify {\n            did: sig.signer_did.clone(),\n            name: sig.name.clone(),\n        }\n    })?;\n    verify_signature(&key, sig)?;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    decode_signer(&sig.signer_did)?;\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "checked_signature_runs_all_checks"
+      ]
+    },
+    {
+      "id": "F-CI4m",
+      "title": "check (c) moves out of verify_checked_signature into verify_name_signature",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    checked.check_name(&sig.name)?;\n",
+          "new": "    let _ = checked;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    checked.check_name(&sig.name)?;\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "checked_signature_runs_all_checks"
+      ]
+    },
+    {
+      "id": "F-CI4n",
+      "title": "check (d) moves out of verify_checked_signature into verify_name_signature",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    verify_signature(&key, sig)?;\n",
+          "new": "    let _ = key;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)?;\n    let key = decode_signer(&sig.signer_did)?;\n    verify_signature(&key, sig)\n"
+        }
+      ],
+      "tests": [
+        "checked_signature_runs_all_checks"
+      ]
+    },
+    {
+      "id": "F-CI4o",
+      "title": "sign_bundle replaces the walk's refusal with NoManifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let name = lab_cid(bundle)?.to_string();\n",
+          "new": "    let name = lab_cid(bundle).map_err(|_| Refusal::NoManifest)?.to_string();\n"
+        }
+      ],
+      "tests": [
+        "signature_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI4p",
+      "title": "verify_name_signature replaces the walk's refusal with NoManifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n",
+          "new": "    let checked = checked_bundle(bundle).map_err(|_| Refusal::NoManifest)?;\n"
+        }
+      ],
+      "tests": [
+        "signature_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI4q",
+      "title": "verify_name_signature decodes the signer before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    decode_signer(&sig.signer_did)?;\n    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "signature_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI4r",
+      "title": "verify_name_signature checks the accepted list before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    require_accepted(&sig.signer_did, accepted)?;\n    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "signature_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI4s",
+      "title": "verify_name_signature verifies the signature before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let key = decode_signer(&sig.signer_did)?;\n    verify_signature(&key, sig)?;\n    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "signature_walk_refusal_precedes_bad_signature"
+      ]
+    },
+    {
+      "id": "F-CI4t",
+      "title": "verification runs the accepted-list check before the DID decode",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&sig.signer_did)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    verify_signature(&key, sig)?;\n",
+          "new": "    require_accepted(&sig.signer_did, accepted)?;\n    let key = decode_signer(&sig.signer_did)?;\n    checked.check_name(&sig.name)?;\n    verify_signature(&key, sig)?;\n"
+        }
+      ],
+      "tests": [
+        "signature_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI4u",
+      "title": "verification runs the name check before the accepted-list check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&sig.signer_did)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    verify_signature(&key, sig)?;\n",
+          "new": "    let key = decode_signer(&sig.signer_did)?;\n    checked.check_name(&sig.name)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    verify_signature(&key, sig)?;\n"
+        }
+      ],
+      "tests": [
+        "signature_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI4v",
+      "title": "verification runs the Ed25519 check before the name check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&sig.signer_did)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    checked.check_name(&sig.name)?;\n    verify_signature(&key, sig)?;\n",
+          "new": "    let key = decode_signer(&sig.signer_did)?;\n    require_accepted(&sig.signer_did, accepted)?;\n    verify_signature(&key, sig)?;\n    checked.check_name(&sig.name)?;\n"
+        }
+      ],
+      "tests": [
+        "signature_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI4w",
+      "title": "verify_name_signature builds a second copy of the message",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    let mut hasher = Sha256::new();\n    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(sig.name.as_bytes());\n    let _ = hasher.finalize();\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI4x",
+      "title": "verify_name_signature verifies the signature a second time",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    let key = decode_signer(&sig.signer_did)?;\n    let digest = name_signature_message(&sig.name);\n    let signature = Signature::from_bytes(&sig.signature);\n    let _ = key.verify(&digest, &signature);\n    verify_checked_signature(&checked, sig, accepted)\n"
+        }
+      ],
+      "tests": [
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI4y",
+      "title": "fresh_signing_key uses a fixed seed instead of the operating system's generator",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    SigningKey::generate(&mut OsRng)\n",
+          "new": "    SigningKey::from_bytes(&[4u8; 32])\n"
+        }
+      ],
+      "tests": [
+        "test_keys_use_fresh_os_randomness"
+      ]
+    },
+    {
+      "id": "F-CI4z",
+      "title": "key-material scan skips headers when any file byte is invalid UTF-8",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/name_signature.rs",
+          "old": "        let text = String::from_utf8_lossy(file.bytes);\n",
+          "new": "        let Ok(text) = std::str::from_utf8(file.bytes) else { continue; };\n"
+        }
+      ],
+      "tests": [
+        "key_material_scan_finds_headers_in_non_utf8_files"
       ]
     }
   ]
