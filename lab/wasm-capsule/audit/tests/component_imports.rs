@@ -245,27 +245,54 @@ fn component_custom_section_carrying_code_is_refused() {
         0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
     ];
     hidden_name.extend_from_slice(&[b'x'; 75]);
-    for (name, expected) in [
-        (hidden_name, Err(Refusal::CodeInCustomSection)),
-        (vec![b'x'; 97], Ok(vec![])),
+    for (case, name, expected) in [
+        (
+            "hidden_name",
+            hidden_name,
+            Err(Refusal::CodeInCustomSection),
+        ),
+        ("plain_name", vec![b'x'; 97], Ok(vec![])),
     ] {
-        assert_eq!(name.len(), 97);
-        let mut wasm = wat::parse_str("(component)").unwrap();
-        let size_last_byte = wasm.len() + 2;
         // Section id, padded size 98, name length 97, then the name; data is empty.
-        wasm.extend_from_slice(&[0x00, 0xe2, 0x00, 0x61]);
-        wasm.extend_from_slice(&name);
-        Validator::new().validate_all(&wasm).unwrap();
-        if expected.is_err() {
-            assert_eq!(
-                &wasm[size_last_byte..size_last_byte + 24],
-                wat::parse_str("(module (func))").unwrap()
+        let mut custom = vec![0x00, 0xe2, 0x00, 0x61];
+        custom.extend_from_slice(&name);
+        for layout in ["(i) Component", "(ii) embedded core module"] {
+            assert_eq!(name.len(), 97, "{layout}: {case}");
+            let mut wasm = wat::parse_str("(component)").unwrap();
+            let size_last_byte = if layout == "(i) Component" {
+                let offset = wasm.len() + 2;
+                wasm.extend_from_slice(&custom);
+                offset
+            } else {
+                let mut module = wat::parse_str("(module)").unwrap();
+                let offset = module.len() + 2;
+                module.extend_from_slice(&custom);
+                assert!(module.len() < 0x80, "{layout}: {case}: one-byte size");
+                wasm.extend_from_slice(&[0x01, module.len() as u8]);
+                let offset = wasm.len() + offset;
+                wasm.extend_from_slice(&module);
+                offset
+            };
+            assert!(
+                Validator::new().validate_all(&wasm).is_ok(),
+                "{layout}: {case}: valid Component"
             );
-        }
-        let result = audit_component(&wasm, &[]);
-        assert_eq!(result, expected, "padded size with name {name:?}");
-        if let Err(refusal) = result {
-            assert_eq!(refusal.to_string(), "code in custom section");
+            if expected.is_err() {
+                assert_eq!(
+                    &wasm[size_last_byte..size_last_byte + 24],
+                    wat::parse_str("(module (func))").unwrap(),
+                    "{layout}: {case}: whole hidden module"
+                );
+            }
+            let result = audit_component(&wasm, &[]);
+            assert_eq!(result, expected, "{layout}: {case}: padded size");
+            if let Err(refusal) = result {
+                assert_eq!(
+                    refusal.to_string(),
+                    "code in custom section",
+                    "{layout}: {case}"
+                );
+            }
         }
     }
 }

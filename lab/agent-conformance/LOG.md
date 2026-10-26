@@ -1572,3 +1572,444 @@ The cached upstream advanced during this task: 0 ahead / 9 behind.
 freshness and integration remain with the supervisor; the checks used the
 documented loopback fixture and the builder changed no Git state. Candidate source and all test changes
 stay under `lab/agent-conformance/`.
+
+
+## 005 — parallel clients and bounded runaway (2026-10-26)
+
+Extended the one spawn primitive with `RunningInstances::start/collect`, added
+build-time finite-task and runaway variants to the one probe, and added
+process-isolation rows with separate blocked capsule/result/reason claims.
+
+Plan: read 003/006/013's code and notes, extend managed collection, exercise
+four clients against one operator, then run the lane gates and planted/restored
+falsifiers. The supplied backlog/spec were the read-only task context; this
+checkout has neither the external queue nor a humanizer skill under the
+permitted repository scope. All edits remain in this lane. Git state changes,
+network fetches, Runtime changes and provider changes stay with their owners.
+
+The local volume had 33.74 GiB free before builds, above the 12 GiB estimate
+plus 2 GiB reserve. Each Cargo gate held the existing repository heavy-build
+lease through `fcntl.flock` on its read-only descriptor. Commands used:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+The first live attempt failed at the sandbox loopback bind before Runtime
+started (83.20 s test time); it supplies zero Runtime evidence. The same test
+with local process/socket access ran four clients against one operator. The
+parallel finite row passed with elapsed times 0.063, 0.088, 0.116 and 0.131 s.
+Each client returned only its own computed diagnostic. Both operator socket
+samples counted two loopback sockets and the group stopped.
+
+The initial strict runaway check returned exit 1 naturally after 0.053 s.
+Its lifecycle-trap context was present; the fuel-exhaustion cause was absent.
+The strict assertion failed. It remains intact in the ignored
+`process_isolation::runaway_is_stopped_with_reason` test under AC-005-REASON.
+The separate live row `runaway_trap_is_bounded_while_siblings_finish` grades
+only bounded natural trapping and sibling diagnostics. RT4 and AC-002-ARGS
+also have explicit ignored tests; their claims stay outside the PASS count.
+
+F-ac3a uses the planner's allowed probe mutation: Runtime fuel/memory limits
+are compile-time constants with no fixture control. Its finite-loop mutation
+checks only the live bounded-trap half. The full stop-with-reason acceptance
+remains blocked until Runtime preserves the cause on stderr.
+
+The repository basic gate passed: `git diff --check`,
+`node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method
+contracts), `node --test scripts/check-product-data.test.mjs` (99 passed),
+Runtime workspace formatting, chain-provider formatting, and
+`bash -n lab/agent-conformance/run.sh`. The lane formatting gate also passed.
+
+### F-parallel-capture — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness parallel_collection_preserves_each_status_and_capture -- --exact --nocapture
+```
+
+planted: exit 101, 0.83 s.
+
+```text
+running 1 test
+assertion `left == right` failed
+  left: [111, 117, 116, 48]
+ right: [101, 114, 114, 48]
+test parallel_collection_preserves_each_status_and_capture ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.13s
+```
+
+restored: exit 0, 0.58 s.
+
+```text
+running 1 test
+test parallel_collection_preserves_each_status_and_capture ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.13s
+```
+
+### F-parallel-bound — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness parallel_timeout_is_failure_and_reaps_every_group -- --exact --nocapture
+```
+
+planted: exit 101, 3.81 s.
+
+```text
+running 1 test
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("keep the root after an unstopped child or failed stop")
+test parallel_timeout_is_failure_and_reaps_every_group ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 3.11s
+```
+
+restored: exit 0, 1.59 s.
+
+```text
+running 1 test
+test parallel_timeout_is_failure_and_reaps_every_group ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.13s
+```
+
+### F-parallel-operator-guard — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness parallel_attach_uses_only_guarded_fixture_coordinates -- --exact --nocapture
+```
+
+planted: exit 101, 0.78 s.
+
+```text
+running 1 test
+assertion `left == right` failed
+  left: None
+ right: Some("temp directory must use directories without symlinks")
+test parallel_attach_uses_only_guarded_fixture_coordinates ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.08s
+```
+
+restored: exit 0, 0.5 s.
+
+```text
+running 1 test
+test parallel_attach_uses_only_guarded_fixture_coordinates ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.04s
+```
+
+### F-parallel-coordinates — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness parallel_attach_uses_only_guarded_fixture_coordinates -- --exact --nocapture
+```
+
+planted: exit 101, 0.74 s.
+
+```text
+running 1 test
+required fixture environment entry is missing
+test parallel_attach_uses_only_guarded_fixture_coordinates ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.05s
+```
+
+restored: exit 0, 0.5 s.
+
+```text
+running 1 test
+test parallel_attach_uses_only_guarded_fixture_coordinates ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.04s
+```
+
+### F-parallel-start — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness parallel_collection_preserves_each_status_and_capture -- --exact --nocapture
+```
+
+planted: exit 101, 2.74 s.
+
+```text
+running 1 test
+all children must start before any collection
+test parallel_collection_preserves_each_status_and_capture ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 2.05s
+```
+
+restored: exit 0, 0.56 s.
+
+```text
+running 1 test
+test parallel_collection_preserves_each_status_and_capture ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.11s
+```
+
+### F-parallel-drain — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness parallel_collection_refuses_live_descendants -- --exact --nocapture
+```
+
+planted: exit 101, 0.79 s.
+
+```text
+running 1 test
+assertion `left == right` failed
+  left: None
+ right: Some("completed child left a live process group")
+test parallel_collection_refuses_live_descendants ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.09s
+```
+
+restored: exit 0, 0.57 s.
+
+```text
+running 1 test
+test parallel_collection_refuses_live_descendants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.11s
+```
+
+### F-probe-exclusive — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_effects_are_exclusive -- --exact --nocapture
+```
+
+planted: exit 101, 0.75 s.
+
+```text
+running 1 test
+two effects must be refused
+test probe_effects_are_exclusive ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.05s
+```
+
+restored: exit 0, 0.31 s.
+
+```text
+running 1 test
+test probe_effects_are_exclusive ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.27s
+```
+
+### F-ac3a — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- --exact --nocapture process_isolation::runaway_trap_is_bounded_while_siblings_finish
+```
+
+planted: exit 101, 79.16 s.
+
+```text
+running 1 test
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish has been running for over 60 seconds
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: runaway exit:Some(0) fuel_reason:false elapsed:0.051s
+assertion `left == right` failed: Runtime must report a failure, not a signal
+  left: Some(0)
+ right: Some(1)
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 78.50s
+```
+
+restored: exit 0, 78.11 s.
+
+```text
+running 1 test
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish has been running for over 60 seconds
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: runaway exit:Some(1) fuel_reason:false elapsed:0.073s
+parallel process isolation: task:1 exit:Some(1) own_result:true elapsed:0.104s
+parallel process isolation: task:2 exit:Some(1) own_result:true elapsed:0.119s
+parallel process isolation: task:3 exit:Some(1) own_result:true elapsed:0.146s
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 78.04s
+```
+
+### F-parallel-result — planted and restored
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- --exact --nocapture process_isolation::parallel_instances_complete_independently process_isolation::runaway_trap_is_bounded_while_siblings_finish
+```
+
+planted: exit 101, 84.79 s.
+
+```text
+running 2 tests
+test process_isolation::parallel_instances_complete_independently has been running for over 60 seconds
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish has been running for over 60 seconds
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: task:0 exit:Some(1) own_result:true elapsed:0.064s
+parallel process isolation: task:1 exit:Some(1) own_result:false elapsed:0.080s
+expected exactly this task's computed diagnostic
+test process_isolation::parallel_instances_complete_independently ... FAILED
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: runaway exit:Some(1) fuel_reason:false elapsed:0.063s
+parallel process isolation: task:1 exit:Some(1) own_result:false elapsed:0.078s
+expected exactly this task's computed diagnostic
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish ... FAILED
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 8 filtered out; finished in 84.72s
+```
+
+restored: exit 0, 82.96 s.
+
+```text
+running 2 tests
+test process_isolation::parallel_instances_complete_independently has been running for over 60 seconds
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish has been running for over 60 seconds
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: task:0 exit:Some(1) own_result:true elapsed:0.050s
+parallel process isolation: task:1 exit:Some(1) own_result:true elapsed:0.065s
+parallel process isolation: task:2 exit:Some(1) own_result:true elapsed:0.091s
+parallel process isolation: task:3 exit:Some(1) own_result:true elapsed:0.106s
+test process_isolation::parallel_instances_complete_independently ... ok
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: runaway exit:Some(1) fuel_reason:false elapsed:0.058s
+parallel process isolation: task:1 exit:Some(1) own_result:true elapsed:0.086s
+parallel process isolation: task:2 exit:Some(1) own_result:true elapsed:0.101s
+parallel process isolation: task:3 exit:Some(1) own_result:true elapsed:0.117s
+test process_isolation::runaway_trap_is_bounded_while_siblings_finish ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 82.91s
+```
+
+
+All eight new falsifiers and the updated F-probe-exclusive were caught.
+Every named test failed while planted and passed after byte-for-byte
+restoration. F-parallel-result names two tests; both failed and both passed
+restored. These are author checks. The supervisor owns independent review,
+commit and integration.
+
+### Principles check
+
+Answers follow the task's question wording; paths are relative to this lane.
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name or URL in place of code/content hash? | No. `tests/effects.rs:32` computes SHA-256 and stages those bytes under that hash; task labels identify fixture computations. Bundle-CID acceptance stays separate. |
+| 2. New ambient capsule access or UI authority? | No. `probe/src/lib.rs:58` and `:78` only compute inside the capsule. The artifact gate checks all eight variants against the existing Bus import allowlist. |
+| 3. A second operation path or copy of a rule? | No. `src/harness.rs:464` calls the one spawn site; `tests/effects.rs:32` stages both old and new probe effects. |
+| 4. Does the trusted Runtime core grow? | No. `tests/common/parallel.rs:68` uses the existing CLI; every candidate path is under this lane. |
+| 5. Do new refusals fail closed with clear reasons? | Yes. `src/harness.rs:366` refuses a surviving process group and `:486` reports the shared deadline. The existing Runtime stop-cause gap stays BLOCKED in `tests/common/parallel.rs:162`. |
+| 6. Does the capsule keep its logic inside and use the Bus for granted effects? | Yes. `probe/src/lib.rs:58` and `:78` keep finite and runaway computation inside; the existing typed capability path remains at `:85`. |
+| 7. Do tests and caught falsifiers prove the new live rules? | Yes. `tests/common/parallel.rs:151` and `:156`, plus the four parallel harness tests, have the planted/restored evidence above. The three new blocked claims receive zero passing credit. |
+
+The first full lane gate returned exit 0 in 411.16 s with 27 passed and five
+ignored (BLOCKED). The new descendant-cleanup regression was then verified
+with the other three parallel harness checks (four passed). The final report
+run below covers the complete restored candidate, including that regression.
+The cached upstream moved to 0 ahead / 12 behind during the task; its lane diff
+was empty. Integration stays with the supervisor; this builder changed no Git
+state and made no network fetch.
+
+
+The first final-report attempt stopped before building because another local
+operator held the shared heavy-build lease. Ten already-recorded task failure
+Homes had been removed after an empty open-file census. Automatic approval
+review then refused a proposed cleanup of unrecorded Homes because ownership
+was unproven. The safer disposition preserves those 29 roots under an explicit
+supervisor ownership/evidence-review condition in the ignored local inventory.
+Their contents stay unread. Cleanup is therefore deferred, not reported complete.
+
+### Final report run
+
+`lab/agent-conformance/run.sh` returned exit 0 in 458.94 s.
+All lane source SHA-256 values and `git status --porcelain` matched before
+and after the run. The candidate remains uncommitted under the builder rules.
+
+```text
+probe component sha256:36ad857b48bdffdfe8fd86ac7fbfd3420861568abd91ec0060933af3debb4ea2 effect:default
+probe component sha256:0ae8a9ff8403d03f0145f518174df50f563f76935f508feedeb77cda061e6118 effect:read
+probe component sha256:6b251623dc4ae200abe4a32ee95e904627a373cea23a488d36995d3154cd1e88 effect:network
+probe component sha256:15ec756b4f4e6189bb213fd6845c5ce0f365732f56c19d8e6d48e4d57b794040 effect:task-a
+probe component sha256:2ca200baec1edb2a641ba662469d68ded90041e5d5a5a9627f116abecd78ee2f effect:task-b
+probe component sha256:2b9f2fc4c38f498dd33c7a219372a837e863a3c48fb6afd9b7becfb42096a8d8 effect:task-c
+probe component sha256:11b6e18fd2229353d66c3b0c4d9e2930838558a827f5598c5fa6156d8d1a4878 effect:task-d
+probe component sha256:e8c23692783e8064244b9e6abb54930196cdc10d52923c48b75fa8ccac69cb1b effect:runaway
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+probe component sha256:15ec756b4f4e6189bb213fd6845c5ce0f365732f56c19d8e6d48e4d57b794040 effect:task-a
+probe component sha256:2ca200baec1edb2a641ba662469d68ded90041e5d5a5a9627f116abecd78ee2f effect:task-b
+probe component sha256:2b9f2fc4c38f498dd33c7a219372a837e863a3c48fb6afd9b7becfb42096a8d8 effect:task-c
+probe component sha256:11b6e18fd2229353d66c3b0c4d9e2930838558a827f5598c5fa6156d8d1a4878 effect:task-d
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: task:0 exit:Some(1) own_result:true elapsed:0.088s
+parallel process isolation: task:1 exit:Some(1) own_result:true elapsed:0.119s
+parallel process isolation: task:2 exit:Some(1) own_result:true elapsed:0.146s
+parallel process isolation: task:3 exit:Some(1) own_result:true elapsed:0.182s
+probe component sha256:36ad857b48bdffdfe8fd86ac7fbfd3420861568abd91ec0060933af3debb4ea2 effect:default
+operator census: 2 then 2 loopback sockets for default; group stopped
+probe refusal effect:default exit:Some(1) reason_present:true
+probe component sha256:e8c23692783e8064244b9e6abb54930196cdc10d52923c48b75fa8ccac69cb1b effect:runaway
+probe component sha256:2ca200baec1edb2a641ba662469d68ded90041e5d5a5a9627f116abecd78ee2f effect:task-b
+probe component sha256:2b9f2fc4c38f498dd33c7a219372a837e863a3c48fb6afd9b7becfb42096a8d8 effect:task-c
+probe component sha256:11b6e18fd2229353d66c3b0c4d9e2930838558a827f5598c5fa6156d8d1a4878 effect:task-d
+operator census: 2 then 2 loopback sockets; four clients, one operator; group stopped
+parallel process isolation: runaway exit:Some(1) fuel_reason:false elapsed:0.076s
+parallel process isolation: task:1 exit:Some(1) own_result:true elapsed:0.105s
+parallel process isolation: task:2 exit:Some(1) own_result:true elapsed:0.130s
+parallel process isolation: task:3 exit:Some(1) own_result:true elapsed:0.167s
+probe component sha256:0ae8a9ff8403d03f0145f518174df50f563f76935f508feedeb77cda061e6118 effect:read
+operator census: 2 then 2 loopback sockets for read; group stopped
+probe refusal effect:read exit:Some(1) reason_present:true
+probe component sha256:6b251623dc4ae200abe4a32ee95e904627a373cea23a488d36995d3154cd1e88 effect:network
+operator census: 2 then 2 loopback sockets for network; group stopped
+probe refusal effect:network exit:Some(1) reason_present:true
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+operator census: 2 then 2 loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped
+process_isolation rows: process isolation, not capsule isolation; diagnostic results only
+test | PASS/FAIL/BLOCKED (id)
+default_activation_refuses_without_selector | PASS
+fixture_operator_sockets_are_loopback_only | PASS
+fixture_operator_starts_ready_and_stops_cleanly | PASS
+foreign_and_wrong_version_imports_are_refused | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+managed_child_drop_kills_its_group_and_keeps_root | PASS
+managed_child_stop_reaps_its_process_group | PASS
+non_component_and_invalid_component_are_refused | PASS
+operator_storage_is_under_throwaway_home | BLOCKED (AC-006-STORAGE)
+parallel_attach_uses_only_guarded_fixture_coordinates | PASS
+parallel_capsules_complete_independently | BLOCKED (RT4)
+parallel_collection_preserves_each_status_and_capture | PASS
+parallel_collection_refuses_live_descendants | PASS
+parallel_instances_return_success_payloads | BLOCKED (AC-002-ARGS)
+parallel_timeout_is_failure_and_reaps_every_group | PASS
+probe_effects_are_exclusive | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+process_isolation::parallel_instances_complete_independently | PASS
+process_isolation::runaway_is_stopped_with_reason | BLOCKED (AC-005-REASON)
+process_isolation::runaway_trap_is_bounded_while_siblings_finish | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+serve_refuses_provider_whose_bytes_differ_from_its_hash | PASS
+socket_census_requires_parseable_loopback_endpoints_and_api_listener | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+ungranted_effect_is_refused | PASS
+ungranted_model_call_is_refused | BLOCKED (RT3)
+ungranted_network_is_refused | PASS
+```
+
+
+Final count: 28 PASS, five BLOCKED, zero FAIL. The four finite diagnostics
+completed within 0.182 s; the runaway trapped naturally after 0.076 s and its
+three siblings completed within 0.167 s in this run. These times exclude
+probe preparation and include client launch, polling and group checks.
+The Runtime stop-cause row remains BLOCKED.
+
+Final read-only checks found zero matching Runtime or fixture-provider
+processes under this lane's test paths, zero shared probe WASM entrypoints,
+and exactly 15 candidate paths, all inside the lane. Every falsifier anchor
+matched once after restoration. The local inventory was refreshed; the 29
+unconfirmed retained Homes keep their ownership-review condition. Earlier
+owners retain their recorded roots. Git state was left to the supervisor.
+At handoff the cached upstream was 0 ahead / 28 behind, with an empty lane
+diff against that upstream. Final `git diff --check` passed. Source changes
+are ready for independent review; the blocked claims and deferred cleanup
+remain explicit.

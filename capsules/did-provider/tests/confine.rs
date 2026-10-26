@@ -118,6 +118,34 @@ fn resolved(path: &Path) -> PathBuf {
     fs::canonicalize(path).expect("fixture path must resolve")
 }
 
+/// The three parameter bindings the Runtime makes for one storage root.
+fn canonical_bindings(base: &Path) -> [(&'static str, String); 3] {
+    [
+        ("STORAGE_ROOT", base.join("did").display().to_string()),
+        ("STORAGE_PARENT", base.display().to_string()),
+        (
+            "PROVIDER_EXECUTABLE",
+            resolved(Path::new(PROVIDER_BINARY)).display().to_string(),
+        ),
+    ]
+}
+
+/// The one launch builder: `sandbox-exec -f <profile>` with each binding, then
+/// the provider binary.
+///
+/// `start_under` binds the three canonical parameters. A test that needs a
+/// launch the Runtime cannot make passes fewer bindings through the same
+/// command shape, so one builder covers every start (P10).
+fn confinement_command(profile: &Path, bindings: &[(&str, String)]) -> Command {
+    let mut command = Command::new(SANDBOX_EXEC);
+    command.arg("-f").arg(profile);
+    for (name, value) in bindings {
+        command.arg("-D").arg(format!("{name}={value}"));
+    }
+    command.arg(PROVIDER_BINARY);
+    command
+}
+
 /// The child's exit, or the deadline that ended the wait.
 enum ChildExit {
     Exited(ExitStatus),
@@ -193,21 +221,7 @@ impl ConfinedProvider {
 
     /// Starts the provider under `profile`, its one profile source.
     fn start_under(profile: &Path, base: &Path) -> Self {
-        let mut command = Command::new(SANDBOX_EXEC);
-        command
-            .arg("-f")
-            .arg(profile)
-            .arg("-D")
-            .arg(format!("STORAGE_ROOT={}", base.join("did").display()))
-            .arg("-D")
-            .arg(format!("STORAGE_PARENT={}", base.display()))
-            .arg("-D")
-            .arg(format!(
-                "PROVIDER_EXECUTABLE={}",
-                resolved(Path::new(PROVIDER_BINARY)).display()
-            ))
-            .arg(PROVIDER_BINARY);
-        Self::spawn(command)
+        Self::spawn(confinement_command(profile, &canonical_bindings(base)))
     }
 
     /// Sends one request and returns its answer; a failure panics with the one
@@ -602,8 +616,10 @@ fn outside_read_denied() {
 /// A fixture child that reads one request and exits without answering reaches
 /// the response-stream branch of the same harness with the same three facts.
 ///
-/// Falsifier: drop the child's standard error from `unanswered` (DID12); both
-/// failures lose `Operation not permitted` and this test fails.
+/// Falsifier: drop the child's standard error from `unanswered` (DID12); the
+/// denied start loses `Operation not permitted`, so this test fails on that
+/// assertion at the first case, and the silent child's failure loses the line
+/// it wrote.
 #[test]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available() {
@@ -676,6 +692,131 @@ fn startup_denial_reports_its_reason() {
         "the failure must carry the child's standard error: {silence}"
     );
     eprintln!("response-stream failure: {silence}");
+}
+
+/// One launch whose profile cannot be applied is refused with its reason.
+///
+/// The launch goes through `confinement_command`, waits for the child, sends
+/// `init`, and requires the one harness failure to name the request, the exit
+/// status and `sandbox-exec`'s own reason on standard error. The failure must
+/// not name `execvp`, so the exec was never attempted. The base stays empty,
+/// because the provider took no `Init.base_path`.
+fn assert_startup_is_refused(
+    case: &str,
+    profile: &Path,
+    bindings: &[(&str, String)],
+    marker: &str,
+    root: &Path,
+    request: &Value,
+) {
+    let mut child = ConfinedProvider::spawn(confinement_command(profile, bindings));
+    let exit = child.wait_for_exit();
+    // A live child means the launch fell back to an unconfined start; the
+    // deadline killed it before it could answer, so check that first.
+    assert!(
+        !matches!(exit, ChildExit::TimedOut),
+        "{case}: the provider must not start, so sandbox-exec must exit: {exit}"
+    );
+    assert_ne!(
+        exit.code(),
+        Some(0),
+        "{case}: the launch must fail instead of starting the provider: {exit}"
+    );
+    let failure = child
+        .try_send(request)
+        .expect_err("a refused launch must not answer the init request");
+    assert!(
+        !failure.contains("execvp"),
+        "{case}: sandbox-exec must stop before the exec: {failure}"
+    );
+    assert!(
+        failure.contains(&request.to_string()),
+        "{case}: the failure must name the request: {failure}"
+    );
+    assert!(
+        failure.contains(&exit.to_string()),
+        "{case}: the failure must name the exit status: {failure}"
+    );
+    assert!(
+        failure.contains(marker),
+        "{case}: the failure must carry sandbox-exec's reason, {marker:?}: {failure}"
+    );
+    assert!(
+        fs::read_dir(root)
+            .expect("the storage root must stay readable")
+            .next()
+            .is_none(),
+        "{case}: a refused launch must leave Init.base_path empty, with nothing under {}",
+        root.display()
+    );
+    eprintln!("{case} refusal: {failure}");
+}
+
+/// A launch whose profile cannot be applied never starts the provider.
+///
+/// Three profiles cannot load on this Mac: one whose path does not exist, one
+/// that does not parse because its last `)` is removed, and the real profile
+/// with every parameter bound except `STORAGE_ROOT`. `sandbox-exec` exits 65
+/// for each before it reaches the exec, and the one harness reports its reason
+/// from standard error.
+///
+/// Falsifier: start the provider binary directly when the profile file does
+/// not exist (DID21); the provider stays alive to the deadline instead of
+/// being refused, and this test fails on its first case.
+#[test]
+fn startup_is_refused_when_the_profile_cannot_be_applied() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_root = resolved(profile_root.path());
+    let missing = profile_root.join("missing.sb");
+    let broken = profile_root.join("broken.sb");
+    let source = fs::read_to_string(PROFILE_PATH).expect("single profile source");
+    let trimmed = source.trim_end();
+    assert!(
+        trimmed.ends_with(')'),
+        "the fixture needs the profile's last closing form: {trimmed}"
+    );
+    fs::write(&broken, &trimmed[..trimmed.len() - 1]).expect("fixture profile must be writable");
+
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+    });
+    let canonical = canonical_bindings(&root);
+    let unbound_root: Vec<(&str, String)> = canonical
+        .iter()
+        .filter(|(name, _)| *name != "STORAGE_ROOT")
+        .cloned()
+        .collect();
+
+    assert_startup_is_refused(
+        "missing profile",
+        &missing,
+        &canonical,
+        &missing.display().to_string(),
+        &root,
+        &request,
+    );
+    assert_startup_is_refused(
+        "unparsable profile",
+        &broken,
+        &canonical,
+        "syntax error: expecting ')'",
+        &root,
+        &request,
+    );
+    assert_startup_is_refused(
+        "unbound STORAGE_ROOT",
+        Path::new(PROFILE_PATH),
+        &unbound_root,
+        "invalid data type of path filter",
+        &root,
+        &request,
+    );
 }
 
 /// The harness drains standard error while the child runs.

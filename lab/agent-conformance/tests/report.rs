@@ -26,4 +26,14 @@ fn run_table_requires_cargo_results() {
     assert!(!table("", "test unlisted ... ok\n", true).1);
     assert!(!table("", "", true).1);
     assert!(!table("case: test\ncase: test\n", "test case ... ok\n", true).1);
+    let name = "process_isolation::parallel_instances_complete_independently";
+    assert_eq!(
+        table(
+            &format!("{name}: test\n"),
+            &format!("test {name} ... ok\n"),
+            true
+        )
+        .0,
+        format!("test | PASS/FAIL/BLOCKED (id)\n{name} | PASS\n")
+    );
 }
