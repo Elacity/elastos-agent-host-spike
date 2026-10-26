@@ -6,8 +6,8 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no Linux enforcement or tests yet. The providers are not
-confined on Linux today, and nothing in this file is current behaviour.
+This contract has no Linux enforcement or tests yet. Nothing in this file is
+current behaviour.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
