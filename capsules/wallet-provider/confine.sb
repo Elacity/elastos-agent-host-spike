@@ -15,7 +15,7 @@
 (deny default)
 (deny network*)
 
-;; Startup: exec is pinned to the one binary the Runtime named, so the provider
+;; Startup: exec is pinned to the one binary the launch named, so the provider
 ;; cannot start any other program.
 (allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
 

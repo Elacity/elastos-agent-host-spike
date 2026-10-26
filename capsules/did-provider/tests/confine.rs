@@ -118,7 +118,7 @@ fn resolved(path: &Path) -> PathBuf {
     fs::canonicalize(path).expect("fixture path must resolve")
 }
 
-/// The three parameter bindings the Runtime makes for one storage root.
+/// The three parameter bindings the tests make for one storage root.
 fn canonical_bindings(base: &Path) -> [(&'static str, String); 3] {
     [
         ("STORAGE_ROOT", base.join("did").display().to_string()),

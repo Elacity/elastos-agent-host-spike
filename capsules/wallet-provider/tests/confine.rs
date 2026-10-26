@@ -133,7 +133,7 @@ fn wallet_dir(root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
-/// The three parameter bindings the Runtime makes for one storage root.
+/// The three parameter bindings the tests make for one storage root.
 fn canonical_bindings(base: &Path) -> [(&'static str, PathBuf); 3] {
     let wallet_root = wallet_dir(base);
     let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
@@ -142,6 +142,18 @@ fn canonical_bindings(base: &Path) -> [(&'static str, PathBuf); 3] {
         ("STORAGE_PARENT", parent),
         ("PROVIDER_EXECUTABLE", resolved(Path::new(PROVIDER_BINARY))),
     ]
+}
+
+/// The test creates the directory `STORAGE_PARENT` names before the launch,
+/// and the provider creates `Wallet`. The binding the launch receives names
+/// that directory, so the folder created and the folder bound cannot drift
+/// apart (P10).
+fn create_shared_ancestors(bindings: &[(&'static str, PathBuf)]) {
+    let (_, parent) = bindings
+        .iter()
+        .find(|(name, _)| *name == "STORAGE_PARENT")
+        .expect("the tests bind STORAGE_PARENT");
+    fs::create_dir_all(parent).expect("prepare shared service directories");
 }
 
 fn runtime_invocation_envelope() -> Value {
@@ -269,11 +281,8 @@ impl ConfinedProvider {
     }
 
     fn start_with_profile(base: &Path, profile: &Path, parameters: &[(&str, &Path)]) -> Self {
-        let wallet_root = wallet_dir(base);
-        let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
-        // Runtime prepares the shared ancestors; the provider creates Wallet.
-        fs::create_dir_all(&parent).expect("prepare shared service directories");
         let canonical = canonical_bindings(base);
+        create_shared_ancestors(&canonical);
         let mut bindings: Vec<(&str, &Path)> = canonical
             .iter()
             .map(|(name, path)| (*name, path.as_path()))
@@ -668,10 +677,8 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     fs::write(&unclosed_profile, unclosed).expect("unclosed profile must be writable");
 
     let wallet_root = wallet_dir(&base);
-    let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
-    // Runtime prepares the shared ancestors before it launches the provider.
-    fs::create_dir_all(&parent).expect("prepare shared service directories");
     let canonical = canonical_bindings(&base);
+    create_shared_ancestors(&canonical);
     let unbound_root: Vec<(&str, PathBuf)> = canonical
         .iter()
         .filter(|(name, _)| *name != "STORAGE_ROOT")
@@ -792,9 +799,10 @@ fn profile_denies_network() {
     }
 }
 
-/// The parameter tokens the Runtime bridge binds for every file-profile
-/// provider. A provider-prefixed token would add a second path for one
-/// operation (P10).
+/// The parameter tokens every file-profile provider's profile declares. The
+/// tests bind these three for each launch; one generator for every provider is
+/// the Runtime bridge change, and that Runtime half is not built. A
+/// provider-prefixed token would add a second path for one operation (P10).
 const CANONICAL_PARAMS: [&str; 3] = ["PROVIDER_EXECUTABLE", "STORAGE_ROOT", "STORAGE_PARENT"];
 const PARAM_PREFIX: &str = "(param \"";
 /// The three rules every file profile binds verbatim.
@@ -807,11 +815,12 @@ const SHARED_RULES: [&str; 3] = [
 /// present the contract, in this order.
 const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
 
-/// The one file-profile contract the Runtime bridge relies on: `(version 1)`
+/// The one file-profile contract every file profile declares: `(version 1)`
 /// first, `(deny default)` second, an explicit `(deny network*)`, no
 /// `(allow default)`, no network allow, only the canonical parameter tokens,
-/// and the three shared rules verbatim. Every refusal names the profile and
-/// the rule.
+/// and the three shared rules verbatim. The profile the Runtime generates must
+/// match it; that Runtime bridge change is not built. Every refusal names the
+/// profile and the rule.
 fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
     let forms = profile_forms(profile);
     if forms.first().map(String::as_str) != Some("(version 1)") {
@@ -918,12 +927,12 @@ fn contract_fixture_capsules() -> tempfile::TempDir {
     capsules
 }
 
-/// The did, wallet and model file profiles present one contract to the Runtime
-/// bridge: the same canonical parameter tokens and the same deny-by-default
-/// head. The bridge binds `STORAGE_ROOT`, `STORAGE_PARENT` and
-/// `PROVIDER_EXECUTABLE` with one parameterized launch, so a provider-prefixed
-/// token would add a second path for one operation (P10). All three profiles
-/// are required, in list order.
+/// The did, wallet and model file profiles present one contract: the same
+/// canonical parameter tokens and the same deny-by-default head. The tests
+/// bind `STORAGE_ROOT`, `STORAGE_PARENT` and `PROVIDER_EXECUTABLE` with one
+/// launch for every provider, and the Runtime bridge change does the same; it
+/// is not built. A provider-prefixed token would add a second path for one
+/// operation (P10). All three profiles are required, in list order.
 ///
 /// Falsifier: rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in either
 /// `confine.sb`; this test fails on the non-canonical token.
@@ -1012,8 +1021,8 @@ fn file_profile_contract_rejects_an_allow_default() {
     );
 }
 
-/// The one contract check refuses a profile that binds a parameter token the
-/// Runtime bridge does not supply, and names the profile and that token. The
+/// The one contract check refuses a profile that binds a parameter token
+/// outside the canonical three, and names the profile and that token. The
 /// fixtures are built in the test; no file is read.
 ///
 /// Falsifier: remove the canonical-token refusal from

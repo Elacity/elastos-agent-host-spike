@@ -18,9 +18,10 @@ with `sandbox-exec -D`:
 the same three parameter tokens, literal startup access, one state subtree
 grant, and a real stdin/stdout process test.
 
-The bridge change creates the shared ancestors before launch, derives both
-storage parameters from the same canonical `Init.base_path`, and passes the
-original base to `Init`; the tests do the same. The provider creates the final
+The tests create the shared ancestors before launch, derive both storage
+parameters from the same canonical `Init.base_path` and pass the original base
+to `Init` (`start_with_profile`); the Runtime half of the bridge change does
+the same and is not built. The provider creates the final
 `Wallet` directory. Seatbelt grants recursive state access to that wallet
 directory alone. Literal read access to its existing parent lets the provider
 inspect and synchronize the directory while it creates Wallet. The parent
