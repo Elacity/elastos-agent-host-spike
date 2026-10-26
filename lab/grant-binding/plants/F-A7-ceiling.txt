@@ -1,0 +1,9 @@
+id: F-A7-ceiling
+file: src/ledger.rs
+test: ledger::model_reserve_over_the_ceiling_is_refused
+test: ledger::model_outstanding_hold_counts_toward_the_ceiling
+--- old
+        let over_ceiling = held.saturating_add(amount) > self.ledger.ceiling;
+--- new
+        let over_ceiling = false;
+--- end
