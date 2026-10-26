@@ -352,6 +352,38 @@ of any extension is Anders's (P4). Hosted routing is not decided here. Until
 the decision lands, this profile has no network grant, and
 `model_hosted_run_fails_closed_under_profile` holds the edge closed.
 
+## Operations and the rights they need
+
+Each operation the provider answers is one row. The inputs and the outputs are
+the provider's top-level JSON names. An ok answer is `status` plus `data`. An
+error answer is `status`, `code` and `message`. The keys of `data` are the
+keys of the value the handler returns. A right, an effect, a macOS rule or a
+test is written only where a named test in `tests/confine/main.rs` shows it.
+Where no named test shows one, the cell says "no named test shows this". The
+startup grants stay in "What the profile allows". A local offer's refusal
+stays the citation in "The local engine". The hosted edge stays in "The hosted
+transport".
+
+Linux stays designed, not enforced. The design's tests do not exist yet. The
+Linux tests do not exist yet. This section claims no current Linux behaviour.
+A Linux cell may cite only a first cell under "The contract on Linux" in
+`../wallet-provider/CONFINEMENT-LINUX.md`: `(deny default)`, files;
+`(deny network*)`, with no network allow;
+`(allow file-read* (literal (param "STORAGE_PARENT")))`;
+`(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. Nothing
+after that cell is copied. A row with no shown right cites no Linux row.
+
+| Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux row |
+| --- | --- | --- | --- | --- | --- | --- |
+| init | `op`, `config` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | The parent read is `(allow file-read* (literal (param "STORAGE_PARENT")))`; removing it is F-cc1-rm-parent and `model_provider_ops_under_profile` fails. The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is F-cc1-rm-storage and `model_provider_ops_under_profile` fails. | writes: creates `runs/` under `STORAGE_ROOT`. refuses: an outside `init` answers `journal_corrupt`; the refused create answers `journal_access_denied`. A local offer's refusal is the citation in "The local engine" and `model_local_offer_fails_closed_under_profile`. | `model_provider_ops_under_profile` shows the creation of `runs/` under `STORAGE_ROOT`. The parent read rule is `(allow file-read* (literal (param "STORAGE_PARENT")))`. The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. `model_outside_write_denied` shows an outside `init` answers `journal_corrupt`. `model_outside_create_reports_access_denied` shows the refused create answers `journal_access_denied`. | `(allow file-read* (literal (param "STORAGE_PARENT")))` in `../wallet-provider/CONFINEMENT-LINUX.md`. `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` in `../wallet-provider/CONFINEMENT-LINUX.md`. |
+| status | `op` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | no named test shows this | no named test shows this | `model_provider_ops_under_profile` shows the answer equals `init`'s. No named test shows a storage or socket right, or a read, write, settle or refusal, for this call. | cites no Linux row |
+| shutdown | `op` | ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`. | no named test shows this | no named test shows this | `Provider::shutdown`, used by `model_provider_ops_under_profile` and `model_bound_copy_serves_under_profile`, shows `data.shutdown` true and a clean exit. No named test shows a storage or socket right for this call. | cites no Linux row |
+| offers_list | `op` | ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`. | no named test shows this | no named test shows this | `model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. No named test shows this op itself reading, writing, settling or using a socket. | cites no Linux row |
+| runs_create | `op`, `offer_id`, `operation`, `input`, `runtime_binding`, `expected_execution_binding_hash` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` for the `STORAGE_ROOT` write. `(deny network*)` for the hosted Runtime socket. The test does not show which call connects. | writes one run under `STORAGE_ROOT`. | `model_outside_read_denied` stores one run with this op before `runs_get` reads it back. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. | `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` in `../wallet-provider/CONFINEMENT-LINUX.md`. `(deny network*)`, with no network allow in `../wallet-provider/CONFINEMENT-LINUX.md`. |
+| runs_get | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. The outside refusal is `(deny default)`. `(deny network*)` for the hosted Runtime socket. The test does not show which call connects. | reads inside `STORAGE_ROOT`. refuses that read once the record is outside it. The hosted test settles by reading this op until the run is terminal. | `model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. The outside refusal is `(deny default)`. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. | `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` in `../wallet-provider/CONFINEMENT-LINUX.md`. `(deny default)`, files in `../wallet-provider/CONFINEMENT-LINUX.md`. `(deny network*)`, with no network allow in `../wallet-provider/CONFINEMENT-LINUX.md`. |
+| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`), names only. error: `status`, `code`, `message`, names only. no named test shows the answer. | no named test shows this | no named test shows this | no named test shows this. no named test shows the right and the effect. | cites no Linux row |
+| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`), names only. error: `status`, `code`, `message`, names only. no named test shows the answer. | no named test shows this | no named test shows this | no named test shows this. no named test shows the right and the effect. | cites no Linux row |
+
 ## Host-OS status
 
 The confinement tests exercise this oracle on macOS through
