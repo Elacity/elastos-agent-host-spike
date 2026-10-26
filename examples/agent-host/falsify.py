@@ -110,6 +110,15 @@ CARGO_FAILURE = re.compile(
 # test and the test failed, so the footer itself is not a harness error. Only
 # the footer text is removed; anything after it on the same line is checked.
 TEST_FAILED = re.compile(r"^[ \t]*error: test failed, to rerun pass", re.MULTILINE)
+# A failed test's own captured section starts at a line that is exactly
+# `---- NAME stdout ----` and ends at the next line that is exactly
+# `failures:`. The harness prints that section only after the test ran, so the
+# text in it belongs to the test: a test may quote a child's standard error on
+# purpose to give its reason (P11), and that quote is not a harness error. A
+# section with no later `failures:` line is not the harness's framing and
+# stays checked, and the removal never reaches past that line.
+OWN_FAILURE_TEXT = re.compile(
+    r"^---- .+ stdout ----\n(?:.*\n)*?^failures:$\n?", re.MULTILINE)
 # A named self-test case runs in its own process. A non-zero exit alone does
 # not say the case ran: a loading error also exits non-zero. The child prints
 # one marker line only after the case returns, and the runner requires both.
@@ -503,10 +512,11 @@ def harness_is_error_free(output):
     test body can print a fake FAILED summary, and a harness that fails to
     load the test prints no summary of its own, so any error marker makes
     every summary in that output untrustworthy. The text keeps its separators:
-    a marker may end at a line break, and only the Cargo footer text is
-    removed."""
+    a marker may end at a line break, and only the Cargo footer text and each
+    failed test's own captured section are removed."""
     if LOADER_ERROR.search(output) or CARGO_FAILURE.search(output):
         return False
+    output = OWN_FAILURE_TEXT.sub("", output)
     return not HARNESS_ERROR.search(TEST_FAILED.sub("", output))
 
 
@@ -636,6 +646,17 @@ mod tests {
 }
 """,
 }
+
+# A test that fails with did's message shape: the panic quote carries a child's
+# standard error on purpose, so the test names its own reason (P11).
+PROVIDER_FAILURE_LIB_RS = """#[cfg(test)]
+mod tests {
+    #[test]
+    fn fails_naming_standard_error() {
+        panic!("provider did not answer request 7 (closed); child exit status: 1; standard error: planted-child: error: denied");
+    }
+}
+"""
 
 STUB_LIST_MISSING = """import sys
 print("tests::some_other_test: test")
@@ -769,6 +790,115 @@ sys.stderr.write(
 raise SystemExit(101)
 """
 
+STUB_OWN_TEXT_THEN_HARNESS_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print()
+print("failures:")
+print()
+print("---- tests::planted_check stdout ----")
+print("standard error: x")
+print("failures:")
+print("    tests::planted_check")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_UNTERMINATED_SECTION = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print()
+print("failures:")
+print()
+print("---- tests::planted_check stdout ----")
+print("standard error: x")
+raise SystemExit(101)
+"""
+
+STUB_INDENTED_SECTION = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print()
+print("failures:")
+print()
+print("  ---- tests::planted_check stdout ----")
+print("  standard error: x")
+print("failures:")
+print("    tests::planted_check")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
+STUB_MIDLINE_DELIMITER = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print()
+print("failures:")
+print()
+print("---- tests::planted_check stdout ----")
+print("note: see failures:")
+print("standard error: x")
+print("failures:")
+print("    tests::planted_check")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
+STUB_TWO_DELIMITERS = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print()
+print("failures:")
+print()
+print("---- tests::planted_check stdout ----")
+print("first line")
+print("failures:")
+print("error: could not load the test harness")
+print("failures:")
+print("    tests::planted_check")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
+STUB_TWO_SECTIONS = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 2 tests")
+print("test tests::planted_check ... FAILED")
+print("test tests::planted_check_two ... FAILED")
+print()
+print("failures:")
+print()
+print("---- tests::planted_check stdout ----")
+print("standard error: first")
+print("failures:")
+print("---- tests::planted_check_two stdout ----")
+print("standard error: second")
+print("failures:")
+print("    tests::planted_check")
+print("    tests::planted_check_two")
+print("test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
 STUB_SURVIVOR_RAN = """import sys
 if "--exact" in sys.argv:
     if "--list" in sys.argv:
@@ -881,7 +1011,9 @@ def a_named_test_that_does_not_run_is_not_a_catch():
                             ("fake summary with a cargo launch failure",
                              STUB_FAKE_SUMMARY_CARGO_LAUNCH_FAILURE),
                             ("fake summary with an abnormal test-process exit",
-                             STUB_FAKE_SUMMARY_CARGO_CRASH)):
+                             STUB_FAKE_SUMMARY_CARGO_CRASH),
+                            ("a failure section then a harness error after it",
+                             STUB_OWN_TEXT_THEN_HARNESS_ERROR)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
             how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
@@ -889,6 +1021,88 @@ def a_named_test_that_does_not_run_is_not_a_catch():
             print(f"self-test: {title}: {got[1]} ({got[2]})")
             if got[:2] != (False, "NOT RUN"):
                 ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def stub_verdict(text):
+    """The verdict for one stub's output, run as one named test. The stub
+    answers --list with the name and then prints its planted output."""
+    stub = SELF_TEST_DIR / "stub.py"
+    stub.write_text(text, encoding="utf-8")
+    entry = {"id": "ST", "command": "host", "expect": "caught",
+             "tests": ["tests::planted_check"]}
+    how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+    return verdict(entry, *evaluate(entry, how))
+
+
+def an_unterminated_failure_section_stays_checked():
+    """A section with no later `failures:` line is not the harness's framing,
+    so its text stays checked (task 019). The stub prints its summary before
+    the section, so a removal that accepts the end of the output as a closing
+    delimiter would hide that text and read CAUGHT."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        got = stub_verdict(STUB_UNTERMINATED_SECTION)
+        print(f"self-test: an unterminated failure section: {got[1]} ({got[2]})")
+        if got[:2] != (False, "NOT RUN"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def section_delimiters_are_exact_lines():
+    """A section starts at a line that is exactly `---- NAME stdout ----` and
+    ends at a line that is exactly `failures:`. A line that only contains
+    those words is the test's own text (task 019)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        for title, text, want in (
+                ("an indented section header", STUB_INDENTED_SECTION, (False, "NOT RUN")),
+                ("a delimiter inside the section text", STUB_MIDLINE_DELIMITER,
+                 (True, "CAUGHT"))):
+            got = stub_verdict(text)
+            print(f"self-test: {title}: {got[1]} ({got[2]})")
+            if got[:2] != want:
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_section_stops_at_its_first_delimiter():
+    """The section ends at the first `failures:` line after its header, so a
+    later one cannot hide a harness error (task 019)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        got = stub_verdict(STUB_TWO_DELIMITERS)
+        print(f"self-test: a section stops at its first delimiter: {got[1]} ({got[2]})")
+        if got[:2] != (False, "NOT RUN"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def every_failure_section_is_removed():
+    """Each failed test's captured section is removed, not only the first
+    (task 019)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        got = stub_verdict(STUB_TWO_SECTIONS)
+        print(f"self-test: every failure section: {got[1]} ({got[2]})")
+        if got[:2] != (True, "CAUGHT"):
+            ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
@@ -950,6 +1164,28 @@ def real_catch_counts():
         got = verdict(beside, *evaluate(beside, how))
         print(f"self-test: a passing test beside a failing one: {got[1]} ({got[2]})")
         if got[:2] != (False, "SURVIVED") or "tests::genuinely_passing" not in got[2]:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def provider_failure_with_stderr_counts():
+    """A failed test whose own section quotes a child's standard error is a
+    catch: the text in the section is the test's, not a harness error
+    (task 019)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        (SELF_TEST_DIR / "src").mkdir(parents=True, exist_ok=True)
+        (SELF_TEST_DIR / "Cargo.toml").write_text(REAL_CRATE["Cargo.toml"], encoding="utf-8")
+        (SELF_TEST_DIR / "src" / "lib.rs").write_text(PROVIDER_FAILURE_LIB_RS, encoding="utf-8")
+        how = spec("host", SELF_TEST_DIR / "Cargo.toml", ("--offline",))
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "tests": ["tests::fails_naming_standard_error"]}
+        got = verdict(entry, *evaluate(entry, how))
+        print(f"self-test: a provider failure with stderr counts: {got[1]} ({got[2]})")
+        if got[:2] != (True, "CAUGHT"):
             ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -1902,6 +2138,11 @@ SELF_TEST_CASES = {
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
     "the streams keep their own lines": the_streams_keep_their_own_lines,
     "a real catch counts": real_catch_counts,
+    "a provider failure with stderr counts": provider_failure_with_stderr_counts,
+    "an unterminated failure section stays checked": an_unterminated_failure_section_stays_checked,
+    "the section delimiters are exact lines": section_delimiters_are_exact_lines,
+    "a section stops at its first delimiter": a_section_stops_at_its_first_delimiter,
+    "every failure section is removed": every_failure_section_is_removed,
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
     "a survivor needs its named test to run": a_survivor_needs_its_named_test_to_run,
     "a survivor is proved by its named tests": a_survivor_is_proved_by_its_named_tests,

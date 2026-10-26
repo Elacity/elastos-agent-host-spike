@@ -919,11 +919,17 @@ async fn finish_guard_shutdown(
     loop {
         if unsafe { libc::kill(-guard_group, 0) } != 0 {
             let errno = std::io::Error::last_os_error().raw_os_error();
-            return if errno == Some(libc::ESRCH) {
-                Ok(())
-            } else {
-                Err(guard_close_failed("guard_absence", errno))
-            };
+            if errno == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            // Darwin keeps a group alive while one of its members is a zombie
+            // and reports that group as EPERM (XNU bsd/kern/kern_sig.c,
+            // killpg1). Nothing live remains in it, so the probe polls until
+            // the zombie's new parent reaps it and the group reports ESRCH;
+            // only another errno is a refusal.
+            if !zombie_only_group(errno) {
+                return Err(guard_close_failed("guard_absence", errno));
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(LocalLlamaFault::Timeout);
@@ -946,8 +952,17 @@ async fn finish_guard_shutdown(
 }
 
 #[cfg(unix)]
+fn zombie_only_group(errno: Option<i32>) -> bool {
+    // Darwin excludes zombies from signal recipients and reports a group whose
+    // members are all zombies as EPERM (XNU bsd/kern/kern_sig.c, killpg1).
+    // Such a group has no live member: the signal step may treat the result as
+    // settled, and the closure probe polls it until the zombie is reaped.
+    cfg!(target_os = "macos") && errno == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
 fn exited_guard_signal_can_settle(guard_exited: bool, errno: Option<i32>) -> bool {
-    cfg!(target_os = "macos") && guard_exited && errno == Some(libc::EPERM)
+    guard_exited && zombie_only_group(errno)
 }
 
 fn guard_close_failed(stage: &'static str, errno: Option<i32>) -> LocalLlamaFault {
@@ -1668,6 +1683,51 @@ mod tests {
             member_survived,
             "post-reap shutdown signalled the surviving member"
         );
+        assert!(!process_exists(member_pid));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zombie_only_group_is_polled_until_the_zombie_is_reaped() {
+        use std::os::unix::process::CommandExt as _;
+
+        // The guard is reaped exactly, and the only remaining member is a
+        // zombie. Darwin reports that group as EPERM, so the closure probe
+        // must poll it and settle once the zombie's owner reaps it, not report
+        // a fault: a normal shutdown of a stopped engine is not unconfirmed.
+        let mut guard_command = Command::new("/bin/cat");
+        guard_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        guard_command.as_std_mut().process_group(0);
+        let mut guard = guard_command.spawn().unwrap();
+        let group = guard.id().unwrap() as libc::pid_t;
+        let mut member_command = Command::new("/bin/cat");
+        member_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        member_command.as_std_mut().process_group(group);
+        let mut member = member_command.spawn().unwrap();
+        let member_pid = member.id().unwrap() as libc::pid_t;
+
+        guard.kill().await.unwrap(); // Owned wait leaves child.id() == None.
+        assert_eq!(unsafe { libc::kill(member_pid, libc::SIGKILL) }, 0);
+        // The test owns this exact Child, so it reaps the zombie after the
+        // probe has seen the EPERM state.
+        let reaper = tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            member.wait().await
+        });
+        let result = tokio::time::timeout(
+            FIXTURE_EVENT_TIMEOUT,
+            finish_guard_shutdown(&mut guard, group, Duration::from_millis(500)),
+        )
+        .await;
+        reaper.await.unwrap().unwrap();
+        assert_eq!(result.unwrap(), Ok(()));
         assert!(!process_exists(member_pid));
     }
 
