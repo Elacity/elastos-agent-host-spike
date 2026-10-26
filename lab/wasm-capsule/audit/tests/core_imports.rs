@@ -87,6 +87,26 @@ fn declared_import_passes_and_only_that_one() {
     let other_module = wat::parse_str(r#"(module (import "other" "first" (func)))"#).unwrap();
     assert_undeclared(&other_module, declared, &import("other", "first"));
 
+    // Both fields must match one declared entry.
+    let pairs = [
+        import("wasi_snapshot_preview1", "proc_exit"),
+        import("env", "fd_write"),
+    ];
+    let both = wat::parse_str(
+        r#"(module
+            (import "wasi_snapshot_preview1" "proc_exit" (func))
+            (import "env" "fd_write" (func)))"#,
+    )
+    .unwrap();
+    assert_eq!(audit(&both, &pairs), Ok(pairs.to_vec()));
+    let crossed =
+        wat::parse_str(r#"(module (import "wasi_snapshot_preview1" "fd_write" (func)))"#).unwrap();
+    assert_undeclared(
+        &crossed,
+        &pairs,
+        &import("wasi_snapshot_preview1", "fd_write"),
+    );
+
     // v1 matches the pair, regardless of the import kind, and keeps duplicates.
     let memory = wat::parse_str(r#"(module (import "env" "first" (memory 1)))"#).unwrap();
     assert_eq!(audit(&memory, declared), Ok(vec![allowed.clone()]));
