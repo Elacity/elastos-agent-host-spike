@@ -321,8 +321,8 @@ mod weak {
             "a12.rs now calls the owner cleanup"
         );
         assert!(
-            !src.contains("ThrowawayHome::"),
-            "a12.rs now names a ThrowawayHome constructor or method"
+            !src.contains("ThrowawayHome::new"),
+            "a12.rs now constructs a ThrowawayHome"
         );
         match a12::in_root_census_on_this_host() {
             a12::HostPart::NotRun(_) => {}
@@ -353,8 +353,8 @@ mod weak {
         for needle in [
             "CapabilityToken",
             "from_base64",
-            "validate(",
-            "WrongCapsule",
+            ".validate(",
+            "validate_recurring",
         ] {
             assert!(
                 !src.contains(needle),

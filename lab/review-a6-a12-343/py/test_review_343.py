@@ -243,7 +243,7 @@ class FalsifiedA12Wiring(unittest.TestCase):
 
     def test_a12_constructs_a_throwaway_home(self) -> None:
         src = (SUBJECT / "a12.rs").read_text()
-        self.assertIn("ThrowawayHome::", src)
+        self.assertIn("ThrowawayHome::new", src)
 
     def test_walk_reports_files_behind_a_symlink_root(self) -> None:
         # Needed property: a census of /tmp/elastos/storage still sees files
