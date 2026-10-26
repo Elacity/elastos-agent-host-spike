@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004 and 007). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014 and 011). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -946,14 +946,14 @@
     },
     {
       "id": "F-CI4a",
-      "title": "the message leaves out the lab CID (domain and 0x00 only)",
+      "title": "the shared digest leaves out the payload, so the name message leaves out the lab CID (domain and 0x00 only)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(name.as_bytes());\n",
-          "new": "    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    let _ = name;\n"
+          "old": "    hasher.update(domain.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(payload);\n",
+          "new": "    hasher.update(domain.as_bytes());\n    hasher.update(b\"\\0\");\n    let _ = payload;\n"
         }
       ],
       "tests": [
@@ -963,14 +963,14 @@
     },
     {
       "id": "F-CI4b",
-      "title": "the message drops the domain and the 0x00 byte (a hash of the bare name)",
+      "title": "the shared digest drops the domain and the 0x00 byte (a hash of the bare name)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    hasher.update(NAME_SIGNATURE_DOMAIN.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(name.as_bytes());\n",
-          "new": "    hasher.update(name.as_bytes());\n"
+          "old": "    hasher.update(domain.as_bytes());\n    hasher.update(b\"\\0\");\n    hasher.update(payload);\n",
+          "new": "    hasher.update(payload);\n"
         }
       ],
       "tests": [
@@ -997,14 +997,14 @@
     },
     {
       "id": "F-CI4d",
-      "title": "verification ignores the Ed25519 result",
+      "title": "verification ignores the Ed25519 result (in the one shared Ed25519 check)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    key.verify(&digest, &signature)\n        .map_err(|_| Refusal::SignatureDoesNotVerify {\n            did: sig.signer_did.clone(),\n            name: sig.name.clone(),\n        })?;\n",
-          "new": "    let _ = key.verify(&digest, &signature);\n"
+          "old": "    key.verify(digest, &signature)\n        .map_err(|_| Refusal::SignatureDoesNotVerify {\n            did: did.to_owned(),\n            name: name.to_owned(),\n        })?;\n",
+          "new": "    let _ = key.verify(digest, &signature);\n"
         }
       ],
       "tests": [
@@ -1576,6 +1576,414 @@
       ],
       "tests": [
         "the_harness_exports_only_identity_checks"
+      ]
+    },
+    {
+      "id": "F-CI11a",
+      "title": "the payload uses the Runtime's schema name elastos.capsule.record/v1",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const PACKAGE_RECORD_SCHEMA: &str = \"lab.capsule-identity.record/v1\";\n",
+          "new": "pub const PACKAGE_RECORD_SCHEMA: &str = \"elastos.capsule.record/v1\";\n"
+        }
+      ],
+      "tests": [
+        "package_record_binds_the_cid_and_verifies"
+      ]
+    },
+    {
+      "id": "F-CI11b",
+      "title": "record verification hashes the name-signature domain",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let message = package_record_message(record);\n",
+          "new": "    let message = domain_separated_digest(NAME_SIGNATURE_DOMAIN, &record.package_record_payload());\n"
+        }
+      ],
+      "tests": [
+        "record_signed_under_the_wrong_domain_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11c",
+      "title": "record verification skips the CID compare and rebuilds the payload from the bundle's CID instead of the record's",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_record_cid(checked, record)?;\n    let message = package_record_message(record);\n",
+          "new": "    let rebound = PackageRecord {\n        cid: checked.cid().to_string(),\n        ..record.clone()\n    };\n    let message = package_record_message(&rebound);\n"
+        }
+      ],
+      "tests": [
+        "record_rebound_to_another_cid_is_refused",
+        "checked_record_judges_the_checked_bytes"
+      ]
+    },
+    {
+      "id": "F-CI11d",
+      "title": "record verification skips the accepted-list check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&record.signer_did, accepted)?;\n",
+          "new": "    let _ = accepted;\n"
+        }
+      ],
+      "tests": [
+        "record_by_another_signer_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11e",
+      "title": "on success, sign_package_record writes <bundle>.record next to the bundle",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    record.signature = key.sign(&package_record_message(&record)).to_bytes();\n    Ok(record)\n",
+          "new": "    record.signature = key.sign(&package_record_message(&record)).to_bytes();\n    std::fs::write(bundle.with_extension(\"record\"), record.package_record_payload()).expect(\"write the record\");\n    Ok(record)\n"
+        }
+      ],
+      "tests": [
+        "package_record_stays_outside_the_bundle"
+      ]
+    },
+    {
+      "id": "F-CI11f",
+      "title": "the payload also carries a name field, \"name\":\"example-content\" (content-sample's manifest name)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            \"{{\\\"cid\\\":\\\"{}\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\"}}\",\n",
+          "new": "            \"{{\\\"cid\\\":\\\"{}\\\",\\\"name\\\":\\\"example-content\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\"}}\",\n"
+        }
+      ],
+      "tests": [
+        "package_record_binds_the_cid_and_verifies"
+      ]
+    },
+    {
+      "id": "F-CI11g",
+      "title": "record verification gives a malformed DID the signature reason instead of the decoder's",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&record.signer_did)?;\n",
+          "new": "    let key = decode_signer(&record.signer_did).map_err(|_| Refusal::SignatureDoesNotVerify {\n        did: record.signer_did.clone(),\n        name: record.cid.clone(),\n    })?;\n"
+        }
+      ],
+      "tests": [
+        "record_malformed_signer_did_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11h",
+      "title": "record verification runs the accepted-list check before the DID decode",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&record.signer_did)?;\n    require_accepted(&record.signer_did, accepted)?;\n",
+          "new": "    require_accepted(&record.signer_did, accepted)?;\n    let key = decode_signer(&record.signer_did)?;\n"
+        }
+      ],
+      "tests": [
+        "record_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI11i",
+      "title": "record verification runs the CID compare before the accepted-list check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&record.signer_did, accepted)?;\n    require_record_cid(checked, record)?;\n",
+          "new": "    require_record_cid(checked, record)?;\n    require_accepted(&record.signer_did, accepted)?;\n"
+        }
+      ],
+      "tests": [
+        "record_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI11j",
+      "title": "record verification runs the Ed25519 check before the CID compare",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_record_cid(checked, record)?;\n    let message = package_record_message(record);\n    verify_ed25519(\n        &key,\n        &message,\n        &record.signature,\n        &record.signer_did,\n        &record.cid,\n    )?;\n",
+          "new": "    let message = package_record_message(record);\n    verify_ed25519(\n        &key,\n        &message,\n        &record.signature,\n        &record.signer_did,\n        &record.cid,\n    )?;\n    require_record_cid(checked, record)?;\n"
+        }
+      ],
+      "tests": [
+        "record_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI11k",
+      "title": "sign_package_record replaces the walk's refusal with NoManifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let cid = lab_cid(bundle)?.to_string();\n",
+          "new": "    let cid = lab_cid(bundle).map_err(|_| Refusal::NoManifest)?.to_string();\n"
+        }
+      ],
+      "tests": [
+        "record_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI11l",
+      "title": "verify_package_record replaces the walk's refusal with NoManifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n",
+          "new": "    let held = checked_bundle(bundle).map_err(|_| Refusal::NoManifest)?;\n"
+        }
+      ],
+      "tests": [
+        "record_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI11m",
+      "title": "verify_package_record decodes the signer before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n",
+          "new": "    decode_signer(&record.signer_did)?;\n    let held = checked_bundle(bundle)?;\n"
+        }
+      ],
+      "tests": [
+        "record_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI11n",
+      "title": "verify_package_record checks the accepted list before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n",
+          "new": "    require_accepted(&record.signer_did, accepted)?;\n    let held = checked_bundle(bundle)?;\n"
+        }
+      ],
+      "tests": [
+        "record_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI11o",
+      "title": "verify_package_record verifies the signature before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n",
+          "new": "    let key = decode_signer(&record.signer_did)?;\n    verify_ed25519(&key, &package_record_message(record), &record.signature, &record.signer_did, &record.cid)?;\n    let held = checked_bundle(bundle)?;\n"
+        }
+      ],
+      "tests": [
+        "record_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI11p",
+      "title": "check (a) moves out of verify_checked_package_record into verify_package_record",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&record.signer_did)?;\n    require_accepted(&record.signer_did, accepted)?;\n    require_record_cid(checked, record)?;\n",
+          "new": "    require_accepted(&record.signer_did, accepted)?;\n    require_record_cid(checked, record)?;\n    let key = elastos_identity::decode_did_key(&record.signer_did).map_err(|_| Refusal::SignatureDoesNotVerify {\n        did: record.signer_did.clone(),\n        name: record.cid.clone(),\n    })?;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n    verify_checked_package_record(&held, record, accepted)\n",
+          "new": "    let held = checked_bundle(bundle)?;\n    decode_signer(&record.signer_did)?;\n    verify_checked_package_record(&held, record, accepted)\n"
+        }
+      ],
+      "tests": [
+        "record_malformed_signer_did_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11q",
+      "title": "check (b) moves out of verify_checked_package_record into verify_package_record",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&record.signer_did, accepted)?;\n",
+          "new": "    let _ = accepted;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n    verify_checked_package_record(&held, record, accepted)\n",
+          "new": "    let held = checked_bundle(bundle)?;\n    require_accepted(&record.signer_did, accepted)?;\n    verify_checked_package_record(&held, record, accepted)\n"
+        }
+      ],
+      "tests": [
+        "record_by_another_signer_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11r",
+      "title": "check (c) moves out of verify_checked_package_record into verify_package_record",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_record_cid(checked, record)?;\n",
+          "new": "    let _ = checked;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n    verify_checked_package_record(&held, record, accepted)\n",
+          "new": "    let held = checked_bundle(bundle)?;\n    require_record_cid(&held, record)?;\n    verify_checked_package_record(&held, record, accepted)\n"
+        }
+      ],
+      "tests": [
+        "record_rebound_to_another_cid_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11s",
+      "title": "check (d) moves out of verify_checked_package_record into verify_package_record",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let message = package_record_message(record);\n    verify_ed25519(\n        &key,\n        &message,\n        &record.signature,\n        &record.signer_did,\n        &record.cid,\n    )?;\n",
+          "new": "    let _ = key;\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let held = checked_bundle(bundle)?;\n    verify_checked_package_record(&held, record, accepted)\n",
+          "new": "    let held = checked_bundle(bundle)?;\n    verify_checked_package_record(&held, record, accepted)?;\n    let key = decode_signer(&record.signer_did)?;\n    verify_ed25519(&key, &package_record_message(record), &record.signature, &record.signer_did, &record.cid)\n"
+        }
+      ],
+      "tests": [
+        "record_signed_under_the_wrong_domain_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI11t",
+      "title": "verify_checked_package_record builds a second copy of the payload (same bytes)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let message = package_record_message(record);\n",
+          "new": "    let payload = format!(\n        \"{{\\\"cid\\\":\\\"{}\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\"}}\",\n        record.cid, PACKAGE_RECORD_SCHEMA, record.signer_did\n    );\n    let message = domain_separated_digest(PACKAGE_RECORD_DOMAIN, payload.as_bytes());\n"
+        }
+      ],
+      "tests": [
+        "record_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI11u",
+      "title": "verify_checked_package_record decodes the DID a second time with its own decode_did_key call",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&record.signer_did)?;\n",
+          "new": "    decode_signer(&record.signer_did)?;\n    let key = elastos_identity::decode_did_key(&record.signer_did).expect(\"decoded above\");\n"
+        }
+      ],
+      "tests": [
+        "record_paths_share_one_implementation",
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI11v",
+      "title": "verify_checked_package_record runs its own Ed25519 verification instead of the shared one",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    verify_ed25519(\n        &key,\n        &message,\n        &record.signature,\n        &record.signer_did,\n        &record.cid,\n    )?;\n",
+          "new": "    key.verify(&message, &Signature::from_bytes(&record.signature))\n        .map_err(|_| Refusal::SignatureDoesNotVerify {\n            did: record.signer_did.clone(),\n            name: record.cid.clone(),\n        })?;\n"
+        }
+      ],
+      "tests": [
+        "record_paths_share_one_implementation",
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI11w",
+      "title": "sign_package_record encodes the DID with its own encode_signing_key_did call",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let signer_did = signer_did_of(key);\n",
+          "new": "    let signer_did = elastos_identity::encode_signing_key_did(key);\n"
+        }
+      ],
+      "tests": [
+        "record_paths_share_one_implementation",
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI11x",
+      "title": "the record domain is the name-signature domain",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const PACKAGE_RECORD_DOMAIN: &str = \"lab.capsule-identity.package-record/v1\";\n",
+          "new": "pub const PACKAGE_RECORD_DOMAIN: &str = \"lab.capsule-identity.name-signature/v1\";\n"
+        }
+      ],
+      "tests": [
+        "record_signed_under_the_wrong_domain_is_refused"
       ]
     }
   ]

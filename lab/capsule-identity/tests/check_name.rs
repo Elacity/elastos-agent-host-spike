@@ -122,7 +122,8 @@ fn check_name_uses_the_single_naming_path() {
     // P10: check_name names the bundle only by calling lab_cid, and computes
     // no name of its own. The library creates a SHA-256 hasher in exactly two
     // places: once in the encoder (the one naming hash) and once in
-    // name_signature_message (the one message hash).
+    // domain_separated_digest (the one message hash, which the name
+    // signature and the package record share).
     let code = library_code();
     let start = code
         .find("pub fn check_name(")
@@ -156,10 +157,10 @@ fn check_name_uses_the_single_naming_path() {
         "encode_entries is not the one naming hash"
     );
     assert_eq!(
-        library_item(&code, "pub fn name_signature_message(")
+        library_item(&code, "pub fn domain_separated_digest(")
             .matches("Sha256::new()")
             .count(),
         1,
-        "name_signature_message is not the one message hash"
+        "domain_separated_digest is not the one message hash"
     );
 }

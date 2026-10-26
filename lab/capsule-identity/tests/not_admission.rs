@@ -12,22 +12,6 @@ use capsule_identity::{lab_cid, sign_bundle, verify_name_signature, Refusal, MAN
 use common::*;
 use elastos_common::CapsuleManifest;
 
-/// The names in the folder `parent`, sorted.
-fn listing(parent: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(parent)
-        .unwrap_or_else(|error| panic!("list {}: {error}", parent.display()))
-        .map(|entry| {
-            entry
-                .expect("read a folder entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    names.sort();
-    names
-}
-
 /// After `step`, the bundle's lab CID and its parent folder's listing are
 /// what they were before: no byte the lab CID covers changed, and no entry
 /// was added next to the bundle.
@@ -119,7 +103,9 @@ fn valid_signature_grants_nothing_by_itself() {
 
 /// Every `pub fn` the library declares: identity checks only. `check_name`
 /// is listed twice: the free function and `CheckedBundle`'s checked form.
-const IDENTITY_FUNCTIONS: [&str; 15] = [
+/// The last five are task 011's package record: its digest, its payload, its
+/// signer and its two verifiers. None admits, grants or launches.
+const IDENTITY_FUNCTIONS: [&str; 20] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -135,6 +121,11 @@ const IDENTITY_FUNCTIONS: [&str; 15] = [
     "sign_bundle",
     "verify_checked_signature",
     "verify_name_signature",
+    "domain_separated_digest",
+    "package_record_payload",
+    "sign_package_record",
+    "verify_checked_package_record",
+    "verify_package_record",
 ];
 
 /// How many times each name occurs in `names`.
