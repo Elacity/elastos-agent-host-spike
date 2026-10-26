@@ -70,16 +70,22 @@ before it loads the component. The control build must be admitted and print
 The test builds the agent-host twice from a copy of `examples/agent-host`:
 
 - the shipped source, unchanged;
-- the same source with one injected statement
-  ([fixtures/agent-host-injection.txt](fixtures/agent-host-injection.txt)),
-  placed right after `run()` reads its identity. It skips the guest's own
-  guards, asks `elastos:bus/capabilities` for `read` on
-  `localhost://Public/../../../../.ssh/id_ed25519`, and returns any refusal as
-  its lifecycle error.
+- the same source with the guest's own guards failed on the grant path:
+  `host_path` returns false, `request_journal_grants` no longer returns empty
+  when the resource is outside `JOURNAL_ROOT` or a host path, and
+  `journal_resource` names
+  `localhost://Public/../../../../.ssh/id_ed25519`. After that function asks
+  through `WasmBus`, the copy also `?`s the same `capabilities::request` so
+  the Runtime sentence is visible. The shipped adapter maps `BusError::Internal`
+  to `BusFailure::Other` and would exit 0 with empty grants; that surface is
+  a Runtime change, not a lab one.
 
 The test requires the injected build to keep the shipped import list (all five
-`elastos:bus` interfaces) and to run with the shipped manifest bytes. It puts a
-fake key with an obvious marker at `<home>/.ssh/id_ed25519`. With `Public` at
+`elastos:bus` interfaces) and to run with the shipped manifest bytes. The
+injected guest bytes must name the fake key and must omit the Runtime refusal
+sentence and the old early-return marker (`agent-host read the host key`).
+The shipped guest bytes must omit the fake key path. It puts a fake key with
+an obvious marker at `<home>/.ssh/id_ed25519`. With `Public` at
 `<data dir>/Public` (the layout the agent-conformance lane records), four
 parent segments name that file on both Linux and macOS; the test checks this
 depth lexically and never resolves the path. The run must exit nonzero with
@@ -94,13 +100,12 @@ operator and client capture. The refusal is the manifest bound in
 `elastos/crates/elastos-server/src/resource_bridge.rs` (`request_capability`),
 the same reason the probe proof cites.
 
-Why one injected statement: the shipped agent-host asks only for its own journal
-(`localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal`),
-refuses `..` itself (`host_path`), and drops Bus error text. `elastos:bus@v1`
-gives a component no launch arguments, so nothing outside the bytes can point
-it at another resource. The injection models an agent-host whose own guards
-fail; the Runtime must still refuse. The BLOCKED row records the unmodified
-bytes case.
+The guest bytes omit the refusal sentence, so the line in stderr is the
+Runtime's. `elastos:bus@v1` gives a component no launch arguments, so the
+unmodified bytes still cannot ask for a host key. The BLOCKED row records
+that case. [fixtures/agent-host-injection.txt](fixtures/agent-host-injection.txt)
+and [fixtures/forged-runtime-sentence.txt](fixtures/forged-runtime-sentence.txt)
+are the two #316 plants, used only by F-A8-early and F-A8-forge.
 
 ## Run it
 
@@ -141,12 +146,16 @@ when each test fails at its refusal assertion.
 | F-A1-runtime | turns off the Runtime's component-import allowlist check | `wasi_import_is_refused_at_admission` | CAUGHT |
 | F-A8a | declares the fake key in the staged manifest, so the manifest no longer denies it | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-runtime | removes the Runtime's manifest-authority refusal | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-forge | guest returns the Runtime sentence itself and only mentions the bus under `black_box` | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-early | restores the early-return injection at the start of `run()` | `agent_host_host_key_read_is_refused` | CAUGHT |
 
 Under F-A1-runtime the Runtime still refused the WASI build, through its
 core-module import check, with a different reason; the exact-reason assertion
-caught the change. Under both A8 falsifiers the request went on to the
+caught the change. Under F-A8a and F-A8-runtime the request went on to the
 operator and stayed pending until the client gave up after 30 seconds.
-[LOG.md](LOG.md) has the exact lines.
+F-A8-forge fails before the operator starts, because the guest bytes hold
+the Runtime sentence. F-A8-early fails the same way on the early-return
+marker. [LOG.md](LOG.md) has the exact lines.
 
 `runtime-local` entries edit Runtime source on the test machine for one run.
 They are restored byte-identical and never committed.
@@ -157,10 +166,14 @@ They are restored byte-identical and never committed.
   `elastos run` path. Other WASI interfaces and the Home launch path have no
   row here.
 - A8 covers one route (a Bus read) to one fake file outside the Home roots,
-  with an injected request. The unmodified agent-host bytes are BLOCKED.
+  with the grant-path guards failed in a build copy. The unmodified
+  agent-host bytes are BLOCKED.
+- The path-specific reason is visible because the copy `?`s
+  `capabilities::request`. The shipped `WasmBus` drops that text. That
+  surface is NEEDS RUNTIME.
 - A8 does not query the operator's pending list. The exact manifest-bound
   reason shows the bridge refused before it sent the request on.
 - `elastos run` for a component also opens `/tmp/elastos/storage` (known as
   AC-006-STORAGE in the agent-conformance lane). This harness does not clean it.
-- Linux x86_64 only on this run. The macOS data-dir rule is written but was not
-  run here.
+- Linux x86_64 only on this run. The macOS data-dir rule is written. macOS is
+  NOT RUN until Sash runs it.

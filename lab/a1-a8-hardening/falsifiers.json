@@ -1,5 +1,5 @@
 {
-  "note": "Apply one entry at a time, run its named tests, then restore the exact bytes. 'lab' entries edit files under lab/a1-a8-hardening. 'runtime-local' entries edit Runtime source temporarily on the test machine only; restore them byte-identical (compare SHA-256) and never commit them. A build failure, harness error or timeout does not count as caught: the named test must run and fail at its refusal assertion.",
+  "note": "Apply one entry at a time, run its named tests, then restore the exact bytes. 'lab' entries edit files under lab/a1-a8-hardening. 'runtime-local' entries edit Runtime source temporarily on the test machine only; restore them byte-identical (compare SHA-256) and never commit them. A build failure, harness error or timeout does not count as caught: the named test must run and fail at a listed fail_needle (default: the refusal assertion).",
   "falsifiers": [
     {
       "id": "F-A1a",
@@ -59,6 +59,44 @@
           "file": "elastos/crates/elastos-server/src/resource_bridge.rs",
           "old": "            if !manifest_allows_resource(manifest_capabilities, resource, principal_id) {",
           "new": "            if false && !manifest_allows_resource(manifest_capabilities, resource, principal_id) {"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-forge",
+      "title": "guest returns the Runtime refusal sentence itself and only mentions the bus under black_box",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "the guest bytes must not contain the Runtime refusal sentence"
+      ],
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: SURFACE_OLD,\n                new: SURFACE_NEW,\n            },\n        ],\n    )\n}",
+          "new": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    const ANCHOR: &str = \"        let _identity = elastos::bus::identity::context();\\n\";\n    let injected_source = format!(\n        \"{ANCHOR}{}\",\n        include_str!(\"../fixtures/forged-runtime-sentence.txt\").replace(\"@RESOURCE@\", resource)\n    );\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[Edit {\n            file: \"src/lib.rs\",\n            old: ANCHOR,\n            new: &injected_source,\n        }],\n    )\n}"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-early",
+      "title": "restore the early-return injection at the start of run(), skipping the grant path",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "the injected guest must not be the early-return host-key injection"
+      ],
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: SURFACE_OLD,\n                new: SURFACE_NEW,\n            },\n        ],\n    )\n}",
+          "new": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    const ANCHOR: &str = \"        let _identity = elastos::bus::identity::context();\\n\";\n    let injected_source = format!(\n        \"{ANCHOR}{}\",\n        include_str!(\"../fixtures/agent-host-injection.txt\").replace(\"@RESOURCE@\", resource)\n    );\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[Edit {\n            file: \"src/lib.rs\",\n            old: ANCHOR,\n            new: &injected_source,\n        }],\n    )\n}"
         }
       ],
       "tests": [

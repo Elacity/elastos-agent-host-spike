@@ -46,6 +46,11 @@ pub fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Raw-byte search used to prove a sentence is absent from guest bytes.
+pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|part| part == needle)
+}
+
 fn fresh(prefix: &str) -> String {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

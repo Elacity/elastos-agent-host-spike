@@ -3,8 +3,9 @@
 
 Usage: python3 lab/a1-a8-hardening/falsify.py <ID>
 
-CAUGHT means every named test ran and failed at its refusal assertion. The
-edited files are restored byte-identical (SHA-256 checked) even on error.
+CAUGHT means every named test ran and failed at a listed fail_needle
+(default: the refusal assertion). The edited files are restored
+byte-identical (SHA-256 checked) even on error.
 """
 
 import hashlib
@@ -16,7 +17,7 @@ import sys
 
 LANE = pathlib.Path(__file__).resolve().parent
 REPO = LANE.parent.parent
-REFUSAL_ASSERTION = "expected nonzero exit and the exact"
+DEFAULT_NEEDLE = "expected nonzero exit and the exact"
 
 
 def sha(path):
@@ -35,7 +36,14 @@ def test_file(name):
     raise SystemExit(f"named test not found: {name}")
 
 
-def run_test(name):
+def needles(entry):
+    listed = entry.get("fail_needles")
+    if listed:
+        return listed
+    return [DEFAULT_NEEDLE]
+
+
+def run_test(name, entry):
     env = dict(os.environ)
     env.pop("RUSTFLAGS", None)
     env.update(
@@ -53,7 +61,11 @@ def run_test(name):
     output = result.stdout + result.stderr
     evidence = [line for line in output.splitlines() if line.startswith(("a1 ", "a8 "))]
     ran_and_failed = f"test {name} ... FAILED" in output
-    caught = result.returncode != 0 and ran_and_failed and REFUSAL_ASSERTION in output
+    caught = (
+        result.returncode != 0
+        and ran_and_failed
+        and any(needle in output for needle in needles(entry))
+    )
     return caught, result.returncode, evidence, output
 
 
@@ -77,7 +89,7 @@ def main():
             path = target(entry, edit)
             path.write_text(path.read_text().replace(edit["old"], edit["new"], 1))
         for name in entry["tests"]:
-            results.append((name, *run_test(name)))
+            results.append((name, *run_test(name, entry)))
     finally:
         for path, (data, digest) in originals.items():
             path.write_bytes(data)
