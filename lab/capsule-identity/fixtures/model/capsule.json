@@ -1,0 +1,26 @@
+{
+  "schema": "elastos.capsule/v1",
+  "version": "0.1.0",
+  "name": "model-fixture",
+  "role": "content",
+  "type": "data",
+  "entrypoint": "weights.gguf",
+  "projections": ["content"],
+  "model_content": {
+    "format": "gguf",
+    "quantization": "Q4_K_M",
+    "engine": "llama.cpp",
+    "consumer_interface": "elastos.provider.model",
+    "consumer_interface_version": "0.1.0",
+    "minimum_memory_mb": 8192,
+    "license": {"spdx_id": "Apache-2.0", "path": "LICENSE"},
+    "provenance": {
+      "base_repository": "fixture/base",
+      "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_license": {"spdx_id": "Apache-2.0", "path": "LICENSE.base"},
+      "quantized_repository": "fixture/quantized",
+      "quantized_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path": "PROVENANCE.md"
+    }
+  }
+}

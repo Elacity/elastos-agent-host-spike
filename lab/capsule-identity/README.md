@@ -77,6 +77,14 @@ local file (such as `.DS_Store`) never reaches a pin. The pins are in
 | `web-app` | `capsule.json`, `browser/app.js`, `browser/index.html` | `templates/capsules/web-app/`, byte for byte | `lab-cid:sha256:5559e5e3fe8f8e31006c035af0367d87810e214d987d1e8548d1bac03ca82066` |
 | `wc001-core` | `capsule.json` | written for this lab | not pinned (below) |
 | `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `lab-cid:sha256:43a918a50818e6f6ec81543a6dd423c796b03db028d0c7a4222f354c2afdc054` |
+| `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `lab-cid:sha256:274c6cf5685ec5dd638e91d8ac5e2634ebbeb523e756684587b61c1cb52fd6b8` |
+| `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `lab-cid:sha256:c28893c87d43643092656fd4382bb8611659f12365a4533050639b909cc6a26f` |
+
+`provider` and `model` are task 012's (see [three kinds](#three-kinds-share-the-package-rules)).
+Their manifests are re-indented copies of the Runtime's test JSON, with the same
+fields and values; the Runtime's own `CapsuleManifest` parses and validates
+both. No provider binary, rootfs, Kubo, GGUF, model URL or model hash is
+copied.
 
 `agent-host` holds the agent-host capsule's own manifest and its declared asks
 (M1 check B2). `git hash-object` of each copy equals the blob id in the table.
@@ -653,6 +661,70 @@ fails them (F-CI11x). F-CI11u, F-CI11v and F-CI11w also fail 004's
 
 Claim scope: one Mac, these fixtures, test keys only.
 
+## Three kinds share the package rules
+
+Anders's Q10 asks whether the package rules hold for more than one capsule
+kind. Task 012 tries them on three small kinds: an app (`web-app`, a
+web-projection app: role `app`, type `web-projection`), a provider
+(`provider`: role `provider`, type `microvm`) and a model (`model`: role
+`content`, type `data`, with `model_content`).
+
+- **One CID rule.** All three are named by the one `lab_cid`, with the byte
+  rule [above](#the-encoding). Renaming a bundle's folder keeps its CID. One
+  byte changed in a payload file (`browser/app.js`, `ipfs-provider`,
+  `weights.gguf`) changes it, and `check_name` with the old pin is refused
+  with both values.
+- **One record.** Task 011's `sign_package_record` and `verify_package_record`
+  serve all three the same way. The record is signed over the committed bytes,
+  before any change, so its CID is the fixture's pin. Signing and verifying
+  leave the bundle's bytes and its parent's listing as they were, and the
+  record still verifies after the folder is renamed. No kind gets its own
+  encoder or its own record builder.
+- **Lab stand-ins, never launched.** `ipfs-provider` is not a provider
+  binary, and `weights.gguf`, `LICENSE`, `LICENSE.base` and `PROVENANCE.md`
+  are not a model, its licenses or its provenance. Nothing here launches,
+  loads or admits them. The test holds them tiny: each manifest at most 1024
+  bytes, each provider and model stand-in at most 64 bytes, and every
+  web-app file at most 1024 bytes. No file is big enough to chunk or shard.
+- **A WASM app here has one closure.** `wc001-core` (role `app`, type
+  `wasm`) is the WASM app. Its committed fixture is the manifest alone: its
+  entrypoint `capsule.wasm` is built separately by wc-001's `tools/build` in
+  each test and never committed. `web-app` is one closure too: its manifest
+  and its two `browser/` files. No fixture has a second `capsule.json`, a
+  second file named like its entrypoint, or a path part or entrypoint that
+  names a platform (an architecture or an OS word, such as `aarch64-darwin`).
+  The test reads the fixture tree; it defines no variant type.
+- **A name is not the identity.** The CID covers the manifest's `name` as
+  bytes and nothing more. The record has no name field (see
+  [the lab package record](#lab-package-record-outside-the-bundle)), so a
+  grant or a token built on it would bind the CID, never the manifest's
+  `name`.
+- **Not defined here.** This task does not define a shared capsule identity
+  across kinds or across platform variants; that phrase is still undefined.
+  Variant bindings are a later task.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| App, provider and model: the folder name does not change the CID, one payload byte does and the old pin is refused with both values, a fresh key's record binds the pin and verifies, and signing changes no byte and no listing | `three_kinds_share_the_package_rules` | F-CI1l, F-CI12a |
+| A WASM app has one closure: one manifest per fixture, no platform directory or platform entrypoint, no second entrypoint | `a_wasm_app_has_one_closure` | F-CI12b |
+| The provider and model pins | `lab_cid_matches_the_pinned_value_for_each_fixture` (`tests/fixtures.rs`) | F-CI1l, F-CI12a |
+
+The first two tests are in `tests/kinds.rs`. F-CI12a leaves `weights.gguf`
+out of the stream while the walk still reads it. F-CI1l (name only the
+manifest and the entrypoint) does not drop `weights.gguf`, because that is
+the model's entrypoint, so F-CI12a is a different edit, not a second entry
+for one edit. F-CI1l also names `three_kinds_share_the_package_rules`, which
+it fails on `web-app`'s pin. F-CI12b turns `wc001-core`'s entrypoint into
+`aarch64-darwin/capsule.wasm`, in a file the runner restores. The runner
+cannot add a file, so a platform folder added to the fixture tree is proved
+by hand only: with `fixtures/web-app/aarch64-darwin/app.js` added,
+`a_wasm_app_has_one_closure` fails with `web-app: aarch64-darwin names a
+platform variant`, and with a copy of `capsule.json` in `browser/`, it fails
+on the manifest list.
+
+Claim scope: one Mac, these three fixtures. It is not a claim for every
+capsule kind.
+
 ## Why a lab CID and not the Runtime's CID
 
 The Runtime names a published capsule by the CID its IPFS provider returns when
@@ -704,7 +776,8 @@ Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
 src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
                          the encoder, the walk, the test-key signature, the shared
                          digest and the lab package record
-fixtures/                content-sample, web-app, wc001-core, agent-host
+fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
+                         model
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
                          the refusal asserts both signature checks share, the
@@ -714,6 +787,7 @@ tests/check_name.rs      a claimed name is checked, never trusted; one naming pa
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/encoding.rs        order, boundaries, label, one file per path
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
+tests/kinds.rs           app, provider and model share the package rules; one closure
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
 tests/name_signature.rs  a test key signs the printed lab CID; verification only
 tests/not_admission.rs   verify is not admit: a valid signature grants nothing
@@ -726,7 +800,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 118 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 120 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -740,7 +814,8 @@ and task 014's F-CI14a to F-CI14e (see
 [the test-key signature](#test-key-publisher-signature-lab-proposal) and
 [verify is not admit](#verify-is-not-admit-m1-check-b1)), and task 011's
 F-CI11a to F-CI11x (see
-[the lab package record](#lab-package-record-outside-the-bundle)).
+[the lab package record](#lab-package-record-outside-the-bundle)), and task 012's
+F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h and F-CI4i edits a file the runner
@@ -784,7 +859,8 @@ it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
 At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
 `summary: 94 CAUGHT of 94`. At task 011 it reported
 `summary: 118 CAUGHT of 118` (with the id prefix `F-CI11`: 24 of 24).
+At task 012 it reported `summary: 120 CAUGHT of 120`.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014 and 011 prove each of their falsifiers by break, named test fails, revert.
+014, 011 and 012 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

@@ -1,5 +1,5 @@
 {
-  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. wc-008 (no runtime ABI for a bare capsule, tests/runtime_abi.rs): the manifest gains an invented lab_imports field, the near-fit runtime_abi elastos.component/v1, or execution=component (so each ABI is refused for the manifest's fault, which only the exact-reason check catches); or the tools crate names a bundle without the Runtime's manifest check. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -542,6 +542,22 @@
       ]
     },
     {
+      "id": "F-WC3-CREATE-NEW",
+      "title": "capsule.json is opened with create and truncate instead of create_new, so an existing file or a link at its path is written over or through",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "        .create_new(true)",
+          "new": "        .create(true).truncate(true)"
+        }
+      ],
+      "tests": [
+        "bundle_io_refusals_keep_path_and_cause"
+      ]
+    },
+    {
       "id": "F-WC3-IO-CAUSE-WRITE",
       "title": "capsule.json's write refusal drops the writer's cause",
       "command": "lab",
@@ -974,6 +990,73 @@
       ],
       "tests": [
         "verifier_has_one_check_path"
+      ]
+    },
+    {
+      "id": "F-WC8-UNKNOWN-FIELD",
+      "title": "the committed manifest gains an invented lab_imports field",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/capsule/capsule.json",
+          "old": "  \"entrypoint\": \"capsule.wasm\"\n}",
+          "new": "  \"entrypoint\": \"capsule.wasm\",\n  \"lab_imports\": []\n}"
+        }
+      ],
+      "tests": [
+        "lab_manifest_passes_runtime_validate",
+        "this_capsule_bundle_has_the_pinned_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC8-NEAR-FIT",
+      "title": "the committed manifest declares the near-fit runtime_abi elastos.component/v1 for a module that is not a Component",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/capsule/capsule.json",
+          "old": "  \"type\": \"wasm\",\n",
+          "new": "  \"type\": \"wasm\",\n  \"runtime_abi\": \"elastos.component/v1\",\n"
+        }
+      ],
+      "tests": [
+        "lab_manifest_passes_runtime_validate",
+        "no_runtime_abi_names_a_bare_core_module"
+      ]
+    },
+    {
+      "id": "F-WC8-INVALID-BASELINE",
+      "title": "the committed manifest gains execution=component, so each ABI is refused for the manifest's fault, not its own rule",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/capsule/capsule.json",
+          "old": "  \"type\": \"wasm\",\n",
+          "new": "  \"type\": \"wasm\",\n  \"execution\": \"component\",\n"
+        }
+      ],
+      "tests": [
+        "lab_manifest_passes_runtime_validate",
+        "no_runtime_abi_names_a_bare_core_module"
+      ]
+    },
+    {
+      "id": "F-WC8-NAME-WITHOUT-MANIFEST",
+      "title": "the tools crate names a bundle's two files with the shared encoder, skipping the Runtime's manifest check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/lib.rs",
+          "old": "pub use capsule_identity::lab_cid as bundle_identity;\n",
+          "new": "pub fn bundle_identity(\n    bundle: &std::path::Path,\n) -> Result<capsule_identity::LabCid, capsule_identity::Refusal> {\n    let read = |path: &str| capsule_identity::BundleEntry {\n        path: path.to_owned(),\n        content: std::fs::read(bundle.join(path)).unwrap_or_default(),\n    };\n    capsule_identity::encode_entries(&[read(\"capsule.json\"), read(\"capsule.wasm\")])\n}\n"
+        }
+      ],
+      "tests": [
+        "an_unknown_manifest_field_is_refused_by_name"
       ]
     }
   ]

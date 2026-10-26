@@ -120,3 +120,19 @@
     "the verifier's public functions");
     F-WC4-SECOND-SIG, -SECOND-AUDIT: `verifier_has_one_check_path` (:630, :635).
   - All 21: hand-proven, pending R1 (runner-caught: none). The `falsify.py --from` run is pending R1, not a PASS.
+- wc-008 (task 011), base `f9d2b48f8160398e843e0d656d2771fefc4fef29`: FINDING `NO_ABI_FOR_BARE_CAPSULE`. None of the
+  seven `CapsuleRuntimeAbi` values fits a bare core module, and both run paths (`run_cmd.rs:51-57`,
+  `capsule_cmd.rs:267-273`) refuse a `wasm` capsule that is not a Component; ADOPTION.md has the table and both
+  "Gaps for Anders". `capsule/capsule.json`, the pinned lab CID, `Cargo.lock` (`747f66b0…`) and `capsule.wasm`
+  (`6dd9af1a…`) are unchanged. New `tests/runtime_abi.rs`: `bare_capsule_runtime_abi_is_recorded_as_skipped`
+  (SKIPPED, `ignored`), `no_runtime_abi_names_a_bare_core_module` and `an_unknown_manifest_field_is_refused_by_name`.
+  Falsifiers, each hand-proven, pending R1 (not in the runner-caught count): F-WC8-UNKNOWN-FIELD, F-WC8-NEAR-FIT,
+  F-WC8-INVALID-BASELINE, F-WC8-NAME-WITHOUT-MANIFEST and the reused F-WC3-LABCID-PIN (counted once). A canonical
+  runner run over these five said `summary: 5 CAUGHT of 5`, pending R1 (its recovery targets miss `capsule.json` and
+  `tools/src/lib.rs`), not a PASS. Both retired-label greps still match the base's line 100 above (task 013's fix), so
+  the merge is held until 013 lands.
+- wc-003c (task 012): new falsifier F-WC3-CREATE-NEW (`write_new_file` opens `capsule.json` with
+  `.create(true).truncate(true)` instead of `.create_new(true)`); no code or test change. Runner-caught: the canonical
+  runner (`falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-CREATE-NEW`) said `summary: 1 CAUGHT of 1` and
+  restored `tools/src/bundle.rs`. By hand, `bundle_io_refusals_keep_path_and_cause` panicked at
+  `tests/bundle.rs:410:60` ("an entry is there: ()") with the bug in and passed after the revert.
