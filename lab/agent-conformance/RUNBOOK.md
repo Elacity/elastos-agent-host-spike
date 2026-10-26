@@ -477,8 +477,11 @@ checker only reports processes; it never signals an earlier owner. Keep the
 failed Home for review. Remove its data by hand only after its owner approves
 cleanup. Keep Runtime-owned credentials inside the Home out of reports.
 
-The pre-test root selection takes at most two seconds and lsof at most five
-seconds. A timeout, warning or unreadable listing stops the run with a reason.
+The pre-test root selection takes at most two seconds. The shared root census
+uses at most two five-second lsof calls: an occupied first sample gets one
+confirmation sample. A complete empty sample is required to accept cleanup;
+every holder in the final sample fails the check. A timeout, warning or
+unreadable listing stops the run with a reason.
 The scanner stays within Home roots and does not walk native or probe builds.
 The report-build step runs before this bounded check.
 
@@ -624,3 +627,27 @@ record, F-kill-monitor accepts requests from other sessions,
 F-orphan-settlement omits the shared denial, and F-kill-receipt drops the new
 row's identities. Every test named by an entry must fail while planted.
 LOG.md records the measured results.
+
+## Real agent-host capsule (028, acceptance blocked)
+
+Sasha can select the additional real-capsule journey with:
+
+```bash
+bash lab/agent-conformance/run.sh --agent-host
+```
+
+The plain command keeps its existing test selection. The opt-in target copies
+only `Cargo.toml`, `Cargo.lock`, `capsule.json` and `src/` under the lane target,
+places the read-only Bus contract beside that build tree, and uses the shared
+offline builder, bundle stager, operator, controller and cleanup census.
+A passing row requires exactly the journal write and read requests in that
+order, both fixture denials, exit 0, and an empty journal-path census. Its
+launched component SHA-256 and bundle lab CID belong to the same-run receipt.
+Model calls (RT3), UsersAI principal binding, parallel isolation and CID launch
+remain separate acceptance work.
+
+The current candidate fails the two-request assertion: `Users/self` requires
+a principal before the request reaches the shell, and this CLI launch supplies
+none. See the UsersAI binding section in GAPS.md. F-agent-host-grant is defined
+but awaits a passing baseline; its failure alone would supply zero mutation
+proof while the baseline already fails.

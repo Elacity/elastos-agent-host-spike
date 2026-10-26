@@ -596,6 +596,16 @@ guest environment variables or receives a runtime selector.
 
 ### UsersAI binding — principal-scoped agent launches
 
+Task 028's real capsule also keeps its journal under
+`localhost://Users/self/.AppData/Agents/agent-host/`. The
+`agent_memory_under_own_principal` row stays BLOCKED for that capsule too.
+The opt-in deny journey currently fails before shell decisions: the CLI uses
+`Runtime::run_local`, which supplies no principal, and the bridge requires a
+principal for `Users/self` before it posts a pending capability request.
+The live controller observed zero requests. A principal-scoped CLI launch
+contract is needed before the required two shell denials can be measured.
+The task keeps its exact two-request assertion and adds no ignored row.
+
 Anders must bind the existing component launch to a verified agent principal,
 resolve `UsersAI/self` to that principal's root, and enforce the principal and
 explicit Runtime grants on every access to an agent or human object. The
@@ -704,8 +714,12 @@ the journey and identifies the retained Home by its lane-relative name.
 
 The physical check covers handles on named files, directories, current
 directories under this throwaway root, the operator's loopback API
-port, and entries in this root's `tmp/`. The root scan uses one bounded lsof
-call. Its tool runs through the existing spawn site in a separate scratch Home;
+port, and entries in this root's `tmp/`. The shared root scan takes one lsof
+snapshot. If it sees holders, it takes one confirmation snapshot, so a process
+that releases a capture during the scan can settle. Acceptance requires a
+complete empty snapshot. Every holder in the final sample remains a failure,
+including a new holder; either sample's error fails the check. Each tool runs
+through the existing spawn site in a separate scratch Home;
 after exit, its captures move into the journey's existing capture inventory.
 Task 026 plants a bound Unix socket in a bounded child through the one spawn
 site. On this Mac, `lsof +D` sees its cwd and capture handles but omits the
@@ -719,9 +733,9 @@ Only the test PID is excluded. On macOS, lsof exit 1 means that some selected
 result is parsed; warnings, other exit codes and malformed records fail.
 The live socket samples retain their existing success requirement.
 
-This is a point-in-time census, with a five-second lsof limit and a 200 ms API
-connection limit. Pending requests must be empty for the granted and denied
-fixture journeys. The earlier absent-policy journey keeps its refusal scope
+This is a point-in-time census, with at most two five-second lsof calls and
+a 200 ms API connection limit. Pending requests must be empty for the granted
+and denied fixture journeys. The earlier absent-policy journey keeps its refusal scope
 and reports its pending/grant checks as unmeasured. Task 026 below adds pending-request cancellation and settlement. Worker kill
 and whole-device cleanup need their own journey. AC-006-STORAGE
 remains open: `/tmp/elastos/storage` is the known outside-root leftover. The

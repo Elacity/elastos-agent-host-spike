@@ -33,6 +33,23 @@ pub fn root_holders(home: &ThrowawayHome, roots: &[PathBuf]) -> Result<Vec<Holde
     if roots.is_empty() {
         return Ok(Vec::new());
     }
+    confirm_holders(|| root_snapshot(home, roots))
+}
+
+// A process can release a capture while lsof is walking the tree. Require a
+// complete empty snapshot before accepting cleanup; a second occupied sample
+// still reports every holder, including holders absent from the first sample.
+fn confirm_holders(
+    mut sample: impl FnMut() -> Result<Vec<Holder>, String>,
+) -> Result<Vec<Holder>, String> {
+    let holders = sample()?;
+    if holders.is_empty() {
+        return Ok(holders);
+    }
+    sample()
+}
+
+fn root_snapshot(home: &ThrowawayHome, roots: &[PathBuf]) -> Result<Vec<Holder>, String> {
     let mut args = vec!["-nP", "-FpfPtnT", "-Ts"];
     for root in roots {
         args.extend(["+D", root.to_str().ok_or("census root is not UTF-8")?]);
@@ -130,7 +147,7 @@ pub fn cleanup(home: &ThrowawayHome, port: u16) -> Result<String, String> {
 }
 
 /// Inspect only existing home-* trees, never the build tree or file contents.
-/// One bounded lsof invocation covers all roots and never signals their owners.
+/// Each bounded lsof snapshot covers all roots and never signals their owners.
 pub fn earlier_runs() -> Result<Vec<Holder>, String> {
     let started = Instant::now();
     let home = ThrowawayHome::new()?;
@@ -293,4 +310,75 @@ fn parse_listing(listing: &str) -> Result<Vec<OpenFile<'_>>, String> {
         return Err("census process has no files".into());
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{confirm_holders, Holder};
+    use std::collections::VecDeque;
+
+    fn holder(pid: u32) -> Holder {
+        Holder {
+            pid,
+            root: "home-fixture".into(),
+            path: "stderr-fixture".into(),
+        }
+    }
+
+    #[test]
+    fn root_census_requires_an_empty_snapshot_after_a_transient_holder() {
+        let mut samples = VecDeque::from([Ok(vec![holder(41)]), Ok(Vec::new())]);
+        let holders = confirm_holders(|| samples.pop_front().expect("at most two samples"))
+            .expect("complete snapshots");
+        assert!(
+            holders.is_empty(),
+            "released capture needs a fresh empty census"
+        );
+        assert!(samples.is_empty(), "occupied census must be sampled again");
+
+        let mut calls = 0;
+        assert!(confirm_holders(|| {
+            calls += 1;
+            Ok(Vec::new())
+        })
+        .unwrap()
+        .is_empty());
+        assert_eq!(calls, 1, "an empty census needs one sample");
+    }
+
+    #[test]
+    fn root_census_keeps_persistent_and_new_holders_and_sample_errors() {
+        for next in [41, 42] {
+            let mut samples = VecDeque::from([Ok(vec![holder(41)]), Ok(vec![holder(next)])]);
+            let holders = confirm_holders(|| samples.pop_front().expect("at most two samples"))
+                .expect("complete snapshots");
+            assert_eq!(
+                holders,
+                vec![holder(next)],
+                "all final holders remain failures"
+            );
+            assert!(samples.is_empty());
+        }
+        for (samples, reason) in [
+            (
+                vec![Err("first census failed".into())],
+                "first census failed",
+            ),
+            (
+                vec![
+                    Ok(vec![holder(41)]),
+                    Err("confirmation census failed".into()),
+                ],
+                "confirmation census failed",
+            ),
+        ] {
+            let mut samples = VecDeque::from(samples);
+            assert_eq!(
+                confirm_holders(|| samples.pop_front().expect("at most two samples")),
+                Err(reason.into()),
+                "a census error must retain its exact refusal"
+            );
+            assert!(samples.is_empty());
+        }
+    }
 }

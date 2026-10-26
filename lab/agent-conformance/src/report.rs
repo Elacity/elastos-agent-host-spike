@@ -25,6 +25,7 @@ fn grade(result: &str) -> String {
 struct Evidence {
     rows: BTreeMap<String, Vec<String>>,
     skipped: BTreeMap<String, Vec<String>>,
+    reasons: BTreeMap<String, Vec<String>>,
     identities: Identities,
     failures: Vec<String>,
     duplicate_inventory: bool,
@@ -64,6 +65,17 @@ impl Evidence {
                     .or_insert_with(|| vec!["FAIL".into()]);
                 values.push(result.to_owned());
             } else if let Some((name, reason)) = line
+                .strip_prefix("FAILURE ")
+                .and_then(|s| s.split_once(": "))
+            {
+                if test_name(name) && !reason.is_empty() {
+                    evidence
+                        .reasons
+                        .entry(name.into())
+                        .or_default()
+                        .push(reason.replace('|', "/"));
+                }
+            } else if let Some((name, reason)) = line
                 .strip_prefix("SKIPPED ")
                 .and_then(|s| s.split_once(": "))
             {
@@ -99,6 +111,14 @@ impl Evidence {
             let result = self.result(name, values);
             passed &= result == "PASS" || result.starts_with("BLOCKED (");
             text.push_str(&format!("{name} | {result}"));
+            if result == "FAIL" {
+                if let Some(reasons) = self.reasons.get(name) {
+                    text.push_str(&format!(" | {}", reasons.join("; ")));
+                }
+            }
+            if name == "real_agent_host_gets_no_ungranted_authority" {
+                text.push_str(" | real agent-host capsule, deny half; no model call (RT3)");
+            }
             if matches!(
                 name.as_str(),
                 "granted_read_succeeds"
@@ -179,6 +199,7 @@ fn test_name(name: &str) -> bool {
 
 fn required_effects(test: &str) -> &'static [&'static str] {
     match test {
+        "real_agent_host_gets_no_ungranted_authority" => &["agent-host"],
         "default_activation_refuses_without_selector" => &["default"],
         "granted_read_succeeds" | "run_leaves_no_live_grant" => &["granted-read"],
         "ungranted_sibling_read_is_refused" => &["sibling-read"],
