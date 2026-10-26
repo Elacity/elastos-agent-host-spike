@@ -1,0 +1,32 @@
+
+running 1 test
+a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+test agent_host_host_key_read_is_refused ... FAILED
+
+failures:
+
+failures:
+    agent_host_host_key_read_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.63s
+
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r2/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)
+
+thread 'agent_host_host_key_read_is_refused' (22561) panicked at tests/a8_agent_host_host_key.rs:183:5:
+expected the Runtime Internal sentence on stderr; stderr:
+[2m2026-10-26T22:53:19.229244Z[0m [32m INFO[0m [2melastos::run_cmd[0m[2m:[0m Running capsule from: /tmp/pr-301-a8-r2/lab/a1-a8-hardening/target/homes/home-22560-1793055198628243682-2/capsules/agent-host
+[run] Component capsule attached to runtime at http://127.0.0.1:37731
+[2m2026-10-26T22:53:19.233137Z[0m [33m WARN[0m [2melastos_server::runtime[0m[2m:[0m Capsule signature verification running in dev_mode=true; unsigned local capsules are allowed
+[2m2026-10-26T22:53:19.235030Z[0m [32m INFO[0m [2melastos_server::runtime[0m[2m:[0m Loading capsule 'agent-host' (Wasm)
+[2m2026-10-26T22:53:19.235047Z[0m [33m WARN[0m [2melastos_server::runtime[0m[2m:[0m Unsigned capsule 'agent-host' allowed because dev_mode=true
+Error: Component capsule failed: Compute error: Component capsule denied: BusError::Invalid("the journal append did not follow its grants")
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: lab/a1-a8-hardening/target/homes/home-22560-1793055198628243682-2
+error: test failed, to rerun pass `--test a8_agent_host_host_key`

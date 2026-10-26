@@ -1,0 +1,30 @@
+--- a1/a8 lines ---
+29:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+34:test wasi_import_is_refused_at_admission has been running for over 60 seconds
+35:a1 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+36:a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+37:a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+38:a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; allowed imports: elastos:bus/types@1.0.0, elastos:bus/runtime@1.0.0, elastos:bus/identity@1.0.0, elastos:bus/capabilities@1.0.0, elastos:bus/providers@1.0.0")
+39:a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+40:test wasi_import_is_refused_at_admission ... ok
+42:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 387.05s
+47:test shipped_agent_host_bytes_read_host_key ... ignored, blocked: AC-002-ARGS; the shipped agent-host names only its own journal
+48:test shipped_wasm_bus_prints_internal_sentence ... ignored, needs runtime: WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible
+49:a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+50:a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+51:a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+52:a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+53:a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+54:test agent_host_host_key_read_is_refused ... ok
+56:test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 39.42s
+62:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+--- baseline sha ---
+ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a  lab/a1-a8-hardening/tests/a1_wasi_import.rs
+ebad194d6d99143bf717a081645c2b7370e90a0d20bb774a6b83a5edb4a77ff0  lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs
+7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992  elastos/crates/elastos-server/src/component.rs
+d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a  elastos/crates/elastos-server/src/resource_bridge.rs
+16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275  lab/a1-a8-hardening/target/runtime/debug/elastos
+--- git status worktree ---
+--- rustc ---
+rustc 1.91.0 (f8297e351 2025-10-28)
+Linux cursor 6.12.94+ #1 SMP PREEMPT_DYNAMIC Mon Oct 19 22:12:29 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
