@@ -208,8 +208,13 @@ def main():
         sys.exit("no plants selected")
     WORK.mkdir(parents=True, exist_ok=True)
 
+    mutants = [plant for plant in plants if plant.expect == "caught"]
+    controls = [plant for plant in plants if plant.expect == "survive"]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        outcomes = list(pool.map(lambda plant: run_plant(plant, args.keep), plants))
+        outcomes = list(pool.map(lambda plant: run_plant(plant, args.keep), mutants))
+    # The control runs the whole suite. Run it after the mutants so a
+    # parallel compile cannot starve the identity sample.
+    outcomes.extend(run_plant(plant, args.keep) for plant in controls)
 
     for outcome in outcomes:
         print(f"{outcome.verdict:<9}{outcome.plant.id}  {outcome.detail}")

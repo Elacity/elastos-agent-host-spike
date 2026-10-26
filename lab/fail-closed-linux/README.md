@@ -291,8 +291,8 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: `python3 falsify.py` on this tree: filled after the falsify run.
-A skipped (`ignored`) test is `NOT RUN`, never a pass.
+Result: `python3 falsify.py` on this tree: 31/31 caught; 1/1
+control survived. A skipped (`ignored`) test is `NOT RUN`, never a pass.
 F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid` is a
 host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and F32
 catch the #355 / #357 review gaps. F33-F35 catch the r3 residuals:

@@ -7,9 +7,10 @@
 //! `launch` returns the PID-namespace init. The helper that unshares the
 //! namespace writes that host pid and exits. Init reaps every child. SIGKILL
 //! of init kills the namespace. A start is EOF on the close-on-exec pipe
-//! plus `/proc/<provider pid>/exe` matching the expected binary. The
-//! provider keeps a non-cloexec identity fd so that image stays alive
-//! after the fault pipe closes. Any bytes are a fault.
+//! plus `/proc/<provider pid>/exe` matching the expected binary. A
+//! non-cloexec identity fd keeps the post-`execve` image alive, and the
+//! parent samples that path while it waits for the fault pipe. Any bytes
+//! are a fault.
 
 use crate::{
     confine_and_exec, exe_identity_ok, interpret_fault_pipe, landlock, proc_exe_dev_ino,
@@ -21,6 +22,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::os::raw::{c_int, c_long};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 /// The real kernel. `fault_write` is the child's end of the close-on-exec
 /// pipe. Reapers close their copy so a successful `execve` produces EOF.
@@ -682,12 +684,15 @@ impl Kernel for RealKernel {
 
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
 
+        let expected = plan.exe_dev_ino();
+        let mut matched =
+            init_pid.is_some_and(|init| spin_exe_identity(init, expected, fault_read));
         let mut buf = [0u8; Fault::ENCODED_LEN * 2];
         let (got, read_error) = read_all(fault_read, &mut buf);
+        if !matched {
+            matched = init_pid.is_some_and(|init| any_child_matches(init, expected));
+        }
         unsafe { libc::close(fault_read) };
-        // Fault EOF means execve (or close-pipe). The identity write end is
-        // not cloexec, so the post-exec image is still alive here.
-        let matched = init_pid.is_some_and(|init| any_child_matches(init, plan.exe_dev_ino()));
         unsafe { libc::close(identity_read) };
 
         // The helper writes the pid and `_exit`s. One WNOHANG now; do not
@@ -781,6 +786,29 @@ fn close_pair(a: RawFd, b: RawFd) {
     unsafe {
         libc::close(a);
         libc::close(b);
+    }
+}
+
+/// Poll the fault pipe without sleeping so `/proc/<pid>/exe` is sampled
+/// in the same thread while the post-exec image still holds the identity fd.
+fn spin_exe_identity(init: u32, expected: (u64, u64), fault_read: RawFd) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if any_child_matches(init, expected) {
+            return true;
+        }
+        let mut pfd = libc::pollfd {
+            fd: fault_read,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let pret = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if pret < 0 && errno() != libc::EINTR {
+            return false;
+        }
+        if pret > 0 || Instant::now() >= deadline || !process_alive(init) {
+            return any_child_matches(init, expected);
+        }
     }
 }
 

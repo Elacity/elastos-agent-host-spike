@@ -11,6 +11,7 @@ test: real_kernel::real_confined_provider_has_every_layer
                 HANDOFF_WRITE.store(-1, Ordering::Relaxed);
             }
             close_fault_write(self);
+            close_identity_write(self);
             unsafe { libc::_exit(0) };
 --- new
                 let bytes = (unsafe { libc::getpid() } as u32).to_le_bytes();
@@ -21,6 +22,7 @@ test: real_kernel::real_confined_provider_has_every_layer
                 HANDOFF_WRITE.store(-1, Ordering::Relaxed);
             }
             close_fault_write(self);
+            close_identity_write(self);
             let mut status = 0;
             loop {
                 let ret = unsafe { libc::waitpid(init, &mut status, 0) };
