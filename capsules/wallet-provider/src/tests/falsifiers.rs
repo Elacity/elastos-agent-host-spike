@@ -20,8 +20,16 @@ use std::process::Command;
 /// WP29, which drops the child's standard error from the one failure message,
 /// and task 050's WP30, which returns `false` from the error arm of
 /// `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns
-/// and `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails.
-const EXPECTED_FALSIFIERS: usize = 28;
+/// and `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails,
+/// and task 054's WP31, which restores the plain cut at every `;` and the
+/// parenthesis count inside strings, WP32 to WP37, which disable escaping,
+/// whitespace inside a string, whitespace collapse outside strings, a
+/// comment's end at its newline, and the two parser refusals, and WP38, which
+/// drops the newline that ends a comment and glues the tokens around it, and
+/// WP39, which drops the split outside every form and glues a bare value onto
+/// the next form, and WP40, which adds the separator space after an opening
+/// parenthesis so a spaced allow form escapes both predicates.
+const EXPECTED_FALSIFIERS: usize = 38;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
