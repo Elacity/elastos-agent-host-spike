@@ -7,9 +7,10 @@
 //! stdout, and the profile denies every network operation.
 //!
 //! `CONFINEMENT.md` says the confinement tests exercise these profiles on
-//! macOS through `/usr/bin/sandbox-exec`, and a test there that cannot run
-//! because that tool is missing fails the gate. On any other OS the tests
-//! print why they did not run and return.
+//! macOS through `/usr/bin/sandbox-exec`. On a declared host OS a missing
+//! `/usr/bin/sandbox-exec` fails the test, and `sandbox_available` is the call
+//! that fails it. On any other OS, when that tool is missing, the test prints
+//! why it did not run and returns.
 
 use elastos_wallet_contract::{
     VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
@@ -61,13 +62,18 @@ fn sandbox_gate(os: &str, sandbox_exec: &Path) -> Result<bool, String> {
 }
 
 /// Returns `true` when the test can run, and fails it on a declared OS.
-fn sandbox_available() -> bool {
-    match sandbox_gate(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+///
+/// On `Err` from `sandbox_gate` this fails the test with that reason. It does
+/// not return `false` for an error. It prints the skip line only when the gate
+/// answers `Ok(false)`.
+fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
+    match sandbox_gate(os, sandbox_exec) {
         Ok(true) => true,
         Ok(false) => {
             eprintln!(
-                "SKIP wallet-provider confinement test: {SANDBOX_EXEC} is absent; \
-                 the profile was not exercised on this machine"
+                "SKIP wallet-provider confinement test: {} is absent; \
+                 the profile was not exercised on this machine",
+                sandbox_exec.display()
             );
             false
         }
@@ -114,6 +120,59 @@ fn sandbox_gate_fails_instead_of_skipping_on_a_declared_os() {
         sandbox_gate("macos", &present),
         Ok(true),
         "a declared OS runs the test when sandbox-exec is present"
+    );
+}
+
+/// The one caller fails the test when the gate refuses a declared host OS.
+///
+/// With `macos` and a missing `sandbox-exec` the call panics and its payload,
+/// read as a `String`, is the gate's reason, which names the OS and the path.
+/// A return fails this test with the returned value. A present path on
+/// `macos` returns `true`. The test calls no OS that skips, so it prints no
+/// skip line, and it starts no process.
+///
+/// Falsifier: WP30 returns `false` from the error arm of `sandbox_available`,
+/// so a missing `sandbox-exec` on `macos` returns and this test fails.
+#[test]
+fn sandbox_available_fails_for_macos_when_sandbox_exec_is_missing() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
+    assert!(
+        !missing.exists(),
+        "the fixture path must be absent: {}",
+        missing.display()
+    );
+    let present = std::env::current_exe().expect("the test executable path must be available");
+    assert!(
+        present.is_file(),
+        "the present fixture must be a file: {}",
+        present.display()
+    );
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sandbox_available("macos", &missing)
+    }));
+    let failure = match settled {
+        Err(payload) => payload
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("the gate's reason must arrive as a String payload"),
+        Ok(returned) => panic!(
+            "a missing sandbox-exec on macos must fail the test, but sandbox_available returned {returned}"
+        ),
+    };
+    let expected = sandbox_gate("macos", &missing)
+        .expect_err("a declared OS must refuse a missing sandbox-exec");
+    assert_eq!(
+        failure, expected,
+        "the panic payload must be the gate's reason"
+    );
+    assert!(
+        failure.contains("macos") && failure.contains(&missing.display().to_string()),
+        "the refusal must name the OS and the missing path: {failure}"
+    );
+    assert!(
+        sandbox_available("macos", &present),
+        "a present sandbox-exec on macos must let the confined test run"
     );
 }
 
@@ -459,7 +518,7 @@ fn read_store(root: &Path) -> Value {
 /// and this test fails.
 #[test]
 fn confined_provider_serves_wallet_operations_under_its_root() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
@@ -530,7 +589,7 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 /// `Init` then succeeds and this test fails.
 #[test]
 fn confined_outside_write_is_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
@@ -582,7 +641,7 @@ fn confined_outside_write_is_denied() {
 /// `Init` then adopts the planted key and this test fails.
 #[test]
 fn confined_outside_read_is_denied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
@@ -662,7 +721,7 @@ fn plant_storage_key(wallet_dir: &Path) {
 /// and this test fails.
 #[test]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
-    if !sandbox_available() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let fixture = tempfile::tempdir().expect("temporary wallet root");
