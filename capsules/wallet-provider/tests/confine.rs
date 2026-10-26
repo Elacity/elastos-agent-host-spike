@@ -1394,15 +1394,15 @@ fn is_default_allow(form: &str) -> bool {
 }
 
 /// Whether `form` is a top-level allow rule that grants `process-exec`: one of
-/// its operation names, the tokens after `allow` before the first filter, is
-/// `process*` or starts with `process-exec`, and each of those grants it. This
-/// is the one copy of the rule, used by the shared file-profile contract
-/// check (P10).
+/// its operation names, the tokens after `allow` before the first filter or
+/// closing parenthesis, is `process*` or starts with `process-exec`, and each
+/// of those grants it. This is the one copy of the rule, used by the shared
+/// file-profile contract check (P10).
 fn is_exec_allow(form: &str) -> bool {
     let Some(rest) = form.strip_prefix("(allow ") else {
         return false;
     };
-    let operations = rest.split('(').next().unwrap_or_default();
+    let operations = rest.split(['(', ')']).next().unwrap_or_default();
     operations
         .split_whitespace()
         .any(|operation| operation == "process*" || operation.starts_with("process-exec"))
@@ -2562,12 +2562,15 @@ fn file_profile_contract_rejects_an_allow_default() {
 /// "/bin/sh"))` keeps its own removal for the 055 removal check, and the 056
 /// and 059 copy tests still launch and refuse copies of the provider binary,
 /// because `PROVIDER_EXECUTABLE` stays the only bound binary, so neither test
-/// sees a second exec path. The fixtures are built in the test; no file is
-/// read and no process starts.
+/// sees a second exec path. The unfiltered forms put the operation name
+/// directly before the closing parenthesis, which `profile_forms` keeps
+/// attached, so the predicate must read `)` as a token boundary too. The
+/// fixtures are built in the test; no file is read and no process starts.
 ///
-/// Falsifier: WP69 disables the second-exec-allow refusal in
+/// Falsifiers: WP69 disables the second-exec-allow refusal in
 /// `check_profile_contract`; this test fails because the `/bin/sh` fixture
-/// passes.
+/// passes. WP70 takes the operation list only up to the first `(`, so the
+/// unfiltered `(allow process*)` form passes.
 #[test]
 fn file_profile_contract_rejects_a_second_exec_allow() {
     let complete = contract_fixture_profile(true);
@@ -2578,13 +2581,17 @@ fn file_profile_contract_rejects_a_second_exec_allow() {
         r#"(allow process-exec (literal "/bin/sh"))"#,
         SHARED_RULES[0],
         r#"(allow process* (literal "/bin/sh"))"#,
+        r#"(allow process-exec)"#,
+        r#"(allow process*)"#,
+        r#"(allow file-read* process*)"#,
     ] {
         let profile = format!("{complete}{grant}\n");
         let refusal = check_profile_contract("fixture-provider", &profile)
             .expect_err("a profile with a second exec allow must fail");
         assert!(
-            refusal.contains("fixture-provider") && refusal.contains(grant),
-            "the refusal must name the profile and the extra rule: {refusal}"
+            refusal.contains("fixture-provider")
+                && refusal.contains(&format!("the extra rules are `{grant}`")),
+            "the refusal must name the profile and quote the extra rule: {refusal}"
         );
         assert!(
             refusal.contains("more than one process-exec allow"),

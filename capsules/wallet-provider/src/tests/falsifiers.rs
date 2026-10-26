@@ -64,8 +64,10 @@ use std::process::Command;
 /// and task 066's WP69, which disables the second-exec-allow refusal in
 /// `check_profile_contract`, so
 /// `file_profile_contract_rejects_a_second_exec_allow` fails because the
-/// `/bin/sh` fixture passes.
-const EXPECTED_FALSIFIERS: usize = 67;
+/// `/bin/sh` fixture passes, and WP70, which stops the exec predicate's
+/// operation list only at the first `(`, so `process*)` escapes and the test
+/// fails on its `(allow process*)` case.
+const EXPECTED_FALSIFIERS: usize = 68;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

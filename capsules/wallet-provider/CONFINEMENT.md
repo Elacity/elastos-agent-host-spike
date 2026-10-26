@@ -256,12 +256,16 @@ binding is the only difference between the two runs.
   `must reject (allow default)`. The test reads no file.
 - `file_profile_contract_rejects_a_second_exec_allow` builds the same passing
   fixture and appends `(allow process-exec (literal "/bin/sh"))`, the shared
-  exec rule a second time, then `(allow process* (literal "/bin/sh"))`. The
-  check refuses each profile with a reason that names `fixture-provider`, the
-  extra rule and `more than one process-exec allow`. The narrower exec rule
-  keeps its own removal for the 055 removal check, and the 056 and 059 copy
-  tests still refuse a copy of the provider binary, so neither sees this second
-  exec path. The test reads no file and starts no process.
+  exec rule a second time, `(allow process* (literal "/bin/sh"))`,
+  `(allow process-exec)`, `(allow process*)` and
+  `(allow file-read* process*)`. The check refuses each profile with a reason
+  that names `fixture-provider`, quotes the extra rule and holds
+  `more than one process-exec allow`. The unfiltered forms put the operation
+  name directly before the closing parenthesis, so the predicate reads `)`
+  as a token boundary. The narrower exec rule keeps its own removal for the
+  055 removal check, and the 056 and 059 copy tests still refuse a copy of the
+  provider binary, so neither sees this second exec path. The test reads no
+  file and starts no process.
 - `file_profile_contract_rejects_a_non_canonical_token` builds the same
   passing fixture and appends
   `(allow file-read* (literal (param "READ_FIXTURE_KEY")))`. The check refuses
@@ -527,6 +531,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Remove the second-exec-allow refusal from the shared contract check (WP69):
   `file_profile_contract_rejects_a_second_exec_allow` fails because the
   `/bin/sh` fixture passes.
+- Take the exec predicate's operation list only up to the first `(` (WP70):
+  `file_profile_contract_rejects_a_second_exec_allow` fails on its
+  `(allow process*)` case because the token reads `process*)` and the profile
+  passes the check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
