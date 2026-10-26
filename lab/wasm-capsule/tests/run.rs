@@ -875,19 +875,33 @@ fn queried(folder: &Path, name: &str) -> bool {
 const FAILING_BODY: &str = "printf 'boom: bad module\\n' >&2\nexit 3\n";
 
 /// A stand-in engine `name` that, asked `--version`, records `version <name>`
-/// in `log`; started for a module run, it records that it started, with the
-/// module path it was given, waits, records that it ended, then prints
-/// `output`. Two engines that overlap leave their lines interleaved.
+/// in `log`; started for a module run, it writes every argument it was given,
+/// one per line, to `<name>.argv` in `folder` (see [`logged_argv`]), records
+/// in `log` that it started, with the module path it was given, waits,
+/// records that it ended, then prints `output`. Two engines that overlap leave
+/// their lines interleaved in `log`.
 fn recording(folder: &Path, name: &str, log: &Path, output: &str) -> PathBuf {
     let version = format!(
         "printf 'version {name}\\n' >> '{log}'\nprintf '{name} 0.0.0-stand-in\\n'\n",
         log = log.display()
     );
     let body = format!(
-        "{MODULE_ARGUMENT}printf 'start {name} %s\\n' \"$module\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
+        "printf '%s\\n' \"$@\" > '{argv}'\n{MODULE_ARGUMENT}printf 'start {name} %s\\n' \"$module\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
+        argv = folder.join(format!("{name}.argv")).display(),
         log = log.display()
     );
     engine(folder, name, &version, &body)
+}
+
+/// The argv the stand-in `name` made by [`recording`] in `folder` was given
+/// for its module run, one argument per entry.
+fn logged_argv(folder: &Path, name: &str) -> Vec<String> {
+    let path = folder.join(format!("{name}.argv"));
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn two_ran(result: Result<TwoEngineRun, TwoEngineRefusal>) -> TwoEngineRun {
@@ -1367,7 +1381,7 @@ fn receipt_records_observed_engine_versions() {
     let name = bundle_identity(&signed.bundle).expect("name the bundle");
     let tmp = TempDir::new("run3-receipt");
     let root = canonical(&tmp);
-    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v1");
+    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v2");
 
     // Two runs of the same bundle, by stand-ins that print made-up versions,
     // each followed by a second line that is not kept.
@@ -1415,7 +1429,7 @@ fn receipt_records_observed_engine_versions() {
         assert_eq!(
             receipt,
             format!(
-                "schema: wc-005.run-receipt/v1\n\
+                "schema: wc-005.run-receipt/v2\n\
                  bundle: {name}\n\
                  function: digest\n\
                  argument: 1592590337\n\
@@ -1424,7 +1438,11 @@ fn receipt_records_observed_engine_versions() {
                  wasmtime_stdout: \"4242\\n\"\n\
                  wasmer_version: \"{wasmer_version}\"\n\
                  wasmer_status: exit status: 0\n\
-                 wasmer_stdout: \"4242\\n\"\n"
+                 wasmer_stdout: \"4242\\n\"\n\
+                 memory_mb: 64\n\
+                 memory_cap_bytes: 67108864\n\
+                 wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y\n\
+                 {WASMER_SKIPPED}\n"
             ),
             "{case}: the receipt"
         );
@@ -1799,10 +1817,22 @@ fn real_receipt_names_both_installed_engines() {
     assert_eq!(
         lines[..4],
         [
-            "schema: wc-005.run-receipt/v1".to_string(),
+            "schema: wc-005.run-receipt/v2".to_string(),
             format!("bundle: {name}"),
             "function: digest".to_string(),
             format!("argument: {FIXED_INPUT}"),
+        ]
+    );
+    // wc-010c: this capsule declares no `resources`, so the Runtime's default
+    // 64 MB = 67108864 bytes; the real wasmtime ran under that cap, wasmer
+    // under none.
+    assert_eq!(
+        lines[10..],
+        [
+            "memory_mb: 64",
+            "memory_cap_bytes: 67108864",
+            "wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y",
+            WASMER_SKIPPED,
         ]
     );
     eprintln!("RECEIPT (this machine):\n{receipt}");
@@ -2078,14 +2108,9 @@ fn manifest_with_memory_mb(memory_mb: u32) -> Vec<u8> {
 }
 
 /// A new folder `name` in `root` holding [`manifest_with_memory_mb`] and
-/// `module` as `capsule.wasm`, signed with a fresh key and verified; the
-/// verified value keeps the declared `memory_mb`.
-fn verified_bundle_declaring(
-    root: &Path,
-    name: &str,
-    module: &[u8],
-    memory_mb: u32,
-) -> VerifiedBundle {
+/// `module` as `capsule.wasm`, signed in memory with a fresh key: its folder,
+/// signature and accepted signer, as a `run` needs them.
+fn signed_bundle_declaring(root: &Path, name: &str, module: &[u8], memory_mb: u32) -> Declared {
     let bundle = root.join(name);
     fs::create_dir(&bundle).expect("create the bundle folder");
     fs::write(
@@ -2096,10 +2121,54 @@ fn verified_bundle_declaring(
     fs::write(bundle.join("capsule.wasm"), module).expect("write capsule.wasm");
     let key = fresh_key();
     let sig = sign_bundle(&key, &bundle).expect("sign the bundle");
-    let value = verify_bundle(&bundle, Some(&sig), &[did(&key)], &[])
+    Declared {
+        bundle,
+        sig,
+        accepted: vec![did(&key)],
+    }
+}
+
+/// [`signed_bundle_declaring`]'s bundle, verified; the verified value keeps
+/// the declared `memory_mb`.
+fn verified_bundle_declaring(
+    root: &Path,
+    name: &str,
+    module: &[u8],
+    memory_mb: u32,
+) -> VerifiedBundle {
+    let signed = signed_bundle_declaring(root, name, module, memory_mb);
+    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
         .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"));
     assert_eq!(value.memory_mb(), memory_mb, "the declared memory_mb");
     value
+}
+
+/// A bundle made by [`signed_bundle_declaring`]: its folder, its in-memory
+/// name signature and the signer list that accepts it.
+struct Declared {
+    bundle: PathBuf,
+    sig: NameSignature,
+    accepted: Vec<String>,
+}
+
+impl Declared {
+    /// The two-engine runner's input for this bundle, no grants.
+    fn input<'a>(
+        &'a self,
+        wasmtime: &'a Path,
+        wasmer: &'a Path,
+        work_root: &'a Path,
+    ) -> RunInput<'a> {
+        RunInput {
+            bundle: &self.bundle,
+            signature: Some(&self.sig),
+            accepted: &self.accepted,
+            granted: &[],
+            wasmtime,
+            wasmer,
+            work_root,
+        }
+    }
 }
 
 /// wc-010b: the cap on `wasmtime`'s argv is the manifest's declared
@@ -2338,4 +2407,104 @@ fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
 #[ignore = "SKIPPED: wasmer 7.5.0 has no memory cap flag in wasmer run --help or wasmer --help (wc-010a); no cap is claimed for wasmer"]
 fn memory_cap_on_wasmer_is_skipped() {
     panic!("SKIPPED: no memory cap is claimed for wasmer");
+}
+
+/// wc-010c: the receipt's line for an engine started with no memory cap
+/// argument, with wc-010a's reason.
+const WASMER_SKIPPED: &str =
+    "wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)";
+
+/// The receipt's line that starts with `key: `, if any.
+fn receipt_line<'a>(receipt: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}: ");
+    receipt.lines().find(|line| line.starts_with(&prefix))
+}
+
+/// wc-010c: the receipt records the declared size, not a fixed 64 MB: a
+/// bundle that declares 2 MB, run through `run` on stand-in engines, gives
+/// `memory_mb: 2`, 2097152 bytes, `wasmtime` ENFORCED with exactly the cap
+/// argument it was started with, and `wasmer` SKIPPED with wc-010a's reason.
+#[test]
+fn receipt_records_the_declared_memory_cap() {
+    let tmp = TempDir::new("run10c-receipt");
+    let root = canonical(&tmp);
+    let signed = signed_bundle_declaring(&root, "bundle", MODULE, 2);
+    let engines = work_root(&root, "engines");
+    let wasmtime = marked(&engines, "wasmtime", "printf 'same\\n'\n");
+    let wasmer = marked(&engines, "wasmer", "printf 'same\\n'\n");
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&signed.input(&wasmtime, &wasmer, &work)));
+    assert_eq!(passed.memory_mb(), 2, "the declared memory_mb");
+    assert_eq!(passed.memory_cap_bytes(), 2_097_152, "2 × 2^20 bytes");
+
+    let receipt = render(&passed);
+    let lines: Vec<&str> = receipt.lines().collect();
+    assert_eq!(lines.len(), 14, "the v2 receipt's lines:\n{receipt}");
+    assert_eq!(lines[0], "schema: wc-005.run-receipt/v2");
+    assert_eq!(
+        lines[10..],
+        [
+            "memory_mb: 2",
+            "memory_cap_bytes: 2097152",
+            "wasmtime_memory_cap: ENFORCED max-memory-size=2097152,max-memories=1,trap-on-grow-failure=y",
+            WASMER_SKIPPED,
+        ],
+        "the receipt's memory lines:\n{receipt}"
+    );
+}
+
+/// wc-010c: the receipt's cap line is the argv the engine got, not a claim
+/// beside it. With [`recording`] stand-ins, `wasmtime_memory_cap` is ENFORCED
+/// with exactly the argument that followed `-W` in the argv `wasmtime` logged,
+/// and `wasmer`, whose logged argv has no `-W` and no `max-memory-size`, gets
+/// the SKIPPED line.
+#[test]
+fn receipt_cap_line_matches_the_argv_the_engine_got() {
+    let tmp = TempDir::new("run10c-argv");
+    let root = canonical(&tmp);
+    let signed = signed_bundle_declaring(&root, "bundle", MODULE, 2);
+    let engines = work_root(&root, "engines");
+    let log = engines.join("log");
+    let wasmtime = recording(&engines, "wasmtime", &log, "same");
+    let wasmer = recording(&engines, "wasmer", &log, "same");
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&signed.input(&wasmtime, &wasmer, &work)));
+    let receipt = render(&passed);
+
+    let wasmtime_argv = logged_argv(&engines, "wasmtime");
+    let after_w: Vec<&String> = wasmtime_argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-W")
+        .map(|pair| &pair[1])
+        .collect();
+    assert_eq!(
+        after_w.len(),
+        1,
+        "wasmtime's logged argv {wasmtime_argv:?} has no single -W argument"
+    );
+    assert_eq!(
+        receipt_line(&receipt, "wasmtime_memory_cap"),
+        Some(format!("wasmtime_memory_cap: ENFORCED {}", after_w[0]).as_str()),
+        "the receipt's wasmtime cap is not the argument after -W in its argv"
+    );
+    assert_eq!(
+        passed.memory_cap(Engine::Wasmtime),
+        Some(after_w[0].as_str())
+    );
+
+    let wasmer_argv = logged_argv(&engines, "wasmer");
+    assert!(
+        !wasmer_argv
+            .iter()
+            .any(|arg| arg == "-W" || arg.contains("max-memory-size")),
+        "wasmer's logged argv {wasmer_argv:?} carries a memory cap"
+    );
+    assert_eq!(
+        receipt_line(&receipt, "wasmer_memory_cap"),
+        Some(WASMER_SKIPPED),
+        "the receipt's wasmer cap line"
+    );
+    assert_eq!(passed.memory_cap(Engine::Wasmer), None);
 }
