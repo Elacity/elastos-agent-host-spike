@@ -6,9 +6,15 @@
 //! `verify_bundle` once, then `run_engine` for `wasmtime` and then for
 //! `wasmer`, and requires both to succeed with byte-identical stdout.
 //!
+//! wc-005c: before the module runs, `run` asks each engine `--version` and
+//! keeps the first line it printed; `wasm_capsule_tools::receipt` renders the
+//! run's receipt and writes it only through the shared new-file writer.
+//!
 //! The stand-in engines are small shell scripts written into each test's own
-//! temp dir. One test starts the real `wasmtime` and `wasmer`; an engine it
-//! cannot find is reported SKIPPED, never PASS. Every test key is made fresh in
+//! temp dir. Every stand-in the two-engine runner starts answers `--version`
+//! on its own branch, apart from its module run. The real-engine tests start
+//! the real `wasmtime` and `wasmer`; an engine they cannot find is reported
+//! SKIPPED, never PASS. Every test key is made fresh in
 //! memory inside its test and never written. The tests share one process, so
 //! none changes process-wide state (env, working folder, limits).
 
@@ -23,10 +29,13 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use wasm_capsule_tools::bundle::{Reason as WriteReason, RunRefusal as WriteRefusal};
+use wasm_capsule_tools::bundle::{
+    write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal,
+};
+use wasm_capsule_tools::receipt::{render, write_receipt, RECEIPT_SCHEMA};
 use wasm_capsule_tools::run::{
-    module_refusal, run, run_engine, work_root_folder, Engine, Reason, Refusal, RunInput,
-    TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
+    module_refusal, run, run_engine, work_root_folder, Engine, EngineRun, Reason, Refusal,
+    RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
 };
 use wasm_capsule_tools::verify::{verify_bundle, VerifiedBundle, VerifyRefusal};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
@@ -138,15 +147,18 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
-fn ran(result: Result<Vec<u8>, Refusal>) -> Vec<u8> {
-    result.unwrap_or_else(|refusal| panic!("the runner refused: {refusal}"))
+/// A run's stdout; it exited 0, the only status `run_engine` returns.
+fn ran(result: Result<EngineRun, Refusal>) -> Vec<u8> {
+    let run = result.unwrap_or_else(|refusal| panic!("the runner refused: {refusal}"));
+    assert_eq!(run.status.code(), Some(0), "a run that did not exit 0");
+    run.stdout
 }
 
-fn refused(result: Result<Vec<u8>, Refusal>) -> Refusal {
+fn refused(result: Result<EngineRun, Refusal>) -> Refusal {
     match result {
-        Ok(stdout) => panic!(
+        Ok(run) => panic!(
             "the runner ran, stdout {:?}, not a refusal",
-            String::from_utf8_lossy(&stdout)
+            String::from_utf8_lossy(&run.stdout)
         ),
         Err(refusal) => refusal,
     }
@@ -773,31 +785,69 @@ fn work_root(root: &Path, name: &str) -> PathBuf {
     work
 }
 
-/// A stand-in engine `name` that leaves `<name>.started` in `folder` when it
-/// is started, then runs the shell `body`.
-fn marked(folder: &Path, name: &str, body: &str) -> PathBuf {
-    let marker = folder.join(format!("{name}.started"));
-    let script = format!("#!/bin/sh\n: > '{}'\n{body}", marker.display());
+/// A stand-in engine `name` for the two-engine runner. Asked `--version`, it
+/// runs the shell `version` and exits 0 unless that exits first; started any
+/// other way, it runs the shell `body`.
+fn engine(folder: &Path, name: &str, version: &str, body: &str) -> PathBuf {
+    let script = format!("#!/bin/sh\nif [ \"$1\" = --version ]; then\n{version}exit 0\nfi\n{body}");
     stand_in(folder, name, &script)
 }
 
-/// Whether the stand-in `name` made by [`marked`] in `folder` was started.
+/// The version a stand-in made by [`marked`] prints.
+fn stand_in_version(name: &str) -> String {
+    format!("{name} 0.0.0-stand-in")
+}
+
+/// A stand-in engine `name` that, asked `--version`, leaves `<name>.version`
+/// in `folder` and prints [`stand_in_version`]; started for a module run, it
+/// leaves `<name>.started` in `folder`, then runs the shell `body`.
+fn marked(folder: &Path, name: &str, body: &str) -> PathBuf {
+    let version = format!("printf '%s\\n' '{}'\n", stand_in_version(name));
+    marked_with(folder, name, &version, body)
+}
+
+/// As [`marked`], but asked `--version` it runs the shell `version` after
+/// leaving its marker.
+fn marked_with(folder: &Path, name: &str, version: &str, body: &str) -> PathBuf {
+    let version_marker = folder.join(format!("{name}.version"));
+    let marker = folder.join(format!("{name}.started"));
+    engine(
+        folder,
+        name,
+        &format!(": > '{}'\n{version}", version_marker.display()),
+        &format!(": > '{}'\n{body}", marker.display()),
+    )
+}
+
+/// Whether the stand-in `name` made by [`marked`] in `folder` was started for
+/// a module run.
 fn started(folder: &Path, name: &str) -> bool {
     folder.join(format!("{name}.started")).exists()
+}
+
+/// Whether the stand-in `name` made by [`marked`] in `folder` was asked
+/// `--version`.
+fn queried(folder: &Path, name: &str) -> bool {
+    folder.join(format!("{name}.version")).exists()
 }
 
 /// The shell body of a stand-in engine that fails as [`FAILING`] does.
 const FAILING_BODY: &str = "printf 'boom: bad module\\n' >&2\nexit 3\n";
 
-/// A stand-in engine `name` that records in `log` that it started, with the
+/// A stand-in engine `name` that, asked `--version`, records `version <name>`
+/// in `log`; started for a module run, it records that it started, with the
 /// module path it was given, waits, records that it ended, then prints
 /// `output`. Two engines that overlap leave their lines interleaved.
 fn recording(folder: &Path, name: &str, log: &Path, output: &str) -> PathBuf {
-    let script = format!(
-        "#!/bin/sh\nprintf 'start {name} %s\\n' \"$4\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
+    let version = format!(
+        "printf 'version {name}\\n' >> '{log}'\nprintf '{name} 0.0.0-stand-in\\n'\n",
         log = log.display()
     );
-    stand_in(folder, name, &script)
+    let body = format!(
+        "printf 'start {name} %s\\n' \"$4\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
+        log = log.display()
+    );
+    engine(folder, name, &version, &body)
 }
 
 fn two_ran(result: Result<TwoEngineRun, TwoEngineRefusal>) -> TwoEngineRun {
@@ -914,6 +964,10 @@ fn runner_refuses_an_unverified_bundle() {
         assert!(names(&work).is_empty(), "{kind}: something was written");
         for engine_kind in ENGINES {
             assert!(
+                !queried(&engines, engine_kind.name()),
+                "{kind}: {engine_kind} was asked its version before verification"
+            );
+            assert!(
                 !started(&engines, engine_kind.name()),
                 "{kind}: {engine_kind} was started"
             );
@@ -932,18 +986,15 @@ fn differing_engine_outputs_are_reported_as_a_failure() {
     // Different digits, and the same digit with and without its newline:
     // stdout is compared byte for byte, never trimmed.
     for (case, wasmtime_out, wasmer_out) in [("digits", "1\n", "2\n"), ("newline", "7\n", "7")] {
-        let wasmtime = stand_in(
+        let wasmtime = marked(
             &engines,
             &format!("wasmtime-{case}"),
-            &format!(
-                "#!/bin/sh\nprintf '{}'\n",
-                wasmtime_out.replace('\n', "\\n")
-            ),
+            &format!("printf '{}'\n", wasmtime_out.replace('\n', "\\n")),
         );
-        let wasmer = stand_in(
+        let wasmer = marked(
             &engines,
             &format!("wasmer-{case}"),
-            &format!("#!/bin/sh\nprintf '{}'\n", wasmer_out.replace('\n', "\\n")),
+            &format!("printf '{}'\n", wasmer_out.replace('\n', "\\n")),
         );
         let work = work_root(&root, case);
         let refusal = two_refused(run(&input(&signed, &wasmtime, &wasmer, &work)));
@@ -1017,27 +1068,19 @@ fn runner_preserves_engine_refusals() {
     let tmp = TempDir::new("run2-engine-refusals");
     let root = canonical(&tmp);
 
-    // Either engine failing, or not starting: 014's refusal comes back
-    // unchanged, with its own path and cause, and nothing starts after it.
-    for (failing_engine, start) in [
-        (Engine::Wasmtime, true),
-        (Engine::Wasmtime, false),
-        (Engine::Wasmer, true),
-        (Engine::Wasmer, false),
-    ] {
-        let case = format!(
-            "{failing_engine}-{}",
-            if start { "fails" } else { "missing" }
-        );
+    // Either engine's module run failing: 014's refusal comes back unchanged,
+    // with its own path and cause, and nothing starts after it. A program that
+    // does not start is refused at its version query, before any module run
+    // (`version_query_failures_keep_their_cause`).
+    for failing_engine in ENGINES {
+        let case = format!("{failing_engine}-fails");
         let engines = work_root(&root, &format!("engines-{case}"));
         let mut programs = Vec::new();
         for engine_kind in ENGINES {
             let program = if engine_kind != failing_engine {
                 marked(&engines, engine_kind.name(), "printf same\n")
-            } else if start {
-                marked(&engines, engine_kind.name(), FAILING_BODY)
             } else {
-                engines.join(engine_kind.name())
+                marked(&engines, engine_kind.name(), FAILING_BODY)
             };
             programs.push(program);
         }
@@ -1048,41 +1091,27 @@ fn runner_preserves_engine_refusals() {
         }];
         let work = work_root(&root, &format!("work-{case}"));
         let refusal = two_refused(run(&input(&signed, &programs[0], &programs[1], &work)));
-        let text = if start {
-            format!(
-                "{}: {failing_engine} failed (exit status: 3): boom: bad module",
-                failing.display()
-            )
-        } else {
-            format!(
-                "{}: {failing_engine} did not start: {NOT_FOUND}",
-                failing.display()
-            )
-        };
+        let text = format!(
+            "{}: {failing_engine} failed (exit status: 3): boom: bad module",
+            failing.display()
+        );
         assert_eq!(refusal.to_string(), text, "{case}");
         let refusal = match refusal {
             TwoEngineRefusal::Engine(refusal) => refusal,
             other => panic!("{case}: {other}"),
         };
         assert_eq!(&refusal.path, failing, "{case}");
-        match (refusal.reason, start) {
-            (
-                Reason::EngineFailed {
-                    engine,
-                    status,
-                    stderr,
-                },
-                true,
-            ) => {
+        match refusal.reason {
+            Reason::EngineFailed {
+                engine,
+                status,
+                stderr,
+            } => {
                 assert_eq!(engine, failing_engine, "{case}");
                 assert_eq!(status.code(), Some(3), "{case}");
                 assert_eq!(stderr, "boom: bad module\n", "{case}");
             }
-            (Reason::EngineDidNotStart { engine, error }, false) => {
-                assert_eq!(engine, failing_engine, "{case}");
-                assert_eq!(error.kind(), io::ErrorKind::NotFound, "{case}");
-            }
-            (other, _) => panic!("{case}: {other}"),
+            other => panic!("{case}: {other}"),
         }
         if failing_engine == Engine::Wasmtime {
             assert!(
@@ -1138,12 +1167,13 @@ fn runner_calls_engines_in_order() {
     let work = work_root(&root, "work");
 
     let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
-    // wasmtime starts and ends, then wasmer starts and ends: one after the
-    // other, never overlapping, each through run_engine's own run folder.
+    // Both are asked their version first, wasmtime then wasmer; then wasmtime
+    // starts and ends, then wasmer starts and ends: one after the other, never
+    // overlapping, each through run_engine's own run folder.
     assert_eq!(
         fs::read_to_string(&log).expect("read the start log"),
         format!(
-            "start wasmtime {}\nend wasmtime\nstart wasmer {}\nend wasmer\n",
+            "version wasmtime\nversion wasmer\nstart wasmtime {}\nend wasmtime\nstart wasmer {}\nend wasmer\n",
             work.join("wasmtime").join("module.wasm").display(),
             work.join("wasmer").join("module.wasm").display()
         ),
@@ -1170,15 +1200,15 @@ fn run_returns_the_verified_name_and_both_outputs() {
     let engines = work_root(&root, "engines");
     // wasmtime changes the bundle on disk while it runs, so a name taken from
     // the folder after verification would differ from the verified one.
-    let wasmtime = stand_in(
+    let wasmtime = marked(
         &engines,
         "wasmtime",
         &format!(
-            "#!/bin/sh\nprintf x >> '{}'\nprintf 'same\\n'\n",
+            "printf x >> '{}'\nprintf 'same\\n'\n",
             signed.bundle.join("capsule.wasm").display()
         ),
     );
-    let wasmer = stand_in(&engines, "wasmer", "#!/bin/sh\nprintf 'same\\n'\n");
+    let wasmer = marked(&engines, "wasmer", "printf 'same\\n'\n");
     let work = work_root(&root, "work");
 
     let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
@@ -1194,4 +1224,451 @@ fn run_returns_the_verified_name_and_both_outputs() {
     );
     assert_eq!(passed.wasmtime(), b"same\n");
     assert_eq!(passed.wasmer(), b"same\n");
+}
+
+/// The two-engine runner's version refusal, and nothing else.
+fn version_refused(result: Result<TwoEngineRun, TwoEngineRefusal>) -> Refusal {
+    match two_refused(result) {
+        TwoEngineRefusal::Version(refusal) => refusal,
+        other => panic!("not a version refusal: {other}"),
+    }
+}
+
+#[test]
+fn receipt_records_observed_engine_versions() {
+    let signed = signed_fixture();
+    let name = bundle_identity(&signed.bundle).expect("name the bundle");
+    let tmp = TempDir::new("run3-receipt");
+    let root = canonical(&tmp);
+    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v1");
+
+    // Two runs of the same bundle, by stand-ins that print made-up versions,
+    // each followed by a second line that is not kept.
+    let mut runs = Vec::new();
+    for (case, wasmtime_version, wasmer_version) in [
+        (
+            "first",
+            "wasmtime 99.0.0-made-up (abc1234 2099-01-01)",
+            "wasmer 0.0.1-made-up",
+        ),
+        ("second", "wasmtime 1.2.3-other", "wasmer 4.5.6-other"),
+    ] {
+        let engines = work_root(&root, &format!("engines-{case}"));
+        let wasmtime = engine(
+            &engines,
+            "wasmtime",
+            &format!("printf '%s\\nsecond line\\n' '{wasmtime_version}'\n"),
+            "printf '4242\\n'\n",
+        );
+        let wasmer = engine(
+            &engines,
+            "wasmer",
+            &format!("printf '%s\\nsecond line\\n' '{wasmer_version}'\n"),
+            "printf '4242\\n'\n",
+        );
+        let work = work_root(&root, &format!("work-{case}"));
+        let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
+        assert_eq!(
+            passed.version(Engine::Wasmtime),
+            wasmtime_version.as_bytes(),
+            "{case}"
+        );
+        assert_eq!(
+            passed.version(Engine::Wasmer),
+            wasmer_version.as_bytes(),
+            "{case}"
+        );
+        for engine_kind in ENGINES {
+            assert_eq!(passed.status(engine_kind).code(), Some(0), "{case}");
+            assert_eq!(passed.stdout(engine_kind), b"4242\n", "{case}");
+        }
+        assert_eq!(passed.cid(), name, "{case}: not the verified name");
+
+        let receipt = render(&passed);
+        assert_eq!(
+            receipt,
+            format!(
+                "schema: wc-005.run-receipt/v1\n\
+                 bundle: {name}\n\
+                 function: digest\n\
+                 argument: 1592590337\n\
+                 wasmtime_version: \"{wasmtime_version}\"\n\
+                 wasmtime_status: exit status: 0\n\
+                 wasmtime_stdout: \"4242\\n\"\n\
+                 wasmer_version: \"{wasmer_version}\"\n\
+                 wasmer_status: exit status: 0\n\
+                 wasmer_stdout: \"4242\\n\"\n"
+            ),
+            "{case}: the receipt"
+        );
+        for installed in ["45.0.1", "7.5.0", "second line"] {
+            assert!(
+                !receipt.contains(installed),
+                "{case}: the receipt holds {installed:?}, which no stand-in printed as its version"
+            );
+        }
+        runs.push((passed, [wasmtime_version, wasmer_version]));
+    }
+
+    // The engine versions are beside the lab CID, never in it: other versions
+    // on the same bundle give the same name.
+    assert_eq!(runs[0].0.cid(), runs[1].0.cid());
+    let cid = name.to_string();
+    assert!(cid.starts_with("lab-cid:sha256:"), "{cid}");
+    for (_, versions) in &runs {
+        for version in versions {
+            let number = version.split(' ').nth(1).expect("a version number");
+            assert!(!cid.contains(number), "the lab CID holds {number}");
+        }
+    }
+}
+
+#[test]
+fn version_query_failures_keep_their_cause() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run3-version-fail");
+    let root = canonical(&tmp);
+
+    // A version query that exits nonzero, prints nothing, prints an empty
+    // first line, or whose program is missing: each is refused with its own
+    // reason, engine and cause, and no module run starts.
+    let cases = [
+        ("nonzero", Some("printf 'no version here\\n' >&2\nexit 4\n")),
+        ("empty", Some("")),
+        ("blank-first-line", Some("printf '\\nwasmtime 1.0\\n'\n")),
+        ("missing", None),
+    ];
+    for failing_engine in ENGINES {
+        for (kind, version) in cases {
+            let case = format!("{failing_engine}-{kind}");
+            let engines = work_root(&root, &format!("engines-{case}"));
+            let mut programs = Vec::new();
+            for engine_kind in ENGINES {
+                let name = engine_kind.name();
+                let program = match version {
+                    _ if engine_kind != failing_engine => marked(&engines, name, "printf same\n"),
+                    Some(version) => marked_with(&engines, name, version, "printf same\n"),
+                    None => engines.join(name),
+                };
+                programs.push(program);
+            }
+            let failing = &programs[if failing_engine == Engine::Wasmtime {
+                0
+            } else {
+                1
+            }];
+            let work = work_root(&root, &format!("work-{case}"));
+            let refusal = version_refused(run(&input(&signed, &programs[0], &programs[1], &work)));
+            assert_eq!(&refusal.path, failing, "{case}");
+            let text = match (kind, &refusal.reason) {
+                (
+                    "nonzero",
+                    Reason::VersionFailed {
+                        engine,
+                        status,
+                        stderr,
+                    },
+                ) => {
+                    assert_eq!(*engine, failing_engine, "{case}");
+                    assert_eq!(status.code(), Some(4), "{case}");
+                    assert_eq!(stderr, "no version here\n", "{case}");
+                    format!("{failing_engine} --version failed (exit status: 4): no version here")
+                }
+                ("empty" | "blank-first-line", Reason::VersionEmpty { engine }) => {
+                    assert_eq!(*engine, failing_engine, "{case}");
+                    format!(
+                        "{failing_engine} --version printed no version: its first stdout line is empty"
+                    )
+                }
+                ("missing", Reason::VersionDidNotStart { engine, error }) => {
+                    assert_eq!(*engine, failing_engine, "{case}");
+                    assert_eq!(error.kind(), io::ErrorKind::NotFound, "{case}");
+                    format!("{failing_engine} --version did not start: {NOT_FOUND}")
+                }
+                (_, other) => panic!("{case}: {other}"),
+            };
+            assert_eq!(
+                refusal.to_string(),
+                format!("{}: {text}", failing.display()),
+                "{case}"
+            );
+
+            // No module run started, and nothing was written.
+            for engine_kind in ENGINES {
+                assert!(
+                    !started(&engines, engine_kind.name()),
+                    "{case}: {engine_kind}'s module run started"
+                );
+            }
+            assert!(names(&work).is_empty(), "{case}: something was written");
+            // wasmtime is asked first; wasmer is not asked after it is refused.
+            if failing_engine == Engine::Wasmtime {
+                assert!(!queried(&engines, "wasmer"), "{case}: wasmer was asked");
+            } else {
+                assert!(
+                    queried(&engines, "wasmtime"),
+                    "{case}: wasmtime was not asked"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn version_queries_use_explicit_inputs() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run3-version-inputs");
+    let root = canonical(&tmp);
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "the test process has no HOME, so this test proves nothing"
+    );
+
+    // Each version answer is the program path the stand-in was started by,
+    // HOME as it saw it, and whether its stdin is /dev/null.
+    let report = "if [ /dev/stdin -ef /dev/null ]; then stdin=null; else stdin=other; fi\n\
+                  printf '%s %s %s\\n' \"$0\" \"${HOME-unset}\" \"$stdin\"\n";
+    let engines = work_root(&root, "engines");
+    let wasmtime = engine(&engines, "wasmtime", report, "printf same\n");
+    let wasmer = engine(&engines, "wasmer", report, "printf same\n");
+    let work = work_root(&root, "work");
+    let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
+    for (engine_kind, program) in [(Engine::Wasmtime, &wasmtime), (Engine::Wasmer, &wasmer)] {
+        assert_eq!(
+            String::from_utf8_lossy(passed.version(engine_kind)),
+            format!("{} unset null", program.display()),
+            "{engine_kind}: the version query was not started by its absolute path with an empty environment and stdin null"
+        );
+    }
+
+    // A relative program path, for either engine, is refused before it is
+    // started; nothing is looked up against the working folder, and no
+    // module run starts.
+    for relative_engine in ENGINES {
+        let engines = work_root(&root, &format!("engines-{relative_engine}-relative"));
+        let relative = PathBuf::from(format!("engines/{relative_engine}"));
+        assert!(
+            !relative.exists(),
+            "{relative_engine}: the relative path names a file here, so this test proves nothing"
+        );
+        let mut programs = Vec::new();
+        for engine_kind in ENGINES {
+            programs.push(if engine_kind == relative_engine {
+                relative.clone()
+            } else {
+                marked(&engines, engine_kind.name(), "printf same\n")
+            });
+        }
+        let work = work_root(&root, &format!("work-{relative_engine}-relative"));
+        let refusal = version_refused(run(&input(&signed, &programs[0], &programs[1], &work)));
+        assert!(
+            matches!(refusal.reason, Reason::EngineNotAbsolute),
+            "{relative_engine}: {refusal}"
+        );
+        assert_eq!(refusal.path, relative, "{relative_engine}");
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "engines/{relative_engine}: the engine program path is not absolute: an engine is started only by an absolute path"
+            )
+        );
+        for engine_kind in ENGINES {
+            assert!(
+                !started(&engines, engine_kind.name()),
+                "{relative_engine}: {engine_kind}'s module run started"
+            );
+        }
+        assert!(
+            names(&work).is_empty(),
+            "{relative_engine}: something was written"
+        );
+    }
+}
+
+#[test]
+fn receipt_write_refuses_an_existing_path() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run3-receipt-write");
+    let root = canonical(&tmp);
+    let engines = work_root(&root, "engines");
+    let wasmtime = marked(&engines, "wasmtime", "printf same\n");
+    let wasmer = marked(&engines, "wasmer", "printf same\n");
+    let work = work_root(&root, "work");
+    let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
+
+    // A new path: the receipt is written, byte for byte.
+    let receipts = work_root(&root, "receipts");
+    let written = receipts.join("receipt.txt");
+    write_receipt(&passed, &written)
+        .unwrap_or_else(|refusal| panic!("the receipt was refused: {refusal}"));
+    assert_eq!(
+        fs::read_to_string(&written).expect("read the receipt"),
+        render(&passed)
+    );
+
+    // The receipt just written, a planted file, a live link to a file and a
+    // dangling link: each is refused with the shared writer's own reason and
+    // cause, and nothing at or behind the path changes.
+    let planted = receipts.join("planted.txt");
+    fs::write(&planted, b"planted receipt\n").expect("plant a file");
+    let target = receipts.join("target.txt");
+    fs::write(&target, b"link target\n").expect("write a link target");
+    let live = receipts.join("live-link.txt");
+    std::os::unix::fs::symlink(&target, &live).expect("plant a live link");
+    let nowhere = receipts.join("nowhere.txt");
+    let dangling = receipts.join("dangling-link.txt");
+    std::os::unix::fs::symlink(&nowhere, &dangling).expect("plant a dangling link");
+
+    for (kind, path) in [
+        ("the receipt already written", &written),
+        ("a planted file", &planted),
+        ("a live link", &live),
+        ("a dangling link", &dangling),
+    ] {
+        let link_before = fs::read_link(path).ok();
+        let bytes_before = fs::read(path).ok();
+        let refusal = write_receipt(&passed, path)
+            .err()
+            .unwrap_or_else(|| panic!("{kind}: the receipt was written over an existing path"));
+        assert_eq!(&refusal.path, path, "{kind}");
+        match &refusal.reason {
+            WriteReason::ManifestNotCreated(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
+                assert_eq!(error.raw_os_error(), Some(17), "{kind}");
+            }
+            other => panic!("{kind}: {other}"),
+        }
+        let own = write_new_file(path, b"other bytes")
+            .err()
+            .unwrap_or_else(|| panic!("{kind}: the shared writer wrote over an existing path"));
+        assert_eq!(refusal.to_string(), own.to_string(), "{kind}");
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "{}: capsule.json cannot be created: File exists (os error 17)",
+                path.display()
+            ),
+            "{kind}"
+        );
+        assert_eq!(
+            fs::read_link(path).ok(),
+            link_before,
+            "{kind}: the link changed"
+        );
+        assert_eq!(
+            fs::read(path).ok(),
+            bytes_before,
+            "{kind}: the bytes changed"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&written).expect("read the receipt"),
+        render(&passed),
+        "the first receipt changed"
+    );
+    assert_eq!(fs::read(&planted).expect("read"), b"planted receipt\n");
+    assert_eq!(fs::read(&target).expect("read"), b"link target\n");
+    assert!(
+        !nowhere.exists(),
+        "a receipt was written through the dangling link"
+    );
+    assert_eq!(
+        names(&receipts),
+        [
+            "dangling-link.txt",
+            "live-link.txt",
+            "planted.txt",
+            "receipt.txt",
+            "target.txt"
+        ]
+    );
+}
+
+#[test]
+fn real_receipt_names_both_installed_engines() {
+    let mut missing = Vec::new();
+    let mut programs = Vec::new();
+    for engine_kind in ENGINES {
+        match find_engine(engine_kind.name()) {
+            Some(program) => programs.push(program),
+            None => missing.push(engine_kind.name()),
+        }
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "SKIPPED: {} not found on PATH; the real receipt needs both (no result, not a PASS)",
+            missing.join(" and ")
+        );
+        return;
+    }
+    let tmp = TempDir::new("run3-real");
+    let root = canonical(&tmp);
+    let out = root.join("out");
+    fs::create_dir(&out).expect("create OUT_DIR");
+    run_build(&lane_dir(), &out);
+    let built = fs::read(out.join("capsule.wasm")).expect("read the built capsule.wasm");
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(&root, "bundle", &built, &key);
+    let accepted = [did(&key)];
+    let name = bundle_identity(&bundle).expect("name the bundle");
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        wasmtime: &programs[0],
+        wasmer: &programs[1],
+        work_root: &work,
+    }));
+    let expected = format!("{FIXED_OUTPUT}\n");
+    for (engine_kind, program) in ENGINES.iter().zip(&programs) {
+        let version = passed.version(*engine_kind);
+        assert!(
+            version.starts_with(format!("{engine_kind} ").as_bytes()),
+            "{engine_kind} ({}) printed the version {:?}",
+            program.display(),
+            String::from_utf8_lossy(version)
+        );
+        // What the engine prints for --version here, asked the same way.
+        let printed = std::process::Command::new(program)
+            .arg("--version")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("ask the engine its version");
+        assert_eq!(
+            printed.stdout.split(|&byte| byte == b'\n').next(),
+            Some(version),
+            "{engine_kind}: the receipt's version is not the line the engine prints"
+        );
+        assert_eq!(passed.stdout(*engine_kind), expected.as_bytes());
+        assert_eq!(passed.status(*engine_kind).code(), Some(0));
+    }
+    assert_eq!(
+        passed.cid(),
+        name,
+        "the run does not hold the verified name"
+    );
+
+    let receipt = render(&passed);
+    let path = root.join("receipt.txt");
+    write_receipt(&passed, &path)
+        .unwrap_or_else(|refusal| panic!("the receipt was refused: {refusal}"));
+    assert_eq!(
+        fs::read_to_string(&path).expect("read the receipt"),
+        receipt
+    );
+    let lines: Vec<&str> = receipt.lines().collect();
+    assert_eq!(
+        lines[..4],
+        [
+            "schema: wc-005.run-receipt/v1".to_string(),
+            format!("bundle: {name}"),
+            "function: digest".to_string(),
+            format!("argument: {FIXED_INPUT}"),
+        ]
+    );
+    eprintln!("RECEIPT (this machine):\n{receipt}");
+    eprintln!("PASS: the receipt names both installed engines' versions as they printed them");
 }
