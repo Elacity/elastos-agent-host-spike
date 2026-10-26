@@ -77,6 +77,95 @@ For plain `serve`, the same path is a CLI **default**
 Thus an in-root argument contains this constructor for `serve`;
 AC-006-STORAGE remains the separate `run` blocker above.
 
+## Launch by bundle CID (025)
+
+Verdict: **blocked: AC-025-CID** for the full `capsule_named_by_hash` journey.
+The fixture needs a provider-resolvable directory CID and a measured offline
+content backend before that row can run. The existing CLI accepts `--cid` and
+resolves it before manifest loading and the operator step
+(`elastos/crates/elastos-server/src/run_cmd.rs:31,127-139`). Historical RT1,
+the name-only-launch blocker, therefore does not describe this CLI. AC-025-CID
+owns the remaining content fixture and identity work.
+
+The two refusal tests exercise the real Runtime through the one bounded
+`ThrowawayHome::launch` primitive. A fresh Home gives `ipfs-provider not found`.
+A Home with the repository entry and an installed marker script, stamped with
+another byte string's SHA-256, gives the complete one-line checksum refusal.
+The script marker stays absent and both tests require zero `elastos-capsule-*`
+entries in TMPDIR before `home.finish()` removes the root. These refusals give
+**no evidence that the CID itself was checked**: provider verification precedes
+spawn (`elastos/crates/elastos-server/src/main.rs:1788-1792,1808-1814`), and
+content fetch validates the CID later (`content.rs:3174,8784-8785`). The tests
+obtain a synthetic printed value from `capsule_identity::encode_entries`, as
+the receipt tests do; they build no probe.
+
+A future fixture Home must hold these inputs:
+
+- `bin/ipfs-provider` and its `external.ipfs-provider` entry in that Home's
+  `components.json`, including the native provider contract, exact install
+  path and current-platform checksum. Runtime verifies those bytes before
+  spawn (`elastos/crates/elastos-server/src/binaries.rs:112-180`;
+  `setup.rs:1046-1075`; repository `components.json:1080-1111`).
+- A locally prepared Kubo package at `bin/kubo`, with its installed
+  `external.kubo` platform entry and package provenance. The repository's
+  Kubo entry describes the archive, extracted path and install path
+  (`components.json:1332-1352`); the provider selects the Home's `bin/kubo`
+  (`capsules/ipfs-provider/src/main.rs:2213-2216`). The native-provider refusal
+  tests cover `ipfs-provider`; Kubo preparation belongs to the later fixture.
+- An in-root `ipfs-repo` containing the exact bundle directory blocks and
+  offline daemon configuration. The provider derives that repository from
+  its selected data root and sets `IPFS_PATH` for Kubo
+  (`capsules/ipfs-provider/src/main.rs:823-855,1007-1016,1056`). The directory
+  must expose `capsule.json` and the manifest entrypoint under the requested
+  CID (`elastos/crates/elastos-server/src/content.rs:3027,3068-3071`). The
+  component also needs the existing operator fixture and admission setting;
+  after materialization it uses the same component path
+  (`run_cmd.rs:51-59,225-265`).
+
+Offline content can avoid an external fetch when all blocks are local. It still
+uses local sockets: the provider reserves loopback ports and calls Kubo's HTTP
+API; Kubo receives loopback API and gateway addresses
+(`capsules/ipfs-provider/src/main.rs:580-582,1028-1056,1940-1947`). The current
+capsule fetch sends a stream request through Content to IPFS `cat`
+(`elastos/crates/elastos-server/src/content.rs:2839-2865,3295-3310`). The
+provider's unbounded `cat` calls `fetch_bytes`, which can pin/prefetch after a
+local miss and use the local gateway (`capsules/ipfs-provider/src/main.rs:626-650,782-800,1395-1405`).
+The provider source identifies pin/add and gateway fallback as public-swarm
+searches (`main.rs:654-658`), and its daemon arguments omit an offline flag
+(`main.rs:1049-1055`). Thus an offline launch needs a controlled Kubo policy and
+a socket census; local blocks alone do not establish that policy. Task 013's
+Carrier setting covers `serve`; it does not configure this content backend.
+Neither the real `ipfs-provider` nor Kubo was run for 025.
+
+In this checkout the lab CID is a framed-stream SHA-256, printed by `LabCid`
+(`lab/capsule-identity/src/lib.rs:170-177,600-621`). Content instead parses an
+IPFS CID and fetches paths below it
+(`elastos/crates/elastos-server/src/content.rs:8784-8785,3027,3070`). The
+current lab value therefore is not that resolvable identifier. The task's
+cc-capsule-identity 010 handoff assigns the move to a CIDv1 directory root to
+the identity lane. After it lands, the fixture must prove that importing the
+same directory yields the encoder's CID and that both required paths resolve
+offline. The refusal tests use the encoder API and retain their pre-validation
+scope across that change.
+
+AC-025-CID flips when the identity owner's directory CID is integrated and a
+fixture stages the probe, makes those exact bytes available offline through
+verified installed components, runs `--cid`, and sees the same activation as
+the directory launch. The content/provider owner must supply a bounded,
+local-only backend policy if the existing fixture configuration cannot prove
+it; protocol policy stays with that owner. The fixture must also stop its
+owned Kubo process, since provider shutdown keeps shared Kubo alive
+(`capsules/ipfs-provider/src/main.rs:1619-1621,2422-2423`). Identity, admission,
+resource grants and resource budgets remain separate decisions; this row
+does not claim signed-bundle admission or a grant.
+
+Item 15's census must include the materialized `elastos-capsule-*` directory:
+Runtime creates it under TMPDIR and returns `temp_dir.keep()` after writing
+the capsule (`elastos/crates/elastos-server/src/content.rs:3052-3056,3075`).
+That is a kept leftover on the full path. The two refusals stop before its
+creation. AC-006-STORAGE above still owns the component client's fixed
+storage path (`run_cmd.rs:236`); a full cleanup claim must close that gate too.
+
 ## Operator in a throwaway home
 
 operator recipe: create a fresh guarded Home; install the matching localhost-provider fixture; write the two-setting config; start through the fixed four-entry environment with loopback API and in-root storage; require live readiness and two loopback socket samples; stop and verify the whole process group before removing the root.

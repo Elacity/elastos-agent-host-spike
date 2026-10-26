@@ -29,6 +29,9 @@ remain open in [GAPS.md](GAPS.md).
 - `launch_stops_a_child_past_its_bound`: checks that a one-second bound stops a three-second sleep with the exact timeout reason.
 - `run_without_operator_is_refused_with_reason`: runs the probe through the bounded launch primitive in a fresh Home and requires a nonzero exit with `This command requires a running runtime.` on stderr.
 - `runtime_data_dir_is_under_throwaway_home`: places a dummy coordinates file in the guarded data directory and requires Runtime to remove it and return the same refusal reason. Its documentation-address URL is rejected before any network call.
+- `run_by_cid_without_content_provider_is_refused`: runs `--cid` with an encoder-produced synthetic lab CID in a fresh Home; requires a nonzero exit, `ipfs-provider not found`, and zero materialized capsule entries in TMPDIR.
+- `run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash`: stamps a different byte string's SHA-256 on the installed marker script; requires the complete checksum refusal on one stderr line, an absent marker, and zero materialized capsule entries.
+- `capsule_named_by_hash`: BLOCKED (AC-025-CID). The full journey will stage the probe, make its CID available offline, run `--cid`, and require the directory launch's activation result. The verdict and changes needed are in [GAPS.md](GAPS.md#launch-by-bundle-cid-025).
 - `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
 - `run_table_grades_blocker_lists_by_one_rule`: checks whole multi-word blocker reasons, trimmed semicolon lists and FAIL for empty reasons or parts. F-report-blocker-list keeps only the first whitespace word; the named test must fail planted and pass restored.
@@ -61,9 +64,12 @@ ready-operator rows below prove the operator fixture;
 the grant and effect rows below extend it. Runtime bundle-CID launch stays separate.
 
 `tests/common::write_operator_home` owns the operator fixture for this test and
-the ready-operator tests. It checks the Home guard, installs an executable copy, and
-writes a manifest containing only the repository's `external.localhost-provider`
-entry and an empty `profiles` map. It stamps the current Mac platform with the
+the ready-operator tests. It uses `write_component_home`, the shared entry-copy
+and stamping helper, which also prepares the CID refusal fixture. The helper
+checks the Home guard and installs executable bytes. For the operator fixture,
+it writes a manifest containing only the repository's `external.localhost-provider`
+entry and an empty `profiles` map; the CID fixture selects `external.ipfs-provider`.
+It stamps the current Mac platform with the
 copy's checksum, size and install path. The repository entry owns all other fields.
 The writer supports `darwin-arm64` and `darwin-amd64` and refuses other platforms
 with a reason. Exclusive creation keeps existing paths and symlinks intact.
@@ -92,6 +98,15 @@ Keep each failed root only until its result is reviewed, then remove that root.
 The [falsifier list](falsifiers.json) owns the exact mutations; [LOG.md](LOG.md)
 records their local runs. The provider lane owns the shared runner's `lab` arm;
 until it is available, apply and restore each mutation by hand.
+
+For 025, run F-cid-provider under the same heavy-build lease in three steps:
+run its named checksum-refusal test unchanged, apply its exact edit from
+`falsifiers.json` and require FAIL, then restore the edit and require PASS.
+The mutation stamps the script's own SHA-256 so Runtime can spawn it; the
+marker assertion must fail. These two CID refusals precede CID validation and
+give zero evidence that the CID was checked. They use only the inert script;
+the full offline content fixture stays BLOCKED. Cargo supplies that ignored
+row to the existing `run.sh` table, which reports `BLOCKED (AC-025-CID)`.
 
 Task 013 adds these rows to the same Cargo-derived table:
 

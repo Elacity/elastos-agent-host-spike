@@ -60,6 +60,92 @@ fn run_without_operator_is_refused_with_reason() {
     home.finish().unwrap();
 }
 
+fn run_by_synthetic_cid(home: &ThrowawayHome) -> String {
+    let runtime = runtime_under_test().expect("build the checkout Runtime offline");
+    // Provider resolution refuses before CID validation. These refusals give
+    // no evidence that the CID itself was checked, and need no probe build.
+    let cid = capsule_identity::encode_entries(&[capsule_identity::BundleEntry {
+        path: "synthetic.bin".into(),
+        content: b"CID launch refusal fixture".to_vec(),
+    }])
+    .unwrap()
+    .to_string();
+    let output = home
+        .launch(
+            &runtime.binary,
+            &["run", "--cid", &cid],
+            Duration::from_secs(10),
+        )
+        .expect("CID launch must return within its bound through the one primitive");
+    assert!(!output.status.success(), "CID launch must be refused");
+    String::from_utf8(output.stderr).expect("Runtime stderr must be UTF-8")
+}
+
+fn assert_no_materialized_capsule(home: &ThrowawayHome) {
+    assert!(
+        fs::read_dir(home.temp()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("elastos-capsule-")),
+        "refused CID launch must leave no materialized capsule in TMPDIR"
+    );
+}
+
+#[test]
+fn run_by_cid_without_content_provider_is_refused() {
+    let home = ThrowawayHome::new().unwrap();
+    assert!(!home.data().join("components.json").try_exists().unwrap());
+    let stderr = run_by_synthetic_cid(&home);
+    assert!(
+        stderr.contains("ipfs-provider not found"),
+        "expected missing content provider refusal; stderr:\n{stderr}"
+    );
+    assert_no_materialized_capsule(&home);
+    home.finish().unwrap();
+}
+
+#[test]
+fn run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash() {
+    let home = ThrowawayHome::new().unwrap();
+    let script = b"#!/bin/sh\n: > \"$HOME/../cid-provider-started\"\nexit 1\n";
+    let checksum = format!(
+        "{:x}",
+        Sha256::digest(b"uninstalled content provider fixture\n")
+    );
+    let installed = home.data().join("bin/ipfs-provider");
+    common::write_component_home(&home, "ipfs-provider", &installed, script, &checksum)
+        .expect("install the content provider refusal fixture");
+    let stderr = run_by_synthetic_cid(&home);
+    assert!(
+        !home
+            .root()
+            .join("cid-provider-started")
+            .try_exists()
+            .unwrap(),
+        "checksum refusal must happen before the content provider script is spawned"
+    );
+    let refusal = format!(
+        "installed component 'ipfs-provider' at {} failed checksum verification against {}",
+        installed.display(),
+        home.data().join("components.json").display()
+    );
+    assert!(
+        stderr.lines().any(|line| line.contains(&refusal)),
+        "expected the complete content provider checksum refusal on one line; stderr:\n{stderr}"
+    );
+    assert_no_materialized_capsule(&home);
+    home.finish().unwrap();
+}
+
+#[test]
+#[ignore = "blocked: AC-025-CID"]
+fn capsule_named_by_hash() {
+    // Stage the probe, make its bundle CID available offline, run it by --cid,
+    // and require the same activation result as the directory launch.
+    panic!("blocked: AC-025-CID — requires a provider-resolvable bundle CID and an isolated offline content fixture");
+}
+
 #[test]
 fn runtime_data_dir_is_under_throwaway_home() {
     let home = ThrowawayHome::new().unwrap();
