@@ -1,0 +1,103 @@
+Full-clone morning walk after successful step 1
+HEAD: 39b4b47edc64d8705a0294c978e6171819cea9fc cursor/demo-a14-installed-demo-83e1
+porcelain bytes: 0
+install.sh: PRESENT
+
+===== step 2 preflight =====
+command: sh lab/demo-a14/preflight.sh
+cwd: /workspace/lab/review-a14-289/scratch/fetch-experiment/full
+start: 2026-10-26T21:37:41Z
+missing: operating system is Linux; A14's VERSIONS.json is produced on macOS
+missing: architecture is x86_64; A14 needs native Apple Silicon (arm64)
+missing: wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the five morning steps do not add it
+missing: /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+missing: /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+preflight: FAIL
+exit: 1
+seconds: 0
+
+===== step 3 install --sign =====
+command: bash lab/demo-a14/install.sh --sign
+cwd: /workspace/lab/review-a14-289/scratch/fetch-experiment/full
+start: 2026-10-26T21:37:41Z
+Installing the A14 demo into /workspace/lab/review-a14-289/scratch/demo-home-full/current
+REFUSED: this machine is not ready.
+  - wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the morning steps do not add it
+Next: fix the item above, then run `bash lab/demo-a14/install.sh` again.
+exit: 3
+seconds: 0
+
+===== step 4 run =====
+command: bash lab/demo-a14/run.sh
+cwd: /workspace/lab/review-a14-289/scratch/fetch-experiment/full
+start: 2026-10-26T21:37:41Z
+A14 installed demo: /workspace/lab/review-a14-289/scratch/demo-home-full/current
+REFUSED: the demo is not installed. No journey was run.
+  - no installed demo at /workspace/lab/review-a14-289/scratch/demo-home-full/current; run lab/demo-a14/install.sh first
+Next: read /workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_/summary.txt, then run `bash lab/demo-a14/install.sh`, then run this command again.
+Saved: /workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_
+exit: 3
+seconds: 0
+
+===== step 5 as written =====
+command: 
+run=$(ls -dt "$HOME/Library/Application Support/elastos-demo-a14/runs/"*/ | head -1)
+printf "run_var=%s\n" "${run-}"
+if test -n "$run" && test -d "$run" && open "$run"; then
+  printf "open_invoked=yes path=%s\n" "$run"
+else
+  printf "open_invoked=no\n"
+fi
+
+cwd: /workspace/lab/review-a14-289/scratch/fetch-experiment/full
+start: 2026-10-26T21:37:41Z
+ls: cannot access '/home/ubuntu/Library/Application Support/elastos-demo-a14/runs/*/': No such file or directory
+run_var=
+open_invoked=no
+exit: 0
+seconds: 0
+
+===== step 5 isolated demo home =====
+command: 
+run=$(ls -dt "$DEMO_A14_HOME/runs/"*/ | head -1)
+printf "run_var=%s\n" "${run-}"
+if test -n "$run" && test -d "$run"; then
+  printf "guard_would_open=yes path=%s\n" "$run"
+  printf "summary_exists=%s\n" "$(test -f "$run/summary.txt" && echo yes || echo no)"
+  if test -f "$run/summary.txt"; then
+    printf "--- summary.txt ---\n"
+    cat "$run/summary.txt"
+    printf "--- end summary ---\n"
+  fi
+else
+  printf "guard_would_open=no\n"
+fi
+
+cwd: /workspace/lab/review-a14-289/scratch/fetch-experiment/full
+start: 2026-10-26T21:37:41Z
+run_var=/workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_/
+guard_would_open=yes path=/workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_/
+summary_exists=yes
+/workspace/lab/review-a14-289/scratch/walk-steps-2-to-5.sh: line 32: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+A14 installed demo: /workspace/lab/review-a14-289/scratch/demo-home-full/current
+REFUSED: the demo is not installed. No journey was run.
+  - no installed demo at /workspace/lab/review-a14-289/scratch/demo-home-full/current; run lab/demo-a14/install.sh first
+Next: read /workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_/summary.txt, then run `bash lab/demo-a14/install.sh`, then run this command again.
+Saved: /workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_
+/workspace/lab/review-a14-289/scratch/walk-steps-2-to-5.sh: line 34: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+exit: 2
+seconds: 0
+
+===== leftover writes =====
+default XDG demo home exists? NO
+Library demo home exists? NO
+isolated signing key exists? NO
+isolated current/ exists? NO
+644 f /workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_/summary.txt
+700 d /workspace/lab/review-a14-289/scratch/demo-home-full/runs/20261026T213741Z-5jinx5t_
+755 d /workspace/lab/review-a14-289/scratch/demo-home-full
+755 d /workspace/lab/review-a14-289/scratch/demo-home-full/runs
+clone porcelain lines: 0
+DONE

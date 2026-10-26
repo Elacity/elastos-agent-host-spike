@@ -1,0 +1,143 @@
+Review walk of PR 289 morning steps
+machine: Linux x86_64
+date: 2026-10-26T21:36:16Z
+origin: (redacted host github.com/Elacity/elastos-agent-host-spike)
+cloning spike/agent-host into morning/ (fresh operator clone)
+morning clone HEAD before step 1: 3fee89ff88d0d42f1c201e2ff2fa92923301190d spike/agent-host
+install.sh before step 1: ABSENT
+
+===== step 1 fetch =====
+command: git fetch origin cursor/demo-a14-installed-demo-83e1
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+From https://github.com/Elacity/elastos-agent-host-spike
+ * branch              cursor/demo-a14-installed-demo-83e1 -> FETCH_HEAD
+exit: 0
+seconds: 0
+
+===== step 1 checkout =====
+command: git checkout cursor/demo-a14-installed-demo-83e1
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+error: pathspec 'cursor/demo-a14-installed-demo-83e1' did not match any file(s) known to git
+exit: 1
+seconds: 0
+
+===== step 1 pull =====
+command: git pull --ff-only
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+Already up to date.
+exit: 0
+seconds: 0
+
+===== step 1 porcelain =====
+command: git status --porcelain=v1
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+exit: 0
+seconds: 0
+
+===== step 1 install.sh present =====
+command: test -f lab/demo-a14/install.sh && echo INSTALL_SH_PRESENT || echo INSTALL_SH_ABSENT
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+INSTALL_SH_ABSENT
+exit: 0
+seconds: 0
+HEAD after step 1: 3fee89ff88d0d42f1c201e2ff2fa92923301190d spike/agent-host
+
+===== step 2 preflight =====
+command: sh lab/demo-a14/preflight.sh
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+sh: 0: cannot open lab/demo-a14/preflight.sh: No such file
+exit: 2
+seconds: 0
+
+===== step 3 install --sign =====
+command: bash lab/demo-a14/install.sh --sign
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+bash: lab/demo-a14/install.sh: No such file or directory
+exit: 127
+seconds: 0
+
+===== step 4 run =====
+command: bash lab/demo-a14/run.sh
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+bash: lab/demo-a14/run.sh: No such file or directory
+exit: 127
+seconds: 0
+
+===== step 5 as written =====
+command: 
+run=$(ls -dt "$HOME/Library/Application Support/elastos-demo-a14/runs/"*/ | head -1)
+printf "run_var=%s\n" "${run-}"
+if test -n "$run" && test -d "$run" && open "$run"; then
+  printf "open_invoked=yes path=%s\n" "$run"
+else
+  printf "open_invoked=no\n"
+fi
+
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+ls: cannot access '/home/ubuntu/Library/Application Support/elastos-demo-a14/runs/*/': No such file or directory
+run_var=
+open_invoked=no
+exit: 0
+seconds: 0
+
+===== step 5 isolated demo home =====
+command: 
+run=$(ls -dt "$DEMO_A14_HOME/runs/"*/ | head -1)
+printf "run_var=%s\n" "${run-}"
+if test -n "$run" && test -d "$run"; then
+  printf "guard_would_open=yes path=%s\n" "$run"
+  printf "summary_exists=%s\n" "$(test -f "$run/summary.txt" && echo yes || echo no)"
+  if test -f "$run/summary.txt"; then
+    printf "--- summary.txt ---\n"
+    cat "$run/summary.txt"
+    printf "--- end summary ---\n"
+  fi
+else
+  printf "guard_would_open=no\n"
+fi
+
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+ls: cannot access '/workspace/lab/review-a14-289/scratch/demo-home/runs/*/': No such file or directory
+run_var=
+guard_would_open=no
+exit: 0
+seconds: 0
+
+===== step 5 unguarded empty path (old runbook) =====
+command: 
+run=$(ls -dt "$HOME/Library/Application Support/elastos-demo-a14/runs/"*/ | head -1)
+printf "run_var=%s\n" "${run-}"
+command -v open >/dev/null && open_cmd=open || open_cmd=true
+# Record whether the unguarded command would run with an empty argument.
+if [ -z "${run:-}" ]; then
+  printf "unguarded_would_call_open_with_empty_path=yes\n"
+else
+  printf "unguarded_would_call_open_with_empty_path=no\n"
+fi
+
+cwd: /workspace/lab/review-a14-289/morning
+start: 2026-10-26T21:36:18Z
+ls: cannot access '/home/ubuntu/Library/Application Support/elastos-demo-a14/runs/*/': No such file or directory
+run_var=
+unguarded_would_call_open_with_empty_path=yes
+exit: 0
+seconds: 0
+
+===== leftover writes =====
+default XDG demo home exists? NO
+Library demo home exists? NO
+isolated signing key exists? NO
+isolated current/ exists? NO
+755 d /workspace/lab/review-a14-289/scratch/demo-home
+morning clone porcelain: 0 lines
+DONE

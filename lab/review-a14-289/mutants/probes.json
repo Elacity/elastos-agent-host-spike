@@ -1,0 +1,69 @@
+[
+  {
+    "absolute_outside_refused": true,
+    "relative_name_problems": [],
+    "relative_parent_problems": [],
+    "relative_parent_refused": false
+  },
+  {
+    "home_refused": true,
+    "cargo_home_refused": true
+  },
+  {
+    "exit": 0,
+    "printed_pass": true,
+    "summary_count": 1,
+    "summary_has_pass": true
+  },
+  {
+    "exit": 3,
+    "key_exists": false,
+    "current_exists": false,
+    "summaries": 0,
+    "printed_refused": true
+  },
+  {
+    "exit": 3,
+    "key_exists": true,
+    "current_exists": false,
+    "fetch_started": true,
+    "printed": [
+      "Signing is on: this machine's key is /tmp/a14-probe-key-pbp1kahe/home/signing/receipt-signing.key (it proves VERSIONS.json and INSTALL.json are unchanged since install on this machine; it does not prove who published them).",
+      "Step 5 of 5: copying the pinned files",
+      "REFUSED: the install does not match VERSIONS.json.",
+      "  - disk full",
+      "Next: fix the item above, then run `bash lab/demo-a14/install.sh` again."
+    ]
+  },
+  {
+    "value": "0"
+  },
+  {
+    "preflight": {
+      "ssh-keygen": true,
+      "python3": true,
+      "git": true,
+      "curl": true,
+      "rustup": true,
+      "xcode-select": true,
+      "open": true,
+      "awk": true,
+      "df": true
+    },
+    "machine_problems": {
+      "ssh-keygen": false,
+      "python3": false,
+      "git": false,
+      "curl": false,
+      "rustup": true,
+      "xcode-select": false,
+      "open": true,
+      "awk": false,
+      "df": false
+    }
+  },
+  {
+    "mentions_summary": false,
+    "mentions_a14_pass": true
+  }
+]
