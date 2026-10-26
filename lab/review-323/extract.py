@@ -33,9 +33,20 @@ WALLET_FNS = [
     "filter_is_root_wide",
     "unquote_profile_string",
     "path_normalises_to_root",
+    "casefold_profile_form",
+    "permitted_profile_forms",
+    "is_permitted_profile_form",
+    "is_permitted_storage_form",
+    "allow_head_forms",
     "nested_lists",
     "collect_nested_lists",
     "rust_source_without_comments",
+    "rust_source_without_unlisted_items",
+    "rust_source_without_macro_rules",
+    "rust_skip_macro_rules",
+    "rust_source_without_cfg_any_items",
+    "rust_skip_next_item",
+    "rust_skip_balanced",
     "rust_holds_cited_test",
     "rust_ident_boundary_before",
     "preceding_attributes_include_test",
@@ -76,6 +87,7 @@ WALLET_CONSTS = [
     "NETWORK_OPERATIONS",
     "KNOWN_PROFILE_HEADS",
     "INCLUSION_HEADS",
+    "MODEL_STARTUP_ROOT",
 ]
 
 MODEL_FNS = [

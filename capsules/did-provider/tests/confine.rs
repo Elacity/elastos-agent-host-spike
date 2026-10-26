@@ -1401,38 +1401,160 @@ fn invalid_json_answer_names_the_request_and_the_parse_error() {
     eprintln!("invalid-JSON failure: {failure}");
 }
 
-/// The one profile source denies the network and every default grant.
+/// The one profile source denies the network and every default grant. The
+/// gate is the shared allowlist: every top-level form must be a permitted
+/// form, and every nested allow must be one of those permits.
 ///
 /// Falsifier: replace `(deny network*)` with `(allow network*)` (DID05); this
-/// test fails on the missing explicit denial and the network grant.
-#[test]
-fn profile_denies_network() {
-    let profile = fs::read_to_string(PROFILE_PATH).expect("single profile source");
-    let forms = profile_forms(&profile);
-    assert_eq!(forms.first().map(String::as_str), Some("(version 1)"));
-    assert!(forms.iter().any(|form| form == "(deny default)"));
-    assert!(
-        forms.iter().any(|form| form == "(deny network*)"),
-        "the profile must deny the network explicitly"
-    );
-    for form in forms {
-        let mut stack = vec![form];
-        while let Some(list) = stack.pop() {
-            assert!(
-                !(list.starts_with("(allow ") && list.contains("network")),
-                "network grant: {list}"
-            );
-            assert!(
-                !(list.starts_with("(allow ")
-                    && list.split([' ', '(', ')']).any(|token| token == "default")),
-                "default grant: {list}"
-            );
-            assert!(!list.starts_with("(import"), "import form: {list}");
-            if let Some(inner) = list.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-                stack.extend(profile_forms(inner));
+/// test fails on the missing explicit denial and the extra allow. Append
+/// `(ALLOW DEFAULT)` or `(allow system-socket)`; the allowlist refuses both.
+const DID_SHARED_RULES: [&str; 3] = [
+    r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#,
+    r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
+    r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
+];
+const DID_STARTUP_RULES: [&str; 2] = [
+    r#"(allow file-read* (literal "/"))"#,
+    r#"(allow sysctl-read)"#,
+];
+const DID_MODEL_STARTUP_ROOT: &str = r#"(allow file-read-data (literal "/"))"#;
+
+fn did_allow_head(form: &str) -> bool {
+    let folded = form.to_ascii_lowercase();
+    let Some(rest) = folded.strip_prefix("(allow") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with([' ', '(', ')'])
+}
+
+fn did_casefold_profile_form(form: &str) -> String {
+    profile_characters(form)
+        .into_iter()
+        .map(|(ch, in_string)| {
+            if in_string {
+                ch
+            } else {
+                ch.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+fn did_permitted_profile_forms() -> [&'static str; 9] {
+    [
+        "(version 1)",
+        "(deny default)",
+        "(deny network*)",
+        DID_SHARED_RULES[0],
+        DID_SHARED_RULES[1],
+        DID_SHARED_RULES[2],
+        DID_STARTUP_RULES[0],
+        DID_STARTUP_RULES[1],
+        DID_MODEL_STARTUP_ROOT,
+    ]
+}
+
+fn did_is_permitted_profile_form(form: &str) -> bool {
+    let folded = did_casefold_profile_form(form);
+    did_permitted_profile_forms()
+        .iter()
+        .any(|permitted| did_casefold_profile_form(permitted) == folded)
+}
+
+fn did_is_import(form: &str) -> bool {
+    let folded = form.to_ascii_lowercase();
+    ["import", "include", "load", "require"].iter().any(|head| {
+        let prefix = format!("({head}");
+        folded
+            .strip_prefix(&prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '"', '(', ')']))
+    })
+}
+
+fn did_nested_lists(form: &str) -> Vec<String> {
+    let mut lists = Vec::new();
+    did_collect_nested_lists(form, &mut lists);
+    lists
+}
+
+fn did_collect_nested_lists(form: &str, lists: &mut Vec<String>) {
+    if !form.starts_with('(') {
+        return;
+    }
+    lists.push(form.to_string());
+    let Some(inner) = form.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return;
+    };
+    for child in profile_forms(inner) {
+        did_collect_nested_lists(&child, lists);
+    }
+}
+
+/// The one allowlist check for a did-provider profile. Used by
+/// `profile_denies_network` and by the review probe.
+fn profile_network_denied(profile: &str) -> Result<(), String> {
+    let forms = profile_forms(profile);
+    if forms.first().map(String::as_str) != Some("(version 1)") {
+        return Err("the profile must start with (version 1)".to_string());
+    }
+    if !forms.iter().any(|form| form == "(deny default)") {
+        return Err("the profile must deny by default".to_string());
+    }
+    if !forms.iter().any(|form| form == "(deny network*)") {
+        return Err("the profile must deny the network explicitly".to_string());
+    }
+    for form in &forms {
+        for list in did_nested_lists(form) {
+            if did_is_import(&list) {
+                return Err(format!("import form: {list}"));
+            }
+            if did_allow_head(&list) && !did_is_permitted_profile_form(&list) {
+                return Err(format!("unpermitted allow form: {list}"));
+            }
+        }
+        if form.starts_with('(')
+            && !did_is_permitted_profile_form(form)
+            && !did_allow_head(form)
+            && !did_is_import(form)
+        {
+            let head = form
+                .trim_start_matches('(')
+                .split([' ', '(', ')'])
+                .find(|token| !token.is_empty())
+                .unwrap_or("");
+            if !matches!(head, "if" | "begin" | "deny") {
+                return Err(format!("unknown top-level form: {form}"));
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn profile_denies_network() {
+    let profile = fs::read_to_string(PROFILE_PATH).expect("single profile source");
+    profile_network_denied(&profile).expect("the did profile must stay on the allowlist");
+}
+
+/// Falsifier: the allowlist must refuse `(ALLOW DEFAULT)` and
+/// `(allow system-socket)` the same way the shared contract does.
+#[test]
+fn profile_denies_network_refuses_casefolded_and_system_socket() {
+    let profile = fs::read_to_string(PROFILE_PATH).expect("single profile source");
+    let upper = format!("{profile}(ALLOW DEFAULT)\n");
+    let refusal =
+        profile_network_denied(&upper).expect_err("the allowlist must refuse (ALLOW DEFAULT)");
+    assert!(
+        refusal.contains("unpermitted allow") && refusal.to_ascii_lowercase().contains("default"),
+        "the refusal must name the extra default allow: {refusal}"
+    );
+    let socket = format!("{profile}(allow system-socket)\n");
+    let refusal =
+        profile_network_denied(&socket).expect_err("the allowlist must refuse system-socket");
+    assert!(
+        refusal.contains("unpermitted allow") && refusal.contains("system-socket"),
+        "the refusal must name the extra network grant: {refusal}"
+    );
 }
 
 /// Splits the profile into top-level s-expressions the way `sandbox-exec`

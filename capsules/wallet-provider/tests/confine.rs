@@ -1679,7 +1679,9 @@ fn is_unknown_profile_head(form: &str) -> bool {
 
 /// Whether `form` is an allow that reads the host root: an unfiltered
 /// `file-read` operation, a regex or prefix on `/`, or a `literal`/`subpath`
-/// path that normalises to `/`.
+/// path that normalises to `/`. Kept for the review probe and the remaining
+/// denylist-helper WEAK cases.
+#[allow(dead_code)]
 fn is_root_wide_read(form: &str) -> bool {
     let reads_file = allow_operation_tokens(form)
         .iter()
@@ -1695,6 +1697,7 @@ fn is_root_wide_read(form: &str) -> bool {
 }
 
 /// Whether one path filter names the host root after normalisation.
+#[allow(dead_code)]
 fn filter_is_root_wide(filter: &str) -> bool {
     let Some(inner) = filter.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
         return false;
@@ -1715,6 +1718,7 @@ fn filter_is_root_wide(filter: &str) -> bool {
 }
 
 /// A profile string token without its surrounding quotes.
+#[allow(dead_code)]
 fn unquote_profile_string(value: &str) -> String {
     value
         .strip_prefix('"')
@@ -1725,6 +1729,7 @@ fn unquote_profile_string(value: &str) -> String {
 
 /// Whether `path` is the host root after collapsing `.`, `..` and empty
 /// segments. `/`, `/.` and `//` are the root.
+#[allow(dead_code)]
 fn path_normalises_to_root(path: &str) -> bool {
     if !path.starts_with('/') {
         return false;
@@ -1740,6 +1745,67 @@ fn path_normalises_to_root(path: &str) -> bool {
         }
     }
     parts.is_empty()
+}
+
+/// Case-fold atoms in a parsed form. Characters inside a string stay as they
+/// are, so a path literal is not rewritten.
+fn casefold_profile_form(form: &str) -> String {
+    profile_characters(form)
+        .into_iter()
+        .map(|(ch, in_string)| {
+            if in_string {
+                ch
+            } else {
+                ch.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+/// The one model startup root read. Did and wallet use `STARTUP_RULES[0]`.
+const MODEL_STARTUP_ROOT: &str = r#"(allow file-read-data (literal "/"))"#;
+
+/// The exact top-level forms a file-profile may hold. Anything else is
+/// refused. Comparison is case-folded on atoms.
+fn permitted_profile_forms() -> [&'static str; 9] {
+    [
+        "(version 1)",
+        "(deny default)",
+        "(deny network*)",
+        SHARED_RULES[0],
+        SHARED_RULES[1],
+        SHARED_RULES[2],
+        STARTUP_RULES[0],
+        STARTUP_RULES[1],
+        MODEL_STARTUP_ROOT,
+    ]
+}
+
+/// Whether `form` is one of the enumerated permitted top-level forms.
+fn is_permitted_profile_form(form: &str) -> bool {
+    let folded = casefold_profile_form(form);
+    permitted_profile_forms()
+        .iter()
+        .any(|permitted| casefold_profile_form(permitted) == folded)
+}
+
+/// A storage right may claim only the two shared storage rules. Any other
+/// file grant is a host-wide or unpermitted form.
+fn is_permitted_storage_form(form: &str) -> bool {
+    let folded = casefold_profile_form(form);
+    folded == casefold_profile_form(SHARED_RULES[1])
+        || folded == casefold_profile_form(SHARED_RULES[2])
+}
+
+/// Every allow-headed list in `profile`, including `(ALLOW` and `(allow(`.
+/// `allow_forms` still requires a lowercase `(allow ` prefix; this walk is
+/// the allowlist gate that sees the forms that prefix misses.
+fn allow_head_forms(profile: &str) -> Vec<String> {
+    profile_forms(profile)
+        .into_iter()
+        .flat_map(|form| nested_lists(&form))
+        .filter(|form| allow_head(form))
+        .collect()
 }
 
 /// Every list in `form`, the form itself first, then each nested list.
@@ -1820,10 +1886,11 @@ fn rust_source_without_comments(source: &str) -> String {
     out
 }
 
-/// Whether `source` holds a `#[test] fn <function>(` item. A match inside a
-/// string or a comment is not a citation.
+/// Whether `source` holds a `#[test] fn <function>(` item that `cargo test
+/// -- --list` would list. A match inside a string, a comment, a
+/// `#[cfg(any())]` item, or an unused `macro_rules` body is not a citation.
 fn rust_holds_cited_test(source: &str, function: &str) -> bool {
-    let cleaned = rust_source_without_comments(source);
+    let cleaned = rust_source_without_unlisted_items(source);
     let needle: Vec<char> = format!("fn {function}(").chars().collect();
     if needle.is_empty() {
         return false;
@@ -1859,6 +1926,210 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Rust source with comments removed, then `macro_rules` bodies and
+/// `#[cfg(any())]` items blanked. What remains is the text `cargo test --
+/// --list` can see as a compiled `#[test]`.
+fn rust_source_without_unlisted_items(source: &str) -> String {
+    let cleaned = rust_source_without_comments(source);
+    let without_macros = rust_source_without_macro_rules(&cleaned);
+    rust_source_without_cfg_any_items(&without_macros)
+}
+
+/// Blank each `macro_rules!` item, including its body. An unused macro does
+/// not list the `#[test]` fns written inside it.
+fn rust_source_without_macro_rules(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let needle: Vec<char> = "macro_rules".chars().collect();
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if chars[i..].starts_with(&needle) && rust_ident_boundary_before(&chars, i) {
+            let after = i + needle.len();
+            if after < chars.len() && chars[after] == '!' {
+                i = rust_skip_macro_rules(&chars, i);
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// Advance past `macro_rules! name { ... }` or `macro_rules! name ( ... )`.
+fn rust_skip_macro_rules(chars: &[char], start: usize) -> usize {
+    let mut i = start + "macro_rules".len();
+    if i < chars.len() && chars[i] == '!' {
+        i += 1;
+    }
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i >= chars.len() {
+        return i;
+    }
+    let open = chars[i];
+    let close = match open {
+        '{' => '}',
+        '(' => ')',
+        '[' => ']',
+        _ => return i + 1,
+    };
+    rust_skip_balanced(chars, i, open, close)
+}
+
+/// Blank each `#[cfg(any())]` item. A `#[test]` under that cfg is never
+/// compiled, so `cargo test -- --list` does not list it.
+fn rust_source_without_cfg_any_items(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let cfg: Vec<char> = "#[cfg(any())]".chars().collect();
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if chars[i..].starts_with(&cfg) {
+            i += cfg.len();
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            i = rust_skip_next_item(&chars, i);
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// Advance past the next Rust item: attributes, then `mod`/`fn`/`struct` or a
+/// braced block.
+fn rust_skip_next_item(chars: &[char], mut i: usize) -> usize {
+    loop {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i + 1 < chars.len() && chars[i] == '#' && chars[i + 1] == '[' {
+            i = rust_skip_balanced(chars, i + 1, '[', ']');
+            continue;
+        }
+        break;
+    }
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i + 3 <= chars.len() && chars[i..].starts_with(&['m', 'o', 'd']) {
+        i += 3;
+        while i < chars.len() && chars[i] != '{' && chars[i] != ';' {
+            i += 1;
+        }
+        if i < chars.len() && chars[i] == '{' {
+            return rust_skip_balanced(chars, i, '{', '}');
+        }
+        if i < chars.len() && chars[i] == ';' {
+            return i + 1;
+        }
+        return i;
+    }
+    while i < chars.len() && chars[i] != '{' && chars[i] != ';' {
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '{' {
+        return rust_skip_balanced(chars, i, '{', '}');
+    }
+    if i < chars.len() && chars[i] == ';' {
+        return i + 1;
+    }
+    i
+}
+
+fn rust_skip_balanced(chars: &[char], start: usize, open: char, close: char) -> usize {
+    let mut i = start;
+    if i >= chars.len() || chars[i] != open {
+        return i;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            i += 1;
+            if depth == 0 {
+                return i;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    i
 }
 
 fn rust_ident_boundary_before(chars: &[char], at: usize) -> bool {
@@ -2204,6 +2475,22 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             return Err(format!("{name} must bind the shared rule {rule}"));
         }
     }
+    for form in &forms {
+        if !form.starts_with('(') || is_permitted_profile_form(form) {
+            continue;
+        }
+        if allow_head(form) {
+            return Err(format!("{name} must reject extra allow form: {form}"));
+        }
+        let head = profile_head_token(form);
+        if head == "deny" {
+            return Err(format!("{name} must reject extra deny form: {form}"));
+        }
+        if head == "if" || head == "begin" {
+            return Err(format!("{name} must reject unknown top-level form: {form}"));
+        }
+        return Err(format!("{name} must reject unknown top-level form: {form}"));
+    }
     Ok(())
 }
 
@@ -2398,13 +2685,22 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
     for claim in &rights {
         if claim.id == "storage" {
             for rule in &claim.rules {
-                if is_root_wide_read(rule) {
+                if !is_permitted_storage_form(rule) {
                     return Err(format!(
-                        "{name} storage must not claim a root-wide read: {rule}"
+                        "{name} storage must not claim a root-wide or unpermitted form: {rule}"
                     ));
                 }
             }
         }
+    }
+    let listed = allow_forms(profile);
+    for form in allow_head_forms(profile) {
+        if listed.iter().any(|seen| seen == &form) {
+            continue;
+        }
+        return Err(format!(
+            "{name} storage must not claim a root-wide or extra allow form: {form}"
+        ));
     }
     Ok(())
 }
@@ -3375,6 +3671,25 @@ fn declared_rights_trace_refuses_each_bad_input() {
             "(allow file-read* (subpath \"/.\"))",
             "a / . subpath root read",
         ),
+        ("(allow file*)", "an unfiltered file*"),
+        ("(allow file-write*)", "an unfiltered file-write*"),
+        ("(allow file-read* (prefix \"\"))", "an empty prefix"),
+        (
+            "(allow file-read* (regex \".*\"))",
+            "a regex that matches every path",
+        ),
+        (
+            "(allow file-read* (subpath (string-append \"/\" \"\")))",
+            "a constructed root path",
+        ),
+        (
+            "(allow file-read* (require-any (subpath \"/\")))",
+            "a require-any root filter",
+        ),
+        (
+            "(allow file-read* (vnode-type REGULAR-FILE))",
+            "a pathless vnode-type filter",
+        ),
     ] {
         let mut widened = profile.clone();
         widened.push_str(rule);
@@ -4110,9 +4425,81 @@ fn operations_table_check_reports_each_missing_citation() {
 
     fs::write(
         capsule.path().join("tests/confine.rs"),
+        "#[cfg(any())]\nmod unused {\n    #[test]\n    fn present_case() {}\n}\n",
+    )
+    .expect("cfg-any citation fixture");
+    let problems =
+        operations_table_citation_problems("fixture-provider", commented, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a #[test] under #[cfg(any())] must not count: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("present_case") && problems[0].contains("does not hold"),
+        "a cfg(any()) test must be refused: {}",
+        problems[0]
+    );
+
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "macro_rules! planted {\n    () => {\n        #[test]\n        fn present_case() {}\n    };\n}\n",
+    )
+    .expect("unused-macro citation fixture");
+    let problems =
+        operations_table_citation_problems("fixture-provider", commented, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "an unused macro_rules body must not count: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("present_case") && problems[0].contains("does not hold"),
+        "an unused macro_rules test must be refused: {}",
+        problems[0]
+    );
+
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
         "#[test]\nfn present_case() {}\n",
     )
     .expect("restore fixture integration test file");
+
+    let crate_dir = tempfile::tempdir().expect("tiny citation crate");
+    fs::write(
+        crate_dir.path().join("Cargo.toml"),
+        "[package]\nname = \"citefix\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n",
+    )
+    .expect("tiny crate manifest");
+    fs::write(crate_dir.path().join("lib.rs"), "").expect("tiny crate lib");
+    fs::create_dir_all(crate_dir.path().join("tests")).expect("tiny crate tests");
+    fs::write(
+        crate_dir.path().join("tests/confine.rs"),
+        "#[cfg(any())]\nmod unused {\n    #[test]\n    fn present_case() {}\n}\nmacro_rules! planted {\n    () => {\n        #[test]\n        fn present_case() {}\n    };\n}\n",
+    )
+    .expect("tiny crate unlistable tests");
+    let listed = Command::new("cargo")
+        .args(["test", "--", "--list"])
+        .current_dir(crate_dir.path())
+        .output()
+        .expect("cargo test -- --list");
+    let list_text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success(),
+        "cargo test -- --list must run: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(
+        !list_text.contains("present_case"),
+        "cargo test -- --list must not list cfg(any()) or unused macro tests: {list_text}"
+    );
+    assert!(
+        !rust_holds_cited_test(
+            &fs::read_to_string(crate_dir.path().join("tests/confine.rs")).unwrap(),
+            "present_case"
+        ),
+        "the citation checker must agree with cargo test -- --list"
+    );
 
     let missing_function = "## Operations and the rights they need\n\n| `tests/confine.rs::absent_case` |\n\n## Host-OS status\n";
     let problems =
@@ -4478,6 +4865,35 @@ fn file_profile_contract_refuses_nested_grants() {
             && refusal.contains("more than one process-exec allow"),
         "the refusal must name the extra process-fork: {refusal}"
     );
+
+    for extra in [
+        "(allow file*)",
+        "(allow file-write*)",
+        "(allow mach-lookup)",
+        "(allow ipc-posix*)",
+        "(allow file-read* (vnode-type REGULAR-FILE))",
+        r#"(allow file-read* (prefix ""))"#,
+        r#"(allow file-read* (regex ".*"))"#,
+        r#"(allow file-read* (subpath (string-append "/" "")))"#,
+        r#"(allow file-read* (require-any (subpath "/")))"#,
+        r#"(allow file-read* (subpath "/var") (regex ".*"))"#,
+    ] {
+        let profile = format!("{complete}{extra}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("an unpermitted allow form must fail the allowlist");
+        assert!(
+            refusal.contains("fixture-provider") && refusal.contains(extra),
+            "the allowlist must name the extra form {extra}: {refusal}"
+        );
+    }
+
+    let profile = format!("{complete}(foo bar)\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("an unknown top-level form must fail");
+    assert!(
+        refusal.contains("unknown top-level form") && refusal.contains("(foo bar)"),
+        "the allowlist must refuse an unknown head: {refusal}"
+    );
 }
 
 /// The one contract check refuses a profile that holds a second exec allow,
@@ -4638,18 +5054,26 @@ fn file_profile_contract_rejects_a_second_exec_allow() {
     assert_generated_reason_has_no_failure(&refusal);
 
     // A token inside a string or a nested filter names text or a filter
-    // argument, not an operation, so these profiles keep one exec allow. An
-    // escaped quote stays inside its string, so the text after it is text too.
-    for passing in [
+    // argument, not an operation. Those forms are still extra allows, so the
+    // allowlist refuses them. They must not be counted as a second exec.
+    for extra in [
         r#"(allow file-read* (literal "/process-exec"))"#,
         r#"(allow file-read* (process-exec "/x"))"#,
         r#"(allow file-read* (require-all (process*)))"#,
         r#"(allow "process-exec")"#,
         r#"(allow file-read* (literal "a\" process-exec "))"#,
     ] {
-        let profile = format!("{complete}{passing}\n");
-        check_profile_contract("fixture-provider", &profile)
-            .expect("a token inside a string or a nested filter must not count as an operation");
+        let profile = format!("{complete}{extra}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("an extra allow form must fail the allowlist");
+        assert!(
+            refusal.contains("extra allow form") && refusal.contains(extra),
+            "the refusal must name the extra allow, not a second exec: {refusal}"
+        );
+        assert!(
+            !refusal.contains("more than one process-exec allow"),
+            "a token inside a string or a nested filter must not count as an operation: {refusal}"
+        );
     }
 }
 

@@ -2563,6 +2563,12 @@ fn model_is_root_wide_read(form: &str) -> bool {
     })
 }
 
+fn model_is_permitted_storage_form(form: &str) -> bool {
+    let folded = form.to_ascii_lowercase();
+    folded == r#"(allow file-read* (literal (param "storage_parent")))"#
+        || folded == r#"(allow file-read* file-write* (subpath (param "storage_root")))"#
+}
+
 fn model_path_normalises_to_root(path: &str) -> bool {
     if !path.starts_with('/') {
         return false;
@@ -2718,7 +2724,7 @@ fn allow_rules_trace_to_declared_rights() {
         }
         if entry_id(entry) == "storage" {
             for rule in rule_strings(entry) {
-                if model_is_root_wide_read(rule) {
+                if !model_is_permitted_storage_form(rule) {
                     panic!("storage must not claim a root-wide read: {rule}");
                 }
             }
