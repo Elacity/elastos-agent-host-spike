@@ -12,6 +12,7 @@ pub enum Effect {
     Network,
     GrantedRead,
     SiblingRead,
+    HostKeyRead,
     Task(u8),
     Runaway,
 }
@@ -26,6 +27,7 @@ impl Effect {
             Self::Network => "network",
             Self::GrantedRead => "granted-read",
             Self::SiblingRead => "sibling-read",
+            Self::HostKeyRead => "host-key-read",
             Self::Task(0) => "task-a",
             Self::Task(1) => "task-b",
             Self::Task(2) => "task-c",
@@ -45,6 +47,7 @@ impl Effect {
             Self::Network => "-Dwarnings --cfg feature=\"network\"",
             Self::GrantedRead => "-Dwarnings --cfg feature=\"granted-read\"",
             Self::SiblingRead => "-Dwarnings --cfg feature=\"sibling-read\"",
+            Self::HostKeyRead => "-Dwarnings --cfg feature=\"host-key-read\"",
             Self::Task(_) => "-Dwarnings --cfg feature=\"task\"",
             Self::Runaway => "-Dwarnings --cfg feature=\"runaway\"",
         }

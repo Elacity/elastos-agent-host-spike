@@ -56,28 +56,40 @@ fn assert_refusal(effect: Effect, bus_error: &str) {
         probe: capsule.identity,
     }
     .emit();
-    operator
-        .finish_check(sampled)
-        .expect("final census and operator group stop");
+    println!(
+        "{}",
+        operator
+            .finish_check(sampled)
+            .expect("final census and operator group stop")
+    );
     assert_output_refusal(&output, effect, bus_error);
     home.finish().unwrap();
 }
 
-fn assert_output_refusal(output: &std::process::Output, effect: Effect, bus_error: &str) {
-    // Report only the expected public refusal and booleans, never raw Runtime
-    // output or operator attach data. Both checks observe the guest lifecycle.
+fn refusal_evidence(
+    output: &std::process::Output,
+    effect: Effect,
+    bus_error: &str,
+) -> (String, bool) {
     let stderr = std::str::from_utf8(&output.stderr).expect("Runtime stderr is UTF-8");
     let reason_present = stderr.contains("Component capsule failed:")
         && stderr.contains(&format!("Component capsule denied: BusError::{bus_error}"));
-    println!(
-        "probe refusal effect:{} exit:{:?} reason_present:{reason_present}",
-        effect.name(),
-        output.status.code()
-    );
-    assert!(
+    (
+        format!(
+            "probe refusal effect:{} exit:{:?} reason_present:{reason_present}",
+            effect.name(),
+            output.status.code()
+        ),
         !output.status.success() && reason_present,
-        "expected nonzero exit and lifecycle refusal {bus_error}; exit:{:?} reason_present:{reason_present}",
-        output.status.code()
+    )
+}
+
+fn assert_output_refusal(output: &std::process::Output, effect: Effect, bus_error: &str) {
+    let (line, refused) = refusal_evidence(output, effect, bus_error);
+    println!("{line}");
+    assert!(
+        refused,
+        "expected nonzero exit and lifecycle refusal {bus_error}"
     );
 }
 
@@ -193,9 +205,12 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome) {
             Ok(())
         }
     });
-    operator
-        .finish_check(sampled)
-        .expect("final census and operator group stop");
+    println!(
+        "{}",
+        operator
+            .finish_check(sampled)
+            .expect("final census and operator group stop")
+    );
     controller
         .check_captures(&home)
         .expect("captures exclude fixture credentials");
@@ -307,6 +322,7 @@ fn attach_secret_stays_in_memory() {
     grants::assert_memory_surfaces();
     exercise_fixture_read(Effect::GrantedRead, true);
     exercise_fixture_read(Effect::SiblingRead, false);
+    host_key::exercise();
 }
 
 #[test]
@@ -362,4 +378,12 @@ fn agent_cannot_read_other_agent_memory() {
 #[ignore = "blocked: UsersAI binding; AC-002-ARGS"]
 fn agent_can_read_human_space_with_grant() {
     panic!("blocked: UsersAI binding; AC-002-ARGS — Runtime must bind the agent launch; reuse the fixture Controller for its human-space grant");
+}
+
+#[path = "common/host_key.rs"]
+mod host_key;
+
+#[test]
+fn host_key_read_is_refused() {
+    host_key::exercise();
 }

@@ -548,3 +548,49 @@ fn skipped_report_keeps_a_nonzero_exit() {
         .starts_with(&memory.table));
     home.finish().unwrap();
 }
+
+#[test]
+fn host_key_receipt_requires_this_launched_bundle() {
+    use agent_conformance::report::render_run;
+    let (mut observations, git) = synthetic(1, true);
+    let name = "host_key_read_is_refused";
+    let listed = format!("{name}: test\n");
+    let render = |observations: &[Observation]| {
+        render_run(
+            &listed,
+            &output(observations).replace(LIVE, name),
+            true,
+            Ok(git.clone()),
+        )
+    };
+    let missing = render(&observations);
+    assert!(!missing.passed);
+    assert!(missing
+        .failures
+        .contains(&"missing launched probe identity: host-key-read".into()));
+    let probe = ProbeIdentity {
+        effect: "host-key-read".into(),
+        component_sha256: sha256(b"host-key component"),
+        bundle_lab_cid: format!("lab-cid:sha256:{}", sha256(b"host-key bundle")),
+    };
+    observations.push(Observation::BuildOnly {
+        probe: probe.clone(),
+    });
+    assert!(
+        !render(&observations).passed,
+        "building alone supplies zero launch evidence"
+    );
+    observations.push(Observation::Launched {
+        probe: probe.clone(),
+    });
+    let complete = render(&observations);
+    assert!(complete.passed);
+    let receipt: Value = serde_json::from_slice(&complete.receipt_bytes).unwrap();
+    let recorded = receipt["probes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["effect"] == "host-key-read")
+        .unwrap();
+    assert_eq!(*recorded, serde_json::to_value(probe).unwrap());
+}
