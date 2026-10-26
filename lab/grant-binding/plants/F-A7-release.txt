@@ -1,0 +1,8 @@
+id: F-A7-release
+file: src/ledger.rs
+test: ledger::model_release_returns_the_unused_hold
+--- old
+        self.ledger.held -= amount;
+--- new
+        self.ledger.charged += amount;
+--- end

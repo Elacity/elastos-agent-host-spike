@@ -88,6 +88,7 @@ pub enum Refuse {
     OutsidePrincipal,
     SymlinkShaped,
     OutsideRoot,
+    PublicRead,
 }
 
 impl std::fmt::Display for Refuse {
@@ -102,6 +103,7 @@ impl std::fmt::Display for Refuse {
             Refuse::OutsidePrincipal => "owned root is outside the agent principal",
             Refuse::SymlinkShaped => "use path has a symlink-shaped segment",
             Refuse::OutsideRoot => "use path leaves the owned root",
+            Refuse::PublicRead => "public storage read does not bind",
         })
     }
 }
@@ -257,7 +259,7 @@ impl Default for Verifier {
 
 /// The one name check. At bind the name is the owned root; a use path also
 /// carries the owned root it must stay inside. The walk order is host-shaped,
-/// outside principal, symlink-shaped, outside root.
+/// public read, outside principal, symlink-shaped, outside root.
 fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {
     if name.contains('\\') || name.starts_with('/') {
         return Err(Refuse::HostPath);
@@ -268,6 +270,9 @@ fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<St
         .any(|part| part.is_empty() || *part == "." || *part == "..")
     {
         return Err(Refuse::HostPath);
+    }
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
     }
     if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
         return Err(Refuse::OutsidePrincipal);
@@ -531,6 +536,32 @@ fn model_owned_root_must_sit_under_the_agent() {
         refusal.to_string(),
         "owned root is outside the agent principal"
     );
+}
+
+#[test]
+fn model_public_storage_read_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "Public/notes", rights())
+        .expect_err("public storage read");
+    assert_eq!(refusal, Refuse::PublicRead);
+    assert_eq!(refusal.to_string(), "public storage read does not bind");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    for path in ["Public/notes", "Public/notes/page.md"] {
+        let refusal = verifier
+            .use_path(&call, &request, path)
+            .expect_err("public storage read");
+        assert_eq!(refusal, Refuse::PublicRead);
+        assert_eq!(refusal.to_string(), "public storage read does not bind");
+    }
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/Public")
+        .expect("a later Public segment is a normal child path");
 }
 
 #[test]
