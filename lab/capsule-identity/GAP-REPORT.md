@@ -24,6 +24,13 @@
   cited files under `docs/` unchanged too. A lab citation added by this revision is at `01f6add1f` unless it names
   `c641bcff2`. Claim scope: read at two commits, plus five issue texts read with `gh`; only `git` and read-only
   `gh` were run (with `grep` to filter their output). The citation count is under "Open Runtime issues".
+- **Revision (task 026, 2026-10-27):** records Anders's B1 split and B2 boundary, as Flint relayed them on
+  2026-10-26 (new section "B1 and B2 (Anders, 26 Oct)" in "Anders's answers and the lab prototypes"), and adds
+  one sentence to "What the lab harness shows and does not show" that points to it. Lab commit read:
+  `563017a7ac048949ef76b8d9c072fd0fca39c8f7` (`spike/agent-host` after PR #297, from `git rev-parse HEAD` before
+  the task's first commit). Every citation in the new section is at that commit; 021's lab citations stay at
+  `01f6add1f`, and the Runtime citations stay at `c641bcff2`. Claim scope: read at one more commit; only `git`
+  was run, and no issue was read again. The citation count is under "Open Runtime issues".
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -124,6 +131,12 @@ shown". The header adds no `path:line` citation. Of 008's 172, the rewritten lab
 69. The other 166 are not changed and keep 008's check. Round 1 of this task read the lab at an older commit,
 `f1f627250`, before tasks 019 and 020 merged; round 2 moved every lab citation to `01f6add1f` and checked each
 again there.
+
+Citations of task 026: each `path:line` citation in "B1 and B2 (Anders, 26 Oct)" was checked against
+`git show 563017a7ac048949ef76b8d9c072fd0fca39c8f7:<path>`, by its line number and its quoted text (with
+`git grep -n -F <text> 563017a7ac048949ef76b8d9c072fd0fca39c8f7 -- <path>`): 16 found, 16 match. The header, the
+amended sentence in "Anders's answers and the lab prototypes" and the pointer in the lab section add no `path:line`
+citation. 021's 69 and 008's other 166 are not changed and keep their checks.
 
 ## PRINCIPLES 13
 
@@ -622,8 +635,9 @@ to a CID, never a name. The lab's record has no name field:
 `lab/capsule-identity/README.md:804` `record binds a CID and never a capsule name, and a grant or a token built on`
 
 Each entry is lab evidence for one answer: a prototype, not the Runtime's format, and no admission decision.
-README sections are cited by their heading line and tests by their `fn` line, at `01f6add1f`. This report did
-not run the tests.
+README sections are cited by their heading line and tests by their `fn` line, at `01f6add1f`, except in "B1 and
+B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's `git rev-parse HEAD`,
+`563017a7a`. This report did not run the tests.
 
 ### Q2: the CID covers the exact bytes, and a signed record binds it
 
@@ -757,6 +771,66 @@ and `lab/capsule-identity/tests/not_admission.rs:315` `fn the_harness_exports_on
 Not shown: what the Runtime would decide. Grants are issue 464
 (https://github.com/Elacity/elastos-runtime/issues/464).
 
+### B1 and B2 (Anders, 26 Oct)
+
+Added by task 026. Anders replied to the gap map on 2026-10-26, and Flint relayed the reply to this lane at
+23:18. It is quoted here as relayed; the lane's inbox is not in this repo: "the CID component command exists and
+applies the current signature policy but does not establish complete signed-package verification; B1's narrow
+first step is the record-to-launch repair plus a regression test (#274, Runtime side, cx-agent-conformance writes
+the black-box row); full B1 needs complete-package verification (#465). Label any lab rejection of an altered
+content provider that happens before capsule CID validation as 'pre-CID, not B1 evidence'. B2: semantics before
+encoding; the ask-to-operation mapping now lives in lab/bus-v2-proposal/ (new lane cu-bus-v2-proposal), so this
+lane writes no B2 encoding."
+
+Each citation in this section is at `563017a7a`, the lab commit task 026 read (see the header). This report did
+not run the tests.
+
+- (a) B1 today. The CID component command applies the current signature policy, and that is not complete
+  signed-package verification. B1's narrow first step is the record-to-launch repair and its regression test, on
+  the Runtime side: issue 274 (https://github.com/Elacity/elastos-runtime/issues/274). Full B1 needs
+  complete-package verification: issue 465 (https://github.com/Elacity/elastos-runtime/issues/465). The black-box
+  row is cx-agent-conformance's, and this lane writes none. This revision records the reply as relayed: it did not
+  read the command's code, and it did not read 274 or 465 again.
+- (b) What the lab's B1 test shows. A valid test-key signature grants nothing, and the library exports identity
+  checks only:
+  `lab/capsule-identity/README.md:780` `## Verify is not admit (M1 check B1)`,
+  `lab/capsule-identity/tests/not_admission.rs:56` `fn valid_signature_grants_nothing_by_itself() {`
+  and `lab/capsule-identity/tests/not_admission.rs:315` `fn the_harness_exports_only_identity_checks() {`
+  Not shown: it is not the record-to-launch repair, it is not complete-package verification, and no Runtime code
+  reads it. It shows identity only; admission stays the Runtime's (the section above).
+- (c) The label rule. A lab refusal of an altered content provider that comes before the CID check is labelled
+  `pre-CID, not B1 evidence`. Each lane test that refuses a changed provider bundle:
+  - `lab/capsule-identity/tests/kinds.rs:109` `assert_name_mismatch(&renamed, pin, changed);`, in
+    `three_kinds_share_the_package_rules`, after one byte of the provider fixture's `ipfs-provider` payload is
+    flipped. The refusal comes from the CID comparison, not before it. The changed bundle is named first,
+    `lab/capsule-identity/tests/kinds.rs:107` `let changed = named(&renamed);`,
+    and naming runs the manifest check and then names the checked bytes:
+    `lab/capsule-identity/src/lib.rs:629` `let wasm = check_manifest(&manifest.content)?;`
+    and `lab/capsule-identity/src/lib.rs:630` `encode_entries(&entries)`.
+    So the Runtime's manifest check
+    (`lab/capsule-identity/src/lib.rs:1142` `fn check_manifest(bytes: &[u8]) -> Result<bool, Refusal> {`)
+    has passed on the changed bundle before the refusal. The test then asks `check_name` for the old pin
+    (`lab/capsule-identity/tests/common/mod.rs:270` `assert_mismatch(check_name(bundle, claimed), claimed, actual);`)
+    and accepts only the name mismatch
+    (`lab/capsule-identity/tests/common/mod.rs:279` `Refusal::NameMismatch {`),
+    which is the compare of the recomputed CID with the claim
+    (`lab/capsule-identity/src/lib.rs:646` `let actual = lab_cid(bundle)?;`
+    and `lab/capsule-identity/src/lib.rs:679` `if actual.0 != claimed_digits {`).
+  - `lab/capsule-identity/tests/variant_binding.rs` holds no test that changes a provider bundle and refuses it.
+    `lab/capsule-identity/tests/variant_binding.rs:357` `fn variant_swapped_between_platforms_is_refused() {`
+    compares the CIDs of the two unchanged variant fixtures, through
+    `lab/capsule-identity/tests/variant_binding.rs:203` `fn another_cid(platform: &str, bound: &str, bundle: &str) -> (Refusal, String) {`
+  So none of these refusals is `pre-CID, not B1 evidence`: no lane test refuses a changed provider bundle before
+  the CID check. The one refusal above is lab identity evidence (the name covers the provider's bytes). It is still
+  not the Runtime's B1 check, for the reasons in (b).
+- (d) B2. The lab's B2 test shows only that `asks.json`'s bytes are inside the lab CID:
+  `lab/capsule-identity/tests/bytes.rs:132` `fn one_byte_change_in_asks_json_changes_the_lab_cid() {`
+  The lab never parses `asks.json`:
+  `lab/capsule-identity/README.md:301` ``capsule's name. The lab never parses `asks.json`: to the lab CID it is one more``
+  Not shown: what an ask means, or how one is encoded. The ask-to-operation mapping is in `lab/bus-v2-proposal/`
+  (its `CORE-CALLS-PROPOSAL.md`, lane cu-bus-v2-proposal), named here and not cited by line. This lane writes no
+  B2 encoding, no ask schema and no mapping.
+
 ### Questions with no answer
 
 - Q1, Q5, Q8 and Q9: no answer relayed to this lane. They stay open as asked under "Questions".
@@ -765,6 +839,8 @@ Not shown: what the Runtime would decide. Grants are issue 464
 
 Rewritten by task 021 for the lab commit read, `01f6add1f`. Each citation here is at that commit, except the one
 sentence on `c641bcff2` and the Runtime line in the last "Not shown", which is the b3 citation as it stands.
+What the lab's B1 and B2 tests show and do not show, and the `pre-CID, not B1 evidence` label, are in "B1 and B2
+(Anders, 26 Oct)" above.
 
 The lab checks identity apart from admission. It answers whether bytes match a name and whether a test key
 signed that name
