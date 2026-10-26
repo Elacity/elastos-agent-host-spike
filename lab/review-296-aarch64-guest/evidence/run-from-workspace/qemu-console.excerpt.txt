@@ -1,0 +1,31 @@
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x000f0510]
+[    0.000000] Linux version 6.18.58-0-virt (buildozer@build-3-23-aarch64) (cc (Alpine 15.2.0) 15.2.0, GNU ld (GNU Binutils) 2.45.1) #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15
+[    0.000000] random: crng init done
+[    0.000000] Machine model: linux,dummy-virt
+[    0.000000] earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+[    0.000000] printk: legacy bootconsole [pl11] enabled
+[    0.000000] efi: UEFI not found.
+[    0.000000] OF: reserved mem: Reserved memory: No reserved-memory node in the DT
+[    0.033422] LSM: initializing lsm=lockdown,capability,landlock,yama
+[    0.036638] landlock: Up and running.
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+uid=0 gid=0
+--- landlock probe ---
+uname.sysname=Linux
+uname.nodename=(none)
+uname.release=6.18.58-0-virt
+uname.version=#1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15
+uname.machine=aarch64
+landlock_create_ruleset nr=444 ret=7 errno=0 (ok)
+landlock_abi=7
+landlock_add_rule nr=445 ret=-1 errno=9 (Bad file descriptor)
+landlock_restrict_self nr=446 ret=-1 errno=9 (Bad file descriptor)
+SYS_landlock_create_ruleset=444 SYS_landlock_add_rule=445 SYS_landlock_restrict_self=446
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+uid=1000 gid=1000
+test a_low_landlock_abi_refuses_the_start ... ok
+test landlock_absence_refuses_the_start ... ok
+test withheld_storage_rights_are_landlock_eacces ... NOT PROVEN: unconfined make-char is EPERM (no CAP_MKNOD in the initial user namespace; a user namespace also refuses char/block mknod). No same-test unconfined success on this machine.
+F-LC-QEMU-USER-LANDLOCK NOT RUN in guest (qemu-user host-kernel row)
+--- guest finished status=0 ---
+[   34.409902] sysrq: Power Off

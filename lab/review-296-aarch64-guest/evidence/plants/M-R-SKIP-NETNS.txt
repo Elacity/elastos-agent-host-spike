@@ -1,0 +1,50 @@
+
+running 1 test
+test did_profile_permits_its_operations_and_refuses_the_rest ... enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
+### did-provider (freestanding probe)
+
+| side | operation | result | errno | reason |
+| --- | --- | --- | --- | --- |
+| permitted | in-memory | ok | - | no file and no socket |
+| permitted | storage-write | ok | - | wrote under STORAGE_ROOT |
+| permitted | storage-read | ok | - | read under STORAGE_ROOT |
+| permitted | storage2-write | ok | - | wrote under STORAGE_ROOT |
+| permitted | storage2-read | ok | - | read under STORAGE_ROOT |
+| denied | outside-read | refused | 13 | landlock refused the read outside STORAGE_ROOT |
+| denied | outside-write | refused | 13 | landlock refused the write outside STORAGE_ROOT |
+| denied | parent-read | refused | 13 | the Landlock ABI cannot express the STORAGE_PARENT read, so the read is refused |
+| denied | root-read | refused | 13 | no Landlock rule for the root directory read |
+| denied | kernel-fact | refused | 13 | landlock refused the read of kernel state |
+| permitted | sysctl | ok | - | read kernel identity |
+| denied | socket | refused | 1 | seccomp refused socket |
+| denied | socket-unix | refused | 1 | seccomp refused socket |
+| denied | socketpair | refused | 1 | seccomp refused socketpair |
+| denied | socketpair-inet | refused | 1 | seccomp refused socketpair |
+| denied | signal-host | refused | 3 | the pid namespace has no such host process |
+| denied | make-sym | refused | 13 | landlock refused MAKE_SYM |
+| denied | make-fifo | refused | 13 | landlock refused MAKE_FIFO |
+| denied | make-sock | refused | 13 | landlock refused MAKE_SOCK |
+| denied | make-char | refused | 13 | landlock refused MAKE_CHAR |
+| denied | make-block | refused | 13 | landlock refused MAKE_BLOCK |
+| permitted | refer-mkdir | ok | - | mkdir under STORAGE_ROOT |
+| denied | refer | refused | 18 | landlock refused REFER |
+| denied | ioctl-dev | refused | 13 | landlock refused IOCTL_DEV |
+| denied | ptrace | refused | 1 | seccomp refused ptrace |
+| denied | proc-self-mem | refused | 13 | landlock refused /proc/self/mem |
+| denied | dev-null | refused | 13 | landlock refused /dev/null |
+| denied | dev-zero | refused | 13 | landlock refused /dev/zero |
+| denied | io-uring | refused | 1 | seccomp refused io_uring_setup |
+| denied | bpf | refused | 1 | seccomp refused bpf |
+| denied | unshare-user | refused | 1 | seccomp refused unshare |
+| denied | unshare-net | refused | 1 | seccomp refused unshare |
+| denied | setns | refused | 1 | seccomp refused setns |
+| denied | keyctl | refused | 1 | seccomp refused keyctl |
+| denied | mount | refused | 1 | seccomp refused mount |
+| denied | clone | refused | 1 | seccomp refused clone |
+| denied | exec-unbound | refused | 13 | landlock refused exec of a file other than PROVIDER_EXECUTABLE |
+| permitted | exec-bound | ok | - | process-exec of PROVIDER_EXECUTABLE |
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.18s
+

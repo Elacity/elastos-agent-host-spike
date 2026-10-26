@@ -1,0 +1,43 @@
+Binaries exercised by the /workspace rerun of
+lab/linux-confine/run-aarch64-guest.sh at head
+de819640b12ba809884fc5ba1b2c408eb2878e9a.
+
+All test and provider objects are ELF e_machine 183 (EM_AARCH64).
+The kernel is the Alpine virt 6.18.58 image, not a qemu-user binary.
+
+file(1)
+-------
+guest-bins/aarch64          ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+guest-bins/confine          ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+guest-bins/elf              ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+guest-bins/providers        ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+out/lc-setup                ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+out/lc-setup-test           ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+out/lc-probe                ELF 64-bit LSB executable, ARM aarch64, statically linked
+did-provider                ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+wallet-provider             ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+model-provider              ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked
+guest-landlock-probe        ELF 64-bit LSB executable, ARM aarch64, statically linked
+run-as-tester               ELF 64-bit LSB executable, ARM aarch64, statically linked
+vmlinuz-virt                PE32+ executable (EFI application) Aarch64
+
+sha256
+------
+080b9ca25a8b60f1ac29b433e4800db5d7f63d4df075deee2f9f6ae31b91934a  guest-bins/aarch64
+4493033b4d31ed20d97b82930a647a5456afeaa2b1061324b4eee6f2d1a503ef  guest-bins/confine
+8ef6c46c989c8061859a9357d87501abb673b377cb23676139e3a5b2acdcd07d  guest-bins/elf
+3488651f301f711e14bdabda19e392eb71faaf1b0ae549ba7ea866b27c856e26  guest-bins/providers
+4a6b9be96a233ed3e8a6dc3ed56d4b8d649cbc626a6a5ee101fa501b27421e6d  out/lc-setup
+122cc866cec5267dc9790561ee42c85c51e712e6ee32c663e13d4290119da72f  out/lc-setup-test
+4541bf5fbf77a437eef861356dcbdb8dda55d24a8b0c23f4e1829202c1c7bea4  out/lc-probe
+b28fc09cb76241bc1bec0a5886057e1c55b6213d3bca19273fcd3fee974d3607  did-provider
+92b796b6e9dfa5bf489967affd56151df986580e008b3cd85a23b2c83a77144e  wallet-provider
+75be184e044dcf55fb8563386563be22fa7bb088039e1894d7855592008b55a9  model-provider
+d1876369b061ef3bc33314f490240efcd32b031393cb34c6f81134fa862fe472  vmlinuz-virt
+
+The vmlinuz hash matches the committed evidence file
+lab/linux-confine/evidence/aarch64-qemu-system-6.18/vmlinuz-virt.sha256.
+
+Note: lc-probe sha256 line above was recorded from `sha256sum` during the
+/workspace run. If a later rebuild changes OUT_DIR hashes, treat BINARIES.txt
+as the hashes of the objects that produced evidence/run-from-workspace/.
