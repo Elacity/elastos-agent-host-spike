@@ -1,0 +1,9 @@
+id: F-B2-own
+file: src/ops.rs
+test: ops::model_child_journal_returns_its_own_handle
+--- old
+        self.bind_grant(grant.instance, path, grant.rights)
+            .map_err(OperateRefuse::Binding)
+--- new
+        Ok(request.handle)
+--- end
