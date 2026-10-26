@@ -1258,3 +1258,56 @@ fn wasm_variant_refusal_order_is_stable() {
         &text,
     );
 }
+
+/// The stand-in payload of `bundle` as the one walk read it.
+fn walked_payload(bundle: &Path) -> Vec<u8> {
+    let held = checked(bundle);
+    let entry = held
+        .entries()
+        .iter()
+        .find(|entry| entry.path == "ipfs-provider")
+        .expect("a variant holds ipfs-provider");
+    entry.content.clone()
+}
+
+/// This test pins a limit, not a feature. A label is the signer's claim: the
+/// lab never reads a label from a manifest, path or payload, so it does not
+/// check that a variant's bytes were built for its label. Here a's payload
+/// says `aarch64-darwin` and b's says `x86_64-linux`, a fresh test key binds
+/// them the other way round, and both verifiers pass. The pinned recipe
+/// stands in for the build that would back the claim
+/// (https://github.com/Elacity/elastos-runtime/issues/285). If the lab ever
+/// checks bytes against labels, this test must change with that rule.
+#[test]
+fn a_variant_label_is_the_signers_claim() {
+    let v = variants();
+    // The words are in the bytes the verifiers hold.
+    assert_eq!(walked_payload(&v.a), b"lab fixture aarch64-darwin\n");
+    assert_eq!(walked_payload(&v.b), b"lab fixture x86_64-linux\n");
+
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let swapped: [(&str, &Path); 2] = [(LINUX, &v.a), (DARWIN, &v.b)];
+    let binding = sign(&key, &swapped, &recipe);
+    assert_eq!(binding.recipe, PROVIDER_VARIANT_RECIPE_LAB_CID);
+    assert_eq!(
+        binding.variants,
+        [
+            (LINUX.to_owned(), PROVIDER_VARIANT_A_LAB_CID.to_owned()),
+            (DARWIN.to_owned(), PROVIDER_VARIANT_B_LAB_CID.to_owned()),
+        ]
+    );
+    assert_eq!(
+        String::from_utf8(binding.variant_binding_payload()).expect("UTF-8 JSON"),
+        expected_payload(
+            PROVIDER_VARIANT_RECIPE_LAB_CID,
+            &did,
+            &[
+                (DARWIN, PROVIDER_VARIANT_B_LAB_CID),
+                (LINUX, PROVIDER_VARIANT_A_LAB_CID),
+            ]
+        )
+    );
+    both_pass(&binding, &swapped, &recipe, &[did]);
+}
