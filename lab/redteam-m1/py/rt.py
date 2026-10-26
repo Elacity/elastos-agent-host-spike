@@ -41,8 +41,8 @@ def head():
     return git("rev-parse", "HEAD")
 
 
-def scratch_clone(name):
-    """A fresh shared clone of this checkout's HEAD under SCRATCH/name."""
+def scratch_clone(name, rev=None):
+    """A fresh shared clone of this checkout under SCRATCH/name, at REV or HEAD."""
     if not SCRATCH.is_absolute() or SCRATCH in (Path("/"), REPO) or REPO in SCRATCH.parents:
         raise SetupError("scratch root must be an absolute path outside the repository")
     dest = SCRATCH / name
@@ -50,7 +50,7 @@ def scratch_clone(name):
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     git("clone", "-q", "--shared", "--no-checkout", str(REPO), str(dest))
-    git("checkout", "-q", "--detach", head(), cwd=dest)
+    git("checkout", "-q", "--detach", rev or head(), cwd=dest)
     return dest
 
 
