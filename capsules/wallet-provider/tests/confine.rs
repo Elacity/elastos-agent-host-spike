@@ -1718,6 +1718,13 @@ fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
 /// section.
 const FALSIFIER_HEADING: &str = "## Falsifiers";
 
+/// The heading line every operations table uses.
+const OPERATIONS_HEADING: &str = "## Operations and the rights they need";
+
+/// The providers whose `CONFINEMENT.md` operations table names the tests it
+/// cites.
+const OPERATIONS_TABLES: &[&str] = &["did-provider"];
+
 /// Whether `character` can sit directly beside a falsifier id token.
 fn falsifier_id_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_'
@@ -1774,6 +1781,43 @@ fn names_falsifier_id(section: &str, id: &str) -> bool {
         .any(|token| *token == id)
 }
 
+/// The section of `document` under its one `heading` line, or every problem
+/// with that heading.
+///
+/// The document must hold exactly one line equal to `heading`. Its section runs
+/// from that line to the next line that starts with `## `, or to the end of the
+/// file. Each refusal names the document.
+fn section_under_one_heading(
+    document_name: &str,
+    document: &str,
+    heading: &str,
+) -> Result<String, Vec<String>> {
+    let lines: Vec<&str> = document.lines().collect();
+    let heading_lines: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == heading)
+        .map(|(index, _)| index)
+        .collect();
+    let Some(only) = heading_lines.first().copied() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md must hold one line {heading}; found none"
+        )]);
+    };
+    if heading_lines.len() > 1 {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md must hold one line {heading}; found {}",
+            heading_lines.len()
+        )]);
+    }
+    let section_start = only + 1;
+    let section_end = lines[section_start..]
+        .iter()
+        .position(|line| line.starts_with("## "))
+        .map_or(lines.len(), |offset| section_start + offset);
+    Ok(lines[section_start..section_end].join("\n"))
+}
+
 /// Every problem with one document's falsifier section, each naming the
 /// document.
 ///
@@ -1788,30 +1832,10 @@ fn falsifier_section_problems(
     own_ids: &[String],
     registered_ids: &[String],
 ) -> Vec<String> {
-    let lines: Vec<&str> = document.lines().collect();
-    let headings: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| **line == FALSIFIER_HEADING)
-        .map(|(index, _)| index)
-        .collect();
-    let Some(heading) = headings.first().copied() else {
-        return vec![format!(
-            "{document_name} CONFINEMENT.md must hold one line {FALSIFIER_HEADING}; found none"
-        )];
+    let section = match section_under_one_heading(document_name, document, FALSIFIER_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
     };
-    if headings.len() > 1 {
-        return vec![format!(
-            "{document_name} CONFINEMENT.md must hold one line {FALSIFIER_HEADING}; found {}",
-            headings.len()
-        )];
-    }
-    let start = heading + 1;
-    let end = lines[start..]
-        .iter()
-        .position(|line| line.starts_with("## "))
-        .map_or(lines.len(), |offset| start + offset);
-    let section = lines[start..end].join("\n");
     let mut problems = Vec::new();
     for id in own_ids {
         if !names_falsifier_id(&section, id) {
@@ -1845,6 +1869,74 @@ fn read_confinement_document(capsules: &Path, name: &str) -> Result<String, Stri
             path.display()
         )
     })
+}
+
+/// Every backtick-delimited span in `text`, in order.
+fn backtick_spans(text: &str) -> Vec<&str> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        spans.push(&after[..close]);
+        rest = &after[close + 1..];
+    }
+    spans
+}
+
+/// Every problem with one operations table's test citations, each naming the
+/// document and the citation.
+///
+/// The section under `OPERATIONS_HEADING` must cite at least one backtick span
+/// that holds a file relative to `capsule_dir`, two colons and a function
+/// name. A cited file must exist and hold `fn <fn>(`. The check does not decide
+/// whether that function is a `#[test]`.
+fn operations_table_citation_problems(
+    document_name: &str,
+    document: &str,
+    capsule_dir: &Path,
+) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, OPERATIONS_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let mut problems = Vec::new();
+    let mut citations: Vec<&str> = Vec::new();
+    for span in backtick_spans(&section) {
+        let Some((file, function)) = span.split_once("::") else {
+            continue;
+        };
+        if citations.contains(&span) {
+            continue;
+        }
+        citations.push(span);
+        let path = capsule_dir.join(file);
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(err) => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {span} names a file that is not \
+                     readable: {} ({err})",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if !source.contains(&format!("fn {function}(")) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {span} names a function that {} does not hold",
+                path.display()
+            ));
+        }
+    }
+    if citations.is_empty() {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} cites no file::fn test"
+        ));
+    }
+    problems
 }
 
 /// The top-level allow forms of `profile` that no `entries` item removes.
@@ -2032,6 +2124,37 @@ fn every_falsifier_id_is_named_in_its_confinement_document() {
             &document,
             &list.ids,
             &registered,
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Every test cited in an operations table exists where the table says.
+///
+/// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
+/// `OPERATIONS_TABLES`, cuts the section under `OPERATIONS_HEADING`, and
+/// requires every backtick span of the form `<file>::<fn>` to name a file under
+/// `capsules/<name>/` that holds `fn <fn>(`. A missing section, a section that
+/// cites no test, a missing file and a missing function each fail with one
+/// line. The check does not decide whether the function is a `#[test]`. The
+/// test reads files and starts no process, so it runs on every platform.
+///
+/// Falsifier: WP78 renames `outside_write_denied` in did's `tests/confine.rs`,
+/// so the did table's citation names a function that file does not hold and
+/// this test fails.
+#[test]
+fn every_operations_table_cites_existing_tests() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let mut problems = Vec::new();
+    for name in OPERATIONS_TABLES {
+        let document =
+            read_confinement_document(capsules, name).unwrap_or_else(|err| panic!("{err}"));
+        problems.extend(operations_table_citation_problems(
+            name,
+            &document,
+            &capsules.join(name),
         ));
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -2523,6 +2646,101 @@ fn falsifier_document_read_rejects_unreadable_source() {
     assert!(
         refusal.contains(&path.display().to_string()) && refusal.contains("must be readable"),
         "the refusal must name the unreadable path: {refusal}"
+    );
+}
+
+/// The operations-table check reports one line for each missing citation kind.
+///
+/// A temporary provider folder holds `tests/confine.rs` with `fn present_case()`
+/// and `src/main.rs` with `fn unit_case()`. A document whose section cites
+/// `tests/confine.rs::present_case` returns no problem. A cited function the
+/// file does not hold, a cited file that is absent, a document without the
+/// section and a section that cites no test each return one problem that names
+/// the document, the citation and the reason. The fixtures are a temporary
+/// directory; no process starts.
+///
+/// Falsifier: WP78 renames `outside_write_denied` in did's `tests/confine.rs`,
+/// so the real document's citation names a missing function; the real-document
+/// test above fails on it.
+#[test]
+fn operations_table_check_reports_each_missing_citation() {
+    let capsule = tempfile::tempdir().expect("temporary provider folder");
+    fs::create_dir_all(capsule.path().join("tests")).expect("fixture tests folder");
+    fs::create_dir_all(capsule.path().join("src")).expect("fixture src folder");
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "fn present_case() {}\n",
+    )
+    .expect("fixture integration test file");
+    fs::write(capsule.path().join("src/main.rs"), "fn unit_case() {}\n")
+        .expect("fixture unit test file");
+
+    let present = "## Operations and the rights they need\n\n| `tests/confine.rs::present_case` |\n\n## Host-OS status\n";
+    assert!(
+        operations_table_citation_problems("fixture-provider", present, capsule.path()).is_empty(),
+        "a citation of a present function must pass"
+    );
+
+    let missing_function = "## Operations and the rights they need\n\n| `tests/confine.rs::absent_case` |\n\n## Host-OS status\n";
+    let problems =
+        operations_table_citation_problems("fixture-provider", missing_function, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a missing function must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider")
+            && problems[0].contains("tests/confine.rs::absent_case")
+            && problems[0].contains("does not hold"),
+        "the reason must name the document, the citation and the missing function: {}",
+        problems[0]
+    );
+
+    let missing_file = "## Operations and the rights they need\n\n| `tests/absent.rs::present_case` |\n\n## Host-OS status\n";
+    let problems =
+        operations_table_citation_problems("fixture-provider", missing_file, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a missing file must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider")
+            && problems[0].contains("tests/absent.rs::present_case")
+            && problems[0].contains("not readable"),
+        "the reason must name the document, the citation and the missing file: {}",
+        problems[0]
+    );
+
+    let missing_section = "## Tests\n\n- `tests/confine.rs::present_case` is cited\n";
+    let problems =
+        operations_table_citation_problems("fixture-provider", missing_section, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a missing section must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider")
+            && problems[0].contains(OPERATIONS_HEADING)
+            && problems[0].contains("found none"),
+        "the reason must name the document and the missing heading: {}",
+        problems[0]
+    );
+
+    let no_citation = "## Operations and the rights they need\n\n| init |\n\n## Host-OS status\n";
+    let problems =
+        operations_table_citation_problems("fixture-provider", no_citation, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a section without a citation must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider") && problems[0].contains("cites no file::fn test"),
+        "the reason must name the document and the missing citation: {}",
+        problems[0]
     );
 }
 

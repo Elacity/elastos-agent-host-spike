@@ -578,6 +578,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Require a space after `allow` (WP77): `file_profile_contract_rejects_a_second_exec_allow`
   fails on its `(allow(literal "/x") process-exec)` case because that profile
   passes the check.
+- Rename `outside_write_denied` in `capsules/did-provider/tests/confine.rs`
+  (WP78): `every_operations_table_cites_existing_tests` fails because the did
+  operations table cites a function that file does not hold.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

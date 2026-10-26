@@ -81,8 +81,12 @@ use std::process::Command;
 /// `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
 /// both fail, and WP77, which requires a space after `allow`, so the
 /// flush-head form passes and
-/// `file_profile_contract_rejects_a_second_exec_allow` fails.
-const EXPECTED_FALSIFIERS: usize = 75;
+/// `file_profile_contract_rejects_a_second_exec_allow` fails, and task 068's
+/// WP78, which renames the did operations table's cited test in
+/// `capsules/did-provider/tests/confine.rs`, so
+/// `every_operations_table_cites_existing_tests` fails because the cited
+/// function is gone.
+const EXPECTED_FALSIFIERS: usize = 76;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
