@@ -17,8 +17,12 @@
 //! The profile is Kubo v0.40.1's import flags as
 //! `capsules/ipfs-provider/src/directory_hash.rs` sends them: CIDv1, sha2-256,
 //! raw leaves, chunker `size-262144`, no inline, no HAMT shard below its
-//! threshold. This crate runs no Kubo and pins only the single-block,
-//! non-sharded subset of that profile:
+//! threshold. The lab CID follows the
+//! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,
+//! so until an offline Kubo cross-check prints the same value as a committed
+//! pin, it is not called equal to the Runtime's CID or to Kubo's output.
+//! This crate runs no Kubo and pins only the single-block, non-sharded
+//! subset of that profile:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
 //!    leaf: its block is the file's bytes (an empty file is an empty block),
@@ -205,9 +209,9 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// one chunk and no HAMT shard. Each one changes the CID or the refusal, and
-// each has a falsifier. There is no inline setting: no CID here uses the
-// identity multihash, whatever the size of the block.
+// one chunk and no HAMT shard, computed by the lab (no Kubo runs here). Each
+// one changes the CID or the refusal, and each has a falsifier. There is no
+// inline setting: no CID here uses the identity multihash, whatever the size of the block.
 
 /// CID version 1.
 const CID_VERSION: u8 = 0x01;
