@@ -2337,6 +2337,22 @@
       "tests": [
         "hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usage"
       ]
+    },
+    {
+      "id": "MP25",
+      "title": "a cut hosted stream is read as a clean end",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            chunk = response.chunk() => chunk.map_err(|err| map_text_reqwest_failure(err, private_endpoint))?",
+          "new": "            chunk = response.chunk() => chunk.unwrap_or(None)"
+        }
+      ],
+      "tests": [
+        "hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage"
+      ]
     }
   ]
 }
