@@ -387,7 +387,6 @@ NEW_PROFILE_ATTACKS = [
     ("'(allow default)", "quoted allow default"),
     ("`(allow file*)", "quasiquote allow"),
     (",(allow file*)", "unquote allow"),
-    ("#;(allow file*)", "datum comment then allow"),
     ("(allow file-ioctl*)", "file-ioctl star"),
     ("(allow signal)", "signal"),
     ("(allow iokit-user-client*)", "iokit"),
@@ -562,8 +561,41 @@ class CitationUnlisting(unittest.TestCase):
         )
 
 
+class FalsifiedNewBypasses(unittest.TestCase):
+    """New holes on the allowlist head. Each test asks for a refusal."""
+
+    def test_falsified_hash_semicolon_hides_a_following_allow(self) -> None:
+        # The checker treats ';' as a line comment even after '#'. A Scheme
+        # #; reader comments only the next datum, so the allow that follows
+        # it stays live. The lab check already accepts this profile.
+        form = "#;(version 0)(allow file*)"
+        got = contract(form)
+        self.assertFalse(
+            got.get("ok"),
+            "a Scheme #; reader would keep (allow file*) after commenting "
+            f"(version 0); lab checker returned {got}",
+        )
+
+
 class WeakRemainingGaps(unittest.TestCase):
     """Gaps that do not reopen a host-wide grant on the allowlist gate."""
+
+    def test_weak_hash_semicolon_alone_comments_out_the_grant(self) -> None:
+        form = "#;(allow file*)"
+        got = contract(form)
+        self.assertTrue(
+            got.get("ok"),
+            "setup: #;(allow file*) must still pass because ';' comments "
+            f"out the allow; {got}",
+        )
+        extras = [
+            f
+            for f in probe({"op": "forms", "profile": fixture_profile() + form + "\n"})[
+                "forms"
+            ]
+            if f not in probe({"op": "forms", "profile": fixture_profile()})["forms"]
+        ]
+        self.assertEqual(extras, ["#"], extras)
 
     def test_weak_old_root_wide_helper_still_misses_empty_prefix(self) -> None:
         got = probe({"op": "root_wide", "form": '(allow file-read* (prefix ""))'})
