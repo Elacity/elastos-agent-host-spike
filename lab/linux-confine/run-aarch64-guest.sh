@@ -340,7 +340,9 @@ QEMU_TIMEOUT="${LC_QEMU_TIMEOUT:-600}"
 QEMU_LOG="$WORK/qemu-console.txt"
 echo "qemu_timeout_sec=$QEMU_TIMEOUT" | tee -a "$EVIDENCE/host-context.txt"
 set +e
-timeout --signal=KILL "$QEMU_TIMEOUT" qemu-system-aarch64 \
+# stdin is /dev/null so -nographic cannot SIGTTIN-stop when the host
+# script is not a foreground tty (tmux, timeout, or a pipe).
+timeout --foreground --signal=KILL "$QEMU_TIMEOUT" qemu-system-aarch64 \
     -name linux-confine-c9-aarch64 \
     -M virt \
     -cpu max \
@@ -356,7 +358,7 @@ timeout --signal=KILL "$QEMU_TIMEOUT" qemu-system-aarch64 \
     -device virtio-net-pci,netdev=n0 \
     -fsdev local,id=ev,path="$EVIDENCE",security_model=mapped-xattr \
     -device virtio-9p-pci,fsdev=ev,mount_tag=evidence \
-    > "$QEMU_LOG" 2>&1
+    < /dev/null > "$QEMU_LOG" 2>&1
 qemu_rc=$?
 set -e
 if [ "$qemu_rc" -eq 124 ]; then

@@ -421,7 +421,8 @@ class HostScriptNonceIsolation(unittest.TestCase):
         before, after = text.split("=== boot qemu-system-aarch64 TCG ===", 1)
         self.assertNotIn('echo "$NONCE" > "$EVIDENCE/nonce.txt"', before)
         self.assertIn('echo "$NONCE" > "$EVIDENCE/nonce.txt"', after)
-        self.assertIn("timeout --signal=KILL", after)
+        self.assertIn("timeout --foreground --signal=KILL", after)
+        self.assertIn("< /dev/null", after)
         self.assertIn('QEMU_LOG="$WORK/qemu-console.txt"', after)
         self.assertIn('cp "$QEMU_LOG" "$EVIDENCE/qemu-console.txt"', after)
 
