@@ -389,11 +389,9 @@ fn planned(intent: &str) -> Result<&'static [PlannedStep], Refuse> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const INTENT: &str = "summarize my notes into the journal";
-    const PREVIEW: &str = "\
+const INTENT: &str = "summarize my notes into the journal";
+#[cfg(test)]
+const PREVIEW: &str = "\
 Plan preview
 Intent: summarize my notes into the journal
 Principal: ada
@@ -410,165 +408,167 @@ Operation: append
 Resource: UsersAI/ada/.AppData/Agents/agent-host/journal
 ";
 
-    fn sample() -> Plan {
-        plan("ada", INTENT).expect("plan")
-    }
+#[cfg(test)]
+fn sample() -> Plan {
+    plan("ada", INTENT).expect("plan")
+}
 
-    #[test]
-    fn planner_lists_capability_and_resource_for_each_step() {
-        let plan = sample();
-        assert_eq!(Action::Execute.as_str(), "execute");
-        assert_eq!(Action::Message.as_str(), "message");
-        assert_eq!(plan.principal, "ada");
-        assert_eq!(plan.intent, INTENT);
-        assert_eq!(plan.steps.len(), 2);
-        assert_eq!(plan.steps[0].id, 1);
-        assert_eq!(plan.steps[0].capability.action, Action::Read);
-        assert_eq!(plan.steps[0].capability.operation, "read");
-        assert_eq!(plan.steps[0].resource, "UsersAI/ada/notes");
-        assert_eq!(plan.steps[1].id, 2);
-        assert_eq!(plan.steps[1].capability.action, Action::Write);
-        assert_eq!(plan.steps[1].capability.operation, "append");
-        assert_eq!(
-            plan.steps[1].resource,
-            "UsersAI/ada/.AppData/Agents/agent-host/journal"
-        );
-        assert_eq!(super::plan("ada", INTENT).expect("again"), plan);
-        assert_eq!(preview(&plan), PREVIEW);
+#[test]
+fn planner_lists_capability_and_resource_for_each_step() {
+    let plan = sample();
+    assert_eq!(Action::Execute.as_str(), "execute");
+    assert_eq!(Action::Message.as_str(), "message");
+    assert_eq!(plan.principal, "ada");
+    assert_eq!(plan.intent, INTENT);
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[0].id, 1);
+    assert_eq!(plan.steps[0].capability.action, Action::Read);
+    assert_eq!(plan.steps[0].capability.operation, "read");
+    assert_eq!(plan.steps[0].resource, "UsersAI/ada/notes");
+    assert_eq!(plan.steps[1].id, 2);
+    assert_eq!(plan.steps[1].capability.action, Action::Write);
+    assert_eq!(plan.steps[1].capability.operation, "append");
+    assert_eq!(
+        plan.steps[1].resource,
+        "UsersAI/ada/.AppData/Agents/agent-host/journal"
+    );
+    assert_eq!(crate::plan("ada", INTENT).expect("again"), plan);
+    assert_eq!(preview(&plan), PREVIEW);
 
-        let mut host = Host::new();
-        let review = host.review(&plan, Choice::Approve);
-        assert_eq!(preview(&plan), PREVIEW);
-        assert_eq!(review.grants().len(), 2);
-        for grant in review.grants() {
-            assert!(!PREVIEW.contains(grant.token()));
-        }
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(preview(&plan), PREVIEW);
+    assert_eq!(review.grants().len(), 2);
+    for grant in review.grants() {
+        assert!(!PREVIEW.contains(grant.token()));
     }
+}
 
-    #[test]
-    fn approved_plan_executes_with_the_approved_grants() {
-        let plan = sample();
-        let mut host = Host::new();
-        let review = host.review(&plan, Choice::Approve);
-        assert_eq!(review.choice(), Choice::Approve);
-        host.execute(&review, &plan, &plan.steps).expect("run");
-        assert_eq!(host.effects().len(), plan.steps.len());
-        for (effect, grant) in host.effects().iter().zip(review.grants()) {
-            assert_eq!(effect.step_id, grant.step_id());
-            assert_eq!(effect.action, grant.action());
-            assert_eq!(effect.operation, grant.operation());
-            assert_eq!(effect.resource, grant.resource());
-            assert_eq!(effect.grant_token, grant.token());
-        }
-        assert_eq!(host.effects()[0].resource, "UsersAI/ada/notes");
-        assert_eq!(
-            host.effects()[1].resource,
-            "UsersAI/ada/.AppData/Agents/agent-host/journal"
-        );
+#[test]
+fn approved_plan_executes_with_the_approved_grants() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.choice(), Choice::Approve);
+    host.execute(&review, &plan, &plan.steps).expect("run");
+    assert_eq!(host.effects().len(), plan.steps.len());
+    for (effect, grant) in host.effects().iter().zip(review.grants()) {
+        assert_eq!(effect.step_id, grant.step_id());
+        assert_eq!(effect.action, grant.action());
+        assert_eq!(effect.operation, grant.operation());
+        assert_eq!(effect.resource, grant.resource());
+        assert_eq!(effect.grant_token, grant.token());
     }
+    assert_eq!(host.effects()[0].resource, "UsersAI/ada/notes");
+    assert_eq!(
+        host.effects()[1].resource,
+        "UsersAI/ada/.AppData/Agents/agent-host/journal"
+    );
+}
 
-    #[test]
-    fn rejected_plan_executes_nothing() {
-        let plan = sample();
-        let mut host = Host::new();
-        let review = host.review(&plan, Choice::Reject);
-        assert_eq!(review.choice(), Choice::Reject);
-        assert!(review.grants().is_empty());
-        let error = host
-            .execute(&review, &plan, &plan.steps)
-            .expect_err("rejected");
-        assert_eq!(error, Refuse::NotApproved);
-        assert_eq!(error.to_string(), "the plan was not approved");
-        assert!(host.effects().is_empty());
-    }
+#[test]
+fn rejected_plan_executes_nothing() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Reject);
+    assert_eq!(review.choice(), Choice::Reject);
+    assert!(review.grants().is_empty());
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("rejected");
+    assert_eq!(error, Refuse::NotApproved);
+    assert_eq!(error.to_string(), "the plan was not approved");
+    assert!(host.effects().is_empty());
+}
 
-    #[test]
-    fn plan_altered_after_approval_is_refused() {
-        let plan = sample();
-        let mut host = Host::new();
-        let review = host.review(&plan, Choice::Approve);
-        let mut altered = plan.clone();
-        altered.steps[1].resource = "UsersAI/ada/secrets".to_owned();
-        assert_ne!(plan.canonical(), altered.canonical());
-        let error = host
-            .execute(&review, &altered, &altered.steps)
-            .expect_err("altered");
-        assert_eq!(error, Refuse::PlanAltered);
-        assert_eq!(error.to_string(), "the plan was altered after approval");
-        assert!(host.effects().is_empty());
-    }
+#[test]
+fn plan_altered_after_approval_is_refused() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut altered = plan.clone();
+    altered.steps[1].resource = "UsersAI/ada/secrets".to_owned();
+    assert_ne!(plan.canonical(), altered.canonical());
+    let error = host
+        .execute(&review, &altered, &altered.steps)
+        .expect_err("altered");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
 
-    #[test]
-    fn extra_step_injected_at_run_time_is_refused() {
-        let plan = sample();
-        let mut host = Host::new();
-        let review = host.review(&plan, Choice::Approve);
-        let mut steps = plan.steps.clone();
-        steps.push(Step {
-            id: 3,
-            capability: Capability {
-                action: Action::Execute,
-                operation: "run".to_owned(),
-            },
-            resource: "UsersAI/ada/Projects/build".to_owned(),
-        });
-        let error = host.execute(&review, &plan, &steps).expect_err("injected");
-        assert_eq!(error, Refuse::OutsidePlan);
-        assert_eq!(error.to_string(), "a step is outside the approved plan");
-        assert!(host.effects().is_empty());
-    }
+#[test]
+fn extra_step_injected_at_run_time_is_refused() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut steps = plan.steps.clone();
+    steps.push(Step {
+        id: 3,
+        capability: Capability {
+            action: Action::Execute,
+            operation: "run".to_owned(),
+        },
+        resource: "UsersAI/ada/Projects/build".to_owned(),
+    });
+    let error = host.execute(&review, &plan, &steps).expect_err("injected");
+    assert_eq!(error, Refuse::OutsidePlan);
+    assert_eq!(error.to_string(), "a step is outside the approved plan");
+    assert!(host.effects().is_empty());
+}
 
-    #[test]
-    fn approved_grant_runs_once() {
-        let plan = sample();
-        let mut host = Host::new();
-        let review = host.review(&plan, Choice::Approve);
-        host.execute(&review, &plan, &plan.steps).expect("once");
-        let ran = host.effects().len();
-        let error = host
-            .execute(&review, &plan, &plan.steps)
-            .expect_err("again");
-        assert_eq!(error, Refuse::GrantSpent);
-        assert_eq!(error.to_string(), "the approved grant was already used");
-        assert_eq!(host.effects().len(), ran);
-    }
+#[test]
+fn approved_grant_runs_once() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    host.execute(&review, &plan, &plan.steps).expect("once");
+    let ran = host.effects().len();
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("again");
+    assert_eq!(error, Refuse::GrantSpent);
+    assert_eq!(error.to_string(), "the approved grant was already used");
+    assert_eq!(host.effects().len(), ran);
+}
 
-    #[test]
-    fn unknown_intent_and_bad_principal_are_refused() {
-        assert_eq!(
-            plan("ada", "delete my notes").unwrap_err(),
-            Refuse::UnknownIntent
-        );
-        assert_eq!(
-            plan("ada", "delete my notes").unwrap_err().to_string(),
-            "the planner has no steps for this intent"
-        );
-        assert_eq!(plan("Ada", INTENT).unwrap_err(), Refuse::BadPrincipal);
-        assert_eq!(plan("ada/other", INTENT).unwrap_err(), Refuse::BadPrincipal);
-        assert_eq!(plan("", INTENT).unwrap_err(), Refuse::BadPrincipal);
-        assert_eq!(plan("ada.", INTENT).unwrap_err(), Refuse::BadPrincipal);
-        assert_eq!(
-            plan("ada.", INTENT).unwrap_err().to_string(),
-            "principal is not a single plain name"
-        );
-    }
+#[test]
+fn unknown_intent_and_bad_principal_are_refused() {
+    assert_eq!(
+        plan("ada", "delete my notes").unwrap_err(),
+        Refuse::UnknownIntent
+    );
+    assert_eq!(
+        plan("ada", "delete my notes").unwrap_err().to_string(),
+        "the planner has no steps for this intent"
+    );
+    assert_eq!(plan("Ada", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(plan("ada/other", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(plan("", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(plan("ada.", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(
+        plan("ada.", INTENT).unwrap_err().to_string(),
+        "principal is not a single plain name"
+    );
+}
 
-    #[test]
-    fn crate_has_no_dependencies_and_forbids_unsafe() {
-        let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-            .expect("read Cargo.toml");
-        assert!(!manifest.contains("[dependencies]"));
-        assert!(!manifest.contains("[dev-dependencies]"));
-        let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
-            .expect("read src/lib.rs");
-        assert!(
-            lib.starts_with("#![forbid(unsafe_code)]"),
-            "src/lib.rs must begin with forbid(unsafe_code)"
-        );
-    }
+#[test]
+fn crate_has_no_dependencies_and_forbids_unsafe() {
+    let _guard = plant::source_lock();
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("read Cargo.toml");
+    assert!(!manifest.contains("[dependencies]"));
+    assert!(!manifest.contains("[dev-dependencies]"));
+    let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read src/lib.rs");
+    assert!(
+        lib.starts_with("#![forbid(unsafe_code)]"),
+        "src/lib.rs must begin with forbid(unsafe_code)"
+    );
+}
 
-    #[test]
-    fn model_planted_bugs_are_caught() {
-        plant::run_all();
-    }
+#[test]
+fn model_planted_bugs_are_caught() {
+    let _guard = plant::source_lock();
+    plant::run_all();
 }

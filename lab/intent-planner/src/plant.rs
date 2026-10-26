@@ -100,6 +100,12 @@ impl Plant {
     }
 }
 
+/// Serialises source reads with the plant runner, which rewrites a source file.
+pub(crate) fn source_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs every plant in file-name order. A catch is a compiled child run whose
 /// output line for the named test ends with `FAILED`.
 pub(crate) fn run_all() {
@@ -185,6 +191,7 @@ fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
         .env("INTENT_PLANNER_PLANT_CHILD", "1")
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_TARGET_DIR", &target_dir)
+        .env("CARGO_BUILD_BUILD_DIR", target_dir.join("build"))
         .output()
         .unwrap_or_else(|error| panic!("plant {plant_id}: cannot run cargo for {test}: {error}"));
     assert!(

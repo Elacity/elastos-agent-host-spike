@@ -99,5 +99,6 @@ From the repository root:
 ```bash
 export RUST_TEST_THREADS=2
 cargo fmt --manifest-path lab/intent-planner/Cargo.toml -- --check
+cargo clippy --manifest-path lab/intent-planner/Cargo.toml --locked --offline --all-targets -- -D warnings
 cargo test --locked --offline --manifest-path lab/intent-planner/Cargo.toml
 ```
