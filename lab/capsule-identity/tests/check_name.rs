@@ -19,30 +19,8 @@ fn claimed_name_is_checked_never_trusted() {
     assert_name_mismatch(bundle.path(), CONTENT_SAMPLE_LAB_CID, named(bundle.path()));
 
     // A claim that is not a lab CID is refused as one, even when it carries
-    // the bundle's own digits.
-    let digits = WEB_APP_LAB_CID
-        .strip_prefix("lab-cid:sha256:")
-        .expect("the pin has the label");
-    let not_lab_cids = [
-        // No label, the right digits.
-        digits.to_owned(),
-        // Another label, or the label in capitals.
-        format!("sha256:{digits}"),
-        format!("LAB-CID:SHA256:{digits}"),
-        // Uppercase hex.
-        format!("lab-cid:sha256:{}", digits.to_uppercase()),
-        // A character that is not hex, in place of the last digit.
-        format!("lab-cid:sha256:{}g", &digits[..63]),
-        // A character that is not ASCII: 64 bytes, but not 64 hex digits.
-        format!("lab-cid:sha256:{}é", &digits[..62]),
-        // 63 and 65 characters, a trailing newline, and none.
-        format!("lab-cid:sha256:{}", &digits[..63]),
-        format!("lab-cid:sha256:{digits}0"),
-        format!("{WEB_APP_LAB_CID}\n"),
-        "lab-cid:sha256:".to_owned(),
-        String::new(),
-    ];
-    for claim in not_lab_cids {
+    // the bundle's own root.
+    for claim in not_lab_cids() {
         let refusal = check_name(bundle.path(), &claim)
             .expect_err("a claim that is not a lab CID must be refused");
         assert_eq!(
@@ -52,22 +30,16 @@ fn claimed_name_is_checked_never_trusted() {
             },
             "{claim:?}"
         );
-        assert_eq!(
-            refusal.to_string(),
-            format!(
-                "the claim {claim:?} is not a lab CID: a lab CID is lab-cid:sha256: and 64 lowercase hex characters"
-            )
-        );
+        assert_eq!(refusal.to_string(), not_a_lab_cid_text(&claim));
     }
 
     // The claim is checked before any bundle is read: where no bundle
     // exists, a claim that is not a lab CID is still refused as one.
     let nowhere = bundle.path().join("no-bundle-here");
+    let uppercase = WEB_APP_LAB_CID.to_uppercase();
     assert_eq!(
-        check_name(&nowhere, digits),
-        Err(Refusal::NotALabCid {
-            claimed: digits.to_owned()
-        }),
+        check_name(&nowhere, &uppercase),
+        Err(Refusal::NotALabCid { claimed: uppercase }),
         "check_name read the bundle before it checked the claim"
     );
 }

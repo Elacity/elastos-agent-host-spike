@@ -16,8 +16,10 @@ sign that printed lab CID, and a check can say whether that key did.
   decision. It sits in no admission or launch path, and no Runtime code calls
   it. Admission stays a separate decision under each Runtime's trust policy.
   A signature check that returns `Ok(())` is not a permission to run.
-- Its value is a **lab CID**, printed `lab-cid:sha256:<64 lowercase hex>`. It
-  is not the Runtime's CID and is never used as a package identity (see
+- Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS
+  directory root of the bundle, printed as 59 characters that start
+  `bafybei`. It is a prototype, not an admission, and it defines no shared
+  capsule identity. It is not the Runtime's published name (see
   [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)).
 - The one schema check is the Runtime's own. `capsule.json` at the bundle root
   is parsed as `elastos_common::CapsuleManifest`, which refuses an unknown
@@ -26,23 +28,62 @@ sign that printed lab CID, and a check can say whether that key did.
 
 ## The encoding
 
+The lab CID is the CID of the bundle's UnixFS root directory, made the way
+Anders's answer (Q3) asks: CIDv1, SHA-256, the model package profile. The
+profile is Kubo v0.40.1's import flags as
+`capsules/ipfs-provider/src/directory_hash.rs` sends them (`ADD_OPTIONS`,
+lines 21-43, and the HAMT defaults at lines 507-517): CIDv1, `sha2-256`, raw
+leaves, chunker `size-262144`, trickle off (balanced layout), `max-file-links`
+174, `max-directory-links` 0, HAMT fanout 256 and size threshold 256KiB, no
+inline (inline limit 32 unused), no preserved mode or mtime, no empty
+directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
+The tests pin only the single-block, non-sharded subset of that profile: one
+raw leaf per file and one block per directory. Anything bigger is refused, not
+named another way.
+
 To recompute a lab CID by hand:
 
-1. Start the stream with the framing tag: the 30 bytes
-   `lab.capsule-identity.bundle/v1` and one newline byte, 31 bytes in all.
-2. Take every regular file under the bundle root. Its bundle path is its path
-   below the root, parts joined with `/`, in UTF-8. Folders add nothing
-   themselves.
-3. Sort the files by their bundle path's UTF-8 bytes.
-4. For each file in that order, append: the path's length in bytes as 8 bytes
-   big-endian, the path bytes, the content's length as 8 bytes big-endian, and
-   the content bytes.
-5. Take SHA-256 of the whole stream. Print `lab-cid:sha256:` and the digest as
-   64 lowercase hex characters.
+1. Take every regular file under the bundle root. Its bundle path is its path
+   below the root, parts joined with `/`, in UTF-8.
+2. Each file of at most 262144 bytes is one **raw leaf**. Its block is the
+   file's bytes (an empty file is an empty block). Its CID is the 36 bytes
+   `01 55 12 20` and the SHA-256 of the block: CID version 1, the raw codec
+   `0x55`, the multihash code `0x12` (sha2-256) and length `0x20` (32). Its
+   Tsize is its length. A file of 262145 bytes or more is refused with its
+   path, its length and the limit: there is no chunked file DAG.
+3. Each path part but the last is a **directory**: `browser/app.js` is a
+   directory `browser` with a link named `app.js`. The root is the directory
+   of the bundle's entries. No empty directory is ever made.
+4. A directory's **block** is dag-pb. Sort its children by name bytes. For each
+   child, write protobuf field 2 (tag `0x12`, then the length as a varint)
+   holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
+   (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a varint.
+   Then write field 1 (`0x0a 0x02`) holding the UnixFS data `08 01`: type
+   (field 1) = 1, a directory. Lengths and Tsizes are ordinary unsigned
+   varints: 7 bits per byte, low bits first, so a value over 127 takes two
+   bytes. A block over 262144 bytes is refused with the directory's path (`.`
+   is the root) and the limit: there is no HAMT shard. Kubo shards later, by
+   an estimate of its links' size, so this refusal comes first and fails
+   closed.
+5. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
+   codec `0x70`). The Tsize of a link to a directory is the length of its
+   block plus the Tsizes of its own links. Every varint inside a CID here is
+   one byte.
+6. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
+   RFC 4648 base32, in the lowercase alphabet
+   `abcdefghijklmnopqrstuvwxyz234567`, with no `=` padding: 288 bits make 58
+   characters, the last one padded with two zero bits. The result is 59
+   characters, and `01 70 12 20` always prints as `bafybei`.
 
-Nothing else enters the stream: no folder name, no absolute path, no file
-time, mode or owner. The two length prefixes keep every boundary clear, so two
-different bundles never make the same stream.
+For example, `content-sample`'s `sample.example` is 16 bytes, so its leaf CID
+is `bafkreieigdqewmuwbhvduqyyc5lg2eromsgdbnezmrdxmi62lux26qflgy` (`bafkrei` is
+`01 55 12 20`). The root block lists `capsule.json` (895 bytes, Tsize `ff 06`)
+and then `sample.example` (Tsize `10`), and prints as the pin below.
+
+Nothing else enters a block: no folder name, no absolute path, no file time,
+mode, owner or symlink target. Every name and every byte string is written
+with its length, and each file's bytes are their own block, named by hash, so
+two different bundles never make the same root.
 
 The same rule in a few lines of Python, which gives every pin below from the
 committed fixture files:
@@ -50,19 +91,101 @@ committed fixture files:
 ```python
 import hashlib
 
+B32 = "abcdefghijklmnopqrstuvwxyz234567"
+
+def varint(n):
+    out = b""
+    while n >= 0x80:
+        out, n = out + bytes([n & 0x7F | 0x80]), n >> 7
+    return out + bytes([n])
+
+def field(number, data):  # protobuf, wire type 2
+    return bytes([number << 3 | 2]) + varint(len(data)) + data
+
+def cid(codec, block):
+    return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
+
+def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
+    links = b""
+    total = 0
+    for name in sorted(tree, key=lambda n: n.encode("utf-8")):
+        child = tree[name]
+        if isinstance(child, dict):
+            child_cid, tsize = directory(child)
+        else:
+            assert len(child) <= 262144
+            child_cid, tsize = cid(0x55, child), len(child)
+        link = field(1, child_cid) + field(2, name.encode("utf-8"))
+        links += field(2, link + b"\x18" + varint(tsize))
+        total += tsize
+    block = links + field(1, b"\x08\x01")
+    assert len(block) <= 262144
+    return cid(0x70, block), len(block) + total
+
 def lab_cid(files):  # {bundle path: bytes}
-    h = hashlib.sha256(b"lab.capsule-identity.bundle/v1\n")
-    for path in sorted(files, key=lambda p: p.encode("utf-8")):
-        p, data = path.encode("utf-8"), files[path]
-        h.update(len(p).to_bytes(8, "big") + p)
-        h.update(len(data).to_bytes(8, "big") + data)
-    return "lab-cid:sha256:" + h.hexdigest()
+    root = {}
+    for path, data in files.items():
+        *folders, name = path.split("/")
+        node = root
+        for folder in folders:
+            node = node.setdefault(folder, {})
+        node[name] = data
+    bits = "".join(f"{byte:08b}" for byte in directory(root)[0]) + "00"
+    return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
 ```
 
 In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle
 and `encode_entries` is the encoder. They are the only code that names a
-bundle; tests call them and copy neither. `check_name` checks a claimed name by
-calling `lab_cid`; it computes no name of its own.
+bundle; tests call them and copy neither. `encode_entries` holds the one
+naming hash, and leaves and directory blocks share it. It also refuses what
+the walk can never give but a caller of the encoder could: a path with an
+empty, `.` or `..` part, two entries with one path, and one path that is both
+a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
+claimed name by calling `lab_cid`; it computes no name of its own.
+
+The CIDv1 bytes and the base32 text are one marked lab copy inside
+`src/lib.rs` (`cid_bytes`, one encoder, one decoder). The Runtime's `cid`
+0.11 crate lives only in `elastos-server` and `elastos-namespace`, which the
+lab does not link, and any new crate here would make the locks of
+`lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
+crate) stale. So the lab adds no crate.
+
+Each profile setting has a named test and a falsifier (`tests/encoding.rs`;
+the pins are checked against an uncommitted `python3 -I` recomputation written
+from these rules, not from the Rust code):
+
+| Setting | Named test | Falsifier |
+| --- | --- | --- |
+| CID version 1 for directories | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18a (CIDv0) |
+| Multihash code `0x12`, sha2-256 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18b (`0x13`) |
+| Raw leaves, codec `0x55` | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18c (`0x70`) |
+| Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
+| Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
+| A larger file is refused | `file_over_the_chunk_limit_is_refused` | F-CI18e (no refusal) |
+| Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
+| Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
+| A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
+| No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
+| The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
+| A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
+| An empty file is an empty raw leaf | `empty_file_has_the_pinned_cid` | F-CI18n (dag-pb file node) |
+| Lengths over 127 take two varint bytes | `long_utf8_name_has_the_pinned_cid` (a 154-byte name) | F-CI18o (one byte) |
+| A name and a file's length are written with their lengths | `path_and_content_boundaries_cannot_collide` | F-CI1b, F-CI1p (name), F-CI1q (Tsize) |
+| A file and a directory at one path are refused | `encoder_refuses_file_directory_conflict` | F-CI18p, F-CI18q (one silently replaces the other) |
+| An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
+| Two entries with one path are refused | `encoder_refuses_a_duplicate_path` | F-CI1r |
+
+The three pins these tests add are in `tests/common/mod.rs`, and each matches
+the `python3 -I` check (the first is also blocked task 010's pin): the
+chunk-limit bundle (`content-sample`'s `capsule.json` and
+`sample.example` as 262144 zero bytes, built in a temp dir and never
+committed) is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`;
+`content-sample` with an added empty file `empty` is
+`bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we`; and
+`content-sample` with a file named fifty `名` and `.txt` holding `long name`
+and a newline is `bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy`.
+The directory-block test builds 1100 empty files with 200-byte names in a temp
+dir.
 
 ## Fixtures and their pinned lab CIDs
 
@@ -73,15 +196,15 @@ local file (such as `.DS_Store`) never reaches a pin. The pins are in
 
 | Fixture | Files | Where the bytes come from | Pinned lab CID |
 | --- | --- | --- | --- |
-| `content-sample` | `capsule.json`, `sample.example` | `templates/capsules/viewer-content/content.capsule.json` and `sample.example`, byte for byte | `lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51` |
-| `web-app` | `capsule.json`, `browser/app.js`, `browser/index.html` | `templates/capsules/web-app/`, byte for byte | `lab-cid:sha256:5559e5e3fe8f8e31006c035af0367d87810e214d987d1e8548d1bac03ca82066` |
+| `content-sample` | `capsule.json`, `sample.example` | `templates/capsules/viewer-content/content.capsule.json` and `sample.example`, byte for byte | `bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi` |
+| `web-app` | `capsule.json`, `browser/app.js`, `browser/index.html` | `templates/capsules/web-app/`, byte for byte | `bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q` |
 | `wc001-core` | `capsule.json` | written for this lab | not pinned (below) |
-| `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `lab-cid:sha256:43a918a50818e6f6ec81543a6dd423c796b03db028d0c7a4222f354c2afdc054` |
-| `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `lab-cid:sha256:274c6cf5685ec5dd638e91d8ac5e2634ebbeb523e756684587b61c1cb52fd6b8` |
-| `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `lab-cid:sha256:c28893c87d43643092656fd4382bb8611659f12365a4533050639b909cc6a26f` |
-| `provider-variant-a` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture aarch64-darwin` and a newline, a lab stand-in | `lab-cid:sha256:cadd66f6496712053be0b5d994c6f9bee0961d4c76645d49e8cb68b5e7706979` |
-| `provider-variant-b` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture x86_64-linux` and a newline, a lab stand-in | `lab-cid:sha256:753cf8894d4c47386dabf4efcb040337c7654bac885e37828d70ec791cf40b27` |
-| recipe (not a fixture) | `recipes/provider-variant.recipe` | written for this lab: four lines of ASCII, a lab stand-in; named as one entry, `provider-variant.recipe` | `lab-cid:sha256:22de169e0c4ca22fff6b414664de8d8bc2c5fc375b9834369807ef828ed1050f` |
+| `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym` |
+| `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe` |
+| `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq` |
+| `provider-variant-a` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture aarch64-darwin` and a newline, a lab stand-in | `bafybeig77gyxfd7lldgueo5qtn2o7sjvwdr6txm3f7fc4dl4pyjsuvgoc4` |
+| `provider-variant-b` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture x86_64-linux` and a newline, a lab stand-in | `bafybeieh6wqfmuqdn3nv7eu4vyd7j3tpxnt3mefzj2hmreumyazd4uzhr4` |
+| recipe (not a fixture) | `recipes/provider-variant.recipe` | written for this lab: four lines of ASCII, a lab stand-in; named as one entry, `provider-variant.recipe` | `bafybeicgxv53aweiky6lfkoin7iqf5pc6eggehxv4fjnqmmwrfedyhskxm` |
 
 `provider` and `model` are task 012's (see [three kinds](#three-kinds-share-the-package-rules)).
 The two provider variants and the recipe are task 015's (see
@@ -153,12 +276,20 @@ each change, `check_name` with the old lab CID is refused with both values.
 or any other record claims meets the bytes through `check_name(bundle,
 claimed)` (`tests/check_name.rs`):
 
-1. A claim that is not `lab-cid:sha256:` and 64 lowercase hex characters is
-   refused before the bundle is read, for example
-   `the claim "5559e5e3…2066" is not a lab CID: a lab CID is lab-cid:sha256: and 64 lowercase hex characters`.
-   Bare hex, another label, uppercase hex, a character that is not hex, 63 or
-   65 characters and a trailing newline are each refused this way, even with
-   the bundle's own digits.
+1. A claim that is not a lab CID is refused before the bundle is read, for
+   example
+   `the claim "BAFYBEIBC5…DQY7Q" is not a lab CID: a lab package CID is a 59-character CIDv1 bafybei... directory root`.
+   A lab CID is `b` and base32 whose bytes are `01 70 12 20` and 32 bytes,
+   and those bytes must print as exactly the claim. So a raw leaf's
+   `bafkrei...` CID, the uppercase form, the root without its `b`, 58 or 60
+   characters, the old `lab-cid:sha256:` and 64 hex form, a `Qm...` CIDv0, a
+   `bafybei` text whose 8th character is outside `a`-`h` (its bytes do not
+   start `01 70 12 20`), the right root with unused low bits set in its last
+   character (a second spelling of the same bytes), a character outside the
+   base32 alphabet, a trailing newline and the empty string are each refused
+   this way, even when they carry the bundle's own root. The list is one
+   function, `not_lab_cids()` in `tests/common/mod.rs`, which the parse and
+   both name checks are tested on.
 2. The name is recomputed from the bytes with `lab_cid`, the one naming path,
    and compared. A lab CID the bytes do not give is refused with both values:
    `bundle bytes name <actual>; the claim is <claimed>`.
@@ -168,11 +299,11 @@ claimed)` (`tests/check_name.rs`):
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (label), F-CI3k (length), F-CI3l (hex digits), F-CI3m (lowercase), F-CI3p (order) |
+| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (any CID bytes), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
 | `lab_cid`'s refusals pass through | `check_name_preserves_lab_cid_refusals` | F-CI3n |
 | `check_name` names the bundle only by calling `lab_cid` | `check_name_uses_the_single_naming_path` | F-CI3o |
 
-There are no entries F-CI3e (leave `capsule.json` out of the stream) and
+There are no entries F-CI3e (leave `capsule.json` out of the name) and
 F-CI3f (name only the manifest and the entrypoint): they would plant exactly
 the edits of F-CI1k and F-CI1l. Those two entries carry this task's tests
 instead, so no edit has two entries (P10). F-CI3g also names the four byte
@@ -273,14 +404,14 @@ the bytes it hands out are the bytes its lab CID names.
 - Since task 016 it also keeps, in a private field, whether the one manifest
   check found the manifest's `type` to be `wasm`. Only the variant binding's
   check (e2) reads it, and no accessor hands it out.
-- The entries come in the walk's order. The encoder sorts them; a caller that
-  needs an order sorts them by path.
+- The entries come in the walk's order. The encoder sorts each directory's
+  links by name; a caller that needs an order sorts the entries by path.
 - It lives in memory only. It has no file or serialized form, and nothing
   writes or stages its entries anywhere.
 
 **The checked name check.** `checked.check_name(claimed)` is the checked form
-of `check_name(bundle, claimed)`. Both run the one claim check (the
-`lab-cid:sha256:` label and 64 lowercase hex characters) and the one compare,
+of `check_name(bundle, claimed)`. Both run the one claim check (`b` and the
+canonical base32 of `01 70 12 20` and a 32-byte root) and the one compare,
 with the same refusals and texts. The checked form judges the lab CID the value
 holds and reads nothing, so it judges exactly the bytes in `entries()`, even
 after the folder has changed. `check_name(bundle, claimed)` reads the folder as
@@ -309,7 +440,7 @@ walk only through it.
 | A bundle `lab_cid` refuses gets the same refusal, variant and text, and no value | `checked_bundle_refuses_what_lab_cid_refuses` | F-CI9c |
 | One manifest check, in the seam | `checked_bundle_checks_the_manifest_once` | F-CI9c (moved out), F-CI9g (a second one) |
 | Private fields; the seam is the one place that builds one; no `&mut` | `checked_bundle_fields_are_private` | F-CI9d (public field), F-CI9e (constructor), F-CI9f (`&mut` lab CID) |
-| The checked form judges the bytes it holds; the path form reads the folder now | `checked_name_check_judges_the_checked_bytes` | F-CI3g, F-CI9h (no compare), F-CI9i (bare hex), F-CI9j (walks again) |
+| The checked form judges the bytes it holds; the path form reads the folder now | `checked_name_check_judges_the_checked_bytes` | F-CI3g, F-CI9h (no compare), F-CI9i (no `b`, its own reading), F-CI9j (walks again) |
 | The checked form refuses a lab CID its bytes do not give | `checked_name_check_refuses_a_mismatch` | F-CI3g, F-CI9h |
 | The checked form calls the one claim check and the one compare, and reads nothing | `checked_name_check_shares_the_claim_check_and_the_compare` | F-CI9h, F-CI9i, F-CI9j |
 
@@ -322,19 +453,19 @@ too: a checked form with a compare of its own would leave
 
 `str::parse::<LabCid>()` is the one way to check a printed value's form and
 read it back (`impl FromStr for LabCid`, task 013). It runs the same claim
-check the two name checks make, `lab_cid_digits`, and then decodes the digits.
-Text the name checks refuse as not a lab CID gets the same
-`Refusal::NotALabCid { claimed }`, with the same text. A consumer calls it and
-never copies the label or the 64-hex rule.
+check the two name checks make, `lab_cid_digits`, and keeps the root digest it
+gives: the parse decodes nothing itself. Text the name checks refuse as not a
+lab CID gets the same `Refusal::NotALabCid { claimed }`, with the same text. A
+consumer calls it and never copies the base32 or the CID bytes.
 
 - Parsing is not a name check. A parsed value names no bytes until
   `check_name` or `CheckedBundle::check_name` compares it with a bundle.
 - A consumer that needs a well-formed synthetic value names synthetic entries
   with `encode_entries(&[BundleEntry { .. }])` and prints the result. It never
   writes the printed form by hand.
-- The printed form changes when task 010's swap lands. Code that reads a
-  printed value with this parse, and makes values with `encode_entries`, keeps
-  working unchanged.
+- The printed form changed when task 018 (the carry of blocked task 010)
+  swapped it to the `bafybei...` root. Code that reads a printed value with
+  this parse, and makes values with `encode_entries`, kept working unchanged.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -355,8 +486,8 @@ order:
 1. the domain `lab.capsule-identity.name-signature/v1`
    (`NAME_SIGNATURE_DOMAIN`);
 2. one `0x00` byte;
-3. the UTF-8 bytes of the printed lab CID, label included
-   (`lab-cid:sha256:<64 lowercase hex>`).
+3. the UTF-8 bytes of the whole printed lab CID, its `b` included (the
+   59-character `bafybei...` text).
 
 That is the three-step digest in `domain_separated_sign`
 (`elastos/crates/elastos-server/src/crypto.rs:88-128`): SHA-256 of
@@ -417,12 +548,12 @@ is the walk plus the checked form, so a caller checks the signature on the
 bytes it then audits or stages.
 
 **Pinned message digest.** For `content-sample`'s pinned lab CID, the digest
-is `650c3b5baeb1e1e2f3cf1e87ded48ee496090c863d11afb9c80fbf07efb59f11`.
+is `e04c241b58d424a79e9c4308dc611216890d528ee098646acef7a836dbf4fbb9`.
 
 ```python
 import hashlib
 
-name = b"lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51"
+name = b"bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi"
 digest = hashlib.sha256(
     b"lab.capsule-identity.name-signature/v1" + b"\x00" + name
 ).hexdigest()
@@ -593,7 +724,7 @@ a silent change. A second implementation of the encoding must agree; for
 ```python
 import hashlib
 
-cid = "lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51"
+cid = "bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi"
 did = "<the signer's did:key>"
 payload = ('{"cid":"%s","schema":"lab.capsule-identity.record/v1","signer_did":"%s"}' % (cid, did)).encode()
 digest = hashlib.sha256(b"lab.capsule-identity.package-record/v1" + b"\x00" + payload).hexdigest()
@@ -720,7 +851,7 @@ web-projection app: role `app`, type `web-projection`), a provider
 | The provider and model pins | `lab_cid_matches_the_pinned_value_for_each_fixture` (`tests/fixtures.rs`) | F-CI1l, F-CI12a |
 
 The first two tests are in `tests/kinds.rs`. F-CI12a leaves `weights.gguf`
-out of the stream while the walk still reads it. F-CI1l (name only the
+out of the name while the walk still reads it. F-CI1l (name only the
 manifest and the entrypoint) does not drop `weights.gguf`, because that is
 the model's entrypoint, so F-CI12a is a different edit, not a second entry
 for one edit. F-CI1l also names `three_kinds_share_the_package_rules`, which
@@ -805,7 +936,7 @@ pairs are given in never changes the bytes. For the test's binding (a under
 `aarch64-darwin`, b under `x86_64-linux`), with the signer's DID written in:
 
 ```
-{"recipe":"lab-cid:sha256:22de169e0c4ca22fff6b414664de8d8bc2c5fc375b9834369807ef828ed1050f","schema":"lab.capsule-identity.variant-binding/v1","signer_did":"<the signer's did:key>","variants":[{"cid":"lab-cid:sha256:cadd66f6496712053be0b5d994c6f9bee0961d4c76645d49e8cb68b5e7706979","platform":"aarch64-darwin"},{"cid":"lab-cid:sha256:753cf8894d4c47386dabf4efcb040337c7654bac885e37828d70ec791cf40b27","platform":"x86_64-linux"}]}
+{"recipe":"bafybeicgxv53aweiky6lfkoin7iqf5pc6eggehxv4fjnqmmwrfedyhskxm","schema":"lab.capsule-identity.variant-binding/v1","signer_did":"<the signer's did:key>","variants":[{"cid":"bafybeig77gyxfd7lldgueo5qtn2o7sjvwdr6txm3f7fc4dl4pyjsuvgoc4","platform":"aarch64-darwin"},{"cid":"bafybeieh6wqfmuqdn3nv7eu4vyd7j3tpxnt3mefzj2hmreumyazd4uzhr4","platform":"x86_64-linux"}]}
 ```
 
 **The digest.** The signature is Ed25519 over
@@ -955,18 +1086,32 @@ equal the artifact's signed pin (`require_import_cid`). The per-capsule record
 (`elastos/crates/elastos-server/src/capsule_record.rs:1-4` and `:24-34`). The
 archive is a gzip PAX tar made by `create_capsule_tar`
 (`scripts/publish-release.sh:621-655`): it holds the capsule folder's name,
-folder entries, normalized modes and symbolic links. This harness hashes a
-plain framed stream of regular files instead, so its value never equals the
-Runtime's CID, and it does not try to reproduce it. To keep the two apart, the
-value prints as `lab-cid:sha256:` and is called "lab CID" in code, output and
-docs. Lines read at `c6709039d`; they are the same at `1e5f33d34`.
+folder entries, normalized modes and symbolic links. Lines read at
+`c6709039d`; they are the same at `1e5f33d34`. The archive's hash and CID are
+a delivery check of those archive bytes, not this CID.
+
+This harness names the bundle's own files instead: the CIDv1 SHA-256 UnixFS
+directory root of the model package profile (Anders's answer, Q3; see
+[the encoding](#the-encoding)), over the regular files alone. Modes, mtimes,
+owners, the folder's name and symlink targets stay outside it, and a symlink
+is refused by the walk, never named as a UnixFS symlink. So its value never
+equals the archive's CID, and it does not try to reproduce it. It is printed
+as the `bafybei...` text and called "lab CID" (a lab package CID) in code,
+output and docs. It is a prototype, not an admission: no Runtime code reads
+it, and it defines no shared capsule identity. Rong's DR-1 put the swap from
+the old framed `lab-cid:sha256:` value inside the one `lab_cid` path, so no
+second identity scheme sits beside it (task 018, the carry of blocked task
+010).
 
 ## Claim scope
 
 One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0
 (f8297e351 2025-10-28). The swap tests make each change happen at a chosen
 moment through the observer; they do not prove the walk against every timing
-on every filesystem. Not checked here: Linux, and the Runtime's IPFS CID.
+on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and
+Kubo itself (none is installed on this Mac; the pins are checked by an
+uncommitted `python3 -I` recomputation written from the byte rules). The
+tests pin the single-block, non-sharded subset of the profile only.
 
 ## Run
 
@@ -978,8 +1123,8 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
 `elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
-by path (read only, for the one `did:key` encoder and decoder), `hex`,
-`serde_json`, `sha2`, `ed25519-dalek` 2.1 with its `rand_core` feature, and
+by path (read only, for the one `did:key` encoder and decoder), `hex` (since
+task 018 only the tests use it), `serde_json`, `sha2`, `ed25519-dalek` 2.1 with its `rand_core` feature, and
 `rustix` 1.1.4 with its `fs` feature, for safe `openat`, `fstat` and listing
 from a handle (`std` cannot open relative to a handle, and the crate forbids
 `unsafe`). Dev-dependencies: `tempfile` and `rand` 0.8 (the operating system's
@@ -1006,7 +1151,8 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
-tests/encoding.rs        order, boundaries, label, one file per path
+tests/encoding.rs        order, boundaries, the printed form, one file per path,
+                         each UnixFS profile setting
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
 tests/kinds.rs           app, provider and model share the package rules; one closure
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
@@ -1022,7 +1168,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 162 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 181 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1040,7 +1186,8 @@ F-CI11a to F-CI11x (see
 F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)), and task 015's
 F-CI15a to F-CI15z and F-CI15aa to F-CI15af, task 016's F-CI16a to
 F-CI16i, and task 017's F-CI17a (all three: see
-[the variant binding](#lab-variant-binding-outside-the-bundles)).
+[the variant binding](#lab-variant-binding-outside-the-bundles)), and task
+018's F-CI18a to F-CI18s (see [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h and F-CI4i edits a file the runner
@@ -1051,6 +1198,25 @@ The runner still runs them. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged.
+
+Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
+whose text it removed are re-targeted in place: the same id, the same bug in
+the new form, the same named tests. The framing and its two length prefixes
+are now a link's name length and its Tsize: F-CI1b drops both, F-CI1p the
+name's length, F-CI1q the Tsize, and `path_and_content_boundaries_cannot_collide`
+now also pins its two bundles so it catches them. F-CI1a drops each
+directory's link sort; F-CI1c folds the time into every directory block;
+F-CI1d prints without the `b`; F-CI1r keeps a second link of one name. F-CI3b
+joins absolute paths as folders (a leading `/` would be refused, not named).
+F-CI3d and F-CI3j keep their edits, with titles that no longer say stream.
+The hex claim check is now the base32 one: F-CI3g skips the compare, F-CI3h
+takes the claim without its `b`, F-CI3k drops the CID-bytes check, F-CI3l
+drops characters outside the alphabet first, F-CI3m lowercases the claim
+first, F-CI9i reads the claim itself without the `b`, F-CI4j signs the text
+without the `b`, and F-CI13a to F-CI13c plant their bugs in the parse, which
+now keeps the claim check's root. F-CI14d and F-CI14e anchor on
+`MANIFEST_FILE` and `NAME_SIGNATURE_DOMAIN`, since the two constants they
+anchored on are gone. F-CI15ae compares only the `bafybei` start.
 
 Task 016 moved seventeen older edits, each with its same bug and the same
 tests. The seam now keeps `check_manifest`'s answer
@@ -1100,8 +1266,10 @@ At task 012 it reported `summary: 120 CAUGHT of 120`. At task 015 it reported
 `summary: 152 CAUGHT of 152` (with the id prefix `F-CI15`: 32 of 32). At
 task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 `F-CI16`: 9 of 9). At task 017, with the id prefix `F-CI17`, it reported
-`summary: 1 CAUGHT of 1`.
+`summary: 1 CAUGHT of 1`. At task 018 it reported
+`summary: 181 CAUGHT of 181` (`baseline: 112 named tests pass without an edit,
+0 do not`; with the id prefix `F-CI18`: 19 of 19).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016 and 017 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017 and 018 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

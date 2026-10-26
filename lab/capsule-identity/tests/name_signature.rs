@@ -15,7 +15,7 @@ use common::*;
 /// SHA-256 of `domain || 0x00 || content-sample's printed lab CID`. README
 /// pins the same digest.
 const CONTENT_SAMPLE_NAME_DIGEST: &str =
-    "650c3b5baeb1e1e2f3cf1e87ded48ee496090c863d11afb9c80fbf07efb59f11";
+    "e04c241b58d424a79e9c4308dc611216890d528ee098646acef7a836dbf4fbb9";
 
 fn sign(bundle: &Path) -> (ed25519_dalek::SigningKey, NameSignature) {
     let key = fresh_signing_key();

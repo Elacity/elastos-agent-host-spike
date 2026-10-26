@@ -27,23 +27,95 @@ use tempfile::TempDir;
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
 /// values.
 pub const CONTENT_SAMPLE_LAB_CID: &str =
-    "lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51";
-pub const WEB_APP_LAB_CID: &str =
-    "lab-cid:sha256:5559e5e3fe8f8e31006c035af0367d87810e214d987d1e8548d1bac03ca82066";
-pub const AGENT_HOST_LAB_CID: &str =
-    "lab-cid:sha256:43a918a50818e6f6ec81543a6dd423c796b03db028d0c7a4222f354c2afdc054";
-pub const PROVIDER_LAB_CID: &str =
-    "lab-cid:sha256:274c6cf5685ec5dd638e91d8ac5e2634ebbeb523e756684587b61c1cb52fd6b8";
-pub const MODEL_LAB_CID: &str =
-    "lab-cid:sha256:c28893c87d43643092656fd4382bb8611659f12365a4533050639b909cc6a26f";
+    "bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi";
+pub const WEB_APP_LAB_CID: &str = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
+pub const AGENT_HOST_LAB_CID: &str = "bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym";
+pub const PROVIDER_LAB_CID: &str = "bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe";
+pub const MODEL_LAB_CID: &str = "bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq";
 pub const PROVIDER_VARIANT_A_LAB_CID: &str =
-    "lab-cid:sha256:cadd66f6496712053be0b5d994c6f9bee0961d4c76645d49e8cb68b5e7706979";
+    "bafybeig77gyxfd7lldgueo5qtn2o7sjvwdr6txm3f7fc4dl4pyjsuvgoc4";
 pub const PROVIDER_VARIANT_B_LAB_CID: &str =
-    "lab-cid:sha256:753cf8894d4c47386dabf4efcb040337c7654bac885e37828d70ec791cf40b27";
+    "bafybeieh6wqfmuqdn3nv7eu4vyd7j3tpxnt3mefzj2hmreumyazd4uzhr4";
 /// The lab CID of `recipes/provider-variant.recipe`: the encoder over one
 /// entry, `provider-variant.recipe` with the file's bytes.
 pub const PROVIDER_VARIANT_RECIPE_LAB_CID: &str =
-    "lab-cid:sha256:22de169e0c4ca22fff6b414664de8d8bc2c5fc375b9834369807ef828ed1050f";
+    "bafybeicgxv53aweiky6lfkoin7iqf5pc6eggehxv4fjnqmmwrfedyhskxm";
+
+/// The chunk-limit bundle, built in a temp dir and never committed:
+/// content-sample's `capsule.json` and `sample.example` as 262144 zero bytes,
+/// the largest file one raw leaf holds.
+pub const CHUNK_LIMIT_LAB_CID: &str = "bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4";
+/// content-sample with one more file, `empty`, of zero bytes: a raw leaf
+/// whose block is empty.
+pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we";
+/// content-sample's entries and one more, [`long_utf8_name`] holding
+/// `long name\n`: its name and its link are longer than 127 bytes, so their
+/// protobuf lengths take two varint bytes.
+pub const LONG_UTF8_NAME_LAB_CID: &str =
+    "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
+
+/// A 154-byte UTF-8 file name: fifty three-byte characters and `.txt`.
+pub fn long_utf8_name() -> String {
+    format!("{}.txt", "\u{540d}".repeat(50))
+}
+
+/// The leaf CID of content-sample's `sample.example`: a raw leaf, CIDv1 with
+/// codec `0x55`, so a `bafkrei...` CID and no directory root. The encoder
+/// never prints it; the claim checks refuse it.
+pub const SAMPLE_EXAMPLE_LEAF_CID: &str =
+    "bafkreieigdqewmuwbhvduqyyc5lg2eromsgdbnezmrdxmi62lux26qflgy";
+
+/// The text that names no lab package CID: one list, for the parse and both
+/// name checks. Each is refused as not a lab CID, even where it carries
+/// web-app's own root.
+pub fn not_lab_cids() -> Vec<String> {
+    let pin = WEB_APP_LAB_CID;
+    assert_eq!((pin.len(), &pin[..7]), (59, "bafybei"), "{pin}");
+    let ends_with = |last: char| format!("{}{last}", &pin[..58]);
+    // The last character holds 3 bits of the digest and 2 unused low bits,
+    // so a pin's last letter has its 2 low bits clear. Setting one gives a
+    // second spelling of the same bytes.
+    let alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    let last = alphabet.find(&pin[58..]).expect("a base32 letter");
+    assert_eq!(last % 4, 0, "{pin} has unused bits set");
+    let low_bit_set = alphabet.as_bytes()[last | 1] as char;
+    vec![
+        // A raw leaf's CID: CIDv1, but codec 0x55, not a directory root.
+        SAMPLE_EXAMPLE_LEAF_CID.to_owned(),
+        // The uppercase form: the multibase `B`, base32 in capitals.
+        pin.to_uppercase(),
+        // The root without its multibase `b`.
+        pin[1..].to_owned(),
+        // 58 and 60 characters.
+        pin[..58].to_owned(),
+        format!("{pin}a"),
+        // The old printed form: the label and 64 lowercase hex.
+        format!(
+            "lab-cid:sha256:{}",
+            "5559e5e3fe8f8e31006c035af0367d87810e214d987d1e8548d1bac03ca82066"
+        ),
+        // A CIDv0, which is a bare base58 multihash.
+        "QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn".to_owned(),
+        // 59 characters starting bafybei, but the 8th is outside a-h, so its
+        // bytes do not start 01 70 12 20.
+        format!("{}z{}", &pin[..7], &pin[8..]),
+        // The right root with unused low bits set: not canonical.
+        ends_with(low_bit_set),
+        // A character that is not base32, and one that is not ASCII.
+        ends_with('1'),
+        ends_with('é'),
+        // A trailing newline, and nothing.
+        format!("{pin}\n"),
+        String::new(),
+    ]
+}
+
+/// The text of the refusal of `claim`, which is not a lab CID.
+pub fn not_a_lab_cid_text(claim: &str) -> String {
+    format!(
+        "the claim {claim:?} is not a lab CID: a lab package CID is a 59-character CIDv1 bafybei... directory root"
+    )
+}
 
 /// A committed fixture: its folder under `fixtures/` and the files of its
 /// bundle.
