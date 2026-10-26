@@ -133,22 +133,39 @@ Bash here is 5.2.21. macOS `/bin/bash` 3.2 was not executed. `bash --posix -n` a
 
 ## Preflight on this VM
 
-`sh lab/a14-dryrun/preflight.sh` prints one `missing:` line per gap and exits 1 when any gap remains. It does not install, delete, or write a receipt. `dash` and `bash --posix` printed the same text. A control run took 0.069 to 0.077 seconds.
+Recorded on commit `129f4cb875a13dfde5ea00e2de18d02a434dbe43`, clean tree, with `dash`. `bash --posix` printed the same preflight text on the earlier run. The script does not install, delete, or write a receipt. `git status` and the index mtime were the same after the run.
 
-On this Linux checkout the gaps are the operating system, the architecture, the five absent `lab/demo-a14` files, a missing `wasm32-unknown-unknown` target for Rust 1.91.0, `/usr/bin/sandbox-exec`, and `/usr/sbin/lsof`. Before the files in this folder were committed, it also reported local changes. `/usr/bin/shasum`, `ssh-keygen`, `python3 -I`, git, and free space were present, so they produced no line.
-
-`sh lab/a14-dryrun/falsify.sh` builds a `PATH` with the other tools and without `ssh-keygen`. The caught run:
+`dash lab/a14-dryrun/preflight.sh` exited 1. Exact output:
 
 ```text
+missing: operating system is Linux; A14's VERSIONS.json is produced on macOS
+missing: architecture is x86_64; A14 needs native Apple Silicon (arm64)
+missing: lab/demo-a14/install.sh is not in this checkout; morning step 2 leaves spike/agent-host, and that branch has no demo until PR 289 is merged
+missing: lab/demo-a14/run.sh is not in this checkout; morning step 2 leaves spike/agent-host, and that branch has no demo until PR 289 is merged
+missing: lab/demo-a14/demo.py is not in this checkout; morning step 2 leaves spike/agent-host, and that branch has no demo until PR 289 is merged
+missing: lab/demo-a14/RUNBOOK.md is not in this checkout; morning step 2 leaves spike/agent-host, and that branch has no demo until PR 289 is merged
+missing: lab/demo-a14/journeys.json is not in this checkout; morning step 2 leaves spike/agent-host, and that branch has no demo until PR 289 is merged
+missing: wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the five morning steps do not add it
+missing: /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+missing: /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+preflight: FAIL
+```
+
+`/usr/bin/shasum`, `ssh-keygen`, `python3 -I`, git, and free space were present, so they produced no line.
+
+`dash lab/a14-dryrun/falsify.sh` builds a `PATH` with the other tools and without `ssh-keygen`. Exact output, exit 0:
+
+```text
+falsifier: control preflight took 0.059 seconds
 falsifier: CAUGHT
 plant: PATH with no ssh-keygen (hidden=yes)
-planted exit: 1 in 0.070 seconds
+planted exit: 1 in 0.067 seconds
 caught line: missing: ssh-keygen is not on PATH (install.sh --sign uses it to sign the receipts)
 restored PATH does not report that line
 git status and the index mtime stayed the same
 ```
 
-Deleting the `need_cmd ssh-keygen` line from `preflight.sh` made that command exit 1. The planted output listed the Linux gaps and did not contain the ssh-keygen line. Restoring the line made the command print `falsifier: CAUGHT` again. The git index mtime was unchanged across the runs, and `git status` was unchanged.
+Before that commit, deleting the `need_cmd ssh-keygen` line made the falsifier exit 1, and the planted output had no ssh-keygen line. Restoring the line made it print `falsifier: CAUGHT` again.
 
 On the Mac, from a checkout of this branch:
 
