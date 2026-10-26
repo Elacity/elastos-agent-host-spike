@@ -114,6 +114,11 @@ impl Evidence {
             ) {
                 text.push_str(" | process-isolation lab half of A3, A6 and A9");
             }
+            if name == "cancelled_instance_settles_with_reason_sibling_completes" {
+                text.push_str(
+                    " | cancel at the pending-request point, lab half of A10 (A12 census)",
+                );
+            }
             text.push('\n');
         }
         (text, passed)
@@ -182,7 +187,10 @@ fn required_effects(test: &str) -> &'static [&'static str] {
             "instance-2",
         ],
         "two_instances_overlap_with_separate_grants"
-        | "instance_grant_does_not_authorise_sibling" => &["instance-1", "instance-2"],
+        | "instance_grant_does_not_authorise_sibling"
+        | "cancelled_instance_settles_with_reason_sibling_completes" => {
+            &["instance-1", "instance-2"]
+        }
         "host_key_read_is_refused" => &["host-key-read"],
         "ungranted_effect_is_refused" => &["read"],
         "ungranted_network_is_refused" => &["network"],

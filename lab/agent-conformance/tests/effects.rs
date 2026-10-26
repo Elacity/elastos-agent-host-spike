@@ -6,7 +6,7 @@ use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{Observation, StagedProbe, MANIFEST};
 use agent_conformance::runtime::runtime_under_test;
 use probe::{build_probe, Effect};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 // The repository build script writes one probe entrypoint. Keep builds and
@@ -140,6 +140,7 @@ enum ReadOutcome {
     Denied,
     NoPolicy,
     Instances,
+    Cancel,
 }
 
 fn exercise_fixture_read(effect: Effect, granted: bool) {
@@ -157,20 +158,32 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
 fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool) {
     use agent_conformance::harness::{Launch, RunningInstances};
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
-    let effects = if outcome == ReadOutcome::Instances {
+    let instances = matches!(outcome, ReadOutcome::Instances | ReadOutcome::Cancel);
+    let effects = if instances {
         vec![Effect::Instance1, Effect::Instance2]
     } else {
         vec![effect]
     };
-    let builds: Vec<_> = effects
-        .iter()
-        .map(|effect| build_probe(*effect, 1))
-        .collect();
+    // Reuse the two existing builds once per test process, including the
+    // cancel journey and credential check. Artifact reproducibility stays separate.
+    static INSTANCE_BUILDS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    let builds = if instances {
+        INSTANCE_BUILDS
+            .get_or_init(|| {
+                effects
+                    .iter()
+                    .map(|effect| build_probe(*effect, 1))
+                    .collect()
+            })
+            .clone()
+    } else {
+        vec![build_probe(effect, 1)]
+    };
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
     // As in the existing parallel journey, each client owns its local Home
     // state and borrows only the operator's coordinates through the spawn site.
-    let client_homes: Vec<_> = if outcome == ReadOutcome::Instances {
+    let client_homes: Vec<_> = if instances {
         (0..2)
             .map(|_| {
                 let client = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
@@ -201,7 +214,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         grants::Fixture::no_policy().expect("valid optional fixture policy")
     } else {
         (
-            if outcome == ReadOutcome::Instances {
+            if instances {
                 grants::Fixture::instances().expect("valid instance grant fixture")
             } else {
                 grants::Fixture::committed().expect("valid committed grant fixture")
@@ -222,6 +235,8 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         .expect("seed fixture files through Runtime");
     if outcome == ReadOutcome::Instances {
         controller.require_overlap();
+    } else if outcome == ReadOutcome::Cancel {
+        controller.require_cancel();
     }
     let launches: Vec<_> = capsules
         .iter()
@@ -246,7 +261,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     }
     let bound = match outcome {
         ReadOutcome::NoPolicy => 40,
-        ReadOutcome::Instances => 25,
+        ReadOutcome::Instances | ReadOutcome::Cancel => 25,
         _ => 10,
     };
     let collected = running.collect_with(Duration::from_secs(bound), |running| {
@@ -261,7 +276,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     let cleanup_state = if outcome == ReadOutcome::NoPolicy {
         Ok("pending:unmeasured grants:unmeasured (no-policy refusal scope)")
     } else {
-        controller.cleanup_state()
+        controller.check_cleanup_wiring(|controller| controller.cleanup_state())
     };
     let finished = operator.finish_check(sampled);
     let line = match &finished {
@@ -303,8 +318,12 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         probe: capsule.identity.clone(),
     }))
     .collect();
-    if outcome == ReadOutcome::Instances {
-        let overlap = controller.check_overlap();
+    if instances {
+        let overlap = if outcome == ReadOutcome::Cancel {
+            controller.check_cancel(collected.as_ref().ok().map(Vec::as_slice))
+        } else {
+            controller.check_overlap()
+        };
         // Real output lines and captures are checked even when a barrier fails.
         for index in 0..2 {
             let completion = collected.as_ref().ok().and_then(|items| items.get(index));
@@ -328,19 +347,24 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         let reads = collected
             .as_ref()
             .map_err(|_| "overlap collection failed")
-            .and_then(|completions| instance_read_result(completions, &controller));
+            .and_then(|completions| instance_read_result(completions, &controller, outcome));
         let passed = reads.is_ok() && overlap.is_ok() && finished.is_ok() && cleanup_state.is_ok();
-        for name in [
-            "two_instances_overlap_with_separate_grants",
-            "instance_grant_does_not_authorise_sibling",
-        ] {
+        let names = if outcome == ReadOutcome::Cancel {
+            vec!["cancelled_instance_settles_with_reason_sibling_completes"]
+        } else {
+            vec![
+                "two_instances_overlap_with_separate_grants",
+                "instance_grant_does_not_authorise_sibling",
+            ]
+        };
+        for name in names {
             controller
                 .check_journey(name, &observations, passed)
                 .expect("instance report and receipt exclude fixture credentials");
         }
         collected.expect("overlap journey failed");
-        overlap.expect("overlap requires both barriers");
         reads.expect("instance read acceptance failed");
+        overlap.expect("required instance settlement evidence");
         assert!(
             finished.is_ok(),
             "cleanup census refused leftovers; see checked reason"
@@ -443,7 +467,9 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
                 ReadOutcome::Granted => "granted_read_succeeds",
                 ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
                 ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
-                ReadOutcome::Instances => unreachable!("instances checked above"),
+                ReadOutcome::Instances | ReadOutcome::Cancel => {
+                    unreachable!("instances checked above")
+                }
             },
             &observations,
         )
@@ -461,11 +487,14 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
 fn instance_read_result(
     completions: &[agent_conformance::harness::Completion],
     controller: &grants::Controller,
+    outcome: ReadOutcome,
 ) -> Result<(), &'static str> {
     if completions.len() != 2 {
         return Err("both clients must be collected");
     }
-    for completion in completions {
+    // Check the sibling first: cancelling every first request must fail here.
+    for index in [1, 0] {
+        let completion = &completions[index];
         let stderr = std::str::from_utf8(&completion.output.stderr)
             .map_err(|_| "client stderr requires UTF-8")?;
         if stderr.contains("fixture provider")
@@ -477,19 +506,36 @@ fn instance_read_result(
         let (_, refused) = refusal_evidence(
             &completion.output,
             Effect::Instance1,
-            &format!("Denied(\"{}\")", controller.deny_reason()),
+            &format!(
+                "Denied(\"{}\")",
+                if outcome == ReadOutcome::Cancel && index == 0 {
+                    grants::CANCEL_REASON
+                } else {
+                    controller.deny_reason()
+                }
+            ),
         );
         if !refused {
-            return Err("each instance must receive its sibling denial with the fixture reason");
+            return Err(if index == 1 {
+                "sibling check: instance-2 must finish its own read and receive its sibling denial"
+            } else {
+                "instance-1 must receive its exact denial status and reason"
+            });
         }
     }
-    if controller.decisions.matched != 2
-        || controller.decisions.granted != 2
+    let grants = if outcome == ReadOutcome::Cancel { 1 } else { 2 };
+    if controller.decisions.matched != grants
+        || controller.decisions.granted != grants
         || controller.decisions.denied != 2
     {
-        return Err("two own session grants and two sibling denials are required");
+        return Err("expected own session grants and two denials are required");
     }
     Ok(())
+}
+
+#[test]
+fn cancelled_instance_settles_with_reason_sibling_completes() {
+    exercise_read(Effect::Instance1, ReadOutcome::Cancel, false);
 }
 
 #[test]
