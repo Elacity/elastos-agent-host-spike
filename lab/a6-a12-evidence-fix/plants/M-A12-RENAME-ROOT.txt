@@ -3,7 +3,7 @@ file: src/a12.rs
 test: tests::a12_renamed_root_is_found_by_marker
 --- old
         walk_root(root, &mut found, true)?;
-        scan_parent_for_marker(root, found)?;
+        scan_parent_for_marker(root, &mut found)?;
 --- new
         walk_root(root, &mut found, true)?;
 --- end
