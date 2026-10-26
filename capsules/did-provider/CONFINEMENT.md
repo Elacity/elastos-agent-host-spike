@@ -143,6 +143,11 @@ the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
 print a skip reason; a present sandbox that refuses to launch the child fails
 the test.
 
+The one runner applies and restores each registered falsifier with
+`python3 -I examples/agent-host/falsify.py --from capsules/did-provider/falsifiers.json`
+from the repository root; the list's edit paths are relative to
+`examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
+
 ## Falsifiers
 
 - Restore the temp-directory fallback for a missing or empty storage root
