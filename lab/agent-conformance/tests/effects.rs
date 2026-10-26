@@ -515,6 +515,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
                 &format!("reason:{}; {}", grants::NO_POLICY_REASON, orphan.line()),
             )
             .expect("no-policy settlement excludes fixture credentials");
+        orphan.check().expect("no-policy orphan settlement failed");
         assert_eq!(controller.decisions.granted, 0);
         assert_eq!(controller.decisions.denied, orphan.before);
         assert_eq!(controller.decisions.matched, 0);

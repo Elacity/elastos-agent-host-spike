@@ -169,18 +169,39 @@ pub struct Settlement {
 }
 
 impl Settlement {
+    pub fn check(&self) -> Result<()> {
+        if self.before == 0 {
+            return Err("orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line");
+        }
+        if self.before != 1 {
+            return Err("orphan settlement: unexpected pending request");
+        }
+        if self.after != 0 {
+            return Err("pending request leftover");
+        }
+        Ok(())
+    }
+
     pub fn line(&self) -> String {
         format!(
-            "orphan_before:{} orphan_after:{}; settled by the {}",
+            "orphan_before:{} orphan_after:{}{}",
             self.before,
             self.after,
-            if self.before == 0 {
-                "Runtime"
+            if self.check().is_ok() {
+                "; settled by the fixture"
             } else {
-                "fixture"
+                ""
             }
         )
     }
+}
+
+fn matches_orphan(request: &Value, original: &Value) -> Result<bool> {
+    let same_id = field(request, "request_id")? == field(original, "request_id")?;
+    if same_id && request != original {
+        return Err("orphan request changed while pending");
+    }
+    Ok(same_id && field(request, "session_id")? == field(original, "session_id")?)
 }
 
 // One request-shape rule for both live barriers and synthetic checks. The
@@ -543,11 +564,13 @@ impl Controller {
         {
             return Err("kill: recorded SIGKILL and signal 9 exit are required");
         }
+        settlement
+            .ok_or("kill: orphan measurement is missing")?
+            .check()?;
         if !overlap.kill
             || overlap.stage != 2
             || overlap.cancelled_at.is_none()
             || overlap.duration.is_zero()
-            || settlement.is_none_or(|s| s.after != 0)
             || quiet.is_none_or(|time| {
                 !(Duration::from_secs(2)..=Duration::from_secs(5)).contains(&time)
             })
@@ -574,8 +597,13 @@ impl Controller {
         if pending.is_empty() {
             return Ok(());
         }
-        if pending.len() != 1 || original.as_ref().is_some_and(|first| first != &pending[0]) {
+        if pending.len() != 1 {
             return Err("no-policy: expected one unchanged pending request");
+        }
+        if let Some(first) = original {
+            if !matches_orphan(&pending[0], first)? {
+                return Err("no-policy: expected one unchanged pending request");
+            }
         }
         field(&pending[0], "request_id")?;
         field(&pending[0], "session_id")?;
@@ -586,8 +614,13 @@ impl Controller {
     pub fn settle_orphan(&mut self, original: &Value, reason: &str) -> Result<Settlement> {
         let response = self.pending()?;
         let pending = response["requests"].as_array().unwrap();
-        if pending.len() > 1 || pending.first().is_some_and(|request| request != original) {
+        if pending.len() > 1 {
             return Err("orphan settlement: unexpected pending request");
+        }
+        if let Some(request) = pending.first() {
+            if !matches_orphan(request, original)? {
+                return Err("orphan settlement: unexpected pending request");
+            }
         }
         let before = pending.len();
         for request in pending {
@@ -654,16 +687,16 @@ impl Controller {
         }
         // Retain only the exact original orphan for post-exit measurement.
         // Every new request, including from a new session, reaches the rule.
-        let pending: Vec<_> = pending
-            .iter()
-            .filter(|request| {
-                !self
-                    .overlap
-                    .as_ref()
-                    .is_some_and(|o| o.kill && o.stage > 0 && *request == &o.first[0])
-            })
-            .cloned()
-            .collect();
+        let mut active = Vec::new();
+        for request in pending {
+            if let Some(overlap) = self.overlap.as_ref().filter(|o| o.kill && o.stage > 0) {
+                if matches_orphan(request, &overlap.first[0])? {
+                    continue;
+                }
+            }
+            active.push(request.clone());
+        }
+        let pending = active;
         if let Some(overlap) = &mut self.overlap {
             if !overlap.ready(&pending, &self.fixture, running)? {
                 return Ok(());
@@ -1644,6 +1677,84 @@ mod tests {
             .is_err());
         overlap.advance();
         assert!(overlap.ready_after_cancel(&[sibling]).is_err());
+    }
+
+    #[test]
+    fn kill_requires_measured_fixture_settlement() {
+        let mut overlap = Overlap::new();
+        overlap.kill = true;
+        overlap.stage = 2;
+        overlap.cancelled_at = Some(Instant::now());
+        overlap.duration = Duration::from_millis(1);
+        let controller = Controller {
+            port: 0,
+            credentials: Vec::new(),
+            printed: RefCell::default(),
+            fixture: fixture(),
+            used: BTreeSet::new(),
+            decisions: Decisions::default(),
+            overlap: Some(overlap),
+            requests: Vec::new(),
+        };
+        let completions: Vec<_> = [9, 0]
+            .into_iter()
+            .map(|status| Completion {
+                output: std::process::Output {
+                    status: std::process::ExitStatus::from_raw(status),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+                elapsed: Duration::from_millis(2),
+                kill_requested_at: Some(Duration::from_millis(1)),
+            })
+            .collect();
+        for (before, after, expected, line) in [
+            (0, 0, Err("orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line"),
+                "orphan_before:0 orphan_after:0"),
+            (1, 0, Ok(()), "orphan_before:1 orphan_after:0; settled by the fixture"),
+            (2, 0, Err("orphan settlement: unexpected pending request"), "orphan_before:2 orphan_after:0"),
+            (1, 1, Err("pending request leftover"), "orphan_before:1 orphan_after:1"),
+        ] {
+            let settlement = Settlement { before, after };
+            assert_eq!(
+                controller.check_kill(
+                    Some(&completions),
+                    Some(&settlement),
+                    Some(Duration::from_secs(2)),
+                ),
+                expected,
+                "kill requires exactly one measured orphan and zero after settlement"
+            );
+            assert_eq!(settlement.line(), line);
+        }
+    }
+
+    #[test]
+    fn changed_orphan_has_its_own_reason() {
+        let original = json!({"request_id":"orphan", "session_id":"session-a",
+            "resource":"fixture-a", "action":"read", "reason":"fixture read"});
+        assert_eq!(matches_orphan(&original, &original), Ok(true));
+        let mut unrelated = original.clone();
+        unrelated["request_id"] = json!("another-request");
+        assert_eq!(matches_orphan(&unrelated, &original), Ok(false));
+        for field in ["session_id", "resource", "action", "reason", "extra"] {
+            let mut changed = original.clone();
+            changed[field] = json!("changed");
+            assert_eq!(
+                matches_orphan(&changed, &original),
+                Err("orphan request changed while pending"),
+                "a changed orphan needs its own reason"
+            );
+        }
+        let mut missing_session = original.clone();
+        missing_session
+            .as_object_mut()
+            .unwrap()
+            .remove("session_id");
+        assert_eq!(
+            matches_orphan(&missing_session, &original),
+            Err("orphan request changed while pending")
+        );
     }
 
     #[test]
