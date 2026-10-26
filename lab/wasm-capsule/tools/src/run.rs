@@ -67,10 +67,10 @@
 //! upgrade shows in the receipt, and none of them is part of the lab CID.
 //!
 //! The two-engine result is a behaviour proof on one core module on this
-//! machine, not the Component ABI. Both engines are test-only; neither is
-//! endorsed. The runner gives the engines no host function of its own, so a
-//! granted import is only let through verification, not hosted (wc-009b). The
-//! grants are a lab stand-in, not admission.
+//! machine, not the Component ABI. Both engines are test-only, not endorsed.
+//! The runner gives the engines no host function of its own, so a granted
+//! import is only let through verification, not hosted (wc-009b). The grants
+//! are a lab stand-in, not admission.
 
 use crate::bundle::{write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal};
 use crate::verify::{verify_bundle, DeclaredImport, VerifiedBundle, VerifyRefusal};
@@ -96,7 +96,7 @@ const MODULE_FILE: &str = "module.wasm";
 /// The run folder's mode: only its owner may list, enter or write it.
 const RUN_DIR_MODE: u32 = 0o700;
 
-/// A test-only host engine. Neither is endorsed.
+/// A host engine: test-only, not endorsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     Wasmtime,

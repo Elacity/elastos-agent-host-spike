@@ -71,9 +71,9 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   an engine upgrade shows in the receipt, and none is part of the lab CID
   (README.md, "Run receipt (wc-005c)").
   The two-engine result is a behaviour proof on one **core module** on this
-  Mac, not the Component ABI. `wasmtime` and `wasmer` are test-only host
-  engines here; neither is endorsed. This is separate from Wasmer's role
-  inside a capsule as the POSIX RTOS PoC.
+  Mac, not the Component ABI. Rong's ruling (26 Oct):
+  Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
+  This is separate from Wasmer's role inside a capsule as the POSIX RTOS PoC.
 - `capsule/capsule.json` — this capsule's `elastos.capsule/v1` manifest, with
   only fields of the Runtime's `CapsuleManifest`. The tools crate compiles its
   bytes in (`CAPSULE_MANIFEST`). It lists no Wasm imports: the module's own
@@ -131,7 +131,7 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 - The two-engine run (wc-005b) shows that one verified core module printed the
   same `FIXED_OUTPUT` for `FIXED_INPUT` on `wasmtime` 45.0.1 and `wasmer` 7.5.0
   on this one Mac. It says nothing about the Component ABI, other engines,
-  other machines or other modules, and endorses neither engine.
+  other machines or other modules; both engines are test-only, not endorsed.
 
 ## wc-003 discovery: how the Runtime names an artifact
 
@@ -276,6 +276,11 @@ admission.
 **The grants file (wc-009a, task 020).** The lab grants file is a lab stand-in
 for the Runtime's grant decision
 (https://github.com/Elacity/elastos-runtime/issues/464), not admission.
+
+**Hosting discovery (wc-009b0, task 022).** README.md, "Granted import
+hosting discovery (wc-009b0)", records how each engine's CLI could supply a
+granted import. Rong's ruling (26 Oct):
+Discovery only: no engine-specific host-function route (a preload module or a CLI flag) becomes the lab's import path; granted imports stay a stand-in for the Runtime/provider contract (P10, P18).
 
 ## Runtime ABI for a bare capsule (wc-008)
 
