@@ -364,6 +364,32 @@ fn model_reported_usage_does_not_lower_the_settled_charge() {
 }
 
 #[test]
+fn model_settle_twice_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 0,
+        ..guest(handle)
+    };
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(10))
+        .expect("settle");
+    assert_eq!(charge, 10);
+    assert_eq!(verifier.ledger.charged, 10);
+    assert_eq!(verifier.ledger.held, 0);
+    let refusal = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(10))
+        .expect_err("second settle");
+    assert_eq!(refusal, SettleRefuse::NotOutstanding);
+    assert_eq!(refusal.to_string(), "reservation is not outstanding");
+    assert_eq!(verifier.ledger.charged, 10);
+    assert_eq!(verifier.ledger.held, 0);
+}
+
+#[test]
 fn model_unknown_outcome_keeps_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
@@ -449,4 +475,29 @@ fn model_release_on_a_sibling_instance_is_refused() {
     assert_eq!(verifier.ledger.held, 10);
     assert_eq!(verifier.ledger.charged, 0);
     assert!(verifier.ledger.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_settle_below_the_hold_returns_the_rest() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 9,
+        ..guest(handle)
+    };
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    assert_eq!(verifier.ledger.held, 10);
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Known(4)),
+        Ok(4)
+    );
+    assert_eq!(verifier.ledger.charged, 4);
+    assert_eq!(verifier.ledger.held, 0);
+    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+    verifier
+        .reserve(&call, &request, 10)
+        .expect("reserve after settle");
+    assert_eq!(verifier.ledger.held, 10);
 }

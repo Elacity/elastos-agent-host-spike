@@ -1352,12 +1352,32 @@
       "edits": [
         {
           "file": "tests/common/grants.rs",
-          "old": "            || first\n                .iter()\n                .any(|first| first[\"request_id\"] == request[\"request_id\"])\n",
-          "new": ""
+          "old": "!first\n            .iter()\n            .any(|first| first[\"request_id\"] == request[\"request_id\"])",
+          "new": "true"
         }
       ],
       "tests": [
-        "grants::tests::overlap_sibling_read_must_be_new_in_its_session"
+        "grants::tests::overlap_sibling_read_must_be_new_in_its_session",
+        "grants::tests::cancel_refuses_retries_and_unexpected_requests",
+        "grants::tests::kill_sibling_read_must_be_new_in_its_session"
+      ]
+    },
+    {
+      "id": "F-sibling-one-rule",
+      "title": "drop the resource comparison from the one sibling-read rule",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "request[\"resource\"] == first[1 - index][\"resource\"]",
+          "new": "true"
+        }
+      ],
+      "tests": [
+        "grants::tests::overlap_sibling_read_must_be_new_in_its_session",
+        "grants::tests::cancel_refuses_retries_and_unexpected_requests",
+        "grants::tests::kill_sibling_read_must_be_new_in_its_session"
       ]
     },
     {

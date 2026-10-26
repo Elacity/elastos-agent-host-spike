@@ -5716,3 +5716,177 @@ The current branch is zero commits ahead and 11 commits behind the cached
 this worktree's HEAD remains the tested base `04f1e93b4789d3f86474abe77d89aeadf12e35a0`.
 The builder made zero fetches or Git-state changes under the network rule.
 The supervisor owns current-base integration, review and publication.
+
+## 033 — One sibling-read rule for the barrier, cancel and kill checks
+
+`sibling_read` in `tests/common/grants.rs` is the one sibling-read rule. For instance `index` it requires that instance's session, the other instance's file, action read, that instance's sibling reason, and a request id absent from the first barrier. `barrier_decision`'s stage-1 branch and `Overlap::ready_after_cancel` both call it. The overlap, cancel and kill refusal strings stay as they were. The stopped instance's further-request check stays in `ready_after_cancel` and compares that instance's session only. `overlap_second_barrier_waits_for_both_requests` starts 3-second `sleep` clients and still collects them with the existing 5-second bound. `RUNBOOK.md` says the overlap, cancel and kill rows share this rule. `src/report.rs` is unchanged.
+
+### Hand-run falsifiers
+
+Both entries use `"command": "lab"`. Each step used `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects TEST -- --exact --test-threads=2` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and the lane `target/host` directories. Source bytes were restored after each planted step. Every named test passed before the edit, failed while planted, and passed after restoration.
+
+F-overlap-sibling-new replaces the helper's request-id clause with `true`:
+
+```text
+old: !first\n            .iter()\n            .any(|first| first["request_id"] == request["request_id"])
+new: true
+```
+
+`grants::tests::overlap_sibling_read_must_be_new_in_its_session`:
+
+```text
+baseline: exit 0, 0.115s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+planted: exit 101, 1.371s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... FAILED
+assertion `left == right` failed: sibling rule must check request_id
+ right: Err("overlap: sibling read must be new in its original session")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+restored: exit 0, 1.158s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+```
+
+`grants::tests::cancel_refuses_retries_and_unexpected_requests` (its `request_id` case is the first case that becomes `Ok(true)`; resource and session still refuse):
+
+```text
+baseline: exit 0, 0.068s
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+planted: exit 101, 0.085s
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... FAILED
+assertion `left == right` failed
+  left: Ok(true)
+ right: Err("cancel: unexpected request after cancellation")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+restored: exit 0, 0.081s
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+```
+
+`grants::tests::kill_sibling_read_must_be_new_in_its_session`:
+
+```text
+baseline: exit 0, 0.068s
+test grants::tests::kill_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+planted: exit 101, 0.067s
+test grants::tests::kill_sibling_read_must_be_new_in_its_session ... FAILED
+assertion `left == right` failed: kill sibling rule must check request_id
+  left: Ok(true)
+ right: Err("no-retry check: unexpected request after worker kill")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+restored: exit 0, 0.066s
+test grants::tests::kill_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+```
+
+F-sibling-one-rule replaces only the helper's resource comparison with `true`:
+
+```text
+old: request["resource"] == first[1 - index]["resource"]
+new: true
+```
+
+`grants::tests::overlap_sibling_read_must_be_new_in_its_session`:
+
+```text
+baseline: exit 0, 0.066s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+planted: exit 101, 0.981s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... FAILED
+assertion `left == right` failed: sibling rule must check resource
+ right: Err("overlap: sibling read must be new in its original session")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+restored: exit 0, 1.146s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+```
+
+`grants::tests::cancel_refuses_retries_and_unexpected_requests` (the loop's first case is `("resource", "fixture-b")`, so this failure is that case):
+
+```text
+baseline: exit 0, 0.065s
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+planted: exit 101, 0.149s
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... FAILED
+assertion `left == right` failed
+  left: Ok(true)
+ right: Err("cancel: unexpected request after cancellation")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+restored: exit 0, 0.080s
+test grants::tests::cancel_refuses_retries_and_unexpected_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+```
+
+`grants::tests::kill_sibling_read_must_be_new_in_its_session`:
+
+```text
+baseline: exit 0, 0.065s
+test grants::tests::kill_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+planted: exit 101, 0.206s
+test grants::tests::kill_sibling_read_must_be_new_in_its_session ... FAILED
+assertion `left == right` failed: kill sibling rule must check resource
+  left: Ok(true)
+ right: Err("no-retry check: unexpected request after worker kill")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+restored: exit 0, 0.068s
+test grants::tests::kill_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+```
+
+`F-cancel-retry` and `F-kill-monitor` still anchor on the unchanged `ready_after_cancel` signature, once each. Their anchors did not move, so they were left in place and were not re-run. `F-census-a` and `F-ac2c` already missed their anchors on this base.
+
+### Wiring window and live journeys
+
+`grants::tests::overlap_second_barrier_waits_for_both_requests` with 3-second clients and the existing 5-second `collect` bound:
+
+```text
+exit 0, wall 4.788s
+test grants::tests::overlap_second_barrier_waits_for_both_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 3.06s
+```
+
+The same command with `--show-output` ran the three journeys once. All passed:
+
+```text
+test two_instances_overlap_with_separate_grants ... ok
+instance overlap: instance-1 instance-2 barriers:2 first:0.039284s second:0.229690s overlap:0.268180s elapsed:5.362805s; process-isolation lab half of A3, A6 and A9
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 12.75s
+
+test cancelled_instance_settles_with_reason_sibling_completes ... ok
+cancel settlement: instance-1 exit:Some(1) signal:None elapsed:0.157588s kill_at:0.000000s; instance-2 exit:Some(1) signal:None elapsed:0.389891s kill_at:0.000000s; first:0.026568s overlap:0.025309s since_decision:5.347494s; reason:fixture cancel: instance-1 cancelled mid-run; cancel at the pending-request point, lab half of A10 (A12 census)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 12.69s
+
+test killed_worker_settlement_recorded_without_retry ... ok
+kill settlement: instance-1 exit:None signal:Some(9) elapsed:0.058766s kill_at:0.034001s; instance-2 exit:Some(1) signal:None elapsed:0.333574s kill_at:0.000000s; first:0.033501s overlap:0.032483s since_decision:5.851066s; reason:fixture settlement: worker killed; orphan_before:1 orphan_after:0; settled by the fixture; quiet:2.012286s; kill-worker settlement, lab half of A11 (A12 census)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 12.12s
+```
+
+Wall times for those three commands were 12.829s, 12.805s and 12.189s.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code or content hash belongs? | No | `tests/common/grants.rs:220` compares a pending request's session, resource, action, reason and request id. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `probe/src/lib.rs:138` still requests the read, and `:146` invokes the provider with that grant. The probe is unchanged. |
+| 3. A second path or a second copy of one rule? | No | `tests/common/grants.rs:222` holds the session comparison, `:223` the resource comparison, `:227` the request-id comparison, `:217` the read comparison, and `:213` the sibling-reason comparison. `:276` and `:379` call `sibling_read`. |
+| 4. Runtime core grows? | No | The edit is the lab harness in `tests/common/grants.rs:220`. Runtime, provider and probe sources are unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:277` keeps `overlap: sibling read must be new in its original session`. `:380` keeps the cancel and kill unexpected-request refusals. `:371` keeps the stopped instance's further-request refusal. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:138` requests the capability and `:146` passes the grant to the provider. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/common/grants.rs:1800` is the new kill test. `falsifiers.json:1348` and `:1366` are the two planted bugs. All three named tests failed for each bug and passed after restoration. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/common/grants.rs:220` checks request shape. `:270` still matches the fixture grant for an own read. Bundle identity stays on the existing receipt path. |
+
+### Gates
+
+Both commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and the lane `target/host` and `target/host-build` directories, under the shared heavy-build lease. The volume had about 45 GiB free before the runs.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: PASS, exit 0, 0.122 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: PASS, exit 0, 255.480 seconds, inside the 600-second bound. 85 passed, 0 failed, 11 ignored. The effects target passed 35 tests, with 10 ignored, in 202.20 seconds.
+
+`Cargo.toml` and `Cargo.lock` are unchanged. The builder made no Git-state changes.
