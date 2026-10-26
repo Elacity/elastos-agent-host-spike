@@ -828,10 +828,14 @@ mod tests {
     #[cfg(unix)]
     fn wait_for_fake_llama_event(path: &Path, expected: &str) {
         let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        while !fake_llama_events(path).iter().any(|line| line == expected) {
+        loop {
+            let events = fake_llama_events(path);
+            if events.iter().any(|line| line == expected) {
+                return;
+            }
             assert!(
                 Instant::now() < deadline,
-                "missing fake llama event {expected}"
+                "missing fake llama event {expected}; events: {events:?}"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -4199,11 +4203,19 @@ mod tests {
         let root = temp_root("local-llama-timeout-capacity");
         let (mut offer, events, root) = local_llama_offer(&root, "timeout_ignore_term");
         offer.policy.concurrency_limit = 1;
-        offer.policy.runtime_ms_limit = 2_000;
+        // The fake engine installs its SIGTERM handler before its heavy imports,
+        // so start-up up to that point is interpreter start plus one small file
+        // read. This 5 s deadline outlasts that under CPU load and still keeps
+        // the deliberate 3 s pre-handler delay of the falsifier inside the margin.
+        offer.policy.runtime_ms_limit = 5_000;
         let AdapterConfig::LocalLlamaCppText { settings, .. } = &mut offer.adapter else {
             unreachable!();
         };
-        settings.health_timeout_ms = 5_000;
+        // Keep the run deadline the trigger: the health wait is capped to it.
+        settings.health_timeout_ms = FIXTURE_EVENT_TIMEOUT.as_millis() as u64;
+        // The engine ignores SIGTERM, so it stays alive this long after the
+        // deadline; the test reads the still-held slot inside that window.
+        settings.shutdown_timeout_ms = 1_000;
         let mut provider = ProviderCoordinatorHandle::start();
         init_provider(&provider, &root, vec![offer.clone()]);
 

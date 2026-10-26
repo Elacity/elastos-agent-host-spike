@@ -2400,3 +2400,276 @@ fn allow_rules_trace_to_declared_rights() {
         );
     }
 }
+
+/// The two platform-baseline startup rules stay the narrow pins written here.
+///
+/// `startup-root-directory` is `(allow file-read-data (literal "/"))` and
+/// `startup-sysctl` is `(allow sysctl-read)`. Each pin must occur once. The
+/// pins are not read from the declared-rights fixture, so a fixture and a
+/// profile that widen together still fail. A wider grant fails even when the
+/// pin remains. Every file operation, including `file*`, is checked even
+/// when the line contains no `file-read` or `file-write`. The test reads
+/// `confine.sb` from `CARGO_MANIFEST_DIR`. It
+/// starts no process and needs no sandbox.
+///
+/// Falsifier: F-cc35a replaces the root pin with
+/// `(allow file-read* (literal "/"))`. F-cc35b appends `(allow sysctl-write)`
+/// after the sysctl pin. F-cc35c, F-cc35d and F-cc35e append literal reads
+/// whose filenames contain STORAGE_ROOT, STORAGE_PARENT or PROVIDER_EXECUTABLE.
+/// F-cc35f keeps both pins and appends
+/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile and
+/// to `startup-root-directory` in the declared-rights fixture.
+/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to both files
+/// while keeping both pins.
+#[test]
+fn platform_baseline_rules_stay_narrow() {
+    // One check classifies every baseline refusal. The file scan below and
+    // the in-memory cases call it, so a write grant is not a second path.
+    fn refuse_widened_baseline(allow_lines: &[&str]) -> Result<(), String> {
+        fn root_operation_widens(line: &str) -> bool {
+            if line.contains("file-read*") {
+                return true;
+            }
+            let rest = line.strip_prefix("(allow ").unwrap_or(line);
+            let head = rest.split('(').next().unwrap_or(rest);
+            let head = head.trim().trim_end_matches(')');
+            head.split_whitespace()
+                .any(|token| token != "file-read-data")
+        }
+
+        fn root_path_widens(line: &str) -> bool {
+            if line.contains("subpath") {
+                return true;
+            }
+            let mut rest = line;
+            while let Some(start) = rest.find('"') {
+                let after = &rest[start + 1..];
+                let Some(end) = after.find('"') else {
+                    return true;
+                };
+                if &after[..end] != "/" {
+                    return true;
+                }
+                rest = &after[end + 1..];
+            }
+            false
+        }
+
+        let root_pin = "(allow file-read-data (literal \"/\"))";
+        let sysctl_pin = "(allow sysctl-read)";
+        // All file operations are root candidates, including file* and
+        // operations outside file-read/file-write. Only the exact storage
+        // grants are exempt, so a filename that contains a parameter name
+        // does not exempt a wider rule.
+        let root_candidates: Vec<&str> = allow_lines
+            .iter()
+            .copied()
+            .filter(|line| {
+                line.contains("file")
+                    && !matches!(
+                        *line,
+                        "(allow file-read* (literal (param \"STORAGE_PARENT\")))"
+                            | "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))"
+                    )
+            })
+            .collect();
+        let mut root_pins = 0usize;
+        for line in root_candidates {
+            if line == root_pin {
+                root_pins += 1;
+                continue;
+            }
+            if root_operation_widens(line) {
+                return Err(format!("startup-root-directory operation widened: {line}"));
+            }
+            if root_path_widens(line) {
+                return Err(format!("startup-root-directory path widened: {line}"));
+            }
+            return Err(format!("startup-root-directory widened: {line}"));
+        }
+        if root_pins == 0 {
+            return Err("startup-root-directory widened".to_string());
+        }
+        if root_pins != 1 {
+            return Err(format!(
+                "startup-root-directory widened: pin occurs {root_pins} times"
+            ));
+        }
+
+        let mut sysctl_pins = 0usize;
+        for line in allow_lines {
+            if !line.contains("sysctl") {
+                continue;
+            }
+            if *line == sysctl_pin {
+                sysctl_pins += 1;
+                continue;
+            }
+            if line.contains("sysctl-write") || line.contains("sysctl*") {
+                return Err(format!("startup-sysctl operation widened: {line}"));
+            }
+            if line.contains("sysctl-name") {
+                return Err(format!("startup-sysctl sysctl name widened: {line}"));
+            }
+            return Err(format!("startup-sysctl widened: {line}"));
+        }
+        if sysctl_pins == 0 {
+            return Err("startup-sysctl widened".to_string());
+        }
+        if sysctl_pins != 1 {
+            return Err(format!(
+                "startup-sysctl widened: pin occurs {sysctl_pins} times"
+            ));
+        }
+        Ok(())
+    }
+
+    #[track_caller]
+    fn must_refuse(lines: &[&str], reason: &str) {
+        assert_eq!(refuse_widened_baseline(lines), Err(reason.to_string()));
+    }
+
+    let root = "(allow file-read-data (literal \"/\"))";
+    let sysctl = "(allow sysctl-read)";
+    let parent = "(allow file-read* (literal (param \"STORAGE_PARENT\")))";
+    let storage = "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))";
+    let exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    assert_eq!(
+        refuse_widened_baseline(&[exec, root, sysctl, parent, storage]),
+        Ok(())
+    );
+
+    must_refuse(
+        &["(allow file-read* (literal \"/\"))", sysctl],
+        "startup-root-directory operation widened: (allow file-read* (literal \"/\"))",
+    );
+    // Broader file operations reach the same check with both pins present,
+    // including when a fixture declares the same extra grant.
+    for (line, reason) in [
+        (
+            "(allow file* (literal \"/tmp/cc35-wildcard\"))",
+            "startup-root-directory operation widened: (allow file* (literal \"/tmp/cc35-wildcard\"))",
+        ),
+        (
+            "(allow file-map-executable (literal \"/tmp/cc35-executable\"))",
+            "startup-root-directory operation widened: (allow file-map-executable (literal \"/tmp/cc35-executable\"))",
+        ),
+        (
+            "(allow file-ioctl (literal \"/tmp/cc35-ioctl\"))",
+            "startup-root-directory operation widened: (allow file-ioctl (literal \"/tmp/cc35-ioctl\"))",
+        ),
+        (
+            "(allow file-test-existence (literal \"/tmp/cc35-exists\"))",
+            "startup-root-directory operation widened: (allow file-test-existence (literal \"/tmp/cc35-exists\"))",
+        ),
+        (
+            "(allow file* (subpath (param \"STORAGE_ROOT\")))",
+            "startup-root-directory operation widened: (allow file* (subpath (param \"STORAGE_ROOT\")))",
+        ),
+    ] {
+        must_refuse(&[exec, root, line, sysctl, parent, storage], reason);
+    }
+    // A write of the root path is an operation widen. The literal is still "/".
+    must_refuse(
+        &[root, "(allow file-write* (literal \"/\"))", sysctl],
+        "startup-root-directory operation widened: (allow file-write* (literal \"/\"))",
+    );
+    // The falsifier's write-only grant. Its path is also wider; the reason is
+    // the operation. The exact storage grant beside it stays exempt.
+    must_refuse(
+        &[
+            exec,
+            root,
+            "(allow file-write* (literal \"/tmp/cc35-write-only\"))",
+            sysctl,
+            parent,
+            storage,
+        ],
+        "startup-root-directory operation widened: (allow file-write* (literal \"/tmp/cc35-write-only\"))",
+    );
+    must_refuse(
+        &[root, "(allow file-write-data)", sysctl],
+        "startup-root-directory operation widened: (allow file-write-data)",
+    );
+    must_refuse(
+        &[
+            root,
+            "(allow file-write* (subpath (param \"STORAGE_ROOT\")))",
+            sysctl,
+        ],
+        "startup-root-directory operation widened: (allow file-write* (subpath (param \"STORAGE_ROOT\")))",
+    );
+    must_refuse(
+        &[
+            root,
+            "(allow file-write* (literal \"/tmp/STORAGE_ROOT-write\"))",
+            sysctl,
+        ],
+        "startup-root-directory operation widened: (allow file-write* (literal \"/tmp/STORAGE_ROOT-write\"))",
+    );
+    // The letters file-write in a filename are not a write operation.
+    must_refuse(
+        &[
+            root,
+            "(allow file-read-data (literal \"/tmp/file-write-note\"))",
+            sysctl,
+        ],
+        "startup-root-directory path widened: (allow file-read-data (literal \"/tmp/file-write-note\"))",
+    );
+    must_refuse(
+        &[root, "(allow file-read-data (subpath \"/\"))", sysctl],
+        "startup-root-directory path widened: (allow file-read-data (subpath \"/\"))",
+    );
+    must_refuse(
+        &[
+            "(allow file-read-data (literal \"/\") (vnode-type REGULAR))",
+            sysctl,
+        ],
+        "startup-root-directory widened: (allow file-read-data (literal \"/\") (vnode-type REGULAR))",
+    );
+    must_refuse(&[sysctl], "startup-root-directory widened");
+    must_refuse(
+        &[root, root, sysctl],
+        "startup-root-directory widened: pin occurs 2 times",
+    );
+    must_refuse(
+        &[root, sysctl, "(allow sysctl-write)"],
+        "startup-sysctl operation widened: (allow sysctl-write)",
+    );
+    must_refuse(
+        &[root, "(allow sysctl*)"],
+        "startup-sysctl operation widened: (allow sysctl*)",
+    );
+    must_refuse(
+        &[root, "(allow sysctl-read (sysctl-name \"hw.pagesize\"))"],
+        "startup-sysctl sysctl name widened: (allow sysctl-read (sysctl-name \"hw.pagesize\"))",
+    );
+    must_refuse(
+        &[root, "(allow sysctl-read (with no-log))"],
+        "startup-sysctl widened: (allow sysctl-read (with no-log))",
+    );
+    must_refuse(&[root], "startup-sysctl widened");
+    must_refuse(
+        &[root, sysctl, sysctl],
+        "startup-sysctl widened: pin occurs 2 times",
+    );
+
+    let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
+    let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
+        panic!(
+            "confine.sb must be readable at {}: {err}",
+            profile_path.display()
+        )
+    });
+    // Whole lines that start with `;;` are comments. Allow lines are the
+    // trimmed lines that start with `(allow `.
+    let allow_lines: Vec<&str> = profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| line.starts_with("(allow "))
+        .collect();
+    if let Err(reason) = refuse_widened_baseline(&allow_lines) {
+        panic!("{reason}");
+    }
+}

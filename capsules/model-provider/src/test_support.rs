@@ -195,34 +195,23 @@ pub(crate) fn write_fake_llama_server(root: &Path, mode: &str) -> (PathBuf, Path
     std::io::Write::write_all(
         &mut writer.stdin.take().unwrap(),
         br#"#!/usr/bin/python3
-import errno
-import http.server
-import json
-import os
-import pathlib
 import signal
-import subprocess
 import sys
-import threading
-import time
 
 def arg(name):
     return sys.argv[sys.argv.index(name) + 1]
 
-model_path = pathlib.Path(arg('-m'))
-port = int(arg('--port'))
-alias = arg('--alias')
-mode = model_path.with_suffix('.mode').read_text(encoding='utf-8').strip()
-events = model_path.with_suffix('.events')
-unresponsive = model_path.with_suffix('.unresponsive')
-wrong_alias = model_path.with_suffix('.wrong-alias')
+def sidecar(model, suffix):
+    return model.rsplit('.', 1)[0] + suffix
 
-if mode == 'mutable_readiness':
-    unresponsive.unlink(missing_ok=True)
-    wrong_alias.unlink(missing_ok=True)
+# The run deadline can fire during start-up. Install the SIGTERM handler
+# before the heavy imports so a slow start still records what the engine did.
+events = sidecar(arg('-m'), '.events')
+with open(sidecar(arg('-m'), '.mode'), encoding='utf-8') as stream:
+    mode = stream.read().strip()
 
 def record(value):
-    with events.open('a', encoding='utf-8') as stream:
+    with open(events, 'a', encoding='utf-8') as stream:
         stream.write(value + '\n')
 
 def terminate(_signum, _frame):
@@ -236,6 +225,26 @@ if mode in ('ignore_term', 'timeout_ignore_term', 'stream_then_stall_ignore_term
     signal.signal(signal.SIGTERM, ignore_termination)
 else:
     signal.signal(signal.SIGTERM, terminate)
+
+import errno
+import http.server
+import json
+import os
+import pathlib
+import subprocess
+import threading
+import time
+
+model_path = pathlib.Path(arg('-m'))
+port = int(arg('--port'))
+alias = arg('--alias')
+unresponsive = model_path.with_suffix('.unresponsive')
+wrong_alias = model_path.with_suffix('.wrong-alias')
+
+if mode == 'mutable_readiness':
+    unresponsive.unlink(missing_ok=True)
+    wrong_alias.unlink(missing_ok=True)
+
 record('start:' + str(os.getpid()))
 record('parent:' + str(os.getppid()))
 if mode == 'loader_failure':
