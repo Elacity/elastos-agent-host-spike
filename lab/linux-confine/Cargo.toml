@@ -6,3 +6,8 @@ publish = false
 description = "Linux enforcement of the provider confinement profiles"
 
 [workspace]
+
+[dev-dependencies]
+elastos-model-contract = { path = "../../elastos/crates/elastos-model-contract" }
+elastos-wallet-contract = { path = "../../elastos/crates/elastos-wallet-contract" }
+serde_json = "1.0"

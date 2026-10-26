@@ -8,6 +8,7 @@ fn main() {
     let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let probe = out.join("lc-probe");
     let setup = out.join("lc-setup");
+    let witness = out.join("lc-witness.so");
     compile(
         &cc,
         &probe,
@@ -31,10 +32,18 @@ fn main() {
         &manifest.join("helper/setup.c"),
         &["-O2", "-Wall", "-Wextra", "-Werror"],
     );
+    compile(
+        &cc,
+        &witness,
+        &manifest.join("helper/witness.c"),
+        &["-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror"],
+    );
     println!("cargo:rustc-env=LC_PROBE={}", probe.display());
     println!("cargo:rustc-env=LC_SETUP={}", setup.display());
+    println!("cargo:rustc-env=LC_WITNESS={}", witness.display());
     println!("cargo:rerun-if-changed=helper/probe.c");
     println!("cargo:rerun-if-changed=helper/setup.c");
+    println!("cargo:rerun-if-changed=helper/witness.c");
     println!("cargo:rerun-if-changed=build.rs");
 }
 

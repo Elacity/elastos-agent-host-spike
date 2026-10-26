@@ -21,7 +21,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -38,23 +41,37 @@
 #error linux-confine supports x86_64 and aarch64
 #endif
 
+#define LC_EXTRA 12
+
 struct policy {
     int deny_network;
+    int provider;
+    int read_parent;
     char helper[4096];
+    char execute[4096];
+    char preload[4096];
     char storage_root[4096];
     char storage[4096];
     char storage2[4096];
     char outside[4096];
     char parent[4096];
     char copy[4096];
+    char read_exec[LC_EXTRA][4096];
+    int n_read_exec;
+    char read_only[LC_EXTRA][4096];
+    int n_read_only;
 };
 
-static void emit(const char *s) {
+static void emit_fd(int fd, const char *s) {
     size_t n = 0;
     while (s[n]) {
         n++;
     }
-    syscall(SYS_write, 1, s, n);
+    syscall(SYS_write, fd, s, n);
+}
+
+static void emit(const char *s) {
+    emit_fd(1, s);
 }
 
 static void refuse(const char *msg) {
@@ -174,8 +191,16 @@ static void copy_value(char *dst, size_t dst_len, const char *src) {
     dst[n] = 0;
 }
 
+static void push_path(char paths[][4096], int *count, const char *src) {
+    if (*count >= LC_EXTRA) {
+        refuse("linux confinement refused: the launch has too many library paths");
+    }
+    copy_value(paths[*count], 4096, src);
+    *count += 1;
+}
+
 static void load_policy(const char *path, struct policy *pol) {
-    char buf[16384];
+    char buf[65536];
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     ssize_t n;
     char *p;
@@ -220,6 +245,18 @@ static void load_policy(const char *path, struct policy *pol) {
                 copy_value(pol->parent, sizeof pol->parent, eq + 1);
             } else if (strcmp(p, "copy") == 0) {
                 copy_value(pol->copy, sizeof pol->copy, eq + 1);
+            } else if (strcmp(p, "execute") == 0) {
+                copy_value(pol->execute, sizeof pol->execute, eq + 1);
+            } else if (strcmp(p, "preload") == 0) {
+                copy_value(pol->preload, sizeof pol->preload, eq + 1);
+            } else if (strcmp(p, "mode") == 0) {
+                pol->provider = strcmp(eq + 1, "provider") == 0;
+            } else if (strcmp(p, "read_parent") == 0) {
+                pol->read_parent = strcmp(eq + 1, "1") == 0;
+            } else if (strcmp(p, "read_exec") == 0) {
+                push_path(pol->read_exec, &pol->n_read_exec, eq + 1);
+            } else if (strcmp(p, "read_only") == 0) {
+                push_path(pol->read_only, &pol->n_read_only, eq + 1);
             } else if (p[0] != 0) {
                 refuse("linux confinement refused: the launch policy has an unknown field");
             }
@@ -238,6 +275,9 @@ static void load_policy(const char *path, struct policy *pol) {
     }
     if (pol->storage2[0] == 0) {
         copy_value(pol->storage2, sizeof pol->storage2, "-");
+    }
+    if (pol->execute[0] == 0) {
+        copy_value(pol->execute, sizeof pol->execute, pol->helper);
     }
 }
 
@@ -340,6 +380,192 @@ static void install_allow_list(int deny_network) {
     }
 }
 
+static void push_nr(int *allow, int *nallow, int nr) {
+    if (*nallow >= 96) {
+        refuse("linux confinement refused: the seccomp allow-list does not fit");
+    }
+    allow[*nallow] = nr;
+    *nallow += 1;
+}
+
+static void install_provider_filter(int deny_network) {
+    int allow[96];
+    int nallow = 0;
+    struct sock_filter filt[320];
+    int n = 0;
+    int i;
+    int denied[] = {
+        SYS_socket,   SYS_connect, SYS_bind,      SYS_listen,    SYS_accept,   SYS_accept4,
+        SYS_sendto,   SYS_recvfrom, SYS_sendmsg,  SYS_recvmsg,   SYS_sendmmsg, SYS_recvmmsg,
+    };
+    push_nr(allow, &nallow, SYS_read);
+    push_nr(allow, &nallow, SYS_write);
+    push_nr(allow, &nallow, SYS_close);
+    push_nr(allow, &nallow, SYS_openat);
+    push_nr(allow, &nallow, SYS_exit);
+    push_nr(allow, &nallow, SYS_exit_group);
+    push_nr(allow, &nallow, SYS_mmap);
+    push_nr(allow, &nallow, SYS_mprotect);
+    push_nr(allow, &nallow, SYS_munmap);
+    push_nr(allow, &nallow, SYS_brk);
+    push_nr(allow, &nallow, SYS_madvise);
+    push_nr(allow, &nallow, SYS_pread64);
+    push_nr(allow, &nallow, SYS_pwrite64);
+    push_nr(allow, &nallow, SYS_readv);
+    push_nr(allow, &nallow, SYS_writev);
+    push_nr(allow, &nallow, SYS_lseek);
+    push_nr(allow, &nallow, SYS_fstat);
+    push_nr(allow, &nallow, SYS_newfstatat);
+    push_nr(allow, &nallow, SYS_statx);
+    push_nr(allow, &nallow, SYS_getrandom);
+    push_nr(allow, &nallow, SYS_getpid);
+    push_nr(allow, &nallow, SYS_getuid);
+    push_nr(allow, &nallow, SYS_geteuid);
+    push_nr(allow, &nallow, SYS_getgid);
+    push_nr(allow, &nallow, SYS_getegid);
+    push_nr(allow, &nallow, SYS_rt_sigaction);
+    push_nr(allow, &nallow, SYS_rt_sigprocmask);
+    push_nr(allow, &nallow, SYS_rt_sigreturn);
+    push_nr(allow, &nallow, SYS_sigaltstack);
+    push_nr(allow, &nallow, SYS_set_tid_address);
+    push_nr(allow, &nallow, SYS_set_robust_list);
+    push_nr(allow, &nallow, SYS_rseq);
+    push_nr(allow, &nallow, SYS_prlimit64);
+    push_nr(allow, &nallow, SYS_sched_getaffinity);
+    push_nr(allow, &nallow, SYS_sched_yield);
+    push_nr(allow, &nallow, SYS_prctl);
+    push_nr(allow, &nallow, SYS_futex);
+    push_nr(allow, &nallow, SYS_clone);
+    push_nr(allow, &nallow, SYS_clone3);
+    push_nr(allow, &nallow, SYS_fcntl);
+    push_nr(allow, &nallow, SYS_ioctl);
+    push_nr(allow, &nallow, SYS_dup);
+    push_nr(allow, &nallow, SYS_dup3);
+    push_nr(allow, &nallow, SYS_pipe2);
+    push_nr(allow, &nallow, SYS_eventfd2);
+    push_nr(allow, &nallow, SYS_epoll_create1);
+    push_nr(allow, &nallow, SYS_epoll_ctl);
+    push_nr(allow, &nallow, SYS_flock);
+    push_nr(allow, &nallow, SYS_fsync);
+    push_nr(allow, &nallow, SYS_fdatasync);
+    push_nr(allow, &nallow, SYS_getdents64);
+    push_nr(allow, &nallow, SYS_readlinkat);
+    push_nr(allow, &nallow, SYS_clock_gettime);
+    push_nr(allow, &nallow, SYS_clock_nanosleep);
+    push_nr(allow, &nallow, SYS_nanosleep);
+    push_nr(allow, &nallow, SYS_kill);
+    push_nr(allow, &nallow, SYS_tgkill);
+    push_nr(allow, &nallow, SYS_execve);
+    push_nr(allow, &nallow, SYS_execveat);
+    push_nr(allow, &nallow, SYS_mkdirat);
+    push_nr(allow, &nallow, SYS_unlinkat);
+    push_nr(allow, &nallow, SYS_linkat);
+    push_nr(allow, &nallow, SYS_renameat);
+    push_nr(allow, &nallow, SYS_renameat2);
+    push_nr(allow, &nallow, SYS_fchmod);
+    push_nr(allow, &nallow, SYS_fchmodat);
+    push_nr(allow, &nallow, SYS_faccessat);
+    push_nr(allow, &nallow, SYS_faccessat2);
+#ifdef SYS_arch_prctl
+    push_nr(allow, &nallow, SYS_arch_prctl);
+#endif
+#ifdef SYS_mkdir
+    push_nr(allow, &nallow, SYS_mkdir);
+#endif
+#ifdef SYS_rename
+    push_nr(allow, &nallow, SYS_rename);
+#endif
+#ifdef SYS_link
+    push_nr(allow, &nallow, SYS_link);
+#endif
+#ifdef SYS_unlink
+    push_nr(allow, &nallow, SYS_unlink);
+#endif
+#ifdef SYS_chmod
+    push_nr(allow, &nallow, SYS_chmod);
+#endif
+#ifdef SYS_access
+    push_nr(allow, &nallow, SYS_access);
+#endif
+#ifdef SYS_poll
+    push_nr(allow, &nallow, SYS_poll);
+#endif
+#ifdef SYS_ppoll
+    push_nr(allow, &nallow, SYS_ppoll);
+#endif
+#ifdef SYS_epoll_wait
+    push_nr(allow, &nallow, SYS_epoll_wait);
+#endif
+#ifdef SYS_epoll_pwait
+    push_nr(allow, &nallow, SYS_epoll_pwait);
+#endif
+#ifdef SYS_gettid
+    push_nr(allow, &nallow, SYS_gettid);
+#endif
+#ifdef SYS_close_range
+    push_nr(allow, &nallow, SYS_close_range);
+#endif
+    if (!deny_network) {
+        push_nr(allow, &nallow, SYS_socket);
+        push_nr(allow, &nallow, SYS_socketpair);
+    }
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 4);
+    filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, LC_AUDIT_ARCH, 1, 0);
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0);
+    if (deny_network) {
+        for (i = 0; i < (int)(sizeof denied / sizeof denied[0]); i++) {
+            filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)denied[i], 0, 1);
+            filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
+        }
+        filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_socketpair, 0, 4);
+        filt[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16);
+        filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 0, 1);
+        filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+        filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
+    }
+    for (i = 0; i < nallow; i++) {
+        filt[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)allow[i], 0, 1);
+        filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    }
+    filt[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
+    if (n > (int)(sizeof filt / sizeof filt[0])) {
+        refuse("linux confinement refused: the seccomp filter cannot be installed");
+    }
+    if (install_filter(filt, (unsigned short)n) != 0) {
+        refuse_errno("linux confinement refused: the seccomp filter cannot be installed", errno);
+    }
+}
+
+static void hide_parent_siblings(struct policy *pol) {
+    char hold[] = "/tmp/lc-hold-XXXXXX";
+    const char *slash = strrchr(pol->storage_root, '/');
+    char rebound[8192];
+    int wrote;
+    if (mkdtemp(hold) == NULL) {
+        refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
+    }
+    if (mount(pol->storage_root, hold, NULL, MS_BIND, NULL) != 0) {
+        refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
+    }
+    if (mount("tmpfs", pol->parent, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755") != 0) {
+        refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
+    }
+    if (slash == NULL || slash[1] == 0) {
+        refuse("linux confinement refused: the storage root has no directory name");
+    }
+    wrote = snprintf(rebound, sizeof rebound, "%s/%s", pol->parent, slash + 1);
+    if (wrote < 0 || wrote >= (int)sizeof rebound) {
+        refuse("linux confinement refused: the storage root has no directory name");
+    }
+    if (mkdir(rebound, 0755) != 0 && errno != EEXIST) {
+        refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
+    }
+    if (mount(hold, rebound, NULL, MS_BIND, NULL) != 0) {
+        refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
+    }
+}
+
 static void close_high_fds(void) {
     int fd;
     for (fd = 3; fd < 256; fd++) {
@@ -402,6 +628,12 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
     if (unshare(CLONE_NEWNS) != 0) {
         refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
     }
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
+        refuse_errno("linux confinement refused: the mount namespace cannot be created", errno);
+    }
+    if (pol->read_parent) {
+        hide_parent_siblings(pol);
+    }
     if (unshare(CLONE_NEWNET) != 0) {
         refuse_errno("linux confinement refused: the network namespace cannot be created", errno);
     }
@@ -443,8 +675,20 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
                      LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR;
     add_rule(ruleset, pol->storage_root, storage_rights,
              "linux confinement refused: the launch cannot open the storage root");
-    add_rule(ruleset, pol->helper, LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    add_rule(ruleset, pol->execute, LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
              "linux confinement refused: the launch cannot open PROVIDER_EXECUTABLE");
+    if (pol->read_parent) {
+        add_rule(ruleset, pol->parent, LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_READ_FILE,
+                 "linux confinement refused: the launch cannot open STORAGE_PARENT");
+    }
+    for (int extra = 0; extra < pol->n_read_exec; extra++) {
+        add_rule(ruleset, pol->read_exec[extra], LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+                 "linux confinement refused: the launch cannot open a library");
+    }
+    for (int extra = 0; extra < pol->n_read_only; extra++) {
+        add_rule(ruleset, pol->read_only[extra], LANDLOCK_ACCESS_FS_READ_FILE,
+                 "linux confinement refused: the launch cannot open a loader file");
+    }
 
     if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0) {
         refuse_errno("linux confinement refused: the capability set cannot be dropped", errno);
@@ -478,6 +722,36 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
     snprintf(enforced, sizeof enforced, "enforced abi=%d uid=%d caps=empty nnp=%d netns=%s\n", abi, (int)geteuid(),
              nnp, netns);
     snprintf(pidbuf, sizeof pidbuf, "%ld", host_pid);
+    close_high_fds();
+    if (pol->provider) {
+        char preload_env[4200];
+        char pid_env[64];
+        char copy_env[4200];
+        char *envp[4];
+        int envn = 0;
+        av[0] = pol->helper;
+        av[1] = NULL;
+        if (pol->preload[0] != 0) {
+            snprintf(preload_env, sizeof preload_env, "LD_PRELOAD=%s", pol->preload);
+            snprintf(pid_env, sizeof pid_env, "LC_HOST_PID=%s", pidbuf);
+            snprintf(copy_env, sizeof copy_env, "LC_UNBOUND=%s", pol->copy);
+            envp[envn++] = preload_env;
+            envp[envn++] = pid_env;
+            envp[envn++] = copy_env;
+        }
+        envp[envn] = NULL;
+        install_provider_filter(pol->deny_network);
+        emit_fd(2, enforced);
+        syscall(SYS_execve, pol->helper, av, envp);
+        {
+            char buf[200];
+            int err = errno;
+            snprintf(buf, sizeof buf,
+                     "linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=%d\n", err);
+            emit_fd(2, buf);
+        }
+        syscall(SYS_exit_group, 2);
+    }
     av[0] = pol->helper;
     av[1] = "check";
     av[2] = pol->storage;
@@ -487,7 +761,6 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
     av[6] = pol->storage2;
     av[7] = pidbuf;
     av[8] = NULL;
-    close_high_fds();
     install_allow_list(pol->deny_network);
     emit(enforced);
     {

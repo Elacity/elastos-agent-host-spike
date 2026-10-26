@@ -16,10 +16,13 @@ matching `declared-rights.json`. One launcher applies every profile:
    has only `lo`.
 3. Every capability is dropped, then `no_new_privs` is set.
 4. One Landlock ruleset handles every filesystem right the ABI reports,
-   including truncate and device ioctl. The only path rules are read and write
-   on `STORAGE_ROOT`, and read plus execute on `PROVIDER_EXECUTABLE`.
-5. One seccomp allow-list permits the probe's syscalls and returns `EPERM` for
-   every other number. `socket` and `socketpair` are not on the list.
+   including truncate and device ioctl. `STORAGE_ROOT` gets read and write.
+   `PROVIDER_EXECUTABLE` gets read and execute. A provider launch also gets
+   the library paths named below.
+5. One seccomp allow-list returns `EPERM` for every number that is not listed.
+   The probe list has no `socket` and no `socketpair`. The provider list is
+   the larger set the binaries use, and it still refuses `socket` and every
+   connect, bind, listen, and accept.
 
 Linux `execve` opens a binary for read and execute, so the executable rule
 carries both rights. A copy under `STORAGE_ROOT` is readable and is not
@@ -29,13 +32,37 @@ Landlock cannot name `STORAGE_PARENT` without the tree under it, and a rule on
 `/` would grant the whole tree. Those two macOS allows become no rule. A read
 of either path is refused. `sysctl-read` becomes one fact call, `uname`.
 
-The probe is freestanding. The shipping provider binaries are dynamically
-linked, and these profiles grant no library path, so this lab does not exec
-them. A storage operation is proved by writing and reading the file that
-operation's row names. An in-memory operation is proved by the confined
-process running without a file or a socket. `default_account`,
-`list_approvals`, `runs_events`, and `runs_cancel` have no named macOS test,
-so this lab does not claim them.
+The freestanding probe checks the short filter. The provider tests exec the
+debug binaries from:
+
+```bash
+cargo build --manifest-path capsules/did-provider/Cargo.toml --bin did-provider
+cargo build --manifest-path capsules/wallet-provider/Cargo.toml --bin wallet-provider
+cargo build --manifest-path capsules/model-provider/Cargo.toml --bin model-provider
+```
+
+Those are the binaries the macOS confinement tests launch. Each provider
+launch adds the paths `ldd` prints: read and execute for the dynamic linker
+and each shared library, and read-only for `/etc/ld.so.cache`. The test
+prints the reason for each path. The repo builds these binaries against
+glibc, so this lab does not relink them static.
+
+Wallet init syncs `STORAGE_PARENT`. Landlock cannot grant that directory
+without its tree, so the launcher mounts a private parent that contains only
+`STORAGE_ROOT` and then grants read of that parent.
+
+`model-provider` starts a Tokio thread that creates one `AF_UNIX`
+`socketpair`. The provider filter allows that pair and refuses `socket`.
+Did and wallet do not call `socketpair`. The probe filter still refuses both.
+
+A witness constructor is loaded with `LD_PRELOAD` into the provider process.
+It calls `socket`, `kill` of the host supervisor, and `execve` of a copy,
+records the errno, and returns. The provider's own main then answers the
+protocol. The copy is also started once as the program, with execute granted
+only on the original file.
+
+`default_account`, `list_approvals`, `runs_events`, and `runs_cancel` have
+no named macOS test, so this lab does not claim them.
 
 If Landlock or seccomp is unavailable, or the Landlock ABI is below 5, the
 launcher writes a refusal and does not exec the probe. The same is true when
@@ -46,9 +73,11 @@ launcher and the probe). The audit architecture is chosen with the compiler
 target. The source is the same on x86-64 and aarch64.
 
 ```bash
-cargo test --manifest-path lab/linux-confine/Cargo.toml -- --nocapture
+cargo test --manifest-path lab/linux-confine/Cargo.toml -- --test-threads=1 --nocapture
 python3 lab/linux-confine/falsify.py
 ```
+
+`tests/aarch64.rs` cross-compiles the launcher, probe, and witness with `aarch64-linux-gnu-gcc` and runs the explain path and the probe under `qemu-aarch64` when those tools are installed. Jetson execution is NOT RUN.
 
 The second command removes the socket denial, shows
 `did_profile_permits_its_operations_and_refuses_the_rest` fail, restores the

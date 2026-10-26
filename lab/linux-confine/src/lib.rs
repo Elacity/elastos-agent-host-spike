@@ -2,10 +2,9 @@
 //!
 //! The seatbelt files stay the oracle. This crate maps each of them onto one
 //! launch: a user namespace, empty capabilities, a Landlock ruleset, and a
-//! seccomp allow-list. The probe that runs inside that launch is freestanding,
-//! so it does not read a shared library. The shipping provider binaries are
-//! dynamically linked, and these profiles grant no library path, so this lab
-//! does not exec them.
+//! seccomp allow-list. The freestanding probe checks that filter with no
+//! libraries. A provider launch execs a shipping binary and adds only the
+//! read and execute paths `ldd` names for that binary.
 
 #![forbid(unsafe_code)]
 
@@ -13,8 +12,12 @@ mod policy;
 mod profile;
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub use policy::deny_network_by_default;
 pub use profile::{allow_rules, parse_profile, Allow, Profile};
@@ -247,4 +250,169 @@ pub fn read_profile(path: &Path) -> Result<Profile, String> {
     let text =
         fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
     parse_profile(&text)
+}
+
+/// One extra Landlock path for a dynamically linked provider.
+#[derive(Debug, Clone)]
+pub struct ExtraPath {
+    pub path: PathBuf,
+    /// Read and execute. A loader file is read-only.
+    pub execute: bool,
+}
+
+/// A shipping provider binary under the same confinement as the probe.
+#[derive(Debug, Clone)]
+pub struct ProviderLaunch {
+    pub deny_network: bool,
+    /// The file `execve` is asked to start.
+    pub binary: PathBuf,
+    /// The one file Landlock allows to execute as the program. An unbound
+    /// copy sets `binary` to the copy and `execute` to the real program.
+    pub execute: PathBuf,
+    pub storage_root: PathBuf,
+    pub parent: PathBuf,
+    pub copy: PathBuf,
+    /// Read the parent directory after a private mount that contains only
+    /// `storage_root`. Wallet init syncs that parent.
+    pub read_parent: bool,
+    /// Load the lab witness into the provider process.
+    pub preload: bool,
+    pub paths: Vec<ExtraPath>,
+}
+
+pub struct RunningProvider {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+    stderr: Arc<Mutex<String>>,
+    pub enforced: Enforced,
+}
+
+impl RunningProvider {
+    pub fn request(&mut self, line: &str) -> Result<String, String> {
+        writeln!(self.stdin, "{line}")
+            .map_err(|err| format!("writing the request failed: {err}"))?;
+        self.stdin
+            .flush()
+            .map_err(|err| format!("writing the request failed: {err}"))?;
+        let mut response = String::new();
+        let n = self
+            .stdout
+            .read_line(&mut response)
+            .map_err(|err| format!("reading the response failed: {err}; {}", self.stderr()))?;
+        if n == 0 {
+            return Err(format!("the provider closed stdout; {}", self.stderr()));
+        }
+        Ok(response)
+    }
+
+    pub fn stderr(&self) -> String {
+        self.stderr.lock().expect("stderr lock").clone()
+    }
+
+    pub fn wait(mut self) -> Result<std::process::ExitStatus, String> {
+        self.child
+            .wait()
+            .map_err(|err| format!("waiting for the provider failed: {err}"))
+    }
+}
+
+impl Drop for RunningProvider {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub fn spawn_provider(launch: &ProviderLaunch) -> Result<RunningProvider, String> {
+    let policy = write_provider_policy(launch)?;
+    let mut child = Command::new(env!("LC_SETUP"))
+        .arg(policy)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("cannot start the confinement launcher: {err}"))?;
+    let stdin = child.stdin.take().ok_or("the launcher has no stdin")?;
+    let stdout = child.stdout.take().ok_or("the launcher has no stdout")?;
+    let stderr = child.stderr.take().ok_or("the launcher has no stderr")?;
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let collected = Arc::clone(&stderr_text);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => collected.lock().expect("stderr lock").push_str(&line),
+            }
+        }
+    });
+    let started = Instant::now();
+    let enforced = loop {
+        let text = stderr_text.lock().expect("stderr lock").clone();
+        if let Some(line) = text.lines().find(|line| line.starts_with("enforced ")) {
+            break parse_enforced(line.strip_prefix("enforced ").unwrap())?;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("the launcher status failed: {err}"))?
+        {
+            return Err(format!(
+                "the provider did not start ({status}); {}",
+                stderr_text.lock().expect("stderr lock")
+            ));
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            return Err(format!(
+                "the provider did not report enforcement; {}",
+                stderr_text.lock().expect("stderr lock")
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    Ok(RunningProvider {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+        stderr: stderr_text,
+        enforced,
+    })
+}
+
+fn write_provider_policy(launch: &ProviderLaunch) -> Result<PathBuf, String> {
+    let parent = launch
+        .storage_root
+        .parent()
+        .ok_or("the storage root has no parent")?;
+    let path = parent.join("launch.policy");
+    let mut body = format!(
+        "mode=provider\ndeny_network={}\nhelper={}\nexecute={}\nstorage_root={}\nstorage=-\nstorage2=-\noutside=-\nparent={}\ncopy={}\nread_parent={}\n",
+        if launch.deny_network { "1" } else { "0" },
+        launch.binary.display(),
+        launch.execute.display(),
+        launch.storage_root.display(),
+        launch.parent.display(),
+        launch.copy.display(),
+        if launch.read_parent { "1" } else { "0" },
+    );
+    for extra in &launch.paths {
+        let key = if extra.execute {
+            "read_exec"
+        } else {
+            "read_only"
+        };
+        body.push_str(&format!("{key}={}\n", extra.path.display()));
+    }
+    if launch.preload {
+        body.push_str(&format!(
+            "preload={}\nread_exec={}\n",
+            env!("LC_WITNESS"),
+            env!("LC_WITNESS")
+        ));
+    }
+    fs::write(&path, body).map_err(|err| format!("cannot write policy: {err}"))?;
+    Ok(path)
 }
