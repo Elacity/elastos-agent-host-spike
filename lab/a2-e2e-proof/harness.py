@@ -81,13 +81,27 @@ def sha256_file(path: Path) -> str:
 
 
 def cargo_result(output: str, name: str) -> str:
-    escaped = re.escape(name.split("::")[-1])
-    match = re.search(rf"test {escaped}(?: \(.*?\) )? \.\.\. ([^\n]+)", output)
+    short = re.escape(name.split("::")[-1])
+    match = re.search(
+        rf"test (?:[^\n]*::)?{short}(?: \(.*?\) )? \.\.\. ([^\n]+)",
+        output,
+    )
     if match:
         return match.group(1).strip()
-    if re.search(rf"^test {escaped} .*ignored", output, re.M):
-        return "ignored"
     return "not-run"
+
+
+def cargo_tail(output: str) -> str:
+    lines = [
+        line
+        for line in output.splitlines()
+        if line.startswith("test ")
+        or line.startswith("test result:")
+        or line.startswith("error")
+        or "FAILED" in line
+        or "ignored" in line
+    ]
+    return "\n".join(lines[-20:])
 
 
 def cargo_test(name: str, ignored: bool) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -360,13 +374,13 @@ def confirm_ci_skips_write(proof: Proof) -> None:
     result, status = cargo_test(WRITE_TEST, ignored=False)
     output = result.stdout + result.stderr
     proof.log(f"CMD cargo test {WRITE_TEST} (no --ignored) -> {status}")
-    if status != "ignored":
+    proof.log(cargo_tail(output))
+    if not status.startswith("ignored"):
         proof.step(
             "WRITE",
             "FAIL",
             f"without --ignored the e2e reported {status!r}, not ignored",
         )
-        proof.log(output[-2000:])
         return
     proof.notes.append(
         "Default cargo test reports the A2 e2e as ignored. That skip is not a pass."
@@ -377,9 +391,9 @@ def run_write(proof: Proof) -> None:
     result, status = cargo_test(WRITE_TEST, ignored=True)
     output = result.stdout + result.stderr
     proof.log(f"CMD cargo test {WRITE_TEST} --ignored --exact -> {status}")
-    if status == "ignored":
+    proof.log(cargo_tail(output))
+    if status.startswith("ignored"):
         proof.step("WRITE", "FAIL", "still ignored after --ignored; skip is not a pass")
-        proof.log(output[-3000:])
         return
     if status == "ok" and result.returncode == 0:
         proof.step(
@@ -389,22 +403,21 @@ def run_write(proof: Proof) -> None:
         )
         return
     proof.step("WRITE", "FAIL", f"cargo reported {status!r}")
-    proof.log(output[-4000:])
 
 
 def run_siblings(proof: Proof) -> None:
     for name in (DENIED_TEST, FORMAT1_TEST):
         result, status = cargo_test(name, ignored=True)
         proof.log(f"CMD cargo test {name} --ignored --exact -> {status}")
-        if status != "ok" or result.returncode != 0:
-            proof.log((result.stdout + result.stderr)[-2000:])
+        proof.log(cargo_tail(result.stdout + result.stderr))
 
 
 def run_stale(proof: Proof) -> None:
     result, status = cargo_test(STALE_TEST, ignored=False)
     output = result.stdout + result.stderr
     proof.log(f"CMD cargo test {STALE_TEST} --exact -> {status}")
-    if status == "ignored":
+    proof.log(cargo_tail(output))
+    if status.startswith("ignored"):
         proof.step("STALE", "FAIL", "stale-revision test was ignored; skip is not a pass")
         return
     has_reason = "revision_conflict" in (
@@ -418,7 +431,6 @@ def run_stale(proof: Proof) -> None:
         )
         return
     proof.step("STALE", "FAIL", f"cargo reported {status!r}")
-    proof.log(output[-4000:])
 
 
 def run_resume(proof: Proof) -> None:

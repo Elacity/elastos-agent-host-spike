@@ -1,0 +1,63 @@
+A2 e2e proof
+when: 2026-10-26T20:35:28Z
+commit: 8078a30b7371763cbc0f7ab664972675d82f1afc
+parent: 042cb132371f77ce1b469af059e054bb7ef78295
+machine: Linux x86_64
+rustc: rustc 1.91.0 (f8297e351 2025-10-28)
+python: 3.12.3
+runtime_serve_ready: True
+
+why_ignored: loads examples/agent-host/agent-host.component.wasm; CI does not build that guest, so the test is #[ignore] and points at examples/agent-host/run-e2e.sh. Not flaky. Not marked broken.
+
+WRITE: PASS
+STALE: PASS
+RESUME: FAIL
+FALSIFIER: F-A2-REVISION CAUGHT
+A2_counted: no
+
+log:
+VERSION commit: 8078a30b7371763cbc0f7ab664972675d82f1afc
+VERSION parent: 042cb132371f77ce1b469af059e054bb7ef78295
+VERSION rustc: rustc 1.91.0 (f8297e351 2025-10-28)
+VERSION machine: Linux x86_64
+VERSION python: 3.12.3
+VERSION when: 2026-10-26T20:35:28Z
+IGNORE_MARKER count=3
+GUEST journal_write_body uses_create_only=True
+GUEST resume_journal present=True
+CMD rustup target add wasm32-unknown-unknown -> 0
+CMD examples/agent-host/build.sh -> 0
+GUEST_WASM sha256:c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d bytes:668330
+CMD cargo build -p elastos-server --bin elastos -> 0
+CMD cargo build -p localhost-provider --bin localhost-provider -> 0
+RUNTIME sha256:43db61137d3f07276626ccc72594fa67337df1f040ddc0a1002a621c52e8e680
+PROVIDER sha256:0dbc14552751ffaeac234583493a44182fca675cc8d0c1471230ff0d0129f73c
+CMD elastos serve --addr 127.0.0.1:44753 pid=29232 ready=True
+CMD cargo test runtime::tests::the_agent_host_writes_and_reads_its_journal_through_the_real_bridge (no --ignored) -> ignored, loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh
+test runtime::tests::the_agent_host_writes_and_reads_its_journal_through_the_real_bridge ... ignored, loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 3073 filtered out; finished in 0.00s
+CMD cargo test runtime::tests::the_agent_host_writes_and_reads_its_journal_through_the_real_bridge --ignored --exact -> ok
+test runtime::tests::the_agent_host_writes_and_reads_its_journal_through_the_real_bridge ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3073 filtered out; finished in 0.48s
+STEP WRITE: PASS — guest wrote and read the journal through the in-process real bridge
+CMD cargo test runtime::tests::the_agent_host_stores_nothing_when_its_journal_grants_are_denied --ignored --exact -> ok
+test runtime::tests::the_agent_host_stores_nothing_when_its_journal_grants_are_denied ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3073 filtered out; finished in 0.46s
+CMD cargo test runtime::tests::the_agent_host_refuses_a_format_1_journal_with_its_reason --ignored --exact -> ok
+test runtime::tests::the_agent_host_refuses_a_format_1_journal_with_its_reason ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3073 filtered out; finished in 0.47s
+CMD cargo test resource_bridge::tests::a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept --exact -> ok
+test resource_bridge::tests::a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3073 filtered out; finished in 0.07s
+STEP STALE: PASS — stale if_revision write refused with revision_conflict; stored journal kept
+RESUME e2e_restarts_runtime=False
+RESUME guest_first_write_is_create_only=True
+STEP RESUME: FAIL — the ignored e2e reads back in the same process; shipped run() starts a fresh journal with create_only and does not load a stored format-2 journal after a new launch. Resume after restart is not proven.
+RUNTIME stopped after health 200
+A2 at risk: resume after restart is not proven
+
+FALSIFIER
+F-A2-REVISION CAUGHT
+A stale if_revision write is accepted instead of revision_conflict
+resource_bridge.rs restored clean
+
