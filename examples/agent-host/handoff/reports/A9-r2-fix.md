@@ -5,7 +5,9 @@ Lab only. Do not merge. Do not book A9.
 ```text
 Slice:        A9 r2 fix (hard-link unlink, intermediate-dir TOCTOU, M-no-nofollow)
 Branch / PR:  cursor/owned-storage-a9-9b7c  https://github.com/Elacity/elastos-agent-host-spike/pull/290
+Commit:       578e0959a374af726bbc8f113afdbb5e7723636d
 Parent:       2e5c37293279996fcb98ee2623381264f2d92e3f
+Machine:      Linux x86_64, rustc 1.91.0 (f8297e351 2025-10-28)
 ```
 
 The r2 review (draft #390) found two Store journeys that still let B see or receive A's bytes, and one surviving mutant. Those holes were in `lab/owned-storage`. Runtime store code was not patched. `lab/a9/RUNTIME-ASK.md` names the same class of hole in `LocalMutableStorage` for Anders.
@@ -18,9 +20,50 @@ The r2 review (draft #390) found two Store journeys that still let B see or rece
 
 Runtime rows stay Blocked (`AC-006-STORAGE`, `executed=false`, `read_refusal=None`). Host same-uid walks stay `NEEDS CONFINEMENT/RUNTIME`.
 
-## Tests
+## Tests on 578e0959
 
-See the session message for exact command results (fmt, clippy, suite, plants, 8 r2 mutants, race counts).
+```text
+cargo fmt --manifest-path lab/owned-storage/Cargo.toml -- --check
+# clean, exit 0
+
+cargo clippy --manifest-path lab/owned-storage/Cargo.toml --locked --offline --all-targets -- -D warnings
+# Finished `dev` profile, no diagnostics
+
+cargo test --locked --offline --manifest-path lab/owned-storage/Cargo.toml
+# 17 passed; 0 failed; 0 ignored
+# 17 tests, 0 benchmarks. No ignored names.
+
+python3 -I lab/owned-storage/r2-mutants.py
+# 8 mutants; 8 caught; 0 surviving
+```
+
+Race: 5000 iterations, 0 files left in B (`intermediate_dir_swap_write_leaves_nothing_in_b`).
+
+Plants (6 files, all CAUGHT by `planted_shared_root_is_caught`):
+
+```text
+F-A9-fake-runtime
+F-A9-hardlink
+F-A9-hardlink-unlink
+F-A9-nofollow
+F-A9-root-swap
+F-A9-share
+```
+
+r2 mutants (same old/new strings as draft #390):
+
+```text
+M-root-swap          caught
+M-hardlink-nlink     caught
+M-list-no-resolve    caught
+M-a5-users           caught
+M-inode-noop         caught
+M-no-nofollow        caught   (was the r2 survivor)
+M-share-count-zero   caught
+M-fake-runtime-read  caught
+```
+
+`/tmp/elastos/storage` absent before and after. Worktree clean after mutants.
 
 ## Principles
 
@@ -31,3 +74,4 @@ See the session message for exact command results (fmt, clippy, suite, plants, 8
 
 DeepSeek: none.
 Runtime-ASK: yes, `lab/a9/RUNTIME-ASK.md`.
+Not proven: two Runtime agents; host same-uid confinement.
