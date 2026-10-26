@@ -71,14 +71,38 @@ git hash-object examples/agent-host/src/lib.rs
 
 Results of the run that wrote this note:
 
-- Machine: NOT RUN (filled after the measured loop)
-- Ownership: Runtime `bus_error` matches Elacity `develop` `92aeea44` on
-  the Denied list and the Internal default. Guest blob `ae50487d`.
-- Repro (unpatched / shipped path): NOT RUN
-- Trial property (patched rule): NOT RUN
-- Falsifier: NOT RUN
-- `trial.patch` apply --check: NOT RUN
-- Runtime files were not edited. Guest restored if a trial apply ran.
+- Machine: Linux 6.12.94+ x86_64, rustc 1.91.0 (f8297e351 2025-10-28).
+- Verdict: **CONFIRMED**. Injected Internal and a genuine deny both return
+  `OkDeny` on the shipped path. The trial path returns `Err` for Internal
+  and `OkDeny` for deny.
+- Ownership: Runtime `bus_error` Denied list and Internal default match
+  Elacity `develop` `92aeea44`. Guest blob `ae50487d` before and after
+  the trial apply.
+- Pins (this tree): `.ok()` `examples/agent-host/src/lib.rs:3845-3846`;
+  WasmBus Internal→Other `:4213-4218`; `run()` empty grants → Ok `:8086`;
+  `bus_error` Denied `:271`, Internal `:289`;
+  `manifest_capability_denied` `resource_bridge.rs:274`.
+- Repro (unpatched / shipped path): lab suite 20 of 20.
+  `injected_internal_is_reported_as_ordinary_deny` and
+  `genuine_deny_is_also_ok` both `OkDeny`;
+  `caller_cannot_tell_internal_from_deny` holds;
+  `shipped_mapping_fails_the_trial_property` holds.
+- Trial property (patched rule): `trial_propagates_internal_and_keeps_deny`
+  Internal=`Err`, Denied=`OkDeny`, 20 of 20.
+- Falsifier: `SWALLOW_INTERNAL=true` →
+  `trial_propagates_internal_and_keeps_deny` panicked
+  `SWALLOW_INTERNAL must stay false; the plant sets it`. Constant restored.
+- `trial.patch` `git apply --check` clean. Applied once: `.ok()` gone;
+  `tests::the_guest_asks_for_exactly_two_grants_on_its_own_journal`,
+  `tests::a_refused_grant_request_sends_nothing`,
+  `tests::no_grant_is_asked_for_a_path_outside_the_agents_journal` passed;
+  then `git checkout --` restored `ae50487d`.
+- Runtime files were not edited.
+
+Not run here: a live `elastos serve` / wasm guest (the A8 Home path).
+This lab injects at the grant-request mapping, with source pins. It does
+not load `agent-host.component.wasm`. The full Agent Host suite was not
+run. Nothing was pushed to elastos-runtime.
 
 ## Lab rule
 
