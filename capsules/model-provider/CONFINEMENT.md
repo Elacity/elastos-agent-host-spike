@@ -57,7 +57,8 @@ from the starting set's `file-read*` to `file-read-data`, the one class that
 startup needs.
 
 `(deny network*)` is held by the shared contract check, not by a behaviour
-test here (see Tests). With that one form removed, `(deny default)` still
+test here (see Tests): F-cc12a removes it, and that check fails (see
+Falsifiers). With that one form removed, `(deny default)` still
 refuses the hosted run's connect, and
 `model_hosted_run_fails_closed_under_profile` still passes. The profile's
 refusal of a network operation is now also shown by behaviour: that test and
@@ -321,7 +322,8 @@ skip reason there and returns.
 
 The profile shape has one check (P10):
 `both_file_profiles_bind_one_storage_parameter_contract` in
-`../wallet-provider/tests/confine.rs` runs over this file whenever it exists.
+`../wallet-provider/tests/confine.rs` requires this file and fails when it is
+missing or unreadable.
 It requires `(version 1)` first, `(deny default)` second, `(deny network*)`,
 no network allow, only the three parameter tokens, the three shared rules
 verbatim, and no `(allow default)`. This crate adds no second shape test.
@@ -337,10 +339,11 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 ## Falsifiers
 
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
-runner. Every entry uses command `provider` and `expect: caught`. Each
-mutates `confine.sb` only, except the two entries that edit
-`tests/confine/main.rs`: F-cc1e removes the outside-read fixture rule, and
-F-cc8-rm-journal removes the outside-create fixture grant.
+runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
+because the one shape check is in the wallet crate, and every other entry
+uses command `provider`. Each mutates `confine.sb` only, except the two
+entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
+fixture rule, and F-cc8-rm-journal removes the outside-create fixture grant.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -361,6 +364,7 @@ F-cc8-rm-journal removes the outside-create fixture grant.
 | F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
 | F-cc10a | `(deny default)` becomes `(allow default)` and `(deny network*)` is removed; `(version 1)` stays first | `model_hosted_run_fails_closed_under_profile` | The hosted run's request reaches the Runtime socket stand-in. `(allow default)` alone is not enough: `(deny network*)` still refuses the connect. |
 | F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
+| F-cc12a | Remove `(deny network*)`; nothing else changes | `both_file_profiles_bind_one_storage_parameter_contract` (wallet crate) | The one shape check refuses the model profile with "model-provider must deny the network explicitly with (deny network*)". |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -370,13 +374,12 @@ startup recovery restores `tests/confine/main.rs` after a killed run (provider
 task 015), as it restores `confine.sb`.
 
 The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
-skip and pass, so the runner reports each entry as SURVIVED there.
+skip and pass, so the runner reports each sandbox entry as SURVIVED there.
+F-cc12a needs no sandbox. Its check only reads the profile files, so it is
+CAUGHT on any host that builds the wallet crate.
 
-The runner's `provider` command runs only this crate, so the `(deny network*)`
-falsifier is applied by hand: delete `(deny network*)` from `confine.sb` and
-run the wallet command above.
-`both_file_profiles_bind_one_storage_parameter_contract` then fails with
-"model-provider must deny the network explicitly with (deny network*)".
-Restore the file and it passes. The check itself is guarded by WP06 in
-`../wallet-provider/falsifiers.json`, which deletes the `(deny network*)`
+F-cc12a registers the removal of `(deny network*)`: the runner applies it
+with the `wallet` command and restores `confine.sb` afterwards, or at its
+next start after a killed run. WP06 in `../wallet-provider/falsifiers.json`
+guards the check's own `(deny network*)` requirement: it deletes that
 requirement from the check.
