@@ -19,7 +19,9 @@
 //!
 //! [`run`] is wc-005a's runner: one test-only host engine on a verified
 //! bundle's entrypoint bytes, written from memory into a new private folder,
-//! with no folder, env or network flag.
+//! with no folder, env or network flag; and wc-005b's two-engine `run`, which
+//! verifies once with [`verify`] and then runs `wasmtime` and then `wasmer`
+//! through that one engine runner, requiring identical stdout.
 
 pub mod bundle;
 pub mod run;
