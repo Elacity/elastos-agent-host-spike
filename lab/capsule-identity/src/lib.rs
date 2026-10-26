@@ -1,27 +1,47 @@
-//! Lab capsule identity: one deterministic **lab CID** over a whole capsule
-//! bundle (PRINCIPLES 13 and 15).
+//! Lab capsule identity: one deterministic **lab CID**, a lab package CID,
+//! over a whole capsule bundle (PRINCIPLES 13 and 15).
 //!
 //! This crate answers two questions: "do these bytes match this name?" and
 //! "did this test key sign this lab CID?". It never answers "may this run?":
 //! it makes no trust, admission or launch decision and sits in no admission
-//! or launch path. Its value is a lab CID,
-//! printed `lab-cid:sha256:<64 lowercase hex>`. It is not the Runtime's CID:
-//! the Runtime names a published capsule by the CID its IPFS provider returns
-//! for the capsule archive, and this crate does not reproduce that rule.
+//! or launch path. Its value is a lab package CID: the CIDv1 SHA-256 UnixFS
+//! directory root of the bundle, printed as 59 characters that start
+//! `bafybei`. It is a prototype, not an admission, and it defines no shared
+//! capsule identity. It is not the Runtime's published name either: the
+//! Runtime names a published capsule by the CID its IPFS provider returns
+//! for the capsule archive, and an archive hash is a delivery check, not
+//! this CID.
 //!
 //! # The encoding
 //!
-//! The lab CID is SHA-256 over one byte stream:
+//! The profile is Kubo v0.40.1's import flags as
+//! `capsules/ipfs-provider/src/directory_hash.rs` sends them: CIDv1, sha2-256,
+//! raw leaves, chunker `size-262144`, no inline, no HAMT shard below its
+//! threshold. This crate runs no Kubo and pins only the single-block,
+//! non-sharded subset of that profile:
 //!
-//! 1. the framing tag `lab.capsule-identity.bundle/v1\n` ([`FRAMING_TAG`]);
-//! 2. then, for every regular file under the bundle root, sorted by its
-//!    bundle-relative, `/`-separated UTF-8 path in byte order: the path
-//!    length as u64 big-endian, the path bytes, the content length as u64
-//!    big-endian, the content bytes.
+//! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
+//!    leaf: its block is the file's bytes (an empty file is an empty block),
+//!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
+//!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
+//!    Tsize is its length. A larger file is refused: no chunked file DAG.
+//! 2. A bundle path such as `browser/app.js` is a directory `browser` that
+//!    links `app.js`. Each directory's block is dag-pb: one link per child,
+//!    sorted by name bytes, each as protobuf field 2 holding the child's CID
+//!    (field 1), its name (field 2) and its Tsize (field 3, a varint); then
+//!    the UnixFS data `08 01` (type directory) as field 1. A directory's CID
+//!    is `01 70 12 20` and the SHA-256 of its block (dag-pb codec `0x70`).
+//!    The Tsize of a link to a directory is that directory's block length
+//!    plus the Tsizes of its links. A block over 262144 bytes is refused: no
+//!    HAMT shard.
+//! 3. The root is the directory of the bundle's entries. Its CID prints as
+//!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
-//! Directories add nothing themselves. Nothing else enters the stream: no
-//! folder name, absolute path, mtime, mode or owner. The digest prints as
-//! `lab-cid:sha256:` and 64 lowercase hex characters.
+//! No empty directory is emitted. Nothing else enters a block: no folder
+//! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
+//! and the base32 text are one marked lab copy in this crate, so the lab adds
+//! no crate (the Runtime's `cid` crate lives only in server crates the lab
+//! does not link, and a new crate would stale two consumer locks).
 //!
 //! # One naming path
 //!
@@ -139,12 +159,6 @@ use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
-/// The first bytes of every lab CID stream.
-pub const FRAMING_TAG: &[u8] = b"lab.capsule-identity.bundle/v1\n";
-
-/// How a lab CID prints before its 64 lowercase hex characters.
-pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";
-
 /// The manifest every bundle holds at its root.
 pub const MANIFEST_FILE: &str = "capsule.json";
 
@@ -189,14 +203,41 @@ pub const VARIANT_PLATFORMS: [&str; 4] = [
 /// [`encode_entries`] of one entry with this path and the recipe's bytes.
 pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
-/// A lab CID: SHA-256 over a bundle's lab CID stream. It prints with its
-/// `lab-cid:sha256:` label so it is never mistaken for the Runtime's CID.
+// The profile: Kubo v0.40.1's import flags as
+// `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
+// one chunk and no HAMT shard. Each one changes the CID or the refusal, and
+// each has a falsifier. There is no inline setting: no CID here uses the
+// identity multihash, whatever the size of the block.
+
+/// CID version 1.
+const CID_VERSION: u8 = 0x01;
+/// The multihash code of sha2-256 (`hash: sha2-256`).
+const SHA2_256: u8 = 0x12;
+/// The length of a sha2-256 digest, as its multihash writes it.
+const SHA2_256_LENGTH: u8 = 0x20;
+/// The codec of a raw leaf (`raw-leaves: true`).
+const RAW_CODEC: u8 = 0x55;
+/// The codec of a directory block, dag-pb.
+const DAG_PB_CODEC: u8 = 0x70;
+/// The largest file one raw leaf holds (`chunker: size-262144`). A larger
+/// file would need a chunked file DAG, which the lab refuses.
+const CHUNK_SIZE: usize = 262_144;
+/// The UnixFS data type of a directory, written in its block as `08 01`.
+const DIRECTORY_TYPE: u8 = 1;
+/// The longest directory block the lab names. Kubo shards a directory into a
+/// HAMT once its links' estimated size passes 256KiB; the lab refuses a block
+/// over this length instead, which is earlier, so it fails closed.
+const DIRECTORY_BLOCK_LIMIT: usize = 262_144;
+
+/// A lab CID, a lab package CID: the SHA-256 digest of a bundle's UnixFS
+/// root directory block. It prints as that root's CIDv1 in base32, 59
+/// characters that start `bafybei`. It is a prototype, not an admission.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LabCid([u8; 32]);
 
 impl fmt::Display for LabCid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{LAB_CID_PREFIX}{}", hex::encode(self.0))
+        write!(f, "{}", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))
     }
 }
 
@@ -209,21 +250,17 @@ impl fmt::Debug for LabCid {
 /// Read a printed lab CID back into its value.
 ///
 /// It runs the claim check both name checks run, `lab_cid_digits`, and
-/// then decodes the digits it gives, so a printed value is read in one
-/// place and a consumer never copies the printed form. Text that is not a
-/// lab CID is refused with [`Refusal::NotALabCid`], the same refusal and
-/// text a name check gives. Parsing is not a name check: the value names no
-/// bytes until [`check_name`] or [`CheckedBundle::check_name`] compares it.
+/// keeps the root digest it gives, so a printed value is read in one place
+/// and a consumer never copies the printed form. Text that is not a lab CID
+/// is refused with [`Refusal::NotALabCid`], the same refusal and text a name
+/// check gives. Parsing is not a name check: the value names no bytes until
+/// [`check_name`] or [`CheckedBundle::check_name`] compares it.
 impl std::str::FromStr for LabCid {
     type Err = Refusal;
 
     fn from_str(printed: &str) -> Result<Self, Refusal> {
-        let digits = lab_cid_digits(printed)?;
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(digits, &mut bytes).map_err(|_| Refusal::NotALabCid {
-            claimed: printed.to_owned(),
-        })?;
-        Ok(LabCid(bytes))
+        let digest = lab_cid_digits(printed)?;
+        Ok(LabCid(digest))
     }
 }
 
@@ -260,7 +297,7 @@ pub struct CheckedBundle {
 /// signs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameSignature {
-    /// The printed lab CID the signature covers, label included.
+    /// The printed lab CID the signature covers, as `LabCid` prints it.
     pub name: String,
     /// The signer's canonical Ed25519 `did:key`.
     pub signer_did: String,
@@ -313,7 +350,8 @@ pub struct VariantBinding {
 /// What the walk does with one entry, decided from the entry's own type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
-    /// Walked into. A directory adds nothing to the stream itself.
+    /// Walked into. A directory adds no entry itself; the encoder makes its
+    /// UnixFS directory from the entry paths.
     Directory,
     /// Read and named.
     RegularFile,
@@ -357,6 +395,19 @@ pub enum Refusal {
     NonUtf8Name { path: String },
     /// Two entries given to the encoder have the same path.
     DuplicatePath { path: String },
+    /// An entry given to the encoder has a path with an empty, `.` or `..`
+    /// part, so it names no UnixFS link. The walk never makes one.
+    BadPathPart { path: String },
+    /// One path given to the encoder is both a file and a directory, as
+    /// `a` and `a/b` would be. The walk never makes one.
+    FileAndDirectory { path: String },
+    /// A file is longer than one raw leaf holds, 262144 bytes. The lab names
+    /// no chunked file DAG. `length` is the file's length.
+    FileOverChunkLimit { path: String, length: usize },
+    /// A directory's encoded block is longer than 262144 bytes; `.` is the
+    /// bundle root. The lab names no HAMT-sharded directory. `length` is the
+    /// block's length.
+    DirectoryOverBlockLimit { path: String, length: usize },
     /// An entry's open handle is not the kind its folder's listing said: the
     /// entry changed between the listing and the open.
     Changed { path: String },
@@ -366,8 +417,9 @@ pub enum Refusal {
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
     /// A name check, or [`LabCid`]'s parse, was given a claim that is not a
-    /// lab CID: it lacks the `lab-cid:sha256:` label, or 64 lowercase hex
-    /// characters after it. The claim is kept only to say what was refused.
+    /// lab CID: not `b` and the canonical lowercase base32 of a CIDv1 dag-pb
+    /// sha2-256 directory root (`01 70 12 20` and 32 bytes). The claim is
+    /// kept only to say what was refused.
     NotALabCid { claimed: String },
     /// A name check was given a lab CID the bundle's bytes do not give.
     /// `actual` is the lab CID of the bytes; the claim is kept only to say
@@ -445,11 +497,27 @@ impl fmt::Display for Refusal {
                 f,
                 "two entries have the path {path}: a bundle holds one file per path"
             ),
+            Refusal::BadPathPart { path } => write!(
+                f,
+                "the path {path:?} has an empty, . or .. part: each part names one UnixFS link"
+            ),
+            Refusal::FileAndDirectory { path } => write!(
+                f,
+                "{path} is both a file and a directory: a bundle path names one or the other"
+            ),
+            Refusal::FileOverChunkLimit { path, length } => write!(
+                f,
+                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: the lab names no chunked file"
+            ),
+            Refusal::DirectoryOverBlockLimit { path, length } => write!(
+                f,
+                "the directory {path} encodes to {length} bytes, over the {DIRECTORY_BLOCK_LIMIT}-byte block limit: the lab names no HAMT-sharded directory"
+            ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
             Refusal::NotALabCid { claimed } => write!(
                 f,
-                "the claim {claimed:?} is not a lab CID: a lab CID is {LAB_CID_PREFIX} and 64 lowercase hex characters"
+                "the claim {claimed:?} is not a lab CID: a lab package CID is a 59-character CIDv1 bafybei... directory root"
             ),
             Refusal::NameMismatch { actual, claimed } => {
                 write!(f, "bundle bytes name {actual}; the claim is {claimed}")
@@ -604,11 +672,11 @@ impl CheckedBundle {
     }
 }
 
-/// The compare both name checks make: a lab CID whose digits are not the
-/// claim's digits is refused with both values. `claimed` is the whole
-/// claim, kept only to say what was refused.
-fn compare_name(actual: LabCid, claimed_digits: &str, claimed: &str) -> Result<(), Refusal> {
-    if hex::encode(actual.0) != claimed_digits {
+/// The compare both name checks make: a lab CID whose root digest is not the
+/// claim's is refused with both values. `claimed` is the whole claim, kept
+/// only to say what was refused.
+fn compare_name(actual: LabCid, claimed_digits: [u8; 32], claimed: &str) -> Result<(), Refusal> {
+    if actual.0 != claimed_digits {
         return Err(Refusal::NameMismatch {
             actual,
             claimed: claimed.to_owned(),
@@ -617,51 +685,278 @@ fn compare_name(actual: LabCid, claimed_digits: &str, claimed: &str) -> Result<(
     Ok(())
 }
 
-/// The digits of a claimed lab CID: the 64 lowercase hex characters after
-/// its `lab-cid:sha256:` label. Any other text is not a lab CID.
-fn lab_cid_digits(claimed: &str) -> Result<&str, Refusal> {
+/// The root digest of a claimed lab CID: the one claim check. The claim must
+/// be `b` and base32 whose bytes are the CIDv1 bytes of a dag-pb sha2-256
+/// root (`01 70 12 20` and 32 bytes), so a leaf CID or a CIDv0 is refused.
+/// Then those bytes must print as exactly the claim, so a second spelling of
+/// them (a character more, or unused low bits set in the last character) is
+/// refused too. Any other text is not a lab CID.
+fn lab_cid_digits(claimed: &str) -> Result<[u8; 32], Refusal> {
     let not_a_lab_cid = || Refusal::NotALabCid {
         claimed: claimed.to_owned(),
     };
-    let digits = claimed
-        .strip_prefix(LAB_CID_PREFIX)
+    let cid = claimed
+        .strip_prefix('b')
+        .and_then(decode_base32)
         .ok_or_else(not_a_lab_cid)?;
-    if digits.len() != 64 {
+    let root: [u8; 32] = cid
+        .get(cid.len().saturating_sub(32)..)
+        .and_then(|digest| digest.try_into().ok())
+        .ok_or_else(not_a_lab_cid)?;
+    if cid != cid_bytes(DAG_PB_CODEC, &root) {
         return Err(not_a_lab_cid());
     }
-    if !digits
-        .bytes()
-        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if printed_cid(&cid) != claimed {
         return Err(not_a_lab_cid());
     }
-    Ok(digits)
+    Ok(root)
 }
 
-/// The encoder: the lab CID of `entries`, given in any order.
+// A lab copy of the CIDv1 bytes and of their text, `b` and RFC 4648 base32
+// (lowercase, no padding), as the multibase and CID specifications write
+// them. The Runtime's `cid` crate lives only in `elastos-server` and
+// `elastos-namespace`, which the lab does not link, and a new crate here would
+// stale the locks of the two lab crates that path-depend on this one. So the
+// lab keeps this one marked copy: `cid_bytes`, one encoder and one decoder.
+
+/// The base32 alphabet of RFC 4648, lowercase.
+const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// The CIDv1 bytes of a block with `codec` whose SHA-256 is `digest`: the
+/// version, the codec, the multihash code and length, and the digest. Every
+/// varint in them is one byte.
+fn cid_bytes(codec: u8, digest: &[u8; 32]) -> Vec<u8> {
+    let mut cid = vec![CID_VERSION, codec, SHA2_256, SHA2_256_LENGTH];
+    cid.extend_from_slice(digest);
+    cid
+}
+
+/// The printed form of CID bytes, the one encoder: `b`, then each 5 bits of
+/// the bytes as one character of [`BASE32_ALPHABET`], the last group padded
+/// with zero bits, and no `=` padding.
+fn printed_cid(cid: &[u8]) -> String {
+    let mut text = String::from("b");
+    let (mut bits, mut held) = (0u32, 0u32);
+    for &byte in cid {
+        bits = (bits << 8) | u32::from(byte);
+        held += 8;
+        while held >= 5 {
+            held -= 5;
+            text.push(char::from(BASE32_ALPHABET[(bits >> held) as usize & 31]));
+        }
+        bits &= (1 << held) - 1;
+    }
+    if held > 0 {
+        text.push(char::from(
+            BASE32_ALPHABET[(bits << (5 - held)) as usize & 31],
+        ));
+    }
+    text
+}
+
+/// The bytes of base32 text after its `b`, the one decoder; `None` when a
+/// character is not in [`BASE32_ALPHABET`]. Bits left over after the last
+/// whole byte are dropped here; the claim check refuses a claim that sets
+/// them, because it prints the value again and compares.
+fn decode_base32(text: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let (mut bits, mut held) = (0u32, 0u32);
+    for character in text.bytes() {
+        let value = BASE32_ALPHABET.iter().position(|&one| one == character)?;
+        bits = (bits << 5) | value as u32;
+        held += 5;
+        if held >= 8 {
+            held -= 8;
+            bytes.push((bits >> held) as u8);
+        }
+        bits &= (1 << held) - 1;
+    }
+    Some(bytes)
+}
+
+/// The encoder: the lab CID of `entries`, given in any order. It is the one
+/// naming hash; every leaf and every directory block is hashed by the one
+/// SHA-256 it holds.
 ///
-/// It sorts the entries by path bytes, refuses two entries with one path, and
-/// hashes [`FRAMING_TAG`] and then, for each entry, the path length (u64
-/// big-endian), the path, the content length (u64 big-endian) and the
-/// content. The two length prefixes keep every path and content boundary
-/// unambiguous.
+/// Each entry is a raw leaf: a file over [`CHUNK_SIZE`] bytes is refused,
+/// and its CID is CIDv1, raw codec, sha2-256 of its bytes, with its length as
+/// Tsize. The entry paths make the directories: a path with an empty, `.` or
+/// `..` part, two entries with one path, and one path that is both a file and
+/// a directory are refused. Then each directory, deepest first, becomes one
+/// dag-pb block whose links are sorted by name bytes, a block over
+/// [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's SHA-256
+/// is the lab CID.
 pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
-    let mut sorted: Vec<&BundleEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    if let Some(pair) = sorted.windows(2).find(|pair| pair[0].path == pair[1].path) {
-        return Err(Refusal::DuplicatePath {
-            path: pair[0].path.clone(),
+    let sha256 = |block: &[u8]| -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(block);
+        hasher.finalize().into()
+    };
+    let mut root = Directory::default();
+    for entry in entries {
+        if entry.content.len() > CHUNK_SIZE {
+            return Err(Refusal::FileOverChunkLimit {
+                path: entry.path.clone(),
+                length: entry.content.len(),
+            });
+        }
+        let leaf = Child::File {
+            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),
+            tsize: entry.content.len() as u64,
+        };
+        root.insert(&entry.path, leaf)?;
+    }
+    let (digest, _) = encode_directory(&root, "", &sha256)?;
+    Ok(LabCid(digest))
+}
+
+/// A directory as the encoder builds it: each child with its name, in the
+/// order the entries were given. Its block sorts them.
+#[derive(Default)]
+struct Directory {
+    children: Vec<(String, Child)>,
+}
+
+/// One child of a [`Directory`].
+enum Child {
+    /// A raw leaf: its CID bytes and its Tsize, the file's length.
+    File { cid: Vec<u8>, tsize: u64 },
+    /// A directory below this one.
+    Directory(Directory),
+}
+
+impl Directory {
+    /// Put the leaf `file` at the bundle path `path`, making each directory
+    /// on the way. A path with an empty, `.` or `..` part is refused; so is
+    /// a path already given, and a path that is a file and a directory, in
+    /// either order.
+    fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
+            return Err(Refusal::BadPathPart {
+                path: path.to_owned(),
+            });
+        }
+        let (name, folders) = parts.split_last().expect("a split gives one part");
+        let mut directory = self;
+        for (depth, part) in folders.iter().enumerate() {
+            let at = match directory.position(part) {
+                Some(at) => at,
+                None => {
+                    let made = Child::Directory(Directory::default());
+                    directory.children.push(((*part).to_owned(), made));
+                    directory.children.len() - 1
+                }
+            };
+            directory = match &mut directory.children[at].1 {
+                Child::Directory(inner) => inner,
+                Child::File { .. } => {
+                    return Err(Refusal::FileAndDirectory {
+                        path: parts[..=depth].join("/"),
+                    })
+                }
+            };
+        }
+        match directory.position(name).map(|at| &directory.children[at].1) {
+            None => {
+                directory.children.push(((*name).to_owned(), file));
+                Ok(())
+            }
+            Some(Child::File { .. }) => Err(Refusal::DuplicatePath {
+                path: path.to_owned(),
+            }),
+            Some(Child::Directory(_)) => Err(Refusal::FileAndDirectory {
+                path: path.to_owned(),
+            }),
+        }
+    }
+
+    /// Where the child named `name` is, if this directory has one.
+    fn position(&self, name: &str) -> Option<usize> {
+        self.children.iter().position(|(child, _)| child == name)
+    }
+}
+
+/// One link of a directory block: the child's name, CID bytes and Tsize.
+struct Link<'a> {
+    name: &'a str,
+    cid: Vec<u8>,
+    tsize: u64,
+}
+
+/// The sha2-256 digest and the Tsize of `directory`'s block, at the bundle
+/// path `path` (empty for the root). Each child directory is encoded first,
+/// and its link's Tsize is its block's length plus its links' Tsizes. The
+/// links are sorted by name bytes. A block over [`DIRECTORY_BLOCK_LIMIT`]
+/// bytes is refused with its path. `sha256` is the encoder's one hash.
+fn encode_directory(
+    directory: &Directory,
+    path: &str,
+    sha256: &dyn Fn(&[u8]) -> [u8; 32],
+) -> Result<([u8; 32], u64), Refusal> {
+    let mut links = Vec::new();
+    for (name, child) in &directory.children {
+        let (cid, tsize) = match child {
+            Child::File { cid, tsize } => (cid.clone(), *tsize),
+            Child::Directory(inner) => {
+                let inner_path = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}/{name}")
+                };
+                let (digest, tsize) = encode_directory(inner, &inner_path, sha256)?;
+                (cid_bytes(DAG_PB_CODEC, &digest), tsize)
+            }
+        };
+        links.push(Link { name, cid, tsize });
+    }
+    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    let block = directory_block(&links);
+    if block.len() > DIRECTORY_BLOCK_LIMIT {
+        return Err(Refusal::DirectoryOverBlockLimit {
+            path: shown(path),
+            length: block.len(),
         });
     }
-    let mut hasher = Sha256::new();
-    hasher.update(FRAMING_TAG);
-    for entry in sorted {
-        hasher.update((entry.path.len() as u64).to_be_bytes());
-        hasher.update(entry.path.as_bytes());
-        hasher.update((entry.content.len() as u64).to_be_bytes());
-        hasher.update(&entry.content);
+    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();
+    Ok((sha256(&block), tsize))
+}
+
+/// A directory's dag-pb block: each link in the order given, as protobuf
+/// field 2 holding the child's CID (field 1), its name (field 2) and its
+/// Tsize (field 3, a varint); then the UnixFS data as field 1, which is only
+/// its type (field 1, a varint): `08 01`, a directory.
+fn directory_block(links: &[Link<'_>]) -> Vec<u8> {
+    let mut block = Vec::new();
+    for link in links {
+        let mut pb_link = Vec::new();
+        put_length_delimited(&mut pb_link, 1, &link.cid);
+        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());
+        pb_link.push(3 << 3);
+        put_varint(&mut pb_link, link.tsize);
+        put_length_delimited(&mut block, 2, &pb_link);
     }
-    Ok(LabCid(hasher.finalize().into()))
+    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
+    block
+}
+
+/// Protobuf field `field` of wire type 2: its tag, the length of `bytes` as a
+/// varint, and `bytes`.
+fn put_length_delimited(out: &mut Vec<u8>, field: u8, bytes: &[u8]) {
+    out.push((field << 3) | 2);
+    put_varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+/// An unsigned protobuf varint: 7 bits per byte, low bits first, the high
+/// bit set on every byte but the last. A length or a Tsize can take more
+/// than one byte.
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
 }
 
 /// The kind of one entry, from its own type: as its folder's listing reports
@@ -907,7 +1202,7 @@ pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
 /// [`NAME_SIGNATURE_DOMAIN`] and the UTF-8 bytes of the printed lab CID.
 ///
 /// Signing and verifying both call this, and nothing else builds the message.
-/// The lab CID's label is part of the signed name.
+/// The whole printed lab CID, its `b` prefix included, is the signed name.
 pub fn name_signature_message(name: &str) -> [u8; 32] {
     domain_separated_digest(NAME_SIGNATURE_DOMAIN, name.as_bytes())
 }

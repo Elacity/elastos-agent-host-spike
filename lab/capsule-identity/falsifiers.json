@@ -1,15 +1,15 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015 and 016). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017 and 018). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
-      "title": "name files in listing order: the encoder drops its sort",
+      "title": "name links in the order the entries came: each directory drops its link sort",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));\n",
+          "old": "    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));\n",
           "new": ""
         }
       ],
@@ -19,14 +19,19 @@
     },
     {
       "id": "F-CI1b",
-      "title": "drop the two length prefixes, so path and content boundaries can collide",
+      "title": "drop both lengths a link holds: the name's protobuf length and the file's length as Tsize",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        hasher.update((entry.path.len() as u64).to_be_bytes());\n        hasher.update(entry.path.as_bytes());\n        hasher.update((entry.content.len() as u64).to_be_bytes());\n        hasher.update(&entry.content);\n",
-          "new": "        hasher.update(entry.path.as_bytes());\n        hasher.update(&entry.content);\n"
+          "old": "        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n",
+          "new": "        pb_link.push((2 << 3) | 2);\n        pb_link.extend_from_slice(link.name.as_bytes());\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        pb_link.push(3 << 3);\n        put_varint(&mut pb_link, link.tsize);\n",
+          "new": ""
         }
       ],
       "tests": [
@@ -35,14 +40,14 @@
     },
     {
       "id": "F-CI1c",
-      "title": "fold the wall-clock time into the stream",
+      "title": "fold the wall-clock time into every directory block",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    hasher.update(FRAMING_TAG);\n",
-          "new": "    hasher.update(FRAMING_TAG);\n    hasher.update(\n        std::time::SystemTime::now()\n            .duration_since(std::time::UNIX_EPOCH)\n            .unwrap_or_default()\n            .as_nanos()\n            .to_be_bytes(),\n    );\n"
+          "old": "    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);\n    block\n",
+          "new": "    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);\n    block.extend_from_slice(\n        &std::time::SystemTime::now()\n            .duration_since(std::time::UNIX_EPOCH)\n            .unwrap_or_default()\n            .as_nanos()\n            .to_be_bytes(),\n    );\n    block\n"
         }
       ],
       "tests": [
@@ -51,14 +56,14 @@
     },
     {
       "id": "F-CI1d",
-      "title": "print the bare hex, without the lab-cid:sha256: label",
+      "title": "print the bare base32, without the multibase b",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        write!(f, \"{LAB_CID_PREFIX}{}\", hex::encode(self.0))\n",
-          "new": "        write!(f, \"{}\", hex::encode(self.0))\n"
+          "old": "        write!(f, \"{}\", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))\n",
+          "new": "        write!(f, \"{}\", &printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0))[1..])\n"
         }
       ],
       "tests": [
@@ -255,14 +260,14 @@
     },
     {
       "id": "F-CI1p",
-      "title": "drop only the path length prefix",
+      "title": "drop only the link name's protobuf length",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        hasher.update((entry.path.len() as u64).to_be_bytes());\n",
-          "new": ""
+          "old": "        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n",
+          "new": "        pb_link.push((2 << 3) | 2);\n        pb_link.extend_from_slice(link.name.as_bytes());\n"
         }
       ],
       "tests": [
@@ -271,13 +276,13 @@
     },
     {
       "id": "F-CI1q",
-      "title": "drop only the content length prefix",
+      "title": "drop only the file's length: a link holds no Tsize",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        hasher.update((entry.content.len() as u64).to_be_bytes());\n",
+          "old": "        pb_link.push(3 << 3);\n        put_varint(&mut pb_link, link.tsize);\n",
           "new": ""
         }
       ],
@@ -287,14 +292,14 @@
     },
     {
       "id": "F-CI1r",
-      "title": "the encoder accepts two entries with one path",
+      "title": "the encoder accepts two entries with one path: the second becomes a second link of that name",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if let Some(pair) = sorted.windows(2).find(|pair| pair[0].path == pair[1].path) {\n        return Err(Refusal::DuplicatePath {\n            path: pair[0].path.clone(),\n        });\n    }\n",
-          "new": ""
+          "old": "            Some(Child::File { .. }) => Err(Refusal::DuplicatePath {\n                path: path.to_owned(),\n            }),\n",
+          "new": "            Some(Child::File { .. }) => {\n                directory.children.push(((*name).to_owned(), file));\n                Ok(())\n            }\n"
         }
       ],
       "tests": [
@@ -550,14 +555,14 @@
     },
     {
       "id": "F-CI3b",
-      "title": "hash absolute paths: each file's bundle path joined under the bundle's own path",
+      "title": "name absolute paths: each file's bundle path joined under the bundle's own path, as folders",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle.join(&entry.path).to_string_lossy().into_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle\n                .join(&entry.path)\n                .to_string_lossy()\n                .trim_start_matches('/')\n                .to_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -582,7 +587,7 @@
     },
     {
       "id": "F-CI3d",
-      "title": "fold each file's mtime into the stream, as one more framed record beside the file",
+      "title": "fold each file's mtime into the name, as one more entry beside the file",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
@@ -598,13 +603,13 @@
     },
     {
       "id": "F-CI3g",
-      "title": "check_name accepts any labelled claim without comparing",
+      "title": "check_name accepts any well-formed claim without comparing",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if hex::encode(actual.0) != claimed_digits {\n        return Err(Refusal::NameMismatch {\n            actual,\n            claimed: claimed.to_owned(),\n        });\n    }\n",
+          "old": "    if actual.0 != claimed_digits {\n        return Err(Refusal::NameMismatch {\n            actual,\n            claimed: claimed.to_owned(),\n        });\n    }\n",
           "new": "    let _ = (actual, claimed_digits);\n"
         }
       ],
@@ -620,14 +625,19 @@
     },
     {
       "id": "F-CI3h",
-      "title": "check_name accepts a claim without the label when its hex matches",
+      "title": "check_name accepts a claim without the multibase b when its base32 matches",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .ok_or_else(not_a_lab_cid)?;\n",
-          "new": "        .unwrap_or(claimed);\n"
+          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
+          "new": "    let cid = claimed\n        .strip_prefix('b')\n        .or(Some(claimed))\n        .and_then(decode_base32)\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if printed_cid(&cid) != claimed {\n        return Err(not_a_lab_cid());\n    }\n",
+          "new": "    if printed_cid(&cid).trim_start_matches('b') != claimed.trim_start_matches('b') {\n        return Err(not_a_lab_cid());\n    }\n"
         }
       ],
       "tests": [
@@ -653,7 +663,7 @@
     },
     {
       "id": "F-CI3j",
-      "title": "fold each file's mode into the stream, as one more framed record beside the file",
+      "title": "fold each file's mode into the name, as one more entry beside the file",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
@@ -669,13 +679,13 @@
     },
     {
       "id": "F-CI3k",
-      "title": "check_name accepts a labelled claim with any number of hex digits",
+      "title": "check_name accepts any CID bytes that end in 32 bytes: a raw leaf's CID passes",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if digits.len() != 64 {\n        return Err(not_a_lab_cid());\n    }\n",
+          "old": "    if cid != cid_bytes(DAG_PB_CODEC, &root) {\n        return Err(not_a_lab_cid());\n    }\n",
           "new": ""
         }
       ],
@@ -685,14 +695,14 @@
     },
     {
       "id": "F-CI3l",
-      "title": "check_name takes any lowercase letter for a hex digit",
+      "title": "check_name drops characters outside the base32 alphabet before it reads the claim, so a trailing newline passes",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "b'0'..=b'9' | b'a'..=b'f'",
-          "new": "b'0'..=b'9' | b'a'..=b'z'"
+          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
+          "new": "    let claimed: &str = &claimed\n        .chars()\n        .filter(|one| one.is_ascii_lowercase() || ('2'..='7').contains(one))\n        .collect::<String>();\n    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n"
         }
       ],
       "tests": [
@@ -701,14 +711,14 @@
     },
     {
       "id": "F-CI3m",
-      "title": "check_name accepts uppercase hex digits",
+      "title": "check_name accepts the uppercase form: it lowercases the claim first",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": ".all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))",
-          "new": ".all(|byte| byte.is_ascii_hexdigit())"
+          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
+          "new": "    let claimed: &str = &claimed.to_ascii_lowercase();\n    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n"
         }
       ],
       "tests": [
@@ -903,14 +913,14 @@
     },
     {
       "id": "F-CI9i",
-      "title": "the checked name check reads the claim by itself and takes bare hex",
+      "title": "the checked name check reads the claim by itself and takes it without the multibase b",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n",
-          "new": "        let claimed_digits = claimed.strip_prefix(LAB_CID_PREFIX).unwrap_or(claimed);\n        compare_name(self.cid, claimed_digits, claimed)\n"
+          "new": "        let claimed_digits: [u8; 32] = decode_base32(claimed.strip_prefix('b').unwrap_or(claimed))\n            .and_then(|cid| cid.get(4..).and_then(|digest| digest.try_into().ok()))\n            .unwrap_or([0; 32]);\n        compare_name(self.cid, claimed_digits, claimed)\n"
         }
       ],
       "tests": [
@@ -1096,14 +1106,14 @@
     },
     {
       "id": "F-CI4j",
-      "title": "sign_bundle signs the bare hex instead of calling name_signature_message",
+      "title": "sign_bundle signs the bare base32 instead of calling name_signature_message",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    let digest = name_signature_message(&name);\n    let signature = key.sign(&digest).to_bytes();\n",
-          "new": "    let signature = key.sign(name.strip_prefix(LAB_CID_PREFIX).unwrap_or(name.as_str()).as_bytes()).to_bytes();\n"
+          "new": "    let signature = key.sign(name.strip_prefix('b').unwrap_or(name.as_str()).as_bytes()).to_bytes();\n"
         }
       ],
       "tests": [
@@ -1452,14 +1462,14 @@
     },
     {
       "id": "F-CI13a",
-      "title": "the parse strips the label itself and decodes with hex, without the one claim check, so an uppercase claim parses",
+      "title": "the parse decodes the base32 itself, without the one claim check, so a raw leaf's CID parses",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        let digits = lab_cid_digits(printed)?;\n",
-          "new": "        let digits = printed\n            .strip_prefix(LAB_CID_PREFIX)\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
+          "old": "        let digest = lab_cid_digits(printed)?;\n",
+          "new": "        let digest: [u8; 32] = printed\n            .strip_prefix('b')\n            .and_then(decode_base32)\n            .and_then(|cid| cid.get(4..).and_then(|digest| digest.try_into().ok()))\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
         }
       ],
       "tests": [
@@ -1469,14 +1479,14 @@
     },
     {
       "id": "F-CI13b",
-      "title": "the parse reverses the 32 decoded bytes",
+      "title": "the parse reverses the 32 root digest bytes",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        Ok(LabCid(bytes))\n",
-          "new": "        bytes.reverse();\n        Ok(LabCid(bytes))\n"
+          "old": "        Ok(LabCid(digest))\n",
+          "new": "        let mut digest = digest;\n        digest.reverse();\n        Ok(LabCid(digest))\n"
         }
       ],
       "tests": [
@@ -1491,7 +1501,7 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        Ok(LabCid(bytes))\n",
+          "old": "        Ok(LabCid(digest))\n",
           "new": "        Ok(LabCid([0; 32]))\n"
         }
       ],
@@ -1555,8 +1565,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "pub const LAB_CID_PREFIX: &str = \"lab-cid:sha256:\";\n",
-          "new": "#[rustfmt::skip]\npub async\nfn admit() {}\n\npub const LAB_CID_PREFIX: &str = \"lab-cid:sha256:\";\n"
+          "old": "pub const MANIFEST_FILE: &str = \"capsule.json\";\n",
+          "new": "#[rustfmt::skip]\npub async\nfn admit() {}\n\npub const MANIFEST_FILE: &str = \"capsule.json\";\n"
         }
       ],
       "tests": [
@@ -1571,8 +1581,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "pub const FRAMING_TAG: &[u8] = b\"lab.capsule-identity.bundle/v1\\n\";\n",
-          "new": "/// Not read by the export check.\npub struct Opaque(pub u8);\n\npub const FRAMING_TAG: &[u8] = b\"lab.capsule-identity.bundle/v1\\n\";\n"
+          "old": "pub const NAME_SIGNATURE_DOMAIN: &str = \"lab.capsule-identity.name-signature/v1\";\n",
+          "new": "/// Not read by the export check.\npub struct Opaque(pub u8);\n\npub const NAME_SIGNATURE_DOMAIN: &str = \"lab.capsule-identity.name-signature/v1\";\n"
         }
       ],
       "tests": [
@@ -2508,14 +2518,14 @@
     },
     {
       "id": "F-CI15ae",
-      "title": "the record check compares only the lab-cid label, so the second variant's record binds the first variant's bundle",
+      "title": "the record check compares only the bafybei start, so the second variant's record binds the first variant's bundle",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    if record.cid != checked.cid().to_string() {\n",
-          "new": "    if !record.cid.starts_with(LAB_CID_PREFIX) {\n"
+          "new": "    if !record.cid.starts_with(\"bafybei\") {\n"
         }
       ],
       "tests": [
@@ -2699,6 +2709,311 @@
       ],
       "tests": [
         "a_variant_label_is_the_signers_claim"
+      ]
+    },
+    {
+      "id": "F-CI18a",
+      "title": "directory CIDs are built as CIDv0: a bare multihash, no version and no codec",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                (cid_bytes(DAG_PB_CODEC, &digest), tsize)\n",
+          "new": "                ([SHA2_256, SHA2_256_LENGTH].iter().chain(&digest).copied().collect(), tsize)\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18b",
+      "title": "the multihash code 0x12 (sha2-256) becomes 0x13",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const SHA2_256: u8 = 0x12;\n",
+          "new": "const SHA2_256: u8 = 0x13;\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18c",
+      "title": "a leaf uses the dag-pb codec 0x70 instead of raw 0x55",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),\n",
+          "new": "            cid: cid_bytes(DAG_PB_CODEC, &sha256(&entry.content)),\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18d",
+      "title": "the chunk size 262144 becomes 262143",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const CHUNK_SIZE: usize = 262_144;\n",
+          "new": "const CHUNK_SIZE: usize = 262_143;\n"
+        }
+      ],
+      "tests": [
+        "single_block_at_the_chunk_limit_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI18e",
+      "title": "the over-chunk refusal is removed: a larger file becomes one raw leaf",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        if entry.content.len() > CHUNK_SIZE {\n            return Err(Refusal::FileOverChunkLimit {\n                path: entry.path.clone(),\n                length: entry.content.len(),\n            });\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "file_over_the_chunk_limit_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI18f",
+      "title": "links are sorted in reverse name order",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));\n",
+          "new": "    links.sort_by(|a, b| b.name.as_bytes().cmp(a.name.as_bytes()));\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18g",
+      "title": "the UnixFS directory type byte 1 becomes 5 (a HAMT shard's type)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const DIRECTORY_TYPE: u8 = 1;\n",
+          "new": "const DIRECTORY_TYPE: u8 = 5;\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18h",
+      "title": "the directory-block limit check is removed: an oversize root is named, unsharded",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if block.len() > DIRECTORY_BLOCK_LIMIT {\n        return Err(Refusal::DirectoryOverBlockLimit {\n            path: shown(path),\n            length: block.len(),\n        });\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "directory_over_the_hamt_threshold_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI18i",
+      "title": "a file of at most 32 bytes is inlined: its CID uses the identity multihash 0x00",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),\n",
+          "new": "            cid: if entry.content.len() <= 32 {\n                [&[CID_VERSION, RAW_CODEC, 0x00, entry.content.len() as u8][..], &entry.content[..]].concat()\n            } else {\n                cid_bytes(RAW_CODEC, &sha256(&entry.content))\n            },\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18j",
+      "title": "Display gains the old prefix lab-cid:sha256:",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        write!(f, \"{}\", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))\n",
+          "new": "        write!(f, \"lab-cid:sha256:{}\", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))\n"
+        }
+      ],
+      "tests": [
+        "the_library_names_a_bundle_one_way",
+        "lab_cid_prints_with_the_lab_label"
+      ]
+    },
+    {
+      "id": "F-CI18k",
+      "title": "the base32 alphabet becomes uppercase",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const BASE32_ALPHABET: &[u8; 32] = b\"abcdefghijklmnopqrstuvwxyz234567\";\n",
+          "new": "const BASE32_ALPHABET: &[u8; 32] = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567\";\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18l",
+      "title": "the claim check drops its re-encode comparison, so a non-canonical claim (unused low bits set) passes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if printed_cid(&cid) != claimed {\n        return Err(not_a_lab_cid());\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted"
+      ]
+    },
+    {
+      "id": "F-CI18m",
+      "title": "a link to a directory has Tsize of its block alone, without the child's link Tsizes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();\n",
+          "new": "    let tsize = block.len() as u64;\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18n",
+      "title": "an empty file is encoded as a dag-pb UnixFS file node instead of an empty raw leaf",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),\n",
+          "new": "            cid: if entry.content.is_empty() {\n                cid_bytes(DAG_PB_CODEC, &sha256(&[0x0a, 0x04, 0x08, 0x02, 0x18, 0x00]))\n            } else {\n                cid_bytes(RAW_CODEC, &sha256(&entry.content))\n            },\n"
+        }
+      ],
+      "tests": [
+        "empty_file_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI18o",
+      "title": "protobuf lengths are truncated to one byte, so a name over 127 bytes is written wrong",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    put_varint(out, bytes.len() as u64);\n",
+          "new": "    out.push(bytes.len() as u8);\n"
+        }
+      ],
+      "tests": [
+        "long_utf8_name_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI18p",
+      "title": "a file given after a directory of its name silently replaces that directory",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            Some(Child::Directory(_)) => Err(Refusal::FileAndDirectory {\n                path: path.to_owned(),\n            }),\n",
+          "new": "            Some(Child::Directory(_)) => {\n                let at = directory.position(name).expect(\"found above\");\n                directory.children[at].1 = file;\n                Ok(())\n            }\n"
+        }
+      ],
+      "tests": [
+        "encoder_refuses_file_directory_conflict"
+      ]
+    },
+    {
+      "id": "F-CI18q",
+      "title": "a directory needed below a file's path silently replaces that file",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            directory = match &mut directory.children[at].1 {\n",
+          "new": "            if matches!(directory.children[at].1, Child::File { .. }) {\n                directory.children[at].1 = Child::Directory(Directory::default());\n            }\n            directory = match &mut directory.children[at].1 {\n"
+        }
+      ],
+      "tests": [
+        "encoder_refuses_file_directory_conflict"
+      ]
+    },
+    {
+      "id": "F-CI18r",
+      "title": "the directory codec 0x70 (dag-pb) becomes 0x71",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const DAG_PB_CODEC: u8 = 0x70;\n",
+          "new": "const DAG_PB_CODEC: u8 = 0x71;\n"
+        }
+      ],
+      "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI18s",
+      "title": "the path-part check is removed: an empty, . or .. part becomes a link name",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        if parts.iter().any(|part| matches!(*part, \"\" | \".\" | \"..\")) {\n            return Err(Refusal::BadPathPart {\n                path: path.to_owned(),\n            });\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "encoder_refuses_a_path_with_an_empty_or_dot_part"
       ]
     }
   ]
