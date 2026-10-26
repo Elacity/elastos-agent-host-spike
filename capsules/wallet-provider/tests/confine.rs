@@ -1934,38 +1934,75 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
                 return false;
             };
             let mut owner = None;
-            for (dir_name, crate_name, rel, target) in [
-                (
-                    "wallet-provider",
-                    "wallet-provider",
-                    "tests/confine.rs",
-                    "confine",
-                ),
-                (
-                    "did-provider",
-                    "did-provider",
-                    "tests/confine.rs",
-                    "confine",
-                ),
-                (
-                    "model-provider",
-                    "model-provider",
-                    "tests/confine/main.rs",
-                    "confine",
-                ),
+            for (dir_name, crate_name) in [
+                ("wallet-provider", "wallet-provider"),
+                ("did-provider", "did-provider"),
+                ("model-provider", "model-provider"),
             ] {
-                let path = capsules.join(dir_name).join(rel);
-                let Ok(bytes) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                if bytes == source {
-                    owner = Some((capsules.join(dir_name), crate_name, target));
+                let crate_dir = capsules.join(dir_name);
+                let mut stack = vec![crate_dir.join("src"), crate_dir.join("tests")];
+                while let Some(dir) = stack.pop() {
+                    let Ok(entries) = fs::read_dir(&dir) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if path.file_name().and_then(|n| n.to_str()) != Some("target") {
+                                stack.push(path);
+                            }
+                            continue;
+                        }
+                        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                            continue;
+                        }
+                        let Ok(bytes) = fs::read_to_string(&path) else {
+                            continue;
+                        };
+                        if bytes != source {
+                            continue;
+                        }
+                        let rel = path.strip_prefix(&crate_dir).ok();
+                        let Some(rel) = rel else {
+                            continue;
+                        };
+                        let target = if rel.starts_with("src") {
+                            if crate_dir.join("src/lib.rs").is_file() {
+                                "lib"
+                            } else {
+                                "bin"
+                            }
+                        } else if rel.file_name().and_then(|n| n.to_str()) == Some("main.rs") {
+                            rel.parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("bin")
+                        } else {
+                            rel.file_stem().and_then(|n| n.to_str()).unwrap_or("bin")
+                        };
+                        owner = Some((crate_dir.clone(), crate_name, target.to_string()));
+                    }
+                }
+                if owner.is_some() {
                     break;
                 }
             }
             let Some((crate_dir, crate_name, target)) = owner else {
                 return false;
             };
+            static LISTS: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::HashMap<(String, String), Option<Vec<String>>>>,
+            > = std::sync::OnceLock::new();
+            let cache =
+                LISTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+            let key = (crate_name.to_string(), target.clone());
+            if let Ok(guard) = cache.lock() {
+                if let Some(cached) = guard.get(&key) {
+                    return cached
+                        .as_ref()
+                        .is_some_and(|names| names.iter().any(|name| name == function));
+                }
+            }
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -1976,20 +2013,41 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
                 crate_name,
                 stamp
             ));
+            let mut args = vec!["test", "-p", crate_name];
+            if target == "lib" {
+                args.push("--lib");
+            } else if target == "bin" {
+                args.extend(["--bin", crate_name]);
+            } else {
+                args.extend(["--test", target.as_str()]);
+            }
+            args.extend(["--", "--list"]);
             let listed = std::process::Command::new("cargo")
-                .args(["test", "-p", crate_name, "--test", target, "--", "--list"])
+                .args(&args)
                 .current_dir(&crate_dir)
                 .env("CARGO_TERM_COLOR", "never")
                 .env("CARGO_TARGET_DIR", &target_dir)
                 .output();
             let _ = fs::remove_dir_all(&target_dir);
-            let Ok(listed) = listed else {
-                return false;
-            };
-            listed.status.success()
-                && String::from_utf8_lossy(&listed.stdout)
-                    .lines()
-                    .any(|line| rust_real_list_line_function(line) == Some(function))
+            let names = listed.ok().and_then(|listed| {
+                if !listed.status.success() {
+                    return None;
+                }
+                Some(
+                    String::from_utf8_lossy(&listed.stdout)
+                        .lines()
+                        .filter_map(rust_real_list_line_function)
+                        .map(|name| name.to_string())
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let hit = names
+                .as_ref()
+                .is_some_and(|names| names.iter().any(|name| name == function));
+            if let Ok(mut guard) = cache.lock() {
+                guard.insert(key, names);
+            }
+            hit
         }
     }
 }
