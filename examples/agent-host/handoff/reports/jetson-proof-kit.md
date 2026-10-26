@@ -1,6 +1,6 @@
 Slice:        lab/jetson-proof-kit
 Branch / PR:  cursor/jetson-proof-kit-fd7b  https://github.com/Elacity/elastos-agent-host-spike/pull/320
-Commit:       (filled after this commit lands on the branch)
+Commit:       f563f6c65203da81b6aaa82ed25837a4befe5c62
 Parent:       906a6e763bd2d0f644ca4f532dc195fc8246459e   first kit commit
               fec85a34c5aa91df5e722ce70745b2046b61a6d4   spike/agent-host
 Develop:      Elacity develop not merged this slice; lab folder only
