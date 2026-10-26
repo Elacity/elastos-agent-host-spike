@@ -1,0 +1,406 @@
+{
+  "about": "Lane falsifiers for lab/resident-instances, in the shared data format. Each replaces exact text (found once) and requires every named test to fail; restoring the bytes must make them pass. The shared runner has no resident-instances command, so these run by hand; LOG.md records each run. Journey falsifiers remove one check and show the reference-double test for that wrong behaviour fails; they prove the harness, not the Runtime.",
+  "falsifiers": [
+    {
+      "id": "F-RI-a3-dwell",
+      "title": "A3 skips the residency snapshot after the dwell",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        j.together(\n            &[&a, &b],\n            |state| *state == State::Running,\n            \"running\",\n            \"after start returned and the dwell passed\",\n        )?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a3_refuses_instances_that_leave_after_start"
+      ]
+    },
+    {
+      "id": "F-RI-a3-processes",
+      "title": "A3 skips the process census during the overlap",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        let new = j.new_processes()?;\n        if !new.is_empty() {\n            return Err(format!(\n                \"the two instances added {} processes below the Runtime; resident instances run inside it\",\n                new.len()\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a3_refuses_a_process_per_instance"
+      ]
+    },
+    {
+      "id": "F-RI-launch-session",
+      "title": "two launches may share one Bus session",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if a.session == b.session {\n            return Err(\"two instances share one Bus session\".to_owned());\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "launch_refuses_a_shared_session"
+      ]
+    },
+    {
+      "id": "F-RI-launch-status",
+      "title": "a launch answer outside the resident lifecycle is accepted",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if let State::Other(status) = &instance.state {\n            return Err(format!(\n                \"the launch of {} ({}) returned {status}, which is not a resident instance status\",\n                launched.label,\n                fixture.name()\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "launch_refuses_an_answer_after_the_run"
+      ]
+    },
+    {
+      "id": "F-RI-a6-sibling",
+      "title": "A6 no longer requires the sibling's request to stay pending",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if !j.still_pending(&rb)? {\n            return Err(format!(\n                \"the request from {} for the same resource left the pending list while the grant of {} was live; a grant binds to its own instance\",\n                b.label, a.label\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a6_refuses_a_grant_shared_across_instances"
+      ]
+    },
+    {
+      "id": "F-RI-a6-grant",
+      "title": "A6 skips the live-grant check after instance-1's grant",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        j.only_grant(&a, \"after instance-1's grant\")?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a6_refuses_a_blind_grant_view"
+      ]
+    },
+    {
+      "id": "F-RI-a10-sibling",
+      "title": "A10 skips the sibling's live check after the cancel",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        j.together(&[&b], State::live, \"live\", \"after instance-1 was cancelled\")?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a10_refuses_a_stop_that_stops_the_sibling"
+      ]
+    },
+    {
+      "id": "F-RI-a10-settlement",
+      "title": "A10 skips the Runtime settlement of the cancelled request",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        j.runtime_settlement(&a, Some(&ra), CANCEL_REASON)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a10_refuses_a_stop_that_leaves_the_request_pending"
+      ]
+    },
+    {
+      "id": "F-RI-stop-cause",
+      "title": "a stop may end without its reason in the cause",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if !stopped.cause.contains(reason) {\n            return Err(format!(\n                \"{} stopped with cause {:?}, which omits the stop reason {:?}\",\n                of.label, stopped.cause, reason\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a10_refuses_a_stop_without_its_reason"
+      ]
+    },
+    {
+      "id": "F-RI-a10-watch",
+      "title": "A10 skips the watch on the cancelled instance",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        j.watch(&a, &State::Stopped)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a10_refuses_a_retry_after_stop"
+      ]
+    },
+    {
+      "id": "F-RI-settler",
+      "title": "the settlement record may name the shell as settler",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if record.settled_by != Some(Actor::Runtime) {\n            return Err(format!(\n                \"the request from {} was settled by {:?}, not by the Runtime\",\n                of.label, record.settled_by\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a11_refuses_settlement_by_the_shell"
+      ]
+    },
+    {
+      "id": "F-RI-settlement-reason",
+      "title": "the Runtime's denial may omit the stop reason or failure cause",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if mention.is_empty() || !record.decision.contains(mention) {\n            return Err(format!(\n                \"the Runtime's denial for {} reads {:?}, which omits {:?}\",\n                of.label, record.decision, mention\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a10_and_a11_refuse_a_settlement_without_its_reason"
+      ]
+    },
+    {
+      "id": "F-RI-a11-settlement",
+      "title": "A11 skips the Runtime settlement of the failed instance's request",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        j.runtime_settlement(&a, None, &failed.cause)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a11_refuses_a_request_left_pending_by_failure"
+      ]
+    },
+    {
+      "id": "F-RI-a12-control",
+      "title": "A12 drops the positive control that the census sees live grants",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        if !sees(&a) || !sees(&b) {\n            return Err(format!(\n                \"the live-grant view showed {} grants for the two running instances; the census must see both before it can prove they end\",\n                grants.len()\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a12_refuses_a_blind_grant_census"
+      ]
+    },
+    {
+      "id": "F-RI-a12-grants",
+      "title": "A12's census stops checking live grants",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        let census = j.census(true)?;\n        Ok(format!(\n            \"A12:",
+          "new": "        let census = j.census(false)?;\n        Ok(format!(\n            \"A12:"
+        }
+      ],
+      "tests": [
+        "a12_refuses_grants_kept_after_stop"
+      ]
+    },
+    {
+      "id": "F-RI-census-processes",
+      "title": "the census stops checking for new processes",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/journey.rs",
+          "old": "        let new = self.new_processes()?;\n        if !new.is_empty() {\n            return Err(format!(\n                \"process leftover: {} new processes below the Runtime\",\n                new.len()\n            ));\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "census_refuses_a_process_left_after_stop"
+      ]
+    },
+    {
+      "id": "F-RI-pin",
+      "title": "RI-4's gap pin names text the Runtime source does not hold",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/capability.rs",
+          "old": "        \"component/v1 is a bounded activation contract and has no resident stop operation\",\n",
+          "new": "        \"component/v1 is a bounded activation contract and has a resident stop operation\",\n"
+        }
+      ],
+      "tests": [
+        "blocker_evidence_still_holds",
+        "every_check_reports_blocked_with_its_missing_capabilities"
+      ]
+    },
+    {
+      "id": "F-RI-gate",
+      "title": "a blocked check goes on to read setup",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/lib.rs",
+          "old": "    if !blocked.is_empty() {\n        return Grade::Blocked(capability::describe(&blocked, &repo_root()));\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "every_check_reports_blocked_with_its_missing_capabilities"
+      ]
+    },
+    {
+      "id": "F-RI-wit",
+      "title": "an export defining start or stop counts as resident",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/wit.rs",
+          "old": "names.iter().all(|n| funcs.iter().any(|f| f.name == *n));",
+          "new": "names.iter().any(|n| funcs.iter().any(|f| f.name == *n));"
+        }
+      ],
+      "tests": [
+        "imports_comments_and_half_lifecycles_are_not_resident"
+      ]
+    },
+    {
+      "id": "F-RI-coords",
+      "title": "coordinates may name any host",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/http.rs",
+          "old": "        .strip_prefix(\"http://127.0.0.1:\")\n",
+          "new": "        .rsplit(':').next()\n"
+        }
+      ],
+      "tests": [
+        "coordinates_name_only_a_loopback_operator"
+      ]
+    },
+    {
+      "id": "F-RI-scope",
+      "title": "a session-local grant list counts as the global view",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/http.rs",
+          "old": "    if value[\"scope\"] != \"all_sessions_live\" {\n",
+          "new": "    if false {\n"
+        }
+      ],
+      "tests": [
+        "live_grants_need_the_global_scope"
+      ]
+    },
+    {
+      "id": "F-RI-record",
+      "title": "a record may be decided without a settler, or pending with one",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/http.rs",
+          "old": "            if (status == Status::Pending) != settled_by.is_none() {\n",
+          "new": "            if false {\n"
+        }
+      ],
+      "tests": [
+        "a_settlement_record_is_consistent_about_its_settler"
+      ]
+    },
+    {
+      "id": "F-RI-tree",
+      "title": "the process census stops at the Runtime's children",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/http.rs",
+          "old": "                frontier.push(*pid);\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_process_census_walks_only_below_the_runtime"
+      ]
+    },
+    {
+      "id": "F-RI-row",
+      "title": "the A3 row drops RI-4 from its blockers",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/tests/acceptance.rs",
+          "old": "#[ignore = \"blocked: RI-1; RI-2; RI-3; RI-4\"]\n",
+          "new": "#[ignore = \"blocked: RI-1; RI-2; RI-3\"]\n"
+        }
+      ],
+      "tests": [
+        "acceptance_rows_name_exact_blockers"
+      ]
+    },
+    {
+      "id": "F-RI-spec",
+      "title": "SPEC.md says A10 needs RI-6",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/SPEC.md",
+          "old": "| RI-6 | a capability request can stay pending after the guest's call returns | A11 |",
+          "new": "| RI-6 | a capability request can stay pending after the guest's call returns | A10, A11 |"
+        }
+      ],
+      "tests": [
+        "spec_states_the_same_capabilities_and_checks"
+      ]
+    }
+  ]
+}
