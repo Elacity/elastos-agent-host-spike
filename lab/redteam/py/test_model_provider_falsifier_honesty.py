@@ -3,7 +3,7 @@
 Grade row 10 (local model ops) counts the provider falsifiers as caught.
 That count holds while each ``old`` anchor still occurs once, on the
 updated text, the way ``falsify.py`` applies it. This probe judges the
-entries whose command is ``provider`` (MP01–MP23). The selftest and PV
+entries whose command is ``provider`` (MP01–MP24). The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
 for every list, and this probe leaves it alone.
@@ -44,14 +44,14 @@ MODEL_FILE = "capsules/model-provider/falsifiers.json"
 # `git log -1 --format='%H %s' HEAD -- capsules/model-provider/falsifiers.json`
 # and `shasum -a 256` of that file. The merge is that change's first commit
 # on HEAD's first-parent line.
-RECORDED_SHA256 = "ed3012b3cb9f88ce79efeaaa32db04c35f1a3b2d0d5e637a654d415351b45828"
-LAST_CHANGE = "6cc4c7ae91ff6cbe318ace8b0e6b1c9898490bb8"
-RECORDED_PR = "PR #378"
-MERGE_COMMIT = "db3a4b30a435378da692ef7171919a0bfce42fb4"
+RECORDED_SHA256 = "d816935939b06a3d1edc8b8a5f0e39bdf753e5e55f84efc1eb4f36416ba18dca"
+LAST_CHANGE = "3b13967e85b49e05709da3612113f7c3b908015f"
+RECORDED_PR = "PR #397"
+MERGE_COMMIT = "215841921df50dd30327cc3f5ffe6ac4f811d066"
 FINDING_ID = "provider-001"
 FINDING_NAME = "lab/redteam/findings/provider-001.md"
 FINDING = REPO / FINDING_NAME
-ROW_10_IDS = tuple(f"MP{number:02d}" for number in range(1, 24))
+ROW_10_IDS = tuple(f"MP{number:02d}" for number in range(1, 25))
 
 
 def load_provider_document(data):
@@ -86,13 +86,13 @@ def provider_base():
 
 
 def row_problems(entries):
-    """Problems when the provider entries are not MP01–MP23, each caught."""
+    """Problems when the provider entries are not MP01–MP24, each caught."""
     problems = []
     ids = [entry["id"] for entry in entries]
     if ids != list(ROW_10_IDS):
         problems.append(Problem(
             "ids", "", MODEL_FILE,
-            f"provider ids are {ids}, not MP01 through MP23"))
+            f"provider ids are {ids}, not MP01 through MP24"))
     for entry in entries:
         if entry["command"] != "provider":
             problems.append(Problem(
@@ -224,7 +224,7 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         self.assertEqual(str(caught.exception), "NaN is not strict JSON")
 
     def test_provider_ids_are_the_row_10_list(self):
-        """The provider entries are MP01–MP23, each caught, each naming a test."""
+        """The provider entries are MP01–MP24, each caught, each naming a test."""
         _snapshot, _data, entries = provider_base()
         self.assertEqual(row_problems(entries), [])
         self.assertEqual([entry["id"] for entry in entries], list(ROW_10_IDS))
@@ -236,7 +236,7 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         planted[0]["id"] = "MP00"
         self.assertEqual(row_problems(planted), [Problem(
             "ids", "", MODEL_FILE,
-            f"provider ids are {[entry['id'] for entry in planted]}, not MP01 through MP23")])
+            f"provider ids are {[entry['id'] for entry in planted]}, not MP01 through MP24")])
         planted = copy.deepcopy(entries)
         planted[0]["command"] = "host"
         self.assertEqual(row_problems(planted), [Problem(
