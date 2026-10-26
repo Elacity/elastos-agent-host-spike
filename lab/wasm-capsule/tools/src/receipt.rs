@@ -5,7 +5,7 @@
 //! (`tools/build`), under its own schema line:
 //!
 //! ```text
-//! schema: wc-005.run-receipt/v1
+//! schema: wc-005.run-receipt/v2
 //! bundle: <the verified lab CID, as its Display form>
 //! function: digest
 //! argument: 1592590337
@@ -15,7 +15,19 @@
 //! wasmer_version: "..."
 //! wasmer_status: ...
 //! wasmer_stdout: "..."
+//! memory_mb: <the declared resources.memory_mb>
+//! memory_cap_bytes: <memory_mb × 1048576>
+//! wasmtime_memory_cap: ENFORCED max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y
+//! wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
 //! ```
+//!
+//! wc-010c (v2 adds the last four lines): the declared size the module runs
+//! were given, in MB and in bytes, then per engine `ENFORCED` with the exact
+//! cap argument that engine's run was started with, read back from its argv,
+//! or `SKIPPED` with wc-010a's reason when it was started with none. The
+//! per-engine line follows the recorded argument only, never the engine's
+//! name. No peak memory is recorded (wc-010a: `/usr/bin/time -l` gives the
+//! engine process's resident memory, not the capsule's linear memory).
 //!
 //! Every value comes from the run: the lab CID the verifier checked, the
 //! function and argument the runner passed, and what each engine printed and
@@ -35,7 +47,7 @@ use crate::run::{Engine, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT};
 use std::path::Path;
 
 /// The receipt's schema line value.
-pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v1";
+pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v2";
 
 /// The receipt of `run`, as text. The lines and their order are in the module
 /// docs.
@@ -52,7 +64,27 @@ pub fn render(run: &TwoEngineRun) -> String {
             run.stdout(engine).escape_ascii()
         ));
     }
+    receipt.push_str(&format!(
+        "memory_mb: {}\nmemory_cap_bytes: {}\n",
+        run.memory_mb(),
+        run.memory_cap_bytes()
+    ));
+    for engine in [Engine::Wasmtime, Engine::Wasmer] {
+        receipt.push_str(&memory_cap_line(engine, run.memory_cap(engine)));
+    }
     receipt
+}
+
+/// `engine`'s memory cap line: `ENFORCED` with the cap argument its run was
+/// started with, exactly as recorded, or `SKIPPED` with wc-010a's reason when
+/// it was started with none.
+fn memory_cap_line(engine: Engine, cap: Option<&str>) -> String {
+    match cap {
+        Some(argument) => format!("{engine}_memory_cap: ENFORCED {argument}\n"),
+        None => format!(
+            "{engine}_memory_cap: SKIPPED: no memory cap flag in {engine} run --help or {engine} --help (wc-010a)\n"
+        ),
+    }
 }
 
 /// Write `run`'s receipt to `path` as a new file with the shared

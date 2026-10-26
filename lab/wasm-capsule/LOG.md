@@ -527,3 +527,27 @@
   F-WC10-CAP-OVERFLOW F-WC10-WASMER-FLAG F-WC-README-COUNT`: "baseline: 5 named tests pass without an edit, 0 do
   not", "summary: 7 CAUGHT of 7", exit 0 (runner-caught; all 153 anchors found exactly once). Gates: `cargo test
   --locked` (89 passed, 2 ignored, 0 failed) and both fmt checks green; retired-label greps: both empty, exit 1.
+- 26 Oct, task 028 (wc-010c): the run receipt records the declared memory cap per engine. `tools/src/run.rs`:
+  `EngineRun` gains `memory_mb` and `memory_cap`; `start_engine` keeps its argv line for line and, after the run,
+  reads the cap back from that process's own argv with `memory_cap_given` (the argument after `-W`, else none), so
+  the receipt cannot say ENFORCED for an argv without the cap; `TwoEngineRun` gains `memory_mb()`,
+  `memory_cap_bytes()` (the one `memory_cap_bytes` conversion, no second MB to bytes rule, no second manifest read)
+  and `memory_cap(engine)`. `tools/src/receipt.rs`: `RECEIPT_SCHEMA` is `wc-005.run-receipt/v2`; after the v1 lines
+  (every anchored line unchanged) `render` adds `memory_mb`, `memory_cap_bytes`, then `wasmtime_memory_cap` and
+  `wasmer_memory_cap` from `memory_cap_line` (ENFORCED with the recorded argument exactly, or SKIPPED with wc-010a's
+  reason). Real receipt on this Mac: `memory_mb: 64`, `memory_cap_bytes: 67108864`, `wasmtime_memory_cap: ENFORCED
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y`, `wasmer_memory_cap: SKIPPED: no memory cap flag
+  in wasmer run --help or wasmer --help (wc-010a)`. No peak memory line (waits for Flint). `tests/run.rs`: new
+  `receipt_records_the_declared_memory_cap` and `receipt_cap_line_matches_the_argv_the_engine_got`;
+  `receipt_records_observed_engine_versions` and `real_receipt_names_both_installed_engines` updated to v2;
+  `recording` also writes each module run's argv to `<name>.argv` (its order log unchanged); 027's
+  `verified_bundle_declaring` now calls the new `signed_bundle_declaring` (no assertion changed). New falsifiers
+  F-WC10C-WASMER-ENFORCED and F-WC10C-CAP-FIXED; F-WC10-CAP-IGNORED also names the argv test; F-WC-README-COUNT
+  re-anchored to 155. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC10C-WASMER-ENFORCED F-WC10C-CAP-FIXED F-WC10-CAP-IGNORED F-WC-README-COUNT`:
+  "baseline: 7 named tests pass without an edit, 0 do not", "summary: 4 CAUGHT of 4", exit 0 (runner-caught).
+  Because `run.rs` and `receipt.rs` changed, the other 58 entries anchored there were re-run: "baseline: 26 named
+  tests pass without an edit, 0 do not", "summary: 58 CAUGHT of 58", exit 0. No hand-proven entry was added. No
+  change to `tools/Cargo.toml`, `Cargo.toml`, `Cargo.lock`, `capsule.json`, `capsule/` or the lab CID pins.
+  Gates: `cargo test --locked` (91 passed, 2 ignored, 0 failed) and both fmt checks green; retired-label greps: both
+  empty, exit 1.
