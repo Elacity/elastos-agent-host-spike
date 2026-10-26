@@ -5008,6 +5008,14 @@ pub fn is_auth_session_active(data_dir: &Path, session_id: &str, now: u64) -> an
     }))
 }
 
+/// Shipping `elastos-server` does not export a helper that writes
+/// principal-root protection from a known recovery phrase.
+///
+/// ```compile_fail
+/// fn probe() {
+///     let _ = elastos_server::auth::store_test_principal_root_protection;
+/// }
+/// ```
 pub fn store_principal_root_protection(
     data_dir: &Path,
     protection: PrincipalRootProtectionV1,
@@ -10309,8 +10317,12 @@ fn prune_auth_state(state: &mut AuthState, now: u64) {
     });
 }
 
-#[cfg(test)]
-pub(crate) fn store_test_principal_root_protection(
+/// Disposable principal-root protection for tests and the A2 lab feature.
+/// The product Home still creates protection through init and recovery.
+/// This helper is `pub(crate)` for `cfg(test)`. The `lab-protection`
+/// feature, off by default, exposes it to the isolated A2 lab crate only.
+#[cfg(any(test, feature = "lab-protection"))]
+fn store_test_principal_root_protection_inner(
     data_dir: &Path,
     principal_id: &str,
 ) -> PrincipalRootProtectionV1 {
@@ -10398,6 +10410,22 @@ pub(crate) fn store_test_principal_root_protection(
     };
     store_principal_root_protection(data_dir, protection.clone()).unwrap();
     protection
+}
+
+#[cfg(test)]
+pub(crate) fn store_test_principal_root_protection(
+    data_dir: &Path,
+    principal_id: &str,
+) -> PrincipalRootProtectionV1 {
+    store_test_principal_root_protection_inner(data_dir, principal_id)
+}
+
+#[cfg(all(feature = "lab-protection", not(test)))]
+pub fn store_test_principal_root_protection(
+    data_dir: &Path,
+    principal_id: &str,
+) -> PrincipalRootProtectionV1 {
+    store_test_principal_root_protection_inner(data_dir, principal_id)
 }
 
 #[cfg(test)]

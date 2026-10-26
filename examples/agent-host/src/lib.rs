@@ -4266,6 +4266,79 @@ fn open_task_journal(
     }
 }
 
+/// Send a write that names a revision the guest knows is not current.
+/// The Runtime must refuse it with `revision_conflict`. Nothing is stored.
+/// This goes through the same `providers.invoke` hostcall as a real append.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn probe_stale_write(
+    bus: &mut impl ResourceBus,
+    cursor: &JournalCursor,
+    grant: Option<&JournalGrant>,
+) -> Result<(), &'static str> {
+    let Some(grant) = grant else {
+        return Err("no write grant");
+    };
+    if cursor.revision.is_none() {
+        return Err("no stored revision");
+    }
+    let body = journal_write_body(b"stale if_revision replay", Some("stale-not-current"));
+    match bus
+        .invoke(&cursor.resource, "write", &body, grant.id())
+        .as_deref()
+        .map(provider_reply)
+    {
+        Ok(Some(ProviderReply::Error(code))) if code == "revision_conflict" => Ok(()),
+        _ => Err("stale write was not revision_conflict"),
+    }
+}
+
+/// After a load, write the next version with the loaded revision through
+/// the same `providers.invoke` hostcall as the first write.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn write_at_loaded_revision(
+    bus: &mut impl ResourceBus,
+    journal: &mut Journal,
+    cursor: &mut JournalCursor,
+    grant: Option<&JournalGrant>,
+) -> Result<(), &'static str> {
+    let Some(revision) = cursor.revision.clone() else {
+        return Err("no loaded revision");
+    };
+    let Some(grant) = grant else {
+        return Err("no write grant");
+    };
+    let mut next = journal.clone();
+    admit_user(&mut next, "a2-resume-write");
+    let Some(bytes) = encode_journal(&next, &cursor.head) else {
+        return Err("too large");
+    };
+    let body = journal_write_body(&bytes, Some(&revision));
+    match bus
+        .invoke(&cursor.resource, "write", &body, grant.id())
+        .as_deref()
+        .map(provider_reply)
+    {
+        Ok(Some(ProviderReply::Error(code))) if code == "revision_conflict" => {
+            Err("loaded write was revision_conflict")
+        }
+        Ok(Some(ProviderReply::Ok(data))) => {
+            let Some(new_rev) = reply_revision(&data) else {
+                return Err("loaded write had no revision");
+            };
+            if new_rev == revision {
+                return Err("loaded write did not store a new revision");
+            }
+            let mut sent_head = [0; 32];
+            sent_head.copy_from_slice(&bytes[bytes.len() - 32..]);
+            *journal = next;
+            cursor.revision = Some(new_rev);
+            cursor.head = sent_head;
+            Ok(())
+        }
+        _ => Err("loaded write failed"),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 struct WasmBus;
 
@@ -8198,6 +8271,23 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             return Err(elastos::bus::types::BusError::Invalid(
                 "the journal append did not follow its grants".to_string(),
             ));
+        }
+        // STALE and WRITE2 go through the same guest hostcall as WRITE.
+        match opened {
+            OpenOutcome::Created => {
+                probe_stale_write(&mut WasmBus, &cursor, grants.write.as_ref())
+                    .map_err(|reason| elastos::bus::types::BusError::Invalid(reason.to_string()))?;
+            }
+            OpenOutcome::Loaded => {
+                write_at_loaded_revision(
+                    &mut WasmBus,
+                    &mut journal,
+                    &mut cursor,
+                    grants.write.as_ref(),
+                )
+                .map_err(|reason| elastos::bus::types::BusError::Invalid(reason.to_string()))?;
+            }
+            OpenOutcome::Denied => {}
         }
         Ok(())
     }
@@ -16621,6 +16711,71 @@ mod tests {
         let read = reread_journal(&mut launched, &mut fresh, grants.read.as_ref()).unwrap();
         assert_eq!(read, decoded);
         assert_eq!(fresh.revision.as_deref(), Some(v2.as_str()));
+
+        assert_eq!(
+            probe_stale_write(&mut launched, &fresh, grants.write.as_ref()),
+            Ok(())
+        );
+        assert_eq!(launched.stored.as_deref(), Some(latest.as_slice()));
+        write_at_loaded_revision(&mut launched, &mut empty, &mut fresh, grants.write.as_ref())
+            .expect("a loaded journal can be written at its revision");
+        assert_ne!(fresh.revision.as_deref(), Some(v2.as_str()));
+        assert_ne!(launched.stored.as_deref(), Some(latest.as_slice()));
+    }
+
+    #[test]
+    fn a_stale_probe_is_refused_and_leaves_the_store() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        let grants = request_journal_grants(&mut runtime, &cursor);
+        assert_eq!(
+            open_task_journal(&mut runtime, &mut journal, &mut cursor, &grants),
+            Ok(OpenOutcome::Created)
+        );
+        let latest = runtime.stored.clone().unwrap();
+        let revision = cursor.revision.clone();
+        assert_eq!(
+            probe_stale_write(&mut runtime, &cursor, grants.write.as_ref()),
+            Ok(())
+        );
+        assert_eq!(runtime.stored.as_deref(), Some(latest.as_slice()));
+        assert_eq!(cursor.revision, revision);
+    }
+
+    #[test]
+    fn a_loaded_journal_can_be_written_at_its_revision() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        let grants = request_journal_grants(&mut runtime, &cursor);
+        assert_eq!(
+            open_task_journal(&mut runtime, &mut journal, &mut cursor, &grants),
+            Ok(OpenOutcome::Created)
+        );
+        let first = cursor.revision.clone().unwrap();
+        let latest = runtime.stored.clone().unwrap();
+
+        let mut launched = FakeRuntime {
+            resource: runtime.resource.clone(),
+            stored: runtime.stored.clone(),
+            calls: Vec::new(),
+            lose_reply: false,
+            drop_write: false,
+            refuse_grants: false,
+        };
+        let mut fresh = journal_cursor("demo-agent", "task-1").unwrap();
+        let mut empty = two_turns();
+        let grants = request_journal_grants(&mut launched, &fresh);
+        assert_eq!(
+            open_task_journal(&mut launched, &mut empty, &mut fresh, &grants),
+            Ok(OpenOutcome::Loaded)
+        );
+        write_at_loaded_revision(&mut launched, &mut empty, &mut fresh, grants.write.as_ref())
+            .expect("write after load");
+        assert_ne!(fresh.revision.as_deref(), Some(first.as_str()));
+        assert_ne!(launched.stored.as_deref(), Some(latest.as_slice()));
+        let stored = launched.stored.expect("stored after load write");
+        assert_eq!(&stored[..4], b"EAHJ");
+        assert_eq!(stored[4..6], 2u16.to_le_bytes());
     }
 
     #[test]

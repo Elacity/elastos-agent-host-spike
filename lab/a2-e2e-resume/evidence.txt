@@ -1,0 +1,46 @@
+A2 e2e resume proof
+when: 2026-10-26T21:20:26Z
+commit: 85e3afd30aa89bb8145133cd8436c2403e899448
+parent: db8f7510d99f4e1f887801fc642861043d10b474
+machine: Linux x86_64
+rustc: rustc 1.91.0 (f8297e351 2025-10-28)
+python: 3.12.3
+
+Every row is derived from driver or process output. A skip is NOT RUN.
+
+WRITE: PASS — guest wrote format-2 journal through the real bridge; revision="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30 bytes=2304
+STALE: PASS — stale if_revision refused with revision_conflict; stored sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30
+STOP: PASS — first Runtime process exited 0; store kept at store-14280
+START: PASS — fresh Runtime process started on the same store; exit=0
+RESUME: PASS — fresh process loaded the latest revision without writing; revision="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30
+WRITE2: PASS — write with the loaded revision stored a new revision; old="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" new="5e3156e3d46b4090a4f6503284fb8232bbb298a886df8a2781c1926e9040cfeb"
+A2_counted: yes
+skipped: none
+
+log:
+VERSION commit: 85e3afd30aa89bb8145133cd8436c2403e899448
+VERSION parent: db8f7510d99f4e1f887801fc642861043d10b474
+VERSION rustc: rustc 1.91.0 (f8297e351 2025-10-28)
+VERSION machine: Linux x86_64
+VERSION python: 3.12.3
+VERSION when: 2026-10-26T21:20:26Z
+CMD rustup target add wasm32-unknown-unknown -> 0
+CMD examples/agent-host/build.sh -> 0
+GUEST_WASM sha256:b234ac47ca4f52de27b17ff999ec2af6b9694135e53bf059e49c16897df058e4 bytes:668807
+CMD cargo build a2-resume-driver -> 0
+DRIVER sha256:a842b56f569b2f7e68a7426e2268e43fa7abf707c533cceffe62ea01ea9d37e3
+STORE lab/a2-e2e-resume/homes/store-14280
+CMD a2-resume-driver first -> 0
+PROCESS first pid=14343
+ROW WRITE PASS guest wrote format-2 journal through the real bridge; revision="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30 bytes=2304
+ROW STALE PASS stale if_revision refused with revision_conflict; stored sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30
+STEP WRITE: PASS — guest wrote format-2 journal through the real bridge; revision="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30 bytes=2304
+STEP STALE: PASS — stale if_revision refused with revision_conflict; stored sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30
+STEP STOP: PASS — first Runtime process exited 0; store kept at store-14280
+CMD a2-resume-driver second -> 0
+PROCESS second pid=14353
+ROW RESUME PASS fresh process loaded the latest revision without writing; revision="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30
+ROW WRITE2 PASS write with the loaded revision stored a new revision; old="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" new="5e3156e3d46b4090a4f6503284fb8232bbb298a886df8a2781c1926e9040cfeb"
+STEP START: PASS — fresh Runtime process started on the same store; exit=0
+STEP RESUME: PASS — fresh process loaded the latest revision without writing; revision="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" sha256=fca6e2994578ef3d30d7ee6a9096533730935521090b405bfb6a8aa367931d30
+STEP WRITE2: PASS — write with the loaded revision stored a new revision; old="5a9ce0606d44a4fbdf1ddd76cb3d8c3287f491a0386f09f03f330352ae6b01bc" new="5e3156e3d46b4090a4f6503284fb8232bbb298a886df8a2781c1926e9040cfeb"
