@@ -1201,6 +1201,288 @@ localhost_resource holds the supported-operation list. `elastos/crates/elastos-s
 
 The extension B2 leaves open is the guest body's operation. The guest body carries `op` `edit`. A typed localhost operation for that body is a name on that list and on a match arm. B2 stays open.
 
-Run, child, init, the two hosted rows, and journal-append are not mapped in this section.
+This group is design input for B2. B2 stays open.
+
+The asks file declares three project asks. Each resource pattern is `<principal>/Projects/`. `examples/agent-host/asks.json:7` declares run. `examples/agent-host/asks.json:8` declares child. `examples/agent-host/asks.json:9` declares init.
+
+        {"kind": "run", "resource": "<principal>/Projects/"},
+        {"kind": "child", "resource": "<principal>/Projects/"},
+        {"kind": "init", "resource": "<principal>/Projects/"},
+
+ask_kind_name names Run as `run`, Child as `child`, and Init as `init`. `examples/agent-host/src/lib.rs:8189` is the Run arm.
+
+            ProposalKind::Run => Some("run"),
+
+`examples/agent-host/src/lib.rs:8192` is the Child arm.
+
+            ProposalKind::Child => Some("child"),
+
+`examples/agent-host/src/lib.rs:8193` is the Init arm.
+
+            ProposalKind::Init => Some("init"),
+
+declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. The three patterns are `<principal>/Projects/`.
+
+Run records a step. `examples/agent-host/src/lib.rs::propose_run` sets the kind to Run, stores the resource and the argv, and sets the seat to `microvm`. The body sets `step.kind = ProposalKind::Run`, `step.resource = resource.to_string()`, `step.argv = argv.to_vec()`, and `step.seat = "microvm".to_string();`. The body returns `Err("host path")` when the resource does not start with `localhost://`, when the resource contains whitespace, or when the resource or an argument is a host path. `examples/agent-host/src/lib.rs:2958` says `This does not start a process.` `examples/agent-host/src/lib.rs:2981` is the seat line.
+
+    /// Record a run proposal. The resource is a `localhost://` project. Arguments
+    /// stay data. A host path creates no step. This does not start a process.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_run(
+        journal: &mut Journal,
+        resource: &str,
+        argv: &[String],
+    ) -> Result<u64, &'static str> {
+        if !resource.starts_with("localhost://")
+            || resource.chars().any(char::is_whitespace)
+            || host_path(resource)
+            || argv.iter().any(|arg| host_path(arg))
+        {
+            return Err("host path");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Run;
+        step.resource = resource.to_string();
+        step.argv = argv.to_vec();
+        step.seat = "microvm".to_string();
+        Ok(id)
+    }
+
+`elastos/crates/elastos-compute/src/exec_vm.rs::decide_exec` returns `Refuse("missing grant")` when the grant is missing or empty. `elastos/crates/elastos-compute/src/exec_vm.rs:49` is that return. `elastos/crates/elastos-compute/src/exec_vm.rs:43` says `A ready decision still does not boot.`
+
+    /// Refuse a missing grant, a cancel, a host path, a missing Linux rootfs,
+    /// or a host that has no adapter. A ready decision still does not boot.
+    pub fn decide_exec(request: &ExecRequest<'_>) -> ExecDecision {
+        if request.cancelled {
+            return ExecDecision::Refuse("cancelled");
+        }
+        if request.grant.is_none_or(|grant| grant.is_empty()) {
+            return ExecDecision::Refuse("missing grant");
+        }
+        if !request.workspace.starts_with("localhost://")
+            || request.workspace.chars().any(char::is_whitespace)
+            || host_path(request.workspace)
+        {
+            return ExecDecision::Refuse("host path");
+        }
+        if request.argv.is_empty() || request.argv.iter().any(|arg| host_path(arg)) {
+            return ExecDecision::Refuse("host path");
+        }
+        if request.rootfs.file_name().and_then(|name| name.to_str()) != Some("rootfs.ext4")
+            || !request.rootfs.is_file()
+        {
+            return ExecDecision::Refuse("rootfs missing");
+        }
+        match request.host {
+            ExecHost::Macos => ExecDecision::Admit {
+                adapter: ExecAdapter::AppleVirtualization,
+            },
+            ExecHost::Linux => ExecDecision::Admit {
+                adapter: ExecAdapter::Crosvm,
+            },
+            ExecHost::Other => ExecDecision::Refuse("unsupported host"),
+        }
+    }
+
+`elastos/crates/elastos-compute/src/exec_vm.rs::admit_project_files` splits the workspace at `/Projects/`. `elastos/crates/elastos-compute/src/exec_vm.rs:130` is that `split_once` line. Its doc says a workspace other than `localhost://Users/<root>/Projects/<name>` is refused, and the function copies no directory from the host.
+
+    /// Files that may be placed in the machine for one project. Paths stay
+    /// relative. A host path, a `..` segment, or a workspace that is not
+    /// `localhost://Users/<root>/Projects/<name>` is refused. This does not copy
+    /// a directory from the host.
+    pub fn admit_project_files(workspace: &str, files: &[(&str, &str)]) -> Result<(), &'static str> {
+        let Some(rest) = workspace.strip_prefix("localhost://Users/") else {
+            return Err("host path");
+        };
+        let Some((root, name)) = rest.split_once("/Projects/") else {
+            return Err("host path");
+        };
+        if root.is_empty()
+            || name.is_empty()
+            || root.contains('/')
+            || name.contains('/')
+            || root.contains('\\')
+            || name.contains('\\')
+            || host_path(workspace)
+            || host_path(root)
+            || host_path(name)
+            || workspace.chars().any(char::is_whitespace)
+            || files.is_empty()
+        {
+            return Err("host path");
+        }
+        for (path, text) in files {
+            if path.is_empty()
+                || path.starts_with('/')
+                || host_path(path)
+                || path.chars().any(char::is_whitespace)
+                || path
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err("host path");
+            }
+            if host_path(text) {
+                return Err("host path");
+            }
+        }
+        Ok(())
+    }
+
+decide_exec and admit_project_files are the checks in exec_vm.rs. provider_operation_action is the operation-to-action map. For the localhost scheme that map calls localhost_op_required_action. The typed localhost operation list is the one section 6 already quoted. A typed operation for this ask is a name on that list and on a match arm.
+
+A child copies no parent grant, and the child host is a second journal. `examples/agent-host/src/lib.rs::propose_child` calls narrower_resource. `examples/agent-host/src/lib.rs:3360` says `It does not copy the parent's grant.` `examples/agent-host/src/lib.rs:3370` is that call. The step sets `step.grant = None`. `examples/agent-host/src/lib.rs:3382` is that store.
+
+    /// A child is a separate step. Its resource must sit under the parent's
+    /// resource. It does not copy the parent's grant.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_child(
+        journal: &mut Journal,
+        parent_id: u64,
+        resource: &str,
+    ) -> Result<u64, &'static str> {
+        let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {
+            return Err("no parent");
+        };
+        if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
+            return Err("not a subset");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Child;
+        step.resource = resource.to_string();
+        step.parent_id = Some(parent_id);
+        step.grant = None;
+        Ok(id)
+    }
+
+`examples/agent-host/src/lib.rs::authorize_child` returns false when no step has the child id, when that step is not a Child step, or when the offered grant is absent, empty, or equal to the parent grant. An empty grant unequal to the parent grant still returns false. The function calls authorize only after it finds a Child step and that grant guard passes. `examples/agent-host/src/lib.rs:3449` is the comparison `parent_grant.as_deref() == grant`.
+
+    /// Give a child its own grant. The parent's grant string is refused, and the
+    /// child stays prepared. This does not start a process.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {
+        let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {
+            return false;
+        };
+        if child.kind != ProposalKind::Child {
+            return false;
+        }
+        let parent_grant = child.parent_id.and_then(|parent_id| {
+            journal
+                .steps
+                .iter()
+                .find(|step| step.id == parent_id)
+                .and_then(|step| step.grant.clone())
+        });
+        if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {
+            return false;
+        }
+        authorize(journal, child_id, grant)
+    }
+
+`examples/agent-host/src/lib.rs::open_child_host` starts from empty_journal, calls admit_system with SYSTEM_HEAD, calls propose_run on that journal, and returns `Err("inherited")` when any step has a grant. `examples/agent-host/src/lib.rs:3455` says `A child host is a second journal.` `examples/agent-host/src/lib.rs:3470` is the empty_journal line. `examples/agent-host/src/lib.rs:3471` is the admit_system line.
+
+    /// A child host is a second journal. It keeps the system head and does not
+    /// copy the parent's log or the parent's grant. This is not a second loaded
+    /// component, and it does not start a process.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn open_child_host(
+        parent: &Journal,
+        parent_id: u64,
+        resource: &str,
+    ) -> Result<Journal, &'static str> {
+        let Some(parent_step) = parent.steps.iter().find(|step| step.id == parent_id) else {
+            return Err("no parent");
+        };
+        if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {
+            return Err("not a subset");
+        }
+        let mut child = empty_journal();
+        admit_system(&mut child, SYSTEM_HEAD, true);
+
+The body calls propose_run on that journal. `examples/agent-host/src/lib.rs:3474` is the inherited line.
+
+        if child.steps.iter().any(|step| step.grant.is_some()) {
+            return Err("inherited");
+        }
+        Ok(child)
+    }
+
+`examples/agent-host/src/lib.rs::grant_child_host` returns false when the offered grant is absent, empty, or equal to the parent grant. An empty grant unequal to the parent grant still returns false. When the guard passes, the function looks for a prepared Run step that has no grant. It returns false when no such step exists. When that step exists, the function calls authorize. `examples/agent-host/src/lib.rs:3482` is the comparison `grant == parent_grant`.
+
+    /// Give the child host its own grant. The parent's grant is refused.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Option<&str>) -> bool {
+        if grant.is_none() || grant == Some("") || grant == parent_grant {
+            return false;
+        }
+        let Some(id) = child
+            .steps
+            .iter()
+            .find(|step| {
+                step.kind == ProposalKind::Run
+                    && step.grant.is_none()
+                    && step.state == StepState::Prepared
+            })
+            .map(|step| step.id)
+        else {
+            return false;
+        };
+        authorize(child, id, grant)
+    }
+
+This second journal is the child-journal operation the guest keeps: its own head, its own run step, and its own grant.
+
+Init stores a project resource. `examples/agent-host/src/lib.rs::propose_init` builds `localhost://Users/{root}/Projects/{name}` and stores that resource. `examples/agent-host/src/lib.rs:3403` is that format. `examples/agent-host/src/lib.rs:3387` says `A host path or a slash inside the root or the name creates no step.` The body has no bus call.
+
+    /// Record a project proposal. The resource is a `localhost://` project name.
+    /// A host path or a slash inside the root or the name creates no step.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'static str> {
+        if root.is_empty()
+            || name.is_empty()
+            || root
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+            || name
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+            || host_path(root)
+            || host_path(name)
+        {
+            return Err("host path");
+        }
+        let resource = format!("localhost://Users/{root}/Projects/{name}");
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Init;
+        step.resource = resource;
+        Ok(id)
+    }
+
+On the peer scheme, provider_operation_action maps the operation `init` to `Action::Message`. `elastos/crates/elastos-server/src/provider_resource.rs:174` is the `init` alternative. `elastos/crates/elastos-server/src/provider_resource.rs:176` is the `Action::Message` arm.
+
+            "peer" => match op {
+                "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"
+                | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"
+                | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),
+                _ => None,
+            },
+
+The project ask is the resource propose_init stores. The contract must be extended for a typed operation for run, for child, and for init. The two hosted rows and journal-append are not mapped in this section.
 
 This section cites no lab/grant-binding test.
