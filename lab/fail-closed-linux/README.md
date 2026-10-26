@@ -10,18 +10,24 @@ This is a lab model, not Runtime code. Runtime integration is separate work.
 
 ## The guard
 
-`confine` in `src/lib.rs` applies five layers in this order. The first failed
+`confine` in `src/lib.rs` applies six layers in this order. The first failed
 step stops it.
 
 | Layer | Steps | What the step does |
 | --- | --- | --- |
 | user-namespace | `unshare`, `uid_map`, `setgroups`, `gid_map` | `unshare(CLONE_NEWUSER)`, then maps the caller's own uid and gid to themselves |
+| pid-namespace | `unshare_pid` | `unshare(CLONE_NEWPID)`. The caller stays in the old PID namespace. A later fork puts the provider in the new one. A failed unshare refuses: `the PID namespace cannot be created` |
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
 | no_new_privs | `set_no_new_privs` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
 | seccomp | `install_filter` | `seccomp(SECCOMP_SET_MODE_FILTER)` with the filter in `src/seccomp.rs` |
 | landlock | `abi_probe`, `abi_floor`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
 
-After the five layers, `execve` starts the provider with an empty environment.
+After the six layers, `execve` starts the provider with an empty environment.
+`unshare(CLONE_NEWPID)` does not move the caller. `detach_into_pid_namespace`
+forks a PID-1 init in the new namespace; init forks the provider (PID 2) and
+forwards signals to it. The helper that called `unshare` waits on init and
+returns that exit status. The provider is not PID 1, so a forwarded SIGTERM
+is delivered.
 
 The bounding set is dropped before `capset`, because `PR_CAPBSET_DROP` needs
 `CAP_SETPCAP` and `capset` removes it. On this host the opposite order left
@@ -85,8 +91,9 @@ probe is static, so the Landlock domain needs no library path. The build needs
 static glibc (`libc.a`, from `libc6-dev` on Ubuntu). For a target other than
 the host, `build.rs` skips the probe, so `cargo check --target ...` still works.
 
-The real-kernel tests need unprivileged user namespaces, seccomp, and a
-Landlock ABI that can express `truncate` and `ioctl_dev` (ABI 5 or above).
+The real-kernel tests need unprivileged user namespaces, a PID namespace,
+seccomp, and a Landlock ABI that can express `truncate` and `ioctl_dev`
+(ABI 5 or above).
 
 ## Results on this host
 
@@ -95,8 +102,8 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 | Suite | Tests |
 | --- | --- |
 | `lib` (unit) | 6 passed |
-| `simulated` | 13 passed |
-| `real_kernel` | 9 passed |
+| `simulated` | 14 passed |
+| `real_kernel` | 13 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -108,6 +115,7 @@ seccomp gives the errno, and the feature itself is present.
 | Row | Simulated kernel | Real kernel | How the real step fails |
 | --- | --- | --- | --- |
 | user namespaces off | `sim_user_namespaces_off_refuses` (EPERM, ENOSPC) | `real_user_namespaces_off_refuses` | kernel rule: a parent user namespace with `max_user_namespaces` 0 gives ENOSPC; inherited filter: `unshare` gives EPERM |
+| PID namespace cannot be created | `sim_pid_namespace_unavailable_refuses` (EPERM, ENOSYS, ENOSPC) | `real_pid_namespace_unavailable_refuses` | inherited filter: `unshare(CLONE_NEWPID)` gives EPERM |
 | id maps cannot be written | `sim_id_maps_unwritable_refuses` (`uid_map`, `setgroups`, `gid_map`) | `real_id_map_unwritable_refuses` | kernel rule: a launcher binary with mode 0111 makes the process not dumpable, so opening `/proc/self/uid_map` gives EACCES |
 | capability drop fails | `sim_capability_drop_failure_refuses` (all four steps) | `real_capability_drop_failure_refuses` | inherited filter: `capset` gives EPERM; `prctl(PR_CAPBSET_DROP)` gives EPERM |
 | no_new_privs cannot be set | `sim_no_new_privs_failure_refuses` | `real_no_new_privs_failure_refuses` | inherited filter: `prctl(PR_SET_NO_NEW_PRIVS)` gives EPERM |
@@ -121,12 +129,25 @@ The positive tests:
 - `sim_confined_provider_starts_after_every_layer` checks the order of the
   six layers, one bounding drop per capability, and one exec.
 - `real_confined_provider_has_every_layer` starts the probe and reads the
-  running probe's `/proc/<pid>` from outside. It sees `NoNewPrivs: 1`,
+  started helper's `/proc/<pid>` from outside. It sees `NoNewPrivs: 1`,
   `Seccomp: 2`, `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb` all zero,
   an identity `uid_map`, and a user namespace that differs from the test's.
   Inside, the probe sees EPERM on an inet socket and a unix socket, EACCES on
   a read and a write outside its storage root and on `/etc/passwd`, and a
-  working write and read inside its storage root.
+  working write and read inside its storage root. It prints `nspid=2` (it is
+  the init's child in the new PID namespace).
+- `real_confined_child_cannot_signal_host` asks the probe to `kill` the test
+  process's real pid (`kill(pid, 0)`). The kernel returns ESRCH or EPERM; the
+  test records that errno. The same probe forks a child in its namespace and
+  `kill`s that child successfully.
+- `real_pid_namespace_unavailable_refuses` inherits a seccomp filter that
+  makes `unshare(CLONE_NEWPID)` return EPERM. The refusal names
+  `the PID namespace cannot be created`.
+- `real_reaper_propagates_exit_status` starts the probe with `--exit 42` and
+  requires the launcher to exit 42.
+- `real_reaper_forwards_signal` sends SIGTERM to the started helper pid. The
+  helper forwards it to init, init forwards it to the probe, and the launcher
+  exits 128+SIGTERM. The probe process is gone afterwards.
 
 Two more checks: `sim_every_guard_step_failure_stops_before_exec` fails each
 guard step in turn, and `sim_landlock_abi_floor_cannot_be_lowered` shows that
@@ -166,12 +187,13 @@ boot a Jetson; that ABI is not a measurement from the board.
 ## PID namespace and `LANDLOCK_SCOPE_SIGNAL`
 
 The design's carrier for `(deny default)` signals is a PID namespace
-(`capsules/wallet-provider/CONFINEMENT-LINUX.md`). This lab unshares only
-`CLONE_NEWUSER`. `unshare(CLONE_NEWPID)` in the already-forked child does
-not put the provider itself in the new namespace; only later children enter
-it. Isolating the provider needs a grandchild after that unshare, which
-would change the fault-pipe pid contract. That second fork is a named gap,
-not a silent skip of a Landlock right.
+(`capsules/wallet-provider/CONFINEMENT-LINUX.md`). This lab unshares
+`CLONE_NEWUSER`, writes the maps, then unshares `CLONE_NEWPID`. A failed
+PID unshare is a refusal: `the PID namespace cannot be created`. After the
+other layers, the helper forks a PID-1 init; init forks the provider and
+reaps it. The helper's pid is what `launch` returns. The fault pipe stays
+close-on-exec on the provider; the reapers close their copies so a
+successful exec still looks like an empty pipe.
 
 `LANDLOCK_SCOPE_SIGNAL` exists from ABI 6. The guard sets it when the probe
 returns 6 or above, and fails closed if `create_ruleset` then fails. ABI 5
@@ -202,6 +224,7 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F10-landlock-missing-tolerated | a missing Landlock skips the layer | the Landlock-missing row in both suites |
 | F11-abi-floor-off-by-one | ABI 6 passes an extra required ABI of 7 | the extra-floor ABI rows in both suites |
 | F18-missing-right-silently-passed | a missing needed right is ignored and the start continues | the per-right ABI rows |
+| F19-pid-unshare-skipped | `unshare(CLONE_NEWPID)` is skipped | `real_confined_provider_has_every_layer`, `real_confined_child_cannot_signal_host` |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -210,7 +233,9 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: 18 of 18 caught, and the control survived with 28 tests passed.
+Result: recorded after `python3 falsify.py` on this tree. A skipped
+(`ignored`) test is `NOT RUN`, never a pass. F19 (skip `CLONE_NEWPID`)
+must be caught by the nspid assertions.
 
 ## Not covered here
 
@@ -222,9 +247,9 @@ Result: 18 of 18 caught, and the control survived with 28 tests passed.
 - Real provider binaries: NOT RUN. The stand-in is the static probe. A
   dynamically linked provider needs Landlock read rules for its loader and
   libraries. This lab grants none.
-- Mount, network, PID and IPC namespaces: NOT RUN. They are not layers of
-  this guard. The PID namespace that would contain the provider is a named
-  gap, recorded above.
+- Mount, network and IPC namespaces: NOT RUN. They are not layers of this
+  guard. The PID namespace is a layer; the real-kernel signal and nspid
+  tests above cover it.
 - File descriptor inheritance: NOT RUN. The guard does not close descriptors
   that the provider inherits. Only the fault pipe is close-on-exec.
 - If the child crashes before `exec` without writing a fault, the pipe is
@@ -244,9 +269,9 @@ There are two ways to join it to this guard:
 
 1. Port its policy into the trait. Each of its calls becomes one `Kernel`
    method, which is the shape `RealKernel` has now. Its seccomp allow-list
-   replaces `seccomp::filter()` through `Plan`. Its four extra namespaces
-   become new steps in a new layer of `confine`. Then the simulated rows and
-   the falsifiers here also cover its steps.
+   replaces `seccomp::filter()` through `Plan`. Its mount, network and IPC
+   namespaces become new steps in a new layer of `confine`. Then the simulated
+   rows and the falsifiers here also cover its steps.
 2. Wrap it as a backend. A `LinuxConfineKernel` implements `spawn_confined`
    by running `setup` with its policy file, and maps each refusal line to a
    `Fault` (for example "user namespaces are turned off" becomes

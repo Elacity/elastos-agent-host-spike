@@ -10,11 +10,13 @@
 mod common;
 
 use common::{
-    assert_refused, host_landlock_abi, launch_command, launcher, output, Fixture, Inherit,
-    PROVIDERS,
+    assert_refused, host_landlock_abi, launch_command, launcher, output, require_line,
+    wait_with_timeout, Fixture, Inherit, PROVIDERS,
 };
+use fail_closed_linux::PID_NAMESPACE_UNAVAILABLE;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 
 fn status_field(status: &str, field: &str) -> String {
@@ -80,6 +82,17 @@ fn real_confined_provider_has_every_layer() {
         assert_ne!(
             user_ns, own_user_ns,
             "{provider} shares the test's user namespace"
+        );
+
+        let nspid_line = require_line(&lines, "nspid=", provider);
+        let nspid: i32 = nspid_line
+            .rsplit('=')
+            .next()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or_else(|| panic!("NOT RUN: bad {nspid_line}"));
+        assert!(
+            nspid == 1 || nspid == 2,
+            "{provider}: confined nspid must be 1 (provider as init) or 2 (provider under the reaper), got {nspid}"
         );
 
         for expected in [
@@ -376,4 +389,205 @@ fn real_landlock_ruleset_unappliable_refuses() {
             "(os error 1)",
         );
     }
+}
+
+fn read_until_ready(child: &mut std::process::Child, provider: &str) -> (u32, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut pid = None;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        if let Some(rest) = line.strip_prefix(&format!("started {provider} pid=")) {
+            pid = Some(rest.parse::<u32>().unwrap());
+        }
+        lines.push(line);
+        if pid.is_some() && lines.iter().any(|line| line == "ready") {
+            break;
+        }
+    }
+    let pid = pid.unwrap_or_else(|| panic!("{provider}: no started line in {lines:?}"));
+    assert!(
+        lines.iter().any(|line| line == "ready"),
+        "{provider}: {lines:?}"
+    );
+    (pid, lines)
+}
+
+#[test]
+fn real_confined_child_cannot_signal_host() {
+    let host_pid = std::process::id();
+    assert_ne!(
+        host_pid, 1,
+        "NOT RUN: this process is pid 1; a host kill target of 1 is the confined init"
+    );
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("signal-host", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .arg("--kill-host")
+            .arg(host_pid.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+
+        let nspid_line = require_line(&lines, "nspid=", provider);
+        let nspid: i32 = nspid_line
+            .rsplit('=')
+            .next()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or_else(|| panic!("NOT RUN: bad {nspid_line}"));
+        assert!(
+            nspid == 1 || nspid == 2,
+            "{provider}: confined nspid must be 1 or 2, got {nspid}"
+        );
+
+        let host_line = require_line(&lines, "kill_host ", provider);
+        let errno = host_line
+            .strip_prefix("kill_host errno=")
+            .and_then(|text| text.parse::<i32>().ok());
+        let errno = errno.unwrap_or_else(|| {
+            panic!("{provider}: kill_host must record an errno, got {host_line}")
+        });
+        assert!(
+            errno == libc::ESRCH || errno == libc::EPERM,
+            "{provider}: kill_host expected ESRCH ({}) or EPERM ({}), got {errno} ({host_line})",
+            libc::ESRCH,
+            libc::EPERM
+        );
+        assert!(
+            lines.iter().any(|line| line == "kill_child ok"),
+            "{provider}: missing kill_child ok in {lines:?}"
+        );
+
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+#[test]
+fn real_pid_namespace_unavailable_refuses() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("pidns", provider);
+        let run = output(launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &[],
+            Inherit::Errno {
+                nr: libc::SYS_unshare,
+                arg0: Some(libc::CLONE_NEWPID as u32),
+                errno: libc::EPERM,
+            },
+        ));
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "pid-namespace",
+            "unshare_pid",
+            PID_NAMESPACE_UNAVAILABLE,
+        );
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "pid-namespace",
+            "unshare_pid",
+            "(os error 1)",
+        );
+    }
+}
+
+#[test]
+fn real_reaper_propagates_exit_status() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("reaper-exit", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command.arg("--exit").arg("42");
+        let run = output(command);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let context = format!(
+            "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            run.status
+        );
+        assert_eq!(run.status.code(), Some(42), "{provider}: {context}");
+        assert!(
+            stdout.contains("nspid="),
+            "NOT RUN: probe did not print nspid\n{context}"
+        );
+        assert!(
+            !stderr.contains("refused to start"),
+            "{provider}: guard refused\n{context}"
+        );
+    }
+}
+
+#[test]
+fn real_reaper_forwards_signal() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("reaper-signal", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let _stdin = child.stdin.take().unwrap();
+        let (pid, lines) = read_until_ready(&mut child, provider);
+        require_line(&lines, "nspid=", provider);
+        let provider_pid = innermost_child(pid)
+            .unwrap_or_else(|| panic!("NOT RUN: no provider pid under helper {pid} ({provider})"));
+
+        let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        assert_eq!(sent, 0, "{provider}: kill({pid}, SIGTERM) failed");
+
+        let status = wait_with_timeout(&mut child, 5).unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{provider}: launcher did not exit after SIGTERM to pid {pid}");
+        });
+        assert_eq!(
+            status
+                .code()
+                .or_else(|| status.signal().map(|sig| 128 + sig)),
+            Some(128 + libc::SIGTERM),
+            "{provider}: expected 128+SIGTERM, got {status:?}"
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{provider_pid}")).exists(),
+            "{provider}: provider pid {provider_pid} still exists; the reaper did not forward SIGTERM"
+        );
+    }
+}
+
+fn children_of(pid: u32) -> Vec<u32> {
+    fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|text| text.parse().ok())
+        .collect()
+}
+
+fn innermost_child(pid: u32) -> Option<u32> {
+    let mut current = pid;
+    let mut last = None;
+    for _ in 0..4 {
+        match children_of(current).first().copied() {
+            Some(child) => {
+                last = Some(child);
+                current = child;
+            }
+            None => break,
+        }
+    }
+    last
 }

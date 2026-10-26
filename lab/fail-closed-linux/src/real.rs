@@ -12,8 +12,27 @@ use std::ffi::CStr;
 use std::io;
 use std::os::fd::RawFd;
 use std::os::raw::{c_int, c_long};
+use std::sync::atomic::{AtomicI32, Ordering};
 
-pub struct RealKernel;
+/// The real kernel. `fault_write` is the child's end of the close-on-exec
+/// pipe; reapers close it so a successful exec reports an empty pipe.
+pub struct RealKernel {
+    fault_write: RawFd,
+}
+
+impl RealKernel {
+    pub fn new() -> RealKernel {
+        RealKernel { fault_write: -1 }
+    }
+}
+
+impl Default for RealKernel {
+    fn default() -> RealKernel {
+        RealKernel::new()
+    }
+}
+
+static REAP_CHILD: AtomicI32 = AtomicI32::new(0);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -116,10 +135,102 @@ fn read_u32(path: &CStr) -> Result<u32, Errno> {
     Ok(value)
 }
 
+extern "C" fn forward_signal(sig: c_int) {
+    let child = REAP_CHILD.load(Ordering::Relaxed);
+    if child > 0 {
+        // SAFETY: kill is async-signal-safe; `child` is our forked pid.
+        unsafe { libc::kill(child, sig) };
+    }
+}
+
+fn install_signal_forwarders() {
+    // SAFETY: the handler only calls kill, which is async-signal-safe.
+    unsafe {
+        for sig in [
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGUSR1,
+            libc::SIGUSR2,
+            libc::SIGALRM,
+        ] {
+            libc::signal(sig, forward_signal as libc::sighandler_t);
+        }
+    }
+}
+
+fn exit_from_wait_status(status: c_int) -> ! {
+    // SAFETY: WIF* macros only read the status word; _exit does not return.
+    unsafe {
+        if libc::WIFEXITED(status) {
+            libc::_exit(libc::WEXITSTATUS(status));
+        }
+        if libc::WIFSIGNALED(status) {
+            libc::_exit(128 + libc::WTERMSIG(status));
+        }
+        libc::_exit(70);
+    }
+}
+
+fn reap_forever(child: libc::pid_t) -> ! {
+    REAP_CHILD.store(child, Ordering::Relaxed);
+    install_signal_forwarders();
+    let mut status = 0;
+    loop {
+        // SAFETY: `status` is a valid out pointer.
+        let ret = unsafe { libc::waitpid(child, &mut status, 0) };
+        if ret == child {
+            exit_from_wait_status(status);
+        }
+        if ret < 0 && errno() != libc::EINTR {
+            unsafe { libc::_exit(70) };
+        }
+    }
+}
+
+fn close_fault_write(kernel: &mut RealKernel) {
+    if kernel.fault_write >= 0 {
+        // SAFETY: this is our copy of the pipe write end.
+        unsafe { libc::close(kernel.fault_write) };
+        kernel.fault_write = -1;
+    }
+}
+
 impl Kernel for RealKernel {
     fn unshare_user_namespace(&mut self) -> Result<(), Errno> {
         // SAFETY: unshare takes a flag word only.
         check(unsafe { libc::unshare(libc::CLONE_NEWUSER) }.into()).map(drop)
+    }
+
+    fn unshare_pid_namespace(&mut self) -> Result<(), Errno> {
+        // SAFETY: unshare takes a flag word only. The caller stays in the
+        // old PID namespace; later children enter the new one.
+        check(unsafe { libc::unshare(libc::CLONE_NEWPID) }.into()).map(drop)
+    }
+
+    fn detach_into_pid_namespace(&mut self) -> Result<(), Errno> {
+        // SAFETY: the child of this fork is PID 1 in the new namespace.
+        let init = unsafe { libc::fork() };
+        if init < 0 {
+            return Err(errno());
+        }
+        if init > 0 {
+            close_fault_write(self);
+            reap_forever(init);
+        }
+        // SAFETY: this child (init) forks the provider so the provider is
+        // not PID 1. Signals to PID 1 are ignored unless a handler is set;
+        // the reaper keeps the handlers and the provider can receive them.
+        let provider = unsafe { libc::fork() };
+        if provider < 0 {
+            return Err(errno());
+        }
+        if provider > 0 {
+            close_fault_write(self);
+            reap_forever(provider);
+        }
+        Ok(())
     }
 
     fn write_uid_map(&mut self, map: &[u8]) -> Result<(), Errno> {
@@ -306,7 +417,12 @@ impl Kernel for RealKernel {
         if pid == 0 {
             // SAFETY: closing our copy of the read end, then reporting and exiting.
             unsafe { libc::close(read_end) };
-            let fault = match confine_and_exec(&mut RealKernel, plan) {
+            let fault = match confine_and_exec(
+                &mut RealKernel {
+                    fault_write: write_end,
+                },
+                plan,
+            ) {
                 Err(fault) => fault,
                 Ok(()) => Fault::os(Step::Execve, 0),
             };

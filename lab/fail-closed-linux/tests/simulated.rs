@@ -10,7 +10,7 @@ use fail_closed_linux::sim::{SimKernel, SIM_PID};
 use fail_closed_linux::{
     file_profile_launches_on_abi, handled_fs_for_abi, handled_net_for_abi, landlock, launch,
     missing_required_mask, scoped_for_abi, Errno, Layer, ProviderSpec, Refusal, Step,
-    MISSING_IOCTL_DEV, MISSING_TRUNCATE,
+    MISSING_IOCTL_DEV, MISSING_TRUNCATE, PID_NAMESPACE_UNAVAILABLE,
 };
 
 fn spec(provider: &str) -> ProviderSpec {
@@ -83,6 +83,29 @@ fn os_error_row(rows: &[(Step, Errno)]) {
 #[test]
 fn sim_user_namespaces_off_refuses() {
     os_error_row(&[(Step::Unshare, libc::EPERM), (Step::Unshare, libc::ENOSPC)]);
+}
+
+#[test]
+fn sim_pid_namespace_unavailable_refuses() {
+    os_error_row(&[
+        (Step::UnsharePid, libc::EPERM),
+        (Step::UnsharePid, libc::ENOSYS),
+        (Step::UnsharePid, libc::ENOSPC),
+    ]);
+    let mut kernel = SimKernel::failing(Step::UnsharePid, libc::EPERM);
+    let refusal = refused(&mut kernel, &spec("did-provider"));
+    assert_eq!(refusal.layer, Layer::PidNamespace, "{refusal}");
+    assert_eq!(refusal.step, Step::UnsharePid, "{refusal}");
+    let text = refusal.to_string();
+    assert!(
+        text.contains(PID_NAMESPACE_UNAVAILABLE),
+        "missing {PID_NAMESPACE_UNAVAILABLE:?}: {refusal}"
+    );
+    assert!(
+        !kernel.steps.contains(&Step::LastCapability),
+        "capabilities ran after a PID-namespace refusal: {:?}",
+        kernel.steps
+    );
 }
 
 #[test]
@@ -230,6 +253,7 @@ fn sim_confined_provider_starts_after_every_layer() {
             layers,
             [
                 Layer::UserNamespace,
+                Layer::PidNamespace,
                 Layer::Capabilities,
                 Layer::NoNewPrivs,
                 Layer::Seccomp,

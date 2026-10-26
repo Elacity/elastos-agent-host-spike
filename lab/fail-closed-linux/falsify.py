@@ -117,6 +117,8 @@ def cargo(crate, args, env):
 
 
 def result_of(name, stdout):
+    if re.search(rf"^test {re.escape(name)} \.\.\. ignored", stdout, re.M):
+        return "NOT RUN"
     for verdict in ("FAILED", "ok"):
         if re.search(rf"^test {re.escape(name)} \.\.\. {verdict}$", stdout, re.M):
             return verdict
@@ -150,7 +152,10 @@ def run_plant(plant, keep):
             logs.append(run.stdout + run.stderr)
             passed = re.findall(r"^test (\S+) \.\.\. ok$", run.stdout, re.M)
             failed = re.findall(r"^test (\S+) \.\.\. FAILED$", run.stdout, re.M)
-            if run.returncode == 0 and passed and not failed:
+            ignored = re.findall(r"^test (\S+) \.\.\. ignored", run.stdout, re.M)
+            if ignored:
+                outcome = Outcome(plant, "ERROR", f"NOT RUN: {ignored}")
+            elif run.returncode == 0 and passed and not failed:
                 outcome = Outcome(plant, "SURVIVED", f"{len(passed)} tests passed", passed)
             else:
                 outcome = Outcome(plant, "KILLED", f"failed: {failed or 'build or harness'}")
@@ -174,7 +179,7 @@ def run_plant(plant, keep):
                 outcome = Outcome(plant, "CAUGHT", summary)
             elif not compiled:
                 outcome = Outcome(plant, "ERROR", "the mutant did not compile")
-            elif "missing" in results.values():
+            elif any(verdict in ("missing", "NOT RUN") for verdict in results.values()):
                 outcome = Outcome(plant, "ERROR", f"named test not run: {summary}")
             else:
                 outcome = Outcome(plant, "MISSED", summary)

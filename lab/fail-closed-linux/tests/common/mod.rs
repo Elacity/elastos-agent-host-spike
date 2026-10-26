@@ -7,8 +7,8 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Output};
+use std::time::{Duration, Instant};
 
 pub const PROVIDERS: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
 
@@ -152,6 +152,29 @@ pub fn output(mut command: Command) -> Output {
         }
     }
     panic!("the launcher stayed busy");
+}
+
+/// A required probe line. A missing line is NOT RUN, never a pass.
+pub fn require_line(lines: &[String], prefix: &str, context: &str) -> String {
+    lines
+        .iter()
+        .find(|line| line.starts_with(prefix))
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!("NOT RUN: missing {prefix:?} in {lines:?} ({context})");
+        })
+}
+
+pub fn wait_with_timeout(child: &mut Child, secs: u64) -> Option<ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => return None,
+            Err(err) => panic!("wait failed: {err}"),
+        }
+    }
 }
 
 pub fn host_landlock_abi() -> u32 {

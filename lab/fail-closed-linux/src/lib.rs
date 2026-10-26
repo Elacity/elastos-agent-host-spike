@@ -1,14 +1,14 @@
 //! Fail-closed provider launch guard for Linux (M1 C0 lab).
 //!
 //! The guard runs in the provider's own process, after fork and before exec.
-//! It applies five layers in this order: user namespace, capability drop,
-//! no_new_privs, seccomp, Landlock. Landlock uses a per-right floor: the
-//! profile's needed rights are checked against the probed ABI, and a missing
-//! right refuses with the right and the ABI that first expresses it. The first
-//! step that fails stops the guard and becomes a refusal that names the
-//! provider, the layer, the step and the OS error. The exec call is reached
-//! only after every step succeeded. `launch` has no unconfined path: a
-//! refusal starts nothing.
+//! It applies six layers in this order: user namespace, PID namespace,
+//! capability drop, no_new_privs, seccomp, Landlock. Landlock uses a per-right
+//! floor: the profile's needed rights are checked against the probed ABI, and
+//! a missing right refuses with the right and the ABI that first expresses it.
+//! The first step that fails stops the guard and becomes a refusal that names
+//! the provider, the layer, the step and the OS error. The exec call is
+//! reached only after every step succeeded. `launch` has no unconfined path:
+//! a refusal starts nothing.
 
 pub mod real;
 pub mod seccomp;
@@ -34,6 +34,9 @@ pub const TRUNCATE_ABI: u32 = 3;
 pub const IOCTL_DEV_ABI: u32 = 5;
 /// First Landlock ABI that can set `LANDLOCK_SCOPE_SIGNAL`.
 pub const SCOPE_SIGNAL_ABI: u32 = 6;
+
+/// Reason prefix when `unshare(CLONE_NEWPID)` fails. The OS error follows.
+pub const PID_NAMESPACE_UNAVAILABLE: &str = "the PID namespace cannot be created";
 
 /// Bit in `Fault.errno` when `Step::AbiFloor` names a missing `truncate`.
 pub const MISSING_TRUNCATE: i32 = 1;
@@ -193,6 +196,7 @@ pub fn file_profile_launches_on_abi(abi: u32) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layer {
     UserNamespace,
+    PidNamespace,
     Capabilities,
     NoNewPrivs,
     Seccomp,
@@ -205,6 +209,7 @@ impl Layer {
     pub fn name(self) -> &'static str {
         match self {
             Layer::UserNamespace => "user-namespace",
+            Layer::PidNamespace => "pid-namespace",
             Layer::Capabilities => "capabilities",
             Layer::NoNewPrivs => "no_new_privs",
             Layer::Seccomp => "seccomp",
@@ -228,6 +233,7 @@ pub enum Step {
     UidMap,
     Setgroups,
     GidMap,
+    UnsharePid,
     LastCapability,
     BoundingSet,
     AmbientSet,
@@ -244,16 +250,18 @@ pub enum Step {
     Prepare,
     Pipe,
     Fork,
+    PidFork,
     Report,
 }
 
 impl Step {
     /// The steps that run in the provider's process, in guard order.
-    pub const GUARD: [Step; 17] = [
+    pub const GUARD: [Step; 18] = [
         Step::Unshare,
         Step::UidMap,
         Step::Setgroups,
         Step::GidMap,
+        Step::UnsharePid,
         Step::LastCapability,
         Step::BoundingSet,
         Step::AmbientSet,
@@ -268,11 +276,18 @@ impl Step {
         Step::RestrictSelf,
         Step::Execve,
     ];
-    const LAUNCH: [Step; 4] = [Step::Prepare, Step::Pipe, Step::Fork, Step::Report];
+    const LAUNCH: [Step; 5] = [
+        Step::Prepare,
+        Step::Pipe,
+        Step::Fork,
+        Step::PidFork,
+        Step::Report,
+    ];
 
     pub fn layer(self) -> Layer {
         match self {
             Step::Unshare | Step::UidMap | Step::Setgroups | Step::GidMap => Layer::UserNamespace,
+            Step::UnsharePid | Step::PidFork => Layer::PidNamespace,
             Step::LastCapability | Step::BoundingSet | Step::AmbientSet | Step::CapabilitySets => {
                 Layer::Capabilities
             }
@@ -295,6 +310,7 @@ impl Step {
             Step::UidMap => "uid_map",
             Step::Setgroups => "setgroups",
             Step::GidMap => "gid_map",
+            Step::UnsharePid => "unshare_pid",
             Step::LastCapability => "cap_last_cap",
             Step::BoundingSet => "bounding_set",
             Step::AmbientSet => "ambient_set",
@@ -311,6 +327,7 @@ impl Step {
             Step::Prepare => "prepare",
             Step::Pipe => "pipe",
             Step::Fork => "fork",
+            Step::PidFork => "pid_fork",
             Step::Report => "report",
         }
     }
@@ -407,6 +424,10 @@ impl Refusal {
             Step::AbiFloor => missing_rights_reason(fault.found, fault.errno),
             Step::AbiProbe => format!(
                 "Landlock is not available: {}",
+                io::Error::from_raw_os_error(fault.errno)
+            ),
+            Step::UnsharePid => format!(
+                "{PID_NAMESPACE_UNAVAILABLE}: {}",
                 io::Error::from_raw_os_error(fault.errno)
             ),
             _ => io::Error::from_raw_os_error(fault.errno).to_string(),
@@ -556,6 +577,13 @@ fn c_string(value: &OsStr) -> Option<CString> {
 /// fork and exec, so an implementation must not allocate or panic.
 pub trait Kernel {
     fn unshare_user_namespace(&mut self) -> Result<(), Errno>;
+    fn unshare_pid_namespace(&mut self) -> Result<(), Errno>;
+    /// After `unshare(CLONE_NEWPID)`, fork so the provider runs inside the new
+    /// namespace. The caller stays as a reaper. A simulated kernel does nothing.
+    fn detach_into_pid_namespace(&mut self) -> Result<(), Errno> {
+        let _ = self;
+        Ok(())
+    }
     fn write_uid_map(&mut self, map: &[u8]) -> Result<(), Errno>;
     fn deny_setgroups(&mut self) -> Result<(), Errno>;
     fn write_gid_map(&mut self, map: &[u8]) -> Result<(), Errno>;
@@ -587,7 +615,7 @@ pub trait Kernel {
     fn spawn_confined(&mut self, plan: &Plan) -> Result<u32, Fault>;
 }
 
-/// Applies the five layers to the calling process, in order, and stops at the
+/// Applies the six layers to the calling process, in order, and stops at the
 /// first failed step.
 pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fault> {
     let os = |step: Step| move |errno: Errno| Fault::os(step, errno);
@@ -600,6 +628,9 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
     kernel
         .write_gid_map(&plan.gid_map)
         .map_err(os(Step::GidMap))?;
+    kernel
+        .unshare_pid_namespace()
+        .map_err(os(Step::UnsharePid))?;
 
     // The bounding set first: dropping it needs CAP_SETPCAP, which capset removes.
     let last = kernel.last_capability().map_err(os(Step::LastCapability))?;
@@ -651,6 +682,9 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
 /// not start.
 pub fn confine_and_exec<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fault> {
     confine(kernel, plan)?;
+    kernel
+        .detach_into_pid_namespace()
+        .map_err(|errno| Fault::os(Step::PidFork, errno))?;
     kernel
         .exec(plan)
         .map_err(|errno| Fault::os(Step::Execve, errno))
@@ -774,11 +808,22 @@ mod tests {
     }
 
     #[test]
-    fn pid_namespace_and_scope_signal_gaps() {
-        // The guard unshares only CLONE_NEWUSER. A PID namespace that contains
-        // the provider itself needs a grandchild after unshare(CLONE_NEWPID).
-        // This lab does not take that second fork. ABI 5 can launch and still
-        // cannot set LANDLOCK_SCOPE_SIGNAL.
+    fn pid_namespace_is_a_required_guard_step() {
+        let guard = Step::GUARD.to_vec();
+        let gid = guard.iter().position(|step| *step == Step::GidMap).unwrap();
+        let pid = guard
+            .iter()
+            .position(|step| *step == Step::UnsharePid)
+            .unwrap();
+        let cap = guard
+            .iter()
+            .position(|step| *step == Step::LastCapability)
+            .unwrap();
+        assert_eq!(pid, gid + 1, "PID unshare follows the id maps");
+        assert_eq!(cap, pid + 1, "capabilities follow the PID unshare");
+        assert_eq!(Step::UnsharePid.layer(), Layer::PidNamespace);
+        assert_eq!(Step::UnsharePid.name(), "unshare_pid");
+        // ABI 5 can launch and still cannot set LANDLOCK_SCOPE_SIGNAL.
         assert_eq!(scoped_for_abi(5), 0);
         assert_eq!(scoped_for_abi(6), landlock::SCOPE_SIGNAL);
         assert_eq!(scoped_for_abi(SCOPE_SIGNAL_ABI - 1), 0);

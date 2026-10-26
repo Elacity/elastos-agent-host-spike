@@ -70,6 +70,10 @@ impl Kernel for SimKernel {
         self.run(Step::Unshare)
     }
 
+    fn unshare_pid_namespace(&mut self) -> Result<(), Errno> {
+        self.run(Step::UnsharePid)
+    }
+
     fn write_uid_map(&mut self, _map: &[u8]) -> Result<(), Errno> {
         self.run(Step::UidMap)
     }

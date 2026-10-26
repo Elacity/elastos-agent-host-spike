@@ -24,7 +24,7 @@ fn main() {
             exit(USAGE_EXIT_CODE);
         }
     };
-    match launch(&mut RealKernel, &spec) {
+    match launch(&mut RealKernel::new(), &spec) {
         Ok(started) => {
             println!("started {} pid={}", started.provider, started.pid);
             exit(wait(started.pid));
