@@ -1,0 +1,12 @@
+id: M-A12-TMP-SLASH
+file: src/a12.rs
+test: tests::a12_slash_tmp_root_is_refused
+--- old
+    if path == Path::new("/") {
+        return Err("ELASTOS_TMP_ROOT refuses /".into());
+    }
+--- new
+    if false && path == Path::new("/") {
+        return Err("ELASTOS_TMP_ROOT refuses /".into());
+    }
+--- end

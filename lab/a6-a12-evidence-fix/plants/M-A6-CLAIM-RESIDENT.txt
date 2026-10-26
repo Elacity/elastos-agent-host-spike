@@ -1,0 +1,11 @@
+id: M-A6-CLAIM-RESIDENT
+file: src/a6.rs
+test: tests::a6_resident_two_instances_is_blocked
+--- old
+        Err(reason) => JourneyStatus::Blocked {
+            ask: RA_6,
+            reason,
+        },
+--- new
+        Err(reason) => JourneyStatus::Pass(reason),
+--- end

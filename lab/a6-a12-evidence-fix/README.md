@@ -10,50 +10,56 @@ This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
 - **A6:** instance-1 is granted a real session token. `validate` accepts that
   token as instance-1. The same token as instance-2 is `WrongCapsule
   { expected: instance-1, got: instance-2 }` (fields compared, not
-  substrings). `instance-1-evil` and an empty token capsule are refused the
-  same way. This is an in-process Runtime library journey. It is not two
-  resident capsule instances inside one Home.
-- **A12:** leftover census honours `ELASTOS_TMP_ROOT` (default `/tmp/elastos`
-  when unset). A run that creates `{root}/storage` is scanned. Symlink roots
-  are resolved. Renamed leftover trees are found by marker bytes. A clean
-  isolated root is PASS. `ThrowawayHome::new` + `census::cleanup` are called;
-  on Linux that construction is NOT RUN.
+  substrings). Prefix, empty, case, zero-width, other resource/action,
+  expired, revoked, and tampered-base64 cases are named tests. This is an
+  in-process Runtime library journey. It is not two resident capsule
+  instances inside one Home. Two resident instances are **RA-6**. The
+  ready journey reports **BLOCKED**, never PASS, until the Runtime hosts
+  that pair. Removing validate step 4 from the Runtime this process
+  loaded makes that journey FAIL.
+- **A12:** leftover census records the inode/path set a run created. A
+  rename to an unrelated name (`moved-away`) and a leftover with no lab
+  marker are found. `ELASTOS_TMP_ROOT` is guarded: `/`, empty, `$HOME`,
+  live Home paths, and anything not under the pack mktemp are refused.
+  `run.sh` / `mac-pack.sh` set `ELASTOS_TMP_ROOT` to a fresh `mktemp -d`
+  folder and clean only that. A clean isolated root is PASS.
+  `ThrowawayHome::new` + `census::cleanup` are called; on Linux that
+  construction is NOT RUN.
 
 ## How to run
 
 From the repository root:
 
 ```sh
-cargo fmt --manifest-path lab/a6-a12-evidence-fix/Cargo.toml -- --check
-CARGO_NET_OFFLINE=true \
-CARGO_TARGET_DIR="$PWD/lab/a6-a12-evidence-fix/target" \
-RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 \
-cargo test --locked --offline --manifest-path lab/a6-a12-evidence-fix/Cargo.toml --lib -- --nocapture
+./lab/a6-a12-evidence-fix/run.sh
 ```
 
-Or `./lab/a6-a12-evidence-fix/run.sh`.
+`run.sh` always creates an isolated mktemp, exports `ELASTOS_TMP_ROOT`
+and `ELASTOS_TMP_ISOLATION`, runs the lib tests, prints the Mac pack
+commands with that same root, and removes only the mktemp folder.
 
-The Mac evidence pack can point leftovers at an isolated folder:
-
-```sh
-ELASTOS_TMP_ROOT=/path/to/isolated-tmp ./lab/a6-a12-evidence-fix/run.sh
-```
+On a Mac, `./lab/a6-a12-evidence-fix/mac-pack.sh` runs the three owner
+journeys with the same isolated root.
 
 `planted_bugs_are_caught` applies the plants under `plants/` and requires
 each named test to print `FAILED`.
 
 ## NOT RUN on Linux
 
-Resident instances and throwaway Homes need macOS:
+Resident instances and throwaway Homes need macOS. The commands set the
+isolated temp root:
 
 ```sh
-cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
+ELASTOS_TMP_ROOT="$ELASTOS_TMP_ROOT" ELASTOS_TMP_ISOLATION="$ELASTOS_TMP_ISOLATION" \
+  cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
   two_instances_overlap_with_separate_grants -- --nocapture
-cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
+ELASTOS_TMP_ROOT="$ELASTOS_TMP_ROOT" ELASTOS_TMP_ISOLATION="$ELASTOS_TMP_ISOLATION" \
+  cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
   instance_grant_does_not_authorise_sibling -- --nocapture
-cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime \
+ELASTOS_TMP_ROOT="$ELASTOS_TMP_ROOT" ELASTOS_TMP_ISOLATION="$ELASTOS_TMP_ISOLATION" \
+  cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime \
   cleanup_census_refuses_each_leftover -- --nocapture
 ```
 
-Those skips are not passes. A6 and A12 stay in-flight for Anders's
-resident-instance rule.
+Those skips are not passes. A6 stays BLOCKED on RA-6. A12 owner census
+of a real Runtime leftover after `run` is still the Mac remainder.

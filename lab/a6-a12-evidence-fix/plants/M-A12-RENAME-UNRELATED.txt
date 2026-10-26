@@ -1,0 +1,13 @@
+id: M-A12-RENAME-UNRELATED
+file: src/a12.rs
+test: tests::a12_renamed_to_unrelated_name_is_found
+--- old
+fn allow_moved_away(path: &Path) -> bool {
+    let _ = path;
+    true
+}
+--- new
+fn allow_moved_away(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name != "moved-away")
+}
+--- end

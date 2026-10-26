@@ -1,0 +1,8 @@
+id: M-A12-TMP-UNSET
+file: src/a12.rs
+test: tests::a12_unset_tmp_root_is_refused
+--- old
+        Err(_) => Err("ELASTOS_TMP_ROOT is unset; pack must set an isolated mktemp dir".into()),
+--- new
+        Err(_) => Ok(PathBuf::from("/tmp/elastos")),
+--- end

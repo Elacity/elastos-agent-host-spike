@@ -3,11 +3,13 @@ file: src/a12.rs
 test: tests::a12_census_lists_runtime_storage
 test: tests::a12_planted_storage_file_is_caught
 --- old
-pub fn runtime_owned_temp_roots() -> Vec<PathBuf> {
-    vec![storage_root(), elastos_tmp_root()]
+pub fn runtime_owned_temp_roots() -> Result<Vec<PathBuf>, String> {
+    let tmp = elastos_tmp_root()?;
+    Ok(vec![tmp.join("storage"), tmp])
 }
 --- new
-pub fn runtime_owned_temp_roots() -> Vec<PathBuf> {
-    Vec::new()
+pub fn runtime_owned_temp_roots() -> Result<Vec<PathBuf>, String> {
+    let _tmp = elastos_tmp_root()?;
+    Ok(Vec::new())
 }
 --- end

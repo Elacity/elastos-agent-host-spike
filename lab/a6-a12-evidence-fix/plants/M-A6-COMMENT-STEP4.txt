@@ -1,6 +1,7 @@
 id: M-A6-COMMENT-STEP4
 file: ../../elastos/crates/elastos-runtime/src/capability/manager.rs
 test: tests::a6_sibling_presenting_owner_token_is_refused
+test: tests::a6_resident_two_instances_is_blocked
 --- old
         if token.capsule != caller_capsule_id {
             self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");

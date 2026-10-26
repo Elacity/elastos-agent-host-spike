@@ -1,68 +1,278 @@
 //! A12 leftover census for Runtime-owned temp roots.
 //!
-//! Roots honour `ELASTOS_TMP_ROOT` (default `/tmp/elastos` when unset). A
-//! leftover is found by walking resolved roots and by a leftover marker, not
-//! by a fixed directory name. `ThrowawayHome` / `census::cleanup` are called
-//! for real; on Linux that construction is NOT RUN.
+//! Detection records the inode/path set the run created. It does not depend
+//! on a name prefix or a lab marker. Real Runtime leftovers have no lab
+//! marker; a rename to an unrelated name (`moved-away`) must still be found.
+//!
+//! `ELASTOS_TMP_ROOT` is guarded: `/`, empty, `$HOME`, live Home paths, and
+//! anything not under the pack's fresh mktemp isolation are refused.
+//! `ThrowawayHome` / `census::cleanup` are called for real; on Linux that
+//! construction is NOT RUN.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_conformance::census;
 use agent_conformance::harness::ThrowawayHome;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 static ISOLATED: AtomicU64 = AtomicU64::new(0);
 static REAL_ROOT: Mutex<()> = Mutex::new(());
+static ISOLATION: OnceLock<PathBuf> = OnceLock::new();
 
-/// Bytes written by a run leftover. Detection searches for this marker.
+/// Bytes a lab plant may write. Census does not require this marker.
 pub const LEFTOVER_MARKER: &[u8] = b"a6-a12-evidence-fix leftover-marker\n";
 const PLANTED_NAME: &str = "a6-a12-evidence-fix-planted";
+const ISOLATION_STAMP: &[u8] = b"a6-a12-evidence-fix isolation\n";
+const ISOLATION_STAMP_NAME: &str = ".a6-a12-isolation";
 
 /// Existing in-root census, invoked as functions (not by string name).
 pub const EXISTING_CLEANUP: &str = "agent_conformance::census::cleanup";
 pub const EXISTING_HOME: &str = "agent_conformance::harness::ThrowawayHome";
 
-/// Shared default when `ELASTOS_TMP_ROOT` is unset. The Mac pack sets the env.
-pub fn default_tmp_root() -> PathBuf {
+/// Live Runtime temp. A census target only. Never a pack plant root.
+pub fn live_runtime_tmp_root() -> PathBuf {
     PathBuf::from("/tmp/elastos")
 }
 
-pub fn elastos_tmp_root() -> PathBuf {
-    match std::env::var("ELASTOS_TMP_ROOT") {
-        Ok(value) if !value.is_empty() => PathBuf::from(value),
-        _ => default_tmp_root(),
+/// Inodes and paths present under a watch root at one moment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FsSnapshot {
+    pub inodes: BTreeSet<(u64, u64)>,
+    pub paths: BTreeSet<PathBuf>,
+}
+
+/// Isolation root created by `mktemp -d` (or the env set by `run.sh`).
+pub fn isolation_root() -> PathBuf {
+    ISOLATION
+        .get_or_init(|| {
+            if let Ok(value) = std::env::var("ELASTOS_TMP_ISOLATION") {
+                let path = PathBuf::from(&value);
+                if isolation_stamp_ok(&path) {
+                    return path;
+                }
+            }
+            create_mktemp_isolation()
+        })
+        .clone()
+}
+
+fn isolation_stamp_ok(root: &Path) -> bool {
+    match fs::read(root.join(ISOLATION_STAMP_NAME)) {
+        Ok(bytes) => bytes == ISOLATION_STAMP && root.is_absolute(),
+        Err(_) => false,
     }
 }
 
-pub fn storage_root() -> PathBuf {
-    elastos_tmp_root().join("storage")
+fn create_mktemp_isolation() -> PathBuf {
+    let template = format!("{}/a6-a12-pack.XXXXXX", std::env::temp_dir().display());
+    let output = Command::new("mktemp")
+        .arg("-d")
+        .arg(&template)
+        .output()
+        .expect("mktemp -d for A12 isolation");
+    assert!(
+        output.status.success(),
+        "mktemp -d failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert!(path.is_absolute(), "mktemp must return an absolute path");
+    fs::write(path.join(ISOLATION_STAMP_NAME), ISOLATION_STAMP).expect("isolation stamp");
+    path
 }
 
-pub fn runtime_owned_temp_roots() -> Vec<PathBuf> {
-    vec![storage_root(), elastos_tmp_root()]
+fn live_home_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        paths.push(home.join(".local/share/elastos"));
+        paths.push(home.join("Library/Application Support/elastos"));
+    }
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        paths.push(PathBuf::from(xdg).join("elastos"));
+    }
+    if let Ok(live) = std::env::var("ELASTOS_LIVE_HOME") {
+        paths.push(PathBuf::from(live));
+    }
+    if let Ok(live_xdg) = std::env::var("ELASTOS_LIVE_XDG_DATA_HOME") {
+        paths.push(PathBuf::from(live_xdg).join("elastos"));
+    }
+    paths
+}
+
+fn is_under(child: &Path, parent: &Path) -> bool {
+    child == parent || child.starts_with(parent)
+}
+
+/// Refuse `/`, empty, `$HOME`, live Home paths, and anything outside isolation.
+pub fn check_tmp_root(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("ELASTOS_TMP_ROOT is empty".into());
+    }
+    if path == Path::new("/") {
+        return Err("ELASTOS_TMP_ROOT refuses /".into());
+    }
+    if !path.is_absolute() {
+        return Err("ELASTOS_TMP_ROOT must be an absolute path under the pack mktemp".into());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() && path == Path::new(&home) {
+            return Err("ELASTOS_TMP_ROOT refuses $HOME".into());
+        }
+    }
+    for live in live_home_paths() {
+        if path == live || path.starts_with(&live) {
+            return Err(format!(
+                "ELASTOS_TMP_ROOT refuses live Home path {}",
+                live.display()
+            ));
+        }
+    }
+    let isolation = isolation_root();
+    if !is_under(path, &isolation) {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT {} is not under isolated mktemp {}",
+            path.display(),
+            isolation.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn elastos_tmp_root() -> Result<PathBuf, String> {
+    match std::env::var("ELASTOS_TMP_ROOT") {
+        Ok(value) => {
+            let path = PathBuf::from(value);
+            check_tmp_root(&path)?;
+            Ok(path)
+        }
+        Err(_) => Err("ELASTOS_TMP_ROOT is unset; pack must set an isolated mktemp dir".into()),
+    }
+}
+
+pub fn storage_root() -> Result<PathBuf, String> {
+    Ok(elastos_tmp_root()?.join("storage"))
+}
+
+pub fn runtime_owned_temp_roots() -> Result<Vec<PathBuf>, String> {
+    let tmp = elastos_tmp_root()?;
+    Ok(vec![tmp.join("storage"), tmp])
 }
 
 /// Create the storage tree a Runtime `LocalFSProvider::new` / `create_runtime`
-/// run would create, then leave a marker leftover.
+/// run would create, then leave a leftover file.
 pub fn create_runtime_storage_leftover(tmp_root: &Path) -> Result<PathBuf, String> {
+    create_plain_leftover(tmp_root, PLANTED_NAME, LEFTOVER_MARKER)
+}
+
+/// Leftover with caller bytes. Census must find this with no lab marker.
+pub fn create_plain_leftover(tmp_root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let storage = tmp_root.join("storage");
     fs::create_dir_all(&storage).map_err(|_| format!("could not create {}", storage.display()))?;
-    let leftover = storage.join(PLANTED_NAME);
-    fs::write(&leftover, LEFTOVER_MARKER)
-        .map_err(|_| format!("could not write {}", leftover.display()))?;
+    let leftover = storage.join(name);
+    fs::write(&leftover, bytes).map_err(|_| format!("could not write {}", leftover.display()))?;
     Ok(leftover)
+}
+
+#[cfg(unix)]
+fn inode_of(meta: &fs::Metadata) -> (u64, u64) {
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn inode_of(_meta: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+/// Snapshot every path and inode under `watch` (missing watch is empty).
+pub fn snapshot(watch: &Path) -> Result<FsSnapshot, String> {
+    let mut snap = FsSnapshot::default();
+    record_tree(watch, &mut snap, true, 0)?;
+    Ok(snap)
+}
+
+fn record_tree(
+    root: &Path,
+    snap: &mut FsSnapshot,
+    follow_root_symlink: bool,
+    depth: u32,
+) -> Result<(), String> {
+    if depth > 64 {
+        return Err(format!("walk too deep or loop at {}", root.display()));
+    }
+    let meta = match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(format!("could not inspect {}", root.display())),
+        Ok(meta) => meta,
+    };
+    snap.paths.insert(root.to_path_buf());
+    snap.inodes.insert(inode_of(&meta));
+    if meta.file_type().is_symlink() {
+        if follow_root_symlink {
+            let target = fs::canonicalize(root)
+                .map_err(|_| format!("could not resolve symlink root {}", root.display()))?;
+            record_tree(&target, snap, false, depth + 1)?;
+        }
+        return Ok(());
+    }
+    if !meta.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(root).map_err(|_| format!("could not read {}", root.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|_| format!("could not read entry under {}", root.display()))?
+            .path();
+        record_tree(&path, snap, true, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// True when `path`/`ino` was created or moved after `before`.
+/// Name prefix and file bytes are not consulted.
+fn keep_created_path(before: &FsSnapshot, path: &Path, ino: (u64, u64)) -> bool {
+    let new_inode = !before.inodes.contains(&ino);
+    let new_path = !before.paths.contains(path);
+    new_inode || new_path
+}
+
+/// Leftovers keep an unrelated rename (`moved-away`). Plants may hide that.
+fn allow_moved_away(path: &Path) -> bool {
+    let _ = path;
+    true
+}
+
+/// Leftovers created after `before` under `watch`, by inode/path, not marker.
+pub fn leftovers_created(before: &FsSnapshot, watch: &Path) -> Result<Vec<PathBuf>, String> {
+    let after = snapshot(watch)?;
+    let mut found = BTreeSet::new();
+    for path in &after.paths {
+        let meta = match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(_) => return Err(format!("could not inspect {}", path.display())),
+            Ok(meta) => meta,
+        };
+        let ino = inode_of(&meta);
+        if keep_created_path(before, path, ino) && allow_moved_away(path) {
+            found.insert(path.to_path_buf());
+        }
+    }
+    Ok(found.into_iter().collect())
 }
 
 pub fn leftovers_under(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut found = BTreeSet::new();
     for root in roots {
         walk_root(root, &mut found, true)?;
-        scan_parent_for_marker(root, &mut found)?;
     }
     Ok(found.into_iter().collect())
 }
@@ -90,7 +300,6 @@ fn walk_root(
         return Ok(());
     }
     if !meta.is_dir() {
-        record_if_marker(root, found)?;
         return Ok(());
     }
     walk_resolved(root, found)
@@ -109,100 +318,19 @@ fn walk_resolved(dir: &Path, found: &mut BTreeSet<PathBuf>) -> Result<(), String
                 found.insert(target.clone());
                 if target.is_dir() {
                     walk_resolved(&target, found)?;
-                } else {
-                    record_if_marker(&target, found)?;
                 }
             }
             continue;
         }
         if meta.is_dir() {
             walk_resolved(&path, found)?;
-        } else {
-            record_if_marker(&path, found)?;
-        }
-    }
-    Ok(())
-}
-
-fn record_if_marker(path: &Path, found: &mut BTreeSet<PathBuf>) -> Result<(), String> {
-    match fs::read(path) {
-        Ok(bytes) if bytes == LEFTOVER_MARKER => {
-            found.insert(path.to_path_buf());
-            Ok(())
-        }
-        Ok(_) | Err(_) => Ok(()),
-    }
-}
-
-/// Renamed leftover trees keep the marker. Scan sibling names, not the old path.
-fn scan_parent_for_marker(root: &Path, found: &mut BTreeSet<PathBuf>) -> Result<(), String> {
-    let Some(name) = root.file_name() else {
-        return Ok(());
-    };
-    let Some(parent) = root.parent() else {
-        return Ok(());
-    };
-    if !parent.is_dir() {
-        return Ok(());
-    }
-    let prefix = name.to_string_lossy();
-    let entries = match fs::read_dir(parent) {
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(format!("could not scan {}", parent.display())),
-        Ok(entries) => entries,
-    };
-    for entry in entries {
-        let path = entry
-            .map_err(|_| format!("could not read {}", parent.display()))?
-            .path();
-        if path == root {
-            continue;
-        }
-        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        let Some(file_name) = file_name else {
-            continue;
-        };
-        if !file_name.starts_with(prefix.as_ref()) {
-            continue;
-        }
-        scan_tree_for_marker(&path, found)?;
-    }
-    Ok(())
-}
-
-fn scan_tree_for_marker(dir: &Path, found: &mut BTreeSet<PathBuf>) -> Result<(), String> {
-    let entries = match fs::read_dir(dir) {
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(format!("could not scan {}", dir.display())),
-        Ok(entries) => entries,
-    };
-    for entry in entries {
-        let path = entry
-            .map_err(|_| format!("could not read {}", dir.display()))?
-            .path();
-        let meta = match fs::symlink_metadata(&path) {
-            Err(_) => continue,
-            Ok(meta) => meta,
-        };
-        if meta.file_type().is_symlink() {
-            if let Ok(target) = fs::canonicalize(&path) {
-                if target.is_dir() {
-                    scan_tree_for_marker(&target, found)?;
-                } else {
-                    record_if_marker(&target, found)?;
-                }
-            }
-        } else if meta.is_dir() {
-            scan_tree_for_marker(&path, found)?;
-        } else {
-            record_if_marker(&path, found)?;
         }
     }
     Ok(())
 }
 
 pub fn runtime_temp_census() -> Result<String, String> {
-    runtime_temp_census_at(&runtime_owned_temp_roots())
+    runtime_temp_census_at(&runtime_owned_temp_roots()?)
 }
 
 pub fn runtime_temp_census_at(roots: &[PathBuf]) -> Result<String, String> {
@@ -210,6 +338,21 @@ pub fn runtime_temp_census_at(roots: &[PathBuf]) -> Result<String, String> {
     if leftovers.is_empty() {
         Ok(format!(
             "runtime-temp census: PASS leftovers:0 roots:{roots:?}"
+        ))
+    } else {
+        Err(format!(
+            "runtime-temp census: FAIL leftovers:{} paths:{leftovers:?}",
+            leftovers.len()
+        ))
+    }
+}
+
+pub fn runtime_temp_census_since(before: &FsSnapshot, watch: &Path) -> Result<String, String> {
+    let leftovers = leftovers_created(before, watch)?;
+    if leftovers.is_empty() {
+        Ok(format!(
+            "runtime-temp census: PASS leftovers:0 watch:{}",
+            watch.display()
         ))
     } else {
         Err(format!(
@@ -231,7 +374,7 @@ pub enum HostPart {
 pub fn in_root_census_on_this_host() -> HostPart {
     match ThrowawayHome::new() {
         Err(reason) if reason.contains("macOS") => HostPart::NotRun(format!(
-            "ThrowawayHome::new refused: {reason}. Mac: cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --nocapture"
+            "ThrowawayHome::new refused: {reason}. Mac: ELASTOS_TMP_ROOT=<isolated-mktemp> cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --nocapture"
         )),
         Err(reason) => HostPart::Fail(format!("ThrowawayHome::new: {reason}")),
         Ok(home) => match census::cleanup(&home, 1) {
@@ -290,8 +433,8 @@ pub struct StoragePlant {
 
 impl StoragePlant {
     pub fn place() -> Result<Self, String> {
-        let tmp = elastos_tmp_root();
-        let storage = storage_root();
+        let tmp = elastos_tmp_root()?;
+        let storage = tmp.join("storage");
         let path = storage.join(PLANTED_NAME);
         let mut created = Vec::new();
         for dir in [tmp, storage] {
@@ -332,16 +475,13 @@ pub fn isolated_dir(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("a12-isolated")
-        .join(format!(
-            "{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            stamp,
-            ISOLATED.fetch_add(1, Ordering::Relaxed)
-        ));
+    let dir = isolation_root().join(format!(
+        "{}-{}-{}-{}",
+        label,
+        std::process::id(),
+        stamp,
+        ISOLATED.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::create_dir_all(&dir).expect("isolated A12 root");
     dir
 }
