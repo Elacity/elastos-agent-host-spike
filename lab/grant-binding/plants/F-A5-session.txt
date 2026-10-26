@@ -1,0 +1,9 @@
+id: F-A5-session
+file: src/lib.rs
+test: model_new_session_is_refused
+--- old
+        if live.session != grant.session {
+            return Err(Refuse::Session);
+        }
+--- new
+--- end

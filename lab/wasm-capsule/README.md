@@ -581,12 +581,12 @@ a version it expects. A version query is refused, with its own reason after
 **The receipt.** `render` gives `key: value` lines in the shape of wc-001's
 build receipt (`tools/build:82`), under its own schema line. Every value comes
 from the run. The real receipt from this Mac, from
-`real_receipt_names_both_installed_engines` on 26 Oct 2026 (the capsule
-`tools/build` makes, bundled, signed with a fresh test key, verified and run
-on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`):
+`real_receipt_names_both_installed_engines` on 26 Oct 2026, task 028 (the
+capsule `tools/build` makes, bundled, signed with a fresh test key, verified
+and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`):
 
 ```
-schema: wc-005.run-receipt/v1
+schema: wc-005.run-receipt/v2
 bundle: bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
 function: digest
 argument: 1592590337
@@ -596,13 +596,15 @@ wasmtime_stdout: "230101071268130872\n"
 wasmer_version: "wasmer 7.5.0"
 wasmer_status: exit status: 0
 wasmer_stdout: "230101071268130872\n"
+memory_mb: 64
+memory_cap_bytes: 67108864
+wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y
+wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
 ```
 
 `bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
-pinned lab CID of this capsule's bundle. The run above was before task 024, so
-its receipt printed the old lab CID form; the `bundle` line here shows the same
-bundle's lab CID in the current form, the reference value above (same
-manifest, same `capsule.wasm`). The other lines are that run's. The engine versions sit beside it and
+pinned lab CID of this capsule's bundle, the reference value above (same
+manifest, same `capsule.wasm`); every line is that run's. The engine versions sit beside it and
 are no part of it: the same bundle run under other versions has the same name
 (P15: the hash names the content; versions are provenance beside it).
 `function` and `argument` are the runner's own `DIGEST_EXPORT` and
@@ -610,6 +612,29 @@ are no part of it: the same bundle run under other versions has the same name
 bytes through `escape_ascii`, so every byte is kept and no value can add a
 line. The status is the module run's `ExitStatus` as the OS reported it; a
 passing run always exited 0, because `run_engine` refuses any other status.
+
+**The memory lines (wc-010c, task 028; schema v2).** After the v1 lines,
+`render` adds, in this order:
+
+- `memory_mb: <declared>`: the manifest's `resources.memory_mb` the module runs
+  were given (this capsule declares no `resources`, so the Runtime's default 64);
+- `memory_cap_bytes: <declared × 1048576>`, by the same conversion that makes
+  `wasmtime`'s cap argument (no second MB to bytes rule);
+- per engine, `wasmtime` then `wasmer`, `<engine>_memory_cap: ENFORCED
+  <argument>` with the exact cap argument that engine's module run was started
+  with, or `<engine>_memory_cap: SKIPPED: no memory cap flag in <engine> run
+  --help or <engine> --help (wc-010a)` when it was started with none.
+
+The cap argument is not configured beside the run: `start_engine` reads it back
+from the argv the engine process was started with (the argument after `-W`),
+so a receipt cannot say ENFORCED for an argv without the cap, and the line
+never follows the engine's name or a constant. On this base `wasmtime` gets
+`max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y` and `wasmer`
+gets none ("Memory cap (wc-010b)").
+
+The receipt records no peak memory: `/usr/bin/time -l` gives the engine
+process's resident memory, not the capsule's linear memory (wc-010a); which
+number belongs here waits for Flint.
 
 **Writing it.** `write_receipt` writes `render`'s text to a caller-given path
 with the shared `bundle::write_new_file` (`create_new`). An existing file, a
@@ -902,8 +927,9 @@ reason, never counted as a PASS. No other route (an rlimit, a wrapper, an
 engine inside an engine, a VM) is used. No test name says "on_both" for the
 cap.
 
-Not in this task: the receipt's cap line and measured peak memory (wc-010c), a
-maximum inside `capsule.wasm`, and any admission or launch decision.
+Not in this task: the receipt's cap lines (wc-010c, task 028, in "Run receipt
+(wc-005c)") and measured peak memory, a maximum inside `capsule.wasm`, and any
+admission or launch decision.
 
 ## Granted import hosting discovery (wc-009b0)
 
@@ -1285,7 +1311,8 @@ The run receipt (task 016), in `tests/run.rs`:
   stand-ins that print made-up versions (each with a second line): the run
   holds exactly those first lines, never 45.0.1 or 7.5.0, and `render` gives
   the whole receipt exactly (schema, the verified lab CID, `digest`,
-  `1592590337`, both versions, both `exit status: 0` and both stdouts). Both
+  `1592590337`, both versions, both `exit status: 0` and both stdouts; task
+  028: the v2 schema and the four memory lines, 64 MB = 67108864 bytes). Both
   runs have the same lab CID, which holds no version number.
 - `version_query_failures_keep_their_cause` — for each engine, a version
   query that exits 4 with a stderr line, prints nothing, prints an empty first
@@ -1304,8 +1331,10 @@ The run receipt (task 016), in `tests/run.rs`:
 - `real_receipt_names_both_installed_engines` — the real `wasmtime` and
   `wasmer` found on PATH: the versions start with `wasmtime ` and `wasmer `,
   each is the first line the engine prints for `--version`, both stdouts are
-  `FIXED_OUTPUT`, and the receipt written to a new file is `render`'s text. It
-  prints the receipt. If either engine is not found it prints `SKIPPED` and
+  `FIXED_OUTPUT`, and the receipt written to a new file is `render`'s text
+  (task 028: its schema line is v2, and its last four lines are the memory
+  lines for 64 MB, `wasmtime` ENFORCED and `wasmer` SKIPPED). It prints the
+  receipt. If either engine is not found it prints `SKIPPED` and
   gives no result, never a PASS.
 
 Task 019's two:
@@ -1398,23 +1427,41 @@ engine not found prints SKIPPED and gives no result, never PASS:
 `runner_passes_no_directory_env_or_network_flags` and `verified_bundle_is_sealed`
 (the new private field and its accessor) were updated for the cap.
 
+wc-010c's two (task 028), in `tests/run.rs`, on stand-in engines, with a
+bundle signed by `signed_bundle_declaring` (the signing half of 027's
+`verified_bundle_declaring`, which now calls it):
+
+- `receipt_records_the_declared_memory_cap` — a bundle declaring `memory_mb: 2`
+  run through `run`: the receipt is the v2 schema, 14 lines, ending in
+  `memory_mb: 2`, `memory_cap_bytes: 2097152`, `wasmtime_memory_cap: ENFORCED
+  max-memory-size=2097152,max-memories=1,trap-on-grow-failure=y` and the
+  `wasmer` SKIPPED line, exactly.
+- `receipt_cap_line_matches_the_argv_the_engine_got` — `recording` stand-ins
+  (which now also write each module run's whole argv to `<name>.argv`): the
+  receipt's `wasmtime_memory_cap` is ENFORCED with exactly the one argument
+  after `-W` in `wasmtime`'s logged argv; `wasmer`'s logged argv has no `-W`
+  and no `max-memory-size`, and its receipt line is the exact SKIPPED line.
+
+`receipt_records_observed_engine_versions` and
+`real_receipt_names_both_installed_engines` were updated to the v2 text.
+
 ## Falsifiers
 
-`falsifiers.json` holds 153 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 155 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026 and
-seven wc-010b (task 027).
+wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
+seven wc-010b (task 027) and two wc-010c (task 028).
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 89, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026 and 027: 1 +
-1 + 23 + 11 + 20 + 2 + 17 + 7 + 7), each run by the canonical runner with its
-summary line quoted.
+Two kinds of evidence, kept apart. Runner-caught: 91, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027 and
+028: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2), each run by the canonical
+runner with its summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1833,3 +1880,22 @@ keeps only the entrypoint); F-WC4-SEALED-NEW (the planted constructor fills
 the new `memory_mb` field, so it still compiles and is caught by
 `verified_bundle_is_sealed`); and F-WC-README-COUNT (the new total). Each
 re-anchored entry keeps its own evidence label above.
+
+wc-010c's two (task 028), runner-caught (the canonical runner's summary line is
+in LOG.md, task 028). Both anchors are in `tools/src/receipt.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC10C-WASMER-ENFORCED — `render` prints every engine's cap line from
+  `wasmtime`'s recorded argument, so `wasmer`, started with none, reads ENFORCED
+  (`receipt_records_the_declared_memory_cap`, at its memory lines comparison;
+  `receipt_cap_line_matches_the_argv_the_engine_got`, at its exact `wasmer`
+  SKIPPED line).
+- F-WC10C-CAP-FIXED — `render` prints a fixed `67108864` in place of the
+  declared bytes (`receipt_records_the_declared_memory_cap`, at its 2 MB memory
+  lines comparison).
+
+Task 028 also adds `receipt_cap_line_matches_the_argv_the_engine_got` to
+027's F-WC10-CAP-IGNORED (anchor and mutation unchanged; with no `-W` in
+`wasmtime`'s argv the test fails at its one `-W` argument assertion) and
+re-anchors F-WC-README-COUNT to the new total, the same bug as before. Both
+keep their runner-caught label above.

@@ -64,8 +64,11 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   (task 020) `linked()` and `unused_grants()` (README.md, "Same output on two
   engines (wc-005b)").
   `wasm_capsule_tools::receipt` (wc-005c, task 016) renders that run as
-  `schema: wc-005.run-receipt/v1` lines (the lab CID, `digest`, `1592590337`,
-  each engine's version, exit status and stdout), and writes it only with
+  `schema: wc-005.run-receipt/v2` lines (the lab CID, `digest`, `1592590337`,
+  each engine's version, exit status and stdout; wc-010c, task 028: the two
+  memory lines `memory_mb` and `memory_cap_bytes`, then per engine
+  `<engine>_memory_cap`, ENFORCED with the cap argument read back from that
+  engine's argv or SKIPPED with wc-010a's reason; no peak memory), and writes it only with
   `bundle::write_new_file`. The versions are observed, not configured: each is
   the first line the engine printed for `--version` before the module ran, so
   an engine upgrade shows in the receipt, and none is part of the lab CID
