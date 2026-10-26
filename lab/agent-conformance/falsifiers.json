@@ -1116,6 +1116,22 @@
       "tests": [
         "grants::tests::instance_journey_requires_all_printed_surfaces"
       ]
+    },
+    {
+      "id": "F-cid-provider",
+      "title": "stamp the content provider script with its own hash so Runtime spawns it",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/runtime.rs",
+          "old": "Sha256::digest(b\"uninstalled content provider fixture\\n\")",
+          "new": "Sha256::digest(script)"
+        }
+      ],
+      "tests": [
+        "run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash"
+      ]
     }
   ]
 }
