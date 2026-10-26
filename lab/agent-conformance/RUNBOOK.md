@@ -207,10 +207,11 @@ that path for the tested candidate. The report reads the full repository commit
 and dirty state for this invocation; local edits set `dirty: true`.
 
 The receipt contains native hashes, every observed probe's effect, component
-SHA-256 and complete bundle `lab-cid:sha256:...`, the suite outcome, and the
-exact graded table plus its SHA-256. The sibling identity library owns the bundle
-walk, manifest validation and encoding. The staging path uses its checked entries
-for the component bytes. The lab CID covers `capsule.json` and the payload;
+SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
+the suite outcome, and the exact graded table plus its SHA-256. The sibling
+identity library owns the bundle walk, manifest validation and encoding. The
+staging path uses its checked entries for the component bytes. The lab CID
+covers `capsule.json` and the payload;
 Runtime CID launch remains BACKLOG item 13. Identity, admission and resource
 allowance remain separate decisions. The receipt's description gives the lab
 CID and any separate signed record zero admission or permission credit.
