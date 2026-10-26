@@ -17,7 +17,9 @@ and complete bundle lab CID, with separate `build_only` and `launched` kinds.
 Cargo's `--show-output` supplies these records from this invocation. The existing
 build helpers hash the native binaries; the staging path names the exact probe
 manifest and payload through `capsule_identity::checked_bundle`.
-`ok` becomes PASS. `ignored, blocked: <id> …` becomes BLOCKED with that ID.
+`ok` becomes PASS. `ignored, blocked: <reason>` becomes BLOCKED with each
+semicolon-separated part trimmed and kept whole, joined by `; `.
+An empty reason or part gives FAIL.
 A failure, missing result, repeated result, ignored test without a blocker ID,
 or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
 remain open in [GAPS.md](GAPS.md).
@@ -29,6 +31,7 @@ remain open in [GAPS.md](GAPS.md).
 - `runtime_data_dir_is_under_throwaway_home`: places a dummy coordinates file in the guarded data directory and requires Runtime to remove it and return the same refusal reason. Its documentation-address URL is rejected before any network call.
 - `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
+- `run_table_grades_blocker_lists_by_one_rule`: checks whole multi-word blocker reasons, trimmed semicolon lists and FAIL for empty reasons or parts. F-report-blocker-list keeps only the first whitespace word; the named test must fail planted and pass restored.
 - `foreign_and_wrong_version_imports_are_refused`: rejects imports outside the probe's Bus subset.
 - `non_component_and_invalid_component_are_refused`: rejects a core module and invalid component bytes.
 - `probe_hash_is_stable`: compares the SHA-256 values from two independent probe compilations on this Mac.
@@ -375,8 +378,11 @@ Task 004 adds the agent-memory rows to the same Cargo-derived table:
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 
 F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
-instances the same principal. Run these only after the corresponding blocked
-journeys become live; forcing today's placeholders is zero falsifier evidence.
+instances the same principal. Both are retired under `UsersAI binding;
+AC-002-ARGS` in `falsifiers.json` until their named tests,
+`agent_cannot_read_other_agent_memory` and `agent_memory_under_own_principal`,
+respectively, become live. Then return each mutation to the active list and
+run it; forcing today's placeholders supplies zero falsifier evidence.
 F-ac2c adds the absent `fixtures/no-policy.json` file using its `new` text in
 `falsifiers.json` (`old: ""` denotes an absent file for this manual step).
 The entry allows every effect attempted by this instance: its one read.
@@ -435,3 +441,52 @@ journey supplies its observed pass/fail result to the existing renderer, so a
 planted-grant failure has a failed report with complete version evidence.
 F-output-inventory and F-capture-inventory continue to test missing surfaces.
 LOG.md records commands, results and local receipt hashes for supervisor review.
+
+## Cleanup census and earlier runs
+
+Run `lab/agent-conformance/run.sh` as before. Before any test, the report tool
+checks existing `target/home-*` directories for live holders. For example:
+
+```text
+earlier run: PID 12345 root "home-12300-example"
+earlier-run check: FAIL; live processes hold earlier Homes; inspect and stop their owners by hand before retrying
+```
+
+The PID names a live process. The root name selects a directory under this
+lane's `target/`. Inspect that PID's owner and command locally with
+`ps -p 12345 -o pid=,ppid=,pgid=,comm=`. Use the process's normal stop control.
+If that control is unavailable, confirm the PID still belongs to this test
+before sending `kill -TERM 12345`. Let it exit, then run the suite again. The
+checker only reports processes; it never signals an earlier owner. Keep the
+failed Home for review. Remove its data by hand only after its owner approves
+cleanup. Keep Runtime-owned credentials inside the Home out of reports.
+
+The pre-test root selection takes at most two seconds and lsof at most five
+seconds. A timeout, warning or unreadable listing stops the run with a reason.
+The scanner stays within Home roots and does not walk native or probe builds.
+The report-build step runs before this bounded check.
+
+After a fixture read, `cleanup census:` appears beside `operator census:`.
+Read its process count and root-relative paths, API socket count, TMPDIR entry
+count and paths, pending count and grant grade. Physical leftovers are FAIL;
+the line names the retained `target/home-*`. Passing journeys remove their own
+Homes after capture, source and report checks. The census tool's scratch Home
+is removed after its captures join the existing credential-check inventory.
+
+The grant result is currently `BLOCKED(AC-021-GRANTS)`: the fixture shell sees
+its own grants. `run_leaves_no_live_grant` stays an ignored table row until
+Runtime supplies the global live-grant contract in GAPS.md. F-cleanup-grant
+waits for that contract. F-cleanup-temp and F-cleanup-process run the existing
+`granted_read_succeeds` test; both must fail for their planted reason, then
+pass after restoration. Other cleanup falsifiers exercise the port check,
+pending and scope grading, capture inventory, earlier-run detection and table
+scope. Exact edits and named tests are in `falsifiers.json`; LOG.md records the
+measured commands.
+
+Read these rows with the VERSIONS.json path printed by the same invocation:
+“cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet
+included”. The receipt identifies the Runtime, provider and launched probe
+from that run. The census proves the root, API port and TMPDIR checks only.
+The known `/tmp/elastos/storage` leftover stays under AC-006-STORAGE; this
+command leaves its contents untouched. The earlier absent-policy refusal row
+keeps its existing grade and labels pending/grant cleanup as unmeasured.

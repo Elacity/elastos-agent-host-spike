@@ -13,12 +13,9 @@ fn grade(result: &str) -> String {
         return "PASS".into();
     }
     if let Some(reason) = result.strip_prefix("ignored, blocked: ") {
-        // This blocker has a two-word name; preserve its joint selector gate.
-        if reason == "UsersAI binding; AC-002-ARGS" {
-            return format!("BLOCKED ({reason})");
-        }
-        if let Some(id) = reason.split_whitespace().next() {
-            return format!("BLOCKED ({id})");
+        let parts: Vec<_> = reason.split(';').map(str::trim).collect();
+        if parts.iter().all(|part| !part.is_empty()) {
+            return format!("BLOCKED ({})", parts.join("; "));
         }
     }
     "FAIL".into()
@@ -101,7 +98,16 @@ impl Evidence {
         for (name, values) in &self.rows {
             let result = self.result(name, values);
             passed &= result == "PASS" || result.starts_with("BLOCKED (");
-            text.push_str(&format!("{name} | {result}\n"));
+            text.push_str(&format!("{name} | {result}"));
+            if matches!(
+                name.as_str(),
+                "granted_read_succeeds"
+                    | "ungranted_sibling_read_is_refused"
+                    | "run_leaves_no_live_grant"
+            ) {
+                text.push_str(" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included");
+            }
+            text.push('\n');
         }
         (text, passed)
     }
@@ -159,7 +165,7 @@ fn test_name(name: &str) -> bool {
 fn required_effects(test: &str) -> &'static [&'static str] {
     match test {
         "default_activation_refuses_without_selector" => &["default"],
-        "granted_read_succeeds" => &["granted-read"],
+        "granted_read_succeeds" | "run_leaves_no_live_grant" => &["granted-read"],
         "ungranted_sibling_read_is_refused" => &["sibling-read"],
         "attach_secret_stays_in_memory" => &["granted-read", "sibling-read", "host-key-read"],
         "host_key_read_is_refused" => &["host-key-read"],

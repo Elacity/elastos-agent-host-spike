@@ -752,11 +752,14 @@ mod tests {
     /// which starts the provider directly when its profile file is missing,
     /// and DID22, which returns `false` from the error arm of
     /// `sandbox_available`, so a missing `sandbox-exec` on macOS returns
-    /// instead of failing the test.
-    const EXPECTED_FALSIFIER_IDS: [&str; 22] = [
+    /// instead of failing the test. Task 052 adds DID23, DID24 and DID25 for
+    /// the drainer that starts only after the wait, a fixed denial in the
+    /// shared failure message, and the invalid-JSON branch reporting that
+    /// shared message.
+    const EXPECTED_FALSIFIER_IDS: [&str; 25] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
         "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
-        "DID21", "DID22",
+        "DID21", "DID22", "DID23", "DID24", "DID25",
     ];
 
     /// The repository root; this crate, its test targets and the one runner's

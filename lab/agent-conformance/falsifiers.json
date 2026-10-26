@@ -1,6 +1,9 @@
 {
   "about": "Agent conformance falsifiers. Paths are relative to lab/agent-conformance. Replace each old text exactly once; every named test must run and fail, then pass after restoring the original bytes. command: lab is reserved for the provider-owned shared runner; run these by hand until that arm exists. Run F-ac1d with a synthetic parent environment so the planted bug only captures fixture values. F-probe-a through F-probe-f were F-ac2a through F-ac2f in task 002.",
-  "retired": {},
+  "retired": {
+    "F-ac2a": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_cannot_read_other_agent_memory is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
+    "F-ac2b": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_memory_under_own_principal is live. Mutation remains described in GAPS.md and RUNBOOK.md."
+  },
   "falsifiers": [
     {
       "id": "F-ac1c",
@@ -728,38 +731,6 @@
       ]
     },
     {
-      "id": "F-ac2a",
-      "title": "BLOCKED (UsersAI binding; AC-002-ARGS): grant agent-b the exact agent-a memory path",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "fixtures/agent-principals.json",
-          "old": "\"cross_agent_grants\": []",
-          "new": "\"cross_agent_grants\": [{\"principal\":\"agent-b\",\"resource\":\"localhost://UsersAI/agent-a/.AppData/ElastOS/AgentHost/tasks/conformance/memory\",\"action\":\"read\",\"duration\":\"once\"}]"
-        }
-      ],
-      "tests": [
-        "agent_cannot_read_other_agent_memory"
-      ]
-    },
-    {
-      "id": "F-ac2b",
-      "title": "BLOCKED (UsersAI binding; AC-002-ARGS): launch both agents as the same principal",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "fixtures/agent-principals.json",
-          "old": "\"principal\": \"agent-b\"",
-          "new": "\"principal\": \"agent-a\""
-        }
-      ],
-      "tests": [
-        "agent_memory_under_own_principal"
-      ]
-    },
-    {
       "id": "F-ac2c",
       "title": "add the absent policy file and allow every attempted effect (one fixture read)",
       "command": "lab",
@@ -859,6 +830,155 @@
       ],
       "tests": [
         "host_key_receipt_requires_this_launched_bundle"
+      ]
+    },
+    {
+      "id": "F-cleanup-temp",
+      "title": "plant a TMPDIR file after the run children finish",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "    let cleanup_state = if outcome == ReadOutcome::NoPolicy {",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = if outcome == ReadOutcome::NoPolicy {"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cleanup-process",
+      "title": "leave a separate bounded process group holding the root through the census",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "    let cleanup_state = if outcome == ReadOutcome::NoPolicy {",
+          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = if outcome == ReadOutcome::NoPolicy {"
+        },
+        {
+          "file": "tests/effects.rs",
+          "old": "    if require_live_grants {",
+          "new": "    drop(_leftover);\n    if require_live_grants {"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cleanup-pending",
+      "title": "accept a pending request after the journey",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    if !requests.is_empty() {",
+          "new": "    if false && !requests.is_empty() {"
+        }
+      ],
+      "tests": [
+        "grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants"
+      ]
+    },
+    {
+      "id": "F-cleanup-scope",
+      "title": "count a shell-local grant list as global live evidence",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    if response[\"scope\"] != \"all_sessions_live\" {",
+          "new": "    if false && response[\"scope\"] != \"all_sessions_live\" {"
+        }
+      ],
+      "tests": [
+        "grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants"
+      ]
+    },
+    {
+      "id": "F-cleanup-socket",
+      "title": "ignore a successful connection after stop",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/census.rs",
+          "old": "            Ok(_) => 1,",
+          "new": "            Ok(_) => 0,"
+        }
+      ],
+      "tests": [
+        "cleanup_census_refuses_each_leftover"
+      ]
+    },
+    {
+      "id": "F-cleanup-captures",
+      "title": "discard the census capture inventory",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/census.rs",
+          "old": "    home.collect_captures_from(&tool_home)?;",
+          "new": "    // Planted: discard tool captures."
+        }
+      ],
+      "tests": [
+        "cleanup_census_refuses_each_leftover"
+      ]
+    },
+    {
+      "id": "F-cleanup-earlier",
+      "title": "skip roots left by earlier runs",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/census.rs",
+          "old": "    let holders = root_holders(&home, &roots)?;",
+          "new": "    let holders = Vec::new();"
+        }
+      ],
+      "tests": [
+        "earlier_run_check_refuses_live_owner"
+      ]
+    },
+    {
+      "id": "F-cleanup-report",
+      "title": "omit the cleanup scope from the existing table",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "                text.push_str(\" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included\");",
+          "new": "                text.push_str(\"\");"
+        }
+      ],
+      "tests": [
+        "cleanup_report_keeps_scope_and_grant_blocker"
+      ]
+    },
+    {
+      "id": "F-report-blocker-list",
+      "title": "keep only the first whitespace word of a blocker reason",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        let parts: Vec<_> = reason.split(';').map(str::trim).collect();",
+          "new": "        let parts: Vec<_> = reason.split_whitespace().take(1).collect();"
+        }
+      ],
+      "tests": [
+        "run_table_grades_blocker_lists_by_one_rule"
       ]
     }
   ]

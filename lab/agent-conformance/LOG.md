@@ -2777,3 +2777,596 @@ change zero lane paths, capsule-identity paths, Runtime paths or checked build
 inputs. Network fetch, Git state mutations and publication stay with the
 supervisor. The supervisor also owns independent reviews and current-base
 integration; the evidence here is author verification.
+
+## 021 — cleanup census after a run
+
+021: Extended the existing operator finish flow with a root/API/TMPDIR census, checked pending state before stop, kept cross-session live grants BLOCKED, and added the bounded earlier-run check to run.sh.
+
+The one lsof implementation and field parser now live in `src/census.rs`.
+`tests/common/operator.rs::finish_check` calls that code after group stop.
+The root scan uses a scratch Home through the existing spawn site, then
+`ThrowawayHome::collect_captures_from` transfers the completed tool captures
+into the journey's credential-check inventory. The test PID is the only
+excluded PID. The two-group control proves that the scan includes an owner
+outside the operator group. The API control plants an open loopback listener;
+the temp and process controls plant a file and a bounded child. Each control
+removes or stops its own planted state before the clean-root assertion.
+
+The fixture controller checks global pending requests before stop. Its grant
+check reports `AC-021-GRANTS` until Runtime supplies an explicitly global live
+view. The ignored `run_leaves_no_live_grant` reuses the same read journey and
+requires that view; it keeps its Home on refusal. GAPS.md records the `once`
+allowance and client-exit source trace, the proposed response contract and the
+outside-root AC-006-STORAGE scope. F-cleanup-grant is deferred for that blocker;
+synthetic scope checks supply zero live-grant acceptance.
+
+The pre-test check is a mode of the existing report executable. It selects
+only direct `target/home-*` directories, then uses the same bounded lsof path.
+It prints each owner's PID and root name and exits with failure while leaving
+the owner running. RUNBOOK.md gives the manual inspection and stop procedure.
+The existing report annotates the read and blocked-grant rows with the exact
+A10/A11/A12 lab scope, and its existing VERSIONS.json includes that same table.
+
+All builds below used the shared exclusive heavy-build lease. Each command
+checked free space against the 12 GiB estimate plus 2 GiB reserve. Loopback
+binds were refused by the default sandbox (errno 1); the successful test runs
+used the local process/socket permission. Every Cargo command had these
+settings, and every command retained its 600-second limit:
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-021/tmp"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+### New tests and falsifiers
+
+New live controls: `cleanup_census_refuses_each_leftover`,
+`cleanup_root_selection_finds_other_groups` and
+`earlier_run_check_refuses_live_owner`. New synthetic controls:
+`grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants`
+and `cleanup_report_keeps_scope_and_grant_blocker`.
+`run_leaves_no_live_grant` is BLOCKED, rather than a passing control.
+
+For each entry below, apply its exact `falsifiers.json` edits, run the command,
+restore the original source bytes, and run that identical command again.
+All named tests failed under their mutation and passed after restoration.
+The following are exact result excerpts. Full local, ignored stdout/stderr
+and command/timing JSON are under `target/task-021/<ID>-{planted,restored}`;
+the supervisor retains these through review. They are local evidence rather
+than committed artifacts. Publication and the PR evidence record remain with
+the supervisor under this builder's Git-state restriction.
+
+#### F-cleanup-temp
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects granted_read_succeeds -- --exact --nocapture
+```
+
+Planted: exit 101, 11.230 s. Restored: exit 0, 14.109 s.
+```text
+planted:
+cleanup census: FAIL retained:target/home-87272-1793001432349817000-0; temp leftover; processes:0 paths:[] API sockets:0 temp:1 paths:["tmp/planted-cleanup"]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE); pending:0 grants:BLOCKED(AC-021-GRANTS)
+test granted_read_succeeds ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.78s
+restored:
+cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE); pending:0 grants:BLOCKED(AC-021-GRANTS)
+test granted_read_succeeds ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 11.51s
+```
+
+#### F-cleanup-process
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects granted_read_succeeds -- --exact --nocapture
+```
+
+Planted: exit 101, 10.329 s. Restored: exit 0, 10.947 s.
+```text
+planted:
+cleanup census: FAIL retained:target/home-91500-1793001476028182000-0; process leftover; processes:1 paths:["home", "stderr-5", "stdout-5"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE); pending:0 grants:BLOCKED(AC-021-GRANTS)
+test granted_read_succeeds ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.51s
+restored:
+cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE); pending:0 grants:BLOCKED(AC-021-GRANTS)
+test granted_read_succeeds ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 10.28s
+```
+
+#### F-cleanup-pending
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants -- --exact --nocapture
+```
+
+Planted: exit 101, 0.998 s. Restored: exit 0, 0.940 s.
+```text
+planted:
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("pending request leftover")
+test grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+restored:
+test grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+```
+
+#### F-cleanup-scope
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants -- --exact --nocapture
+```
+
+Planted: exit 101, 1.247 s. Restored: exit 0, 0.916 s.
+```text
+planted:
+assertion `left == right` failed
+  left: Ok("pending:0 grants:0")
+ right: Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)")
+test grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+restored:
+test grants::tests::cleanup_state_refuses_pending_and_requires_global_live_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+```
+
+#### F-cleanup-socket
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact --nocapture
+```
+
+Planted: exit 101, 1.339 s. Restored: exit 0, 1.569 s.
+```text
+planted:
+called `Result::unwrap_err()` on an `Ok` value: "cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
+test cleanup_census_refuses_each_leftover ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.23s
+restored:
+test cleanup_census_refuses_each_leftover ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.86s
+```
+
+#### F-cleanup-captures
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact --nocapture
+```
+
+Planted: exit 101, 1.212 s. Restored: exit 0, 1.617 s.
+```text
+planted:
+called `Result::unwrap()` on an `Err` value: "capture inventory is empty"
+test cleanup_census_refuses_each_leftover ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.23s
+restored:
+test cleanup_census_refuses_each_leftover ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.88s
+```
+
+#### F-cleanup-earlier
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --bin report earlier_run_check_refuses_live_owner -- --exact --nocapture
+```
+
+Planted: exit 101, 0.901 s. Restored: exit 0, 1.139 s.
+```text
+planted:
+assertion failed: holders.iter().any(|h|
+test earlier_run_check_refuses_live_owner ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+restored:
+test earlier_run_check_refuses_live_owner ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+```
+
+#### F-cleanup-report
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report cleanup_report_keeps_scope_and_grant_blocker -- --exact --nocapture
+```
+
+Planted: exit 101, 0.998 s. Restored: exit 0, 0.787 s.
+```text
+planted:
+assertion failed: text.contains("granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included")
+test cleanup_report_keeps_scope_and_grant_blocker ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+restored:
+test cleanup_report_keeps_scope_and_grant_blocker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+```
+
+
+The first unit attempt exposed macOS lsof's exit-1 selection rule. `-V`
+confirmed that unopened entries in a partly matched `+D` tree cause that exit;
+there was zero stderr. The corrected root scan accepts that selection result,
+parses all records and still refuses warnings and other exit codes. The
+restored two-control run passed in 2.443 s. The first process mutation lacked
+an explicit post-census drop and failed Rust's borrow check; that attempt is
+zero falsifier credit. Its final two-edit form keeps the child through the
+census and releases the borrow only after the assertions. The recorded catch
+above failed on `process leftover`; the owned child's Drop stopped its group.
+
+The restored granted baseline passed in 14.370 s. Its checked line was:
+```text
+cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE); pending:0 grants:BLOCKED(AC-021-GRANTS)
+```
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name/URL replacing code or content hash identity? | No | `src/report.rs:171` requires the existing granted probe identity for the ignored live-grant journey when enabled. |
+| 2. New capsule or UI ambient authority? | No | `tests/common/grants.rs:236` reads existing shell routes; probe and manifest bytes retain their existing authority boundary. |
+| 3. Second path or rule copy? | No | `src/census.rs:9,239` own the single lsof path and parser; `tests/common/operator.rs:71` keeps the existing finish flow. |
+| 4. Does the trusted core grow? | No | `tests/common/grants.rs:580` labels the missing Runtime contract; every candidate edit stays in this lane. |
+| 5. Do new refusals fail closed with reasons? | Yes | `src/census.rs:79` names process, API socket and temp leftovers; `tests/common/grants.rs:570` rejects pending requests. |
+| 6. Self-contained capsule logic and granted Bus calls? | Yes | `tests/effects.rs:155` reuses the unchanged probe preparation and grant journey; the capsule keeps its existing Bus-only logic. |
+| 7. Named tests and caught falsifiers? | Yes | `tests/runtime.rs:238`, `tests/common/grants.rs:737`, `src/bin/report.rs:63` and `tests/report.rs:599` are covered by the eight caught mutations above; live grants stay BLOCKED. |
+| 8. Identity, admission and allowance separate? | Yes | `tests/effects.rs:209` checks grant state independently of probe identity and the operator's unsigned-fixture admission. |
+
+### Restored gates and same-run receipt
+
+The restored candidate passed these commands with the environment above:
+
+```sh
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+Formatting returned exit 0. The full locked suite returned exit 0 in
+**209.243 s**, with **53 passed, zero failed and nine ignored**. The command
+began with 55.019 GiB free. Group results: one report-binary test, six artifact
+tests, 19 effect tests with nine ignored, nine harness tests, eight report
+tests, eight Runtime tests and two probe tests. The unchanged deadline was
+600 seconds. The two operator tests exercised the extended finish flow.
+
+`run.sh` returned exit 0 in **188.245 s**, starting with 54.661 GiB free.
+Its pre-test owner check passed, and its table contained 53 PASS test rows,
+nine BLOCKED rows, zero SKIPPED rows, and A14 PASS. The eight inherited blocked
+rows kept their IDs. Earlier live tests passed, and the existing synthetic
+SKIPPED-grading tests passed. The ninth blocker is AC-021-GRANTS. Exact rows:
+
+```text
+granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included
+run_leaves_no_live_grant | BLOCKED (AC-021-GRANTS) | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included
+ungranted_sibling_read_is_refused | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included
+versions_receipt (A14) | PASS
+versions receipt: target/run-table.9L2bth/VERSIONS.json
+```
+
+The local, ignored receipt is
+[`target/run-table.9L2bth/VERSIONS.json`](target/run-table.9L2bth/VERSIONS.json),
+SHA-256 `fb99835f51e448e8ebf18413b23c55a3086860fce31cfb7210ff2e05ec784047`.
+Its table equals this invocation's table, and the table digest matches.
+The Runtime and localhost-provider hashes match the exact native binaries
+under this lane's `target/runtime/debug/`. Identity is complete and command
+success is true. The suite's acceptance scope remains BLOCKED for its nine
+recorded contract gaps. This receipt names the committed base with
+`dirty: true`; it does not identify the uncommitted candidate as HEAD.
+
+`git diff --check`, `bash -n lab/agent-conformance/run.sh`, Runtime workspace
+formatting and chain-provider formatting also returned exit 0.
+`node scripts/check-product-data.mjs` reported
+`{"ok":true,"capsules":42,"profiles":2,"method_contracts":28}`;
+`node --test scripts/check-product-data.test.mjs` passed all 99 tests.
+All eight new falsifier definitions still match the restored candidate.
+There is one lsof executable path and one child spawn site in the lane.
+
+After the table run, the exact command
+`lab/agent-conformance/target/host/debug/report --check-earlier-runs`
+returned exit 0 in **0.220 s**, with empty stdout/stderr: zero remaining
+process owners under earlier Homes. Passing tests removed their Homes.
+Eight failed Homes from controls and mutations remain for supervisor review;
+`target/task-021/lifecycle.json` records their paths, evidence and cleanup
+condition, plus the receipt and rebuildable cache lifecycle. Other owners'
+worktrees and earlier retained data remain under their existing ownership.
+
+The tested source is based on commit
+`f7ff129c2cdb74cf1c7faba4a7b3e8b3209b3054`, base tree
+`6ec7f334c5c9e7d54c99a4ee847f1d265f1419b5`. The current task worktree is dirty
+only under this lane. The branch/worktree inventory was rerun; the builder
+created or removed zero refs or worktrees. The cached upstream comparison is
+zero ahead and nine behind. Those nine commits change zero lane paths,
+capsule-identity paths, Runtime paths or the component build script. The
+supervisor owns fresh integration, independent review, PR evidence and Git
+publication. Final documentation was appended after the gates; tested code
+and fixtures retain the restored bytes.
+
+
+## 022 — Run memory falsifiers and grade blocker lists (2026-10-26)
+
+022: Ran F-ac2c, F-ac2-human and F-ac2-write from clean source, retired the two blocked principal falsifiers, and replaced the report's special case with one blocker-list rule and its caught falsifier.
+
+`report::grade` splits the complete blocker reason on `;`, trims each part,
+and joins whole parts with `; `. An empty reason or part receives FAIL.
+`run_table_grades_blocker_lists_by_one_rule` exercises the existing parser
+with single IDs, multi-word names, joint blockers, whitespace and empty parts.
+The existing joint-row assertion remains active; the older `RT3 model grant`
+fixture now expects its complete reason. F-ac2a and F-ac2b are retired under
+`UsersAI binding; AC-002-ARGS`, with their named live-test return conditions.
+GAPS.md and RUNBOOK.md retain the intended mutations.
+
+### Execution boundary and commands
+
+The three existing falsifiers started at clean source commit
+`f9d2b48f8160398e843e0d656d2771fefc4fef29`, tree
+`26777084c404f2c02cf604bb52569a0ad6b3d8dd`. Before each baseline and after each
+restored run, `git status --porcelain lab/agent-conformance` returned empty.
+Each baseline passed before its mutation was applied. Each edit matched once;
+the original bytes were restored in a Python `finally` block. For F-ac2c,
+`old: ""` required an absent file, created with `open('xb')`; restoration
+removed only that added file. The assertion failure below is the deliberate
+fixture mutation, with a passing unmutated Runtime baseline.
+
+All four falsifiers used the shared exclusive `fcntl.flock` heavy-build lease
+from RUNBOOK.md. The parent opened the existing lock read-only at
+`git rev-parse --path-format=absolute --git-common-dir` plus
+`local-ai-heavy-build.lock`. Both lease acquisitions took 0.000 seconds at
+three-decimal precision. The retry bound was 180 seconds. The parent kept the
+lease through each sequential command and closed it on completion; child
+commands received zero lease descriptors. Every Cargo command had a
+600-second limit. Initial volume free space was 53.024 GiB; each build batch
+checked the 12 GiB build allowance plus 2 GiB reserve.
+
+The default sandbox's loopback bind preflight returned
+`[Errno 1] Operation not permitted`. The measured runs used local process and
+socket permission with offline Cargo, the existing loopback operator fixture,
+and these settings from the repository root:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-022/tmp"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+The commands below are the exact Cargo argument lists. Each ran unchanged
+at baseline, planted and restored. Inline Python read each entry from
+`falsifiers.json` and applied its byte strings with these operations (there
+is no added runner file):
+
+```python
+old = edit['old'].encode()
+new = edit['new'].encode()
+original = path.read_bytes() if path.exists() else None
+if old == b'':
+    assert original is None
+    with path.open('xb') as out:
+        out.write(new)
+else:
+    assert original is not None and original.count(old) == 1
+    path.write_bytes(original.replace(old, new, 1))
+# In finally, after the planted command:
+if original is None:
+    path.unlink(missing_ok=True)
+else:
+    path.write_bytes(original)
+```
+
+Full output and command/timing JSON under `target/task-022/` are local, not
+committed. The excerpts below are copied from those actual runs, including
+the libtest result and assertion panic. All named tests ran: none of these
+falsifier results is an ignored test, build failure or environmental skip.
+
+### F-ac2c — CAUGHT
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects no_policy_file_does_not_mean_allow -- --exact --nocapture
+```
+
+Baseline (exit 0, 40.014 seconds):
+
+```text
+fixture read: exit:Some(1) matched:0 granted:0 denied:0 content_error:false
+probe refusal effect:granted-read exit:Some(1) reason_present:true
+test no_policy_file_does_not_mean_allow ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 38.23s
+```
+
+Planted (exit 101, 9.243 seconds):
+
+```text
+fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false
+thread 'no_policy_file_does_not_mean_allow' (34637908) panicked at tests/effects.rs:263:9:
+assertion `left == right` failed: no-policy acceptance failed; private triage required
+  left: Some(0)
+ right: Some(1)
+test no_policy_file_does_not_mean_allow ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.14s
+```
+
+Restored (exit 0, 37.563 seconds):
+
+```text
+fixture read: exit:Some(1) matched:0 granted:0 denied:0 content_error:false
+probe refusal effect:granted-read exit:Some(1) reason_present:true
+test no_policy_file_does_not_mean_allow ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 37.42s
+```
+
+After restoration, `git status --porcelain lab/agent-conformance` returned empty.
+
+### F-ac2-human — CAUGHT
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --nocapture
+```
+
+Baseline (exit 0, 9.660 seconds):
+
+```text
+probe refusal effect:human-read exit:Some(1) reason_present:true
+test agent_cannot_read_human_space_without_grant ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.54s
+```
+
+Planted (exit 101, 9.413 seconds):
+
+```text
+probe refusal effect:human-read exit:Some(0) reason_present:false
+thread 'agent_cannot_read_human_space_without_grant' (34644376) panicked at tests/effects.rs:90:5:
+expected nonzero exit and lifecycle refusal Internal("localhost://Users/self requires a principal-scoped launch context")
+test agent_cannot_read_human_space_without_grant ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.29s
+```
+
+Restored (exit 0, 9.437 seconds):
+
+```text
+probe refusal effect:human-read exit:Some(1) reason_present:true
+test agent_cannot_read_human_space_without_grant ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.33s
+```
+
+After restoration, `git status --porcelain lab/agent-conformance` returned empty.
+
+### F-ac2-write — CAUGHT
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_memory_write_is_refused -- --exact --nocapture
+```
+
+Baseline (exit 0, 9.816 seconds):
+
+```text
+probe refusal effect:memory-write exit:Some(1) reason_present:true
+test ungranted_memory_write_is_refused ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.71s
+```
+
+Planted (exit 101, 9.233 seconds):
+
+```text
+probe refusal effect:memory-write exit:Some(0) reason_present:false
+thread 'ungranted_memory_write_is_refused' (34660662) panicked at tests/effects.rs:90:5:
+expected nonzero exit and lifecycle refusal Internal("capsule manifest does not declare authority for localhost://UsersAI/self/.AppData/ElastOS/AgentHost/tasks/conformance/memory")
+test ungranted_memory_write_is_refused ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.11s
+```
+
+Restored (exit 0, 9.163 seconds):
+
+```text
+probe refusal effect:memory-write exit:Some(1) reason_present:true
+test ungranted_memory_write_is_refused ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.05s
+```
+
+After restoration, `git status --porcelain lab/agent-conformance` returned empty.
+
+### F-report-blocker-list — CAUGHT
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report run_table_grades_blocker_lists_by_one_rule -- --exact --nocapture
+```
+
+This new test and grader are the uncommitted task candidate. The builder's
+Git-state restriction prevents a committed clean-tree baseline for new code.
+The sequence instead checked the original candidate bytes and identical
+`git status --porcelain lab/agent-conformance` before and after restoration;
+it does not claim this candidate is HEAD. Baseline SHA-256 values:
+
+- `src/report.rs`: `d85714b1cc38a739bcc2927bbcc5afa35b6fe19d9fc21f1a2a45d405a69ae08c`.
+- `tests/report.rs`: `459df899a9676022ff99e8a5a66e699282170ece9c0317d30848bb13bc583eca`.
+
+Baseline (exit 0, 1.481 seconds):
+
+```text
+test run_table_grades_blocker_lists_by_one_rule ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+```
+
+Planted (exit 101, 1.205 seconds):
+
+```text
+thread 'run_table_grades_blocker_lists_by_one_rule' (34684454) panicked at tests/report.rs:112:9:
+assertion `left == right` failed: blocker reason: "UsersAI binding"
+  left: ("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncase | BLOCKED (UsersAI)\n", true)
+ right: ("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncase | BLOCKED (UsersAI binding)\n", true)
+test run_table_grades_blocker_lists_by_one_rule ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+```
+
+Restored (exit 0, 0.941 seconds):
+
+```text
+test run_table_grades_blocker_lists_by_one_rule ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+```
+
+### Gates and remaining acceptance
+
+Commands used the same environment and shared lease as the falsifier runs:
+
+```sh
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+```
+
+Formatting passed (exit 0, 0.129 seconds). The first full locked suite returned
+exit 101 after 212.460 seconds. Its effect target passed 19 tests with nine
+explicit blockers; its report target passed all nine tests, including the
+existing joint-row assertion and the new blocker-list test. The unchanged
+runtime target failed its final cleanup census:
+
+```text
+test fixture_operator_sockets_are_loopback_only ... FAILED
+thread 'fixture_operator_sockets_are_loopback_only' (34746555) panicked at tests/runtime.rs:201:14:
+final census and operator group stop: "cleanup census: FAIL retained:target/home-6868-1793003241614105000-20; process leftover; processes:2 paths:[\"stderr-37\", \"stdout-37\"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.35s
+```
+
+The task leaves the 021 cleanup implementation and assertions intact. The
+failure above remains part of the gate record even if a later run passes.
+The three deliberately failed Homes and this gate's failed Home had completed
+operator group-stop checks. An additional `lsof -nP +D <root> -Fpf` returned
+exit 1 with empty stdout and stderr for each root; those four task-owned roots
+were then removed. Their data contents were kept out of inspection.
+
+Additional required checks passed: `git diff --check`,
+`node scripts/check-product-data.mjs` (42 capsules, two profiles, 28 method
+contracts), `node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+`falsifiers.json` parses with 60 active IDs and two retired IDs, all unique.
+Cargo.toml and Cargo.lock remain byte-identical to HEAD.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name/URL used where a code/content hash belongs? | No | `src/identity.rs:62` retains checked bundle identity; the change affects report reasons only. |
+| 2. New capsule or UI ambient authority? | No | `probe/src/lib.rs:91` retains the grant request; its planted changes were restored byte for byte. |
+| 3. Second operation path or copy of a rule? | No | `src/report.rs:11` remains the one grader; its hard-coded joint-blocker case is removed. |
+| 4. Runtime core grows? | No | `src/report.rs:15` implements the rule in this lane's report; every candidate path is under this lane. |
+| 5. Refusals fail closed with a clear reason? | Yes | `src/report.rs:17` rejects every empty part with FAIL; `tests/report.rs:106` checks the malformed inputs. |
+| 6. Capsule logic remains inside, using granted Bus calls? | Yes | `probe/src/lib.rs:91` keeps the capability request before the provider call; the probe is unchanged. |
+| 7. Named tests and caught falsifiers prove the new rule? | Yes | `tests/report.rs:94` fails under F-report-blocker-list; this section records all four baseline/fail/restored sequences. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:374` retains the receipt's explicit identity/admission/grant boundary. |
+
+### Gate retry and handoff
+
+The follow-up attempted to acquire the same lease before rerunning
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime fixture_operator_sockets_are_loopback_only -- --exact --nocapture`.
+Its bounded 180-second wait ended with exit 75 and this exact output:
+
+```text
+BLOCKED: shared heavy-build lease remained busy for 180 seconds
+```
+
+That command and its conditional full-suite retry both remained unstarted.
+This wait concerns the gate retry only; the four falsifier sequences above
+completed under the lease and keep their recorded results. The full locked
+gate remains FAIL, with its cleanup-census result above. The supervisor owns
+the next full gate run and the clean committed-candidate check for the new
+falsifier; the builder leaves all Git state unchanged.
+
+The final source check matched the recorded report/test SHA-256 values,
+confirmed one occurrence of the new mutation anchor, confirmed original
+probe and Cargo manifest/lock bytes, and confirmed the policy file is absent.
+All six changed files are lane-owned. The local lifecycle inventory records
+the candidate worktree, proof retention through supervisor review, existing
+build caches for the pending rerun, and the four removed test Homes. The
+falsifier commands released their lease; the blocked retry acquired none.
+
+At handoff, cached upstream divergence is 0 ahead and 0 behind.
+Network access stayed disabled; the supervisor owns fresh remote validation.

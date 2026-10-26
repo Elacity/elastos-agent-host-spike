@@ -528,8 +528,13 @@ They remain BLOCKED until the verified launch and typed selector/result seam
 can be wired into the existing helpers. AC-002-ARGS requires the WIT,
 ComponentProvider and CLI forwarding change described above, including the
 resolved ownership result. Merely removing an ignore or changing a fixture
-cannot establish acceptance. F-ac2a and F-ac2b are specified fixture mutations
-for that future live path; neither is counted as caught today.
+cannot establish acceptance. F-ac2a and F-ac2b are retired in `falsifiers.json`
+under `UsersAI binding; AC-002-ARGS` until their named tests become live.
+F-ac2a grants agent-b agent-a's exact memory path for
+`agent_cannot_read_other_agent_memory`. F-ac2b changes agent-b's principal to
+agent-a for `agent_memory_under_own_principal`. Return each mutation to the
+active list when its named journey is live; both supply zero caught evidence
+while retired.
 
 `agent_cannot_read_human_space_without_grant` is the live refusal half. It
 requires the Runtime's principal-context refusal for `Users/self` through the
@@ -598,3 +603,70 @@ refusal assertions, including under F-ac8a. It covers both process captures,
 actual printed journey lines, the rendered report, serialized receipt, committed
 lane blobs and candidate source files. Missing coverage fails with a fixed
 reason; the fake marker is separate from the in-memory fixture credentials.
+
+## Cleanup census — lab half of A10/A11/A12 (021)
+
+The existing read journey collects every `run` child, then its fixture shell
+checks `/api/capability/pending` and `/api/capability/list` while the operator
+is still alive. `Operator::finish_check` takes its second socket sample, stops
+the operator group, and checks the root through the shared census module.
+Each read journey prints one checked `cleanup census:` line. A leftover fails
+the journey and identifies the retained Home by its lane-relative name.
+
+The physical check covers handles on named files, directories, current
+directories and sockets under this throwaway root, the operator's loopback API
+port, and entries in this root's `tmp/`. The root scan uses one bounded lsof
+call. Its tool runs through the existing spawn site in a separate scratch Home;
+after exit, its captures move into the journey's existing capture inventory.
+Only the test PID is excluded. On macOS, lsof exit 1 means that some selected
+`+D` entries have zero handles, even when other entries match. That selection
+result is parsed; warnings, other exit codes and malformed records fail.
+The live socket samples retain their existing success requirement.
+
+This is a point-in-time census, with a five-second lsof limit and a 200 ms API
+connection limit. Pending requests must be empty for the granted and denied
+fixture journeys. The earlier absent-policy journey keeps its refusal scope
+and reports its pending/grant checks as unmeasured. Cancel, worker kill,
+settlement and whole-device cleanup need the later journey. AC-006-STORAGE
+remains open: `/tmp/elastos/storage` is the known outside-root leftover. The
+census neither enumerates nor reads nor removes that directory. The table's
+scope and the same invocation's VERSIONS.json keep these limits visible.
+
+### AC-021-GRANTS — cross-session live-grant visibility
+
+`run_leaves_no_live_grant` is ignored with `blocked: AC-021-GRANTS`. When
+explicitly selected, it reuses the granted-read journey and requires a global
+live-grant result before the Home can pass. The normal journeys report this
+check as BLOCKED, including when the shell's own list is empty.
+
+Runtime owns the grant lifetime. A `once` approval sets `max_uses = 1`
+(`elastos/crates/elastos-server/src/api/handlers/capability.rs:335`). The first
+successful validation spends that allowance; the next validation is refused
+(`elastos/crates/elastos-runtime/src/capability/manager.rs:485` and
+`capability/store.rs:140`). The allowance is consumed at validation, rather
+than waiting for a provider's successful result.
+
+The `run` client attaches shell and client sessions
+(`elastos/crates/elastos-server/src/runtime_control.rs:917`), then returns from
+`run_local` without a detach or grant-revoke call (`run_cmd.rs:264`). Thus client
+exit alone does not end its grants or prove their absence. The shell can see
+all pending requests (`api/handlers/capability.rs:244`), but the current list
+selects grants by the caller's session (`api/handlers/capability.rs:433`). Its
+rows describe granted requests; they are not a global inventory of remaining
+allowances. Audit events provide supporting history only.
+
+The Runtime change that flips this check is a shell-authorized view of every
+session's live grants, with exhausted, revoked and expired grants filtered by
+Runtime. The fixture expects the existing list response to identify that view
+with `scope: "all_sessions_live"` and `capabilities: []`. A session-local or
+unmarked response stays BLOCKED. A global nonempty list fails with `live grant
+leftover`. This is a future response contract, not a claim that Runtime exposes
+it today. Client callers retain their own-session view. This lane changes zero
+Runtime routes and performs zero revocations. F-cleanup-grant is deferred until
+this blocker closes; the synthetic scope falsifier tests honest grading only.
+
+Before tests, `run.sh` uses the existing report executable to check earlier
+`target/home-*` roots. It selects only those direct children (two-second limit)
+and uses the same five-second lsof path. A live holder prints its PID and root
+name, fails the command, and stays owned by the operator who started it. The
+check reads metadata only and leaves the build tree outside its selection.

@@ -1,4 +1,4 @@
-# wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009) and the verifier (wc-004)
+# wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009), the verifier (wc-004) and the bare-capsule ABI gap (wc-008)
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
 byte for byte on this one Mac. A lab bundle of it is named by
@@ -386,6 +386,39 @@ nothing about "may this run": it makes no admission, launch or
 publisher-trust decision and sits in no admission or launch path. The signed
 name is a lab CID, not the Runtime's CID.
 
+## Runtime ABI for a bare capsule (wc-008)
+
+**Decision: `NO_ABI_FOR_BARE_CAPSULE`.** `elastos.capsule/v1` has no
+`runtime_abi` for this capsule, a zero-import core Wasm module that is not a
+Component. Each of the seven `CapsuleRuntimeAbi` values needs Component,
+projection, provider, shell, microVM or data metadata, or is refused outright;
+with no `runtime_abi` the manifest validates, but both Runtime run paths refuse
+a `wasm` capsule that is not a Component. The file:line facts are in
+ADOPTION.md ("Runtime ABI for a bare capsule (wc-008)"), and both gaps are in
+its "Gaps for Anders". `capsule/capsule.json` and the pinned lab CID are
+unchanged: the lane picks no near-fit ABI and invents no field.
+
+The tests, in `tests/runtime_abi.rs`:
+
+- `bare_capsule_runtime_abi_is_recorded_as_skipped` — **SKIPPED**, not
+  passed: `#[ignore = "NO_ABI_FOR_BARE_CAPSULE: ..."]` with the gap and
+  https://github.com/Elacity/elastos-runtime/issues/463, and a body that
+  panics with the same text. Cargo lists it as `ignored`.
+- `no_runtime_abi_names_a_bare_core_module` — evidence of the gap, not a
+  passed capability. It puts each ABI value into this capsule's manifest bytes
+  in memory and checks that `validate()` refuses it with that value's own
+  reason (an exact string, so a manifest broken some other way does not pass
+  as the gap). Its `match` on `CapsuleRuntimeAbi` has no wildcard arm, so a
+  new value in the Runtime fails the build. It also checks that the committed
+  manifest has no `runtime_abi` and is not a Component. It prints
+  `NO_ABI_FOR_BARE_CAPSULE` and the seven results.
+- `an_unknown_manifest_field_is_refused_by_name` — adding `lab_imports` to the
+  manifest bytes is refused by the Runtime's `CapsuleManifest` with an error
+  that names `lab_imports`, and `bundle_identity` refuses a bundle of those
+  bytes with the same manifest-parse reason. This is the guard against
+  inventing a field, and the evidence for the gap "No summary of Wasm imports
+  in the manifest".
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -506,8 +539,8 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009 and 21
-wc-004 planted bugs in the provider format (`command: "lab"`). Each requires
+`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, 21 wc-004
+and four wc-008 planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -590,3 +623,32 @@ updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
   constructor, or mutable access to the verified value.
 - F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT — a second signature check or a
   second audit call in the tools crate.
+
+wc-008's four, and one reused entry, each hand-proven, pending R1 (every named
+test failed at its assertion with the bug in, and passed again after the
+revert). They are not in the runner-caught count. A canonical runner run,
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC8 F-WC3-LABCID-PIN`,
+reported `summary: 5 CAUGHT of 5`; it stays pending R1 (the recovery targets
+name neither `capsule/capsule.json` nor `tools/src/lib.rs`), not a PASS.
+
+- F-WC8-UNKNOWN-FIELD — hand-proven, pending R1. The committed manifest gains
+  `"lab_imports": []`: `lab_manifest_passes_runtime_validate` fails with the
+  Runtime's "unknown field `lab_imports`" error, and
+  `this_capsule_bundle_has_the_pinned_lab_cid` fails too.
+- F-WC8-NEAR-FIT — hand-proven, pending R1. The committed manifest declares
+  `runtime_abi` `elastos.component/v1`: the Runtime refuses a Component ABI
+  without Component metadata (`lab_manifest_passes_runtime_validate`), and
+  `no_runtime_abi_names_a_bare_core_module` sees the manifest is no longer bare.
+- F-WC8-INVALID-BASELINE — hand-proven, pending R1. The committed manifest
+  gains `execution` `component`, so six ABIs are refused for the manifest's
+  fault, not their own rule: `no_runtime_abi_names_a_bare_core_module` fails
+  at its exact-reason check, and `lab_manifest_passes_runtime_validate` fails.
+- F-WC8-NAME-WITHOUT-MANIFEST — hand-proven, pending R1. The tools crate's
+  `bundle_identity` names the two files with the shared encoder and skips the
+  Runtime's manifest check: `an_unknown_manifest_field_is_refused_by_name`
+  sees the `lab_imports` bundle named, not refused.
+- F-WC3-LABCID-PIN (task 010's, reused, counted once) — hand-proven, pending
+  R1. It is the proof of "changing one manifest byte changes the lab CID":
+  one `description` byte changes, and
+  `this_capsule_bundle_has_the_pinned_lab_cid` fails. wc-008 adds no second
+  entry for it (F-WC8-ONE-BYTE).

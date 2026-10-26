@@ -149,10 +149,11 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
         } else {
             ReadOutcome::Denied
         },
+        false,
     );
 }
 
-fn exercise_read(effect: Effect, outcome: ReadOutcome) {
+fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool) {
     use agent_conformance::harness::{Launch, RunningInstances};
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let bytes = build_probe(effect, 1);
@@ -205,15 +206,36 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome) {
             Ok(())
         }
     });
-    println!(
-        "{}",
-        operator
-            .finish_check(sampled)
-            .expect("final census and operator group stop")
-    );
+    let cleanup_state = if outcome == ReadOutcome::NoPolicy {
+        Ok("pending:unmeasured grants:unmeasured (no-policy refusal scope)")
+    } else {
+        controller.cleanup_state()
+    };
+    let finished = operator.finish_check(sampled);
+    let line = match &finished {
+        Ok(line) | Err(line) => line,
+    };
+    let state = match cleanup_state {
+        Ok(state) => state.to_owned(),
+        Err(reason) => format!(
+            "FAIL {reason}; retained:target/{}",
+            home.root().file_name().unwrap().to_string_lossy()
+        ),
+    };
+    controller
+        .print_checked(&format!("{line}; {state}"))
+        .expect("cleanup evidence excludes fixture credentials");
     controller
         .check_captures(&home)
         .expect("captures exclude fixture credentials");
+    assert!(
+        finished.is_ok(),
+        "cleanup census refused leftovers; see checked reason"
+    );
+    assert!(
+        cleanup_state.is_ok(),
+        "cleanup grant census failed; see checked reason"
+    );
     let completions = collected.expect("controller and probe finish within their bounds");
     assert_eq!(completions.len(), 1);
     let output = &completions[0].output;
@@ -314,6 +336,13 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome) {
             &observations,
         )
         .expect("report and receipt exclude fixture credentials");
+    if require_live_grants {
+        assert_eq!(
+            cleanup_state,
+            Ok("pending:0 grants:0"),
+            "blocked: AC-021-GRANTS"
+        );
+    }
     home.finish().unwrap();
 }
 
@@ -323,6 +352,12 @@ fn attach_secret_stays_in_memory() {
     exercise_fixture_read(Effect::GrantedRead, true);
     exercise_fixture_read(Effect::SiblingRead, false);
     host_key::exercise();
+}
+
+#[test]
+#[ignore = "blocked: AC-021-GRANTS"]
+fn run_leaves_no_live_grant() {
+    exercise_read(Effect::GrantedRead, ReadOutcome::Granted, true);
 }
 
 #[test]
@@ -339,7 +374,7 @@ fn ungranted_sibling_read_is_refused() {
 fn no_policy_file_does_not_mean_allow() {
     // One activation attempts one read. A natural Runtime refusal is required;
     // the harness timeout is an error, never refusal evidence.
-    exercise_read(Effect::GrantedRead, ReadOutcome::NoPolicy);
+    exercise_read(Effect::GrantedRead, ReadOutcome::NoPolicy, false);
 }
 
 #[test]
