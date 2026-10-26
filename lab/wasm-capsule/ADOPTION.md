@@ -53,11 +53,16 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 - `wasm_capsule_tools::run` — wc-005's runner, a library function (no
   command: the signature is in memory only). `run(bundle, signature,
   accepted, engines, out_dir)` calls `verify_bundle` with no grants, stages
-  the verified `entries()` into a new `OUT_DIR/staged/`, checks the copy's lab
-  CID against the verified `cid()`, then runs the verified `entrypoint()` with
-  `wasmtime run --invoke digest` and `wasmer run --invoke digest` and the fixed
-  argument, as two separate processes with no directory, environment or network
-  flag. Both must exit successfully with byte-identical stdout; a receipt
+  the verified `entries()` into a new `OUT_DIR/staged/` through folder handles
+  (never through a link, never outside OUT_DIR), seals the module (inode and
+  change time of each step on its path), checks the copy's lab CID against the
+  verified `cid()`, then runs the verified `entrypoint()` with `wasmtime run
+  --invoke digest` and `wasmer run --invoke digest` and the fixed argument, as
+  two separate processes with no directory, environment or network flag. Each
+  engine starts in the sealed staged folder and gets `./<entrypoint>`, so no
+  part of OUT_DIR reaches its command line; the seal is checked before each
+  engine and after the last, so the engines run the checked bytes or the run
+  is refused. Both must exit successfully with byte-identical stdout; a receipt
   records the lab CID, both observed engine versions, the argument and both
   outputs. The engine programs are inputs by path (README.md, "Two engines
   (wc-005)").

@@ -141,3 +141,22 @@
   "summary: 24 CAUGHT of 24", exit 0 (runner-caught). F-WC5a and F-WC5-ENGINE-ENV also checked by hand: each named
   test built and failed at its assertion (`tests/run.rs` "the runner ran lab-cid:…", "the runner reads the
   environment: env::"). `LOG.md`'s gate line reworded so both retired-label greps give empty output, exit 1.
+- wc-005 round 2 (review fix, ownership): (1) each engine now starts in the staged folder's own handle (`fchdir` in
+  the child only) and gets the module as `./<entrypoint>`, so no part of OUT_DIR reaches an engine's command line and
+  the argument is never an option (an option-like relative OUT_DIR `--env=WC5_REVIEW_PROBE=<pid>` runs the verified
+  bytes). Wasmer refuses `/dev/fd/N` ("Unable to determine how to execute"), so a descriptor handoff was not used.
+  (2) Staging, OUT_DIR and the receipt go through folder handles: `mkdirat` (a folder already there is refused),
+  `openat` with `O_NOFOLLOW`, files `O_EXCL`; a planted folder or file link is refused and nothing lands outside
+  OUT_DIR. (3) The module is sealed (inode and change time of `staged/`, each folder on the entrypoint's path and
+  the module file; each name must still lead to the runner's own inode) and checked before each engine and after the
+  last: a substitution during `--version`, a swap-and-restore during wasmtime's run, and a same-bytes replacement
+  before sealing are each refused with no receipt. New reasons `OutDirNotOpened`, `ModuleNotSealed` (an `fstat` on a
+  held descriptor; no test can make it fail) and `StagedModuleChanged`; new moment `OutDirMade`. `libc = "0.2"` added
+  to the tools crate (the 0.2.189 the lockfile already held through `elastos-common`; only the tools package's
+  dependency list in `Cargo.lock` changed). Tests: `an_option_like_out_dir_runs_the_verified_module`,
+  `staging_never_writes_through_a_planted_link`, `runner_keeps_the_checked_bytes_through_both_runs`, and an OUT_DIR
+  link case in `runner_operation_failures_keep_their_cause`; stand-ins can print the module they were given. New
+  falsifiers F-WC5-OPTION-OUT-DIR, -STAGE-LINK, -OUT-DIR-LINK, -SEAL-SKIP, -SEAL-LINK; nine wc-005 anchors moved (same
+  bugs). `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5`: "summary: 23
+  CAUGHT of 23", exit 0 (runner-caught). Real engines again: `wasmtime 45.0.1`, `wasmer 7.5.0`, argument
+  `1592590337`, both `"230101071268130872\n"`. Both retired-label greps: empty output, exit 1.

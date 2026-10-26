@@ -1141,6 +1141,7 @@ version = "0.1.0"
 dependencies = [
  "capsule-identity",
  "elastos-common",
+ "libc",
  "serde_json",
  "wasm-capsule-audit",
 ]

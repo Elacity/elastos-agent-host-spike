@@ -22,8 +22,15 @@ publish = false
 # Runtime's `CapsuleManifest` (read-only), the one reader of `capsule.json`,
 # parsed with `serde_json` as that type is read everywhere else. Both are the
 # versions the lockfile already held through `capsule-identity`.
+#
+# wc-005's runner (src/run.rs) stages through folder handles (`mkdirat`,
+# `openat` with `O_NOFOLLOW`, `fstatat`) and starts each engine in the staged
+# folder's handle (`fchdir`), which std does not offer. `libc` gives those
+# calls; it is the version the lockfile already held through
+# `elastos-common`, which asks for it the same way.
 [dependencies]
 capsule-identity = { path = "../../capsule-identity" }
 elastos-common = { path = "../../../elastos/crates/elastos-common" }
+libc = "0.2"
 serde_json = "1.0"
 wasm-capsule-audit = { path = "../audit" }

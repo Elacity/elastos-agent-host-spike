@@ -400,24 +400,43 @@ wasm_capsule_tools::run::run(bundle: &Path, signature: Option<&NameSignature>, a
 1. wc-004's `verify_bundle` with no grants: the one verify path (P10). A
    refusal is the verifier's own, unchanged, and no engine starts (not even
    `--version`) and no OUT_DIR is made.
-2. A new OUT_DIR (anything already there is refused), and inside it a new
-   `staged/` holding every entry of the verified value's `entries()`, nested
-   folders included, each written new from the checked bytes. The bundle is
-   never read again.
-3. `wasm_capsule_tools::bundle_identity` of `staged/`, compared as an opaque
+2. A new OUT_DIR (anything already there is refused), opened as a folder
+   without following a link, and inside it a new `staged/` holding every entry
+   of the verified value's `entries()`, nested folders included, each written
+   new from the checked bytes. The bundle is never read again. Staging works
+   through folder handles: each folder is made new by this run (`mkdirat`; a
+   folder already there, whoever made it, is refused) and opened with
+   `O_NOFOLLOW`, and each file is made new in its folder's handle (`O_EXCL`,
+   `O_NOFOLLOW`). So a link planted in `staged/` is never written through, and
+   nothing is written outside OUT_DIR.
+3. The module is sealed: the runner keeps the handles it made for `staged/`,
+   each folder on the entrypoint's path and the module file, and records each
+   one's inode and change time.
+4. `wasm_capsule_tools::bundle_identity` of `staged/`, compared as an opaque
    value with the verified `cid()`. A mismatch stops the run before either
    engine starts.
-4. Each engine's `--version`, recorded exactly as the engine printed it.
-5. `wasmtime run --invoke digest <staged entrypoint> 1592590337`, then
-   `wasmer run --invoke digest <staged entrypoint> 1592590337`: two separate
-   processes, one after the other, neither inside the other. `1592590337` is
-   the capsule's `FIXED_INPUT`, `0x5EED_0001`. Neither engine gets `--dir`,
-   `--mapdir`, `--env`, `--net` or any other directory, environment or network
-   flag. The entrypoint is the verified value's `entrypoint()`: the module the
-   audit read.
-6. Both engines must exit successfully (two equal failures are still a
+5. Each engine's `--version`, recorded exactly as the engine printed it.
+6. `wasmtime run --invoke digest ./<entrypoint> 1592590337`, then
+   `wasmer run --invoke digest ./<entrypoint> 1592590337`: two separate
+   processes, one after the other, neither inside the other. Each starts in
+   the sealed `staged/` handle (`fchdir` in the child only, never the test
+   process), so the module argument is `./` and the entrypoint's path: it
+   holds no part of OUT_DIR and can never be read as an option, whatever
+   OUT_DIR is called. `1592590337` is the capsule's `FIXED_INPUT`,
+   `0x5EED_0001`. Neither engine gets `--dir`, `--mapdir`, `--env`, `--net` or
+   any other directory, environment or network flag. The entrypoint is the
+   verified value's `entrypoint()`: the module the audit read.
+7. The seal is checked before each engine starts and after the last one
+   exits: each name on the module's path must still lead, without following a
+   link, to the handle the runner made, and no sealed change time may move.
+   Any write, rename, link or mode change moves a change time, and no
+   unprivileged process can set one back. So a module changed, replaced (even
+   with the same bytes) or swapped and put back at any time after staging is
+   refused, with no further engine run and no receipt.
+8. Both engines must exit successfully (two equal failures are still a
    failure), and their stdout must match byte for byte.
-7. A new `OUT_DIR/receipt.txt`, in wc-001's `key: value` shape:
+9. A new `receipt.txt`, made in OUT_DIR's handle, in wc-001's `key: value`
+   shape:
 
 ```text
 schema: wc-005.run-receipt/v1
@@ -440,21 +459,27 @@ is `FIXED_OUTPUT`, `0x0331_7BB4_875F_B038`.
 
 **The reasons.** Each step has its own, with the path it stopped at and, for
 a system failure, the system's cause: the verifier's refusal; OUT_DIR already
-exists; OUT_DIR, a staged folder or a staged entry cannot be made; the staged
-copy gets no lab CID; the staged copy's lab CID is not the verified one; an
-engine's `--version` does not start or fails; an engine does not start; an
+exists; OUT_DIR cannot be made; the OUT_DIR the runner made cannot be opened
+without following a link; a staged folder or a staged entry cannot be made;
+the module cannot be sealed or its seal read; the staged copy gets no lab CID;
+the staged copy's lab CID is not the verified one; the sealed module changed;
+an engine's `--version` does not start or fails; an engine does not start; an
 engine exits unsuccessfully (with its status and stderr); the two stdouts
-differ (both shown); the receipt cannot be written.
+differ (both shown); the receipt cannot be written. Reading a sealed handle's
+own state (`fstat` on a descriptor the runner holds open) has no failure a test
+can cause, so "cannot be sealed or its seal read" is the one reason no test
+reaches.
 
 **The engine seam.** The two engine programs are inputs (`Engines`), by path,
 never read from the environment: the runner reads no environment variable,
 and a bare name is run as `./name`, never looked up on PATH. Tests pass small
 stand-in scripts they write into their own temp dir (a stand-in logs its
-arguments and prints what the test told it to), so only one test starts the
-real engines. There is one run path: the input picks which program starts,
-not what the runner does. `run_observed` is `run` with an observer told about
-`staged/` at two moments (made, and filled); tests use it to change the folder
-as another process could. `run` is `run_observed` with an observer that does
+arguments and prints what the test told it to, or the bytes of the module it
+was given), so only one test starts the real engines. There is one run path:
+the input picks which program starts, not what the runner does.
+`run_observed` is `run` with an observer told about OUT_DIR once it is made,
+and about `staged/` once it is made and once it is filled (before the seal);
+tests use it to change the folder as another process could. `run` is `run_observed` with an observer that does
 nothing.
 
 **Engines, and the claim.** Homebrew `wasmtime` 45.0.1 and `wasmer` 7.5.0 are
@@ -467,10 +492,10 @@ supported" or "runs anywhere". The runner makes no admission, launch or
 publisher-trust decision and sits in no admission or launch path.
 
 **Not covered.** Links in OUT_DIR's own parent folders are not checked. The
-staged folders are made with `create_dir_all`, so a link another process
-plants inside `staged/` during the run would be followed for that write; the
-staged copy's name check then refuses the run (the walk refuses links), but
-the write has happened. The engines' own caches and files (for example
+seal rests on change times, which only a privileged process (or one that sets
+the system clock) could forge, and a process that can debug the engines can
+change what they run in memory; neither is in this lab's reach. The engines'
+own caches and files (for example
 Wasmer's cache under the user's home) are the engines' business, not the
 capsule's: the capsule gets no directory, environment or network.
 
@@ -607,25 +632,40 @@ scripts; every key is fresh in memory:
   is made, and neither stand-in is called at all.
 - `runner_passes_no_directory_env_or_network_flags` — an **argv proof**, not
   behaviour: each stand-in got exactly `--version`, then `run --invoke digest
-  <staged module> 1592590337`; no argument is a directory, environment or
+  ./capsule.wasm 1592590337`; no argument is a directory, environment or
   network flag, and wasmer's carry neither `--env` nor `--dir`.
 - `differing_engine_outputs_are_reported_as_a_failure` — stand-ins print `1`
   and `2`: refused, both outputs named, no receipt.
 - `matching_engine_failures_are_refused` — both stand-ins exit 3 with the same
   stdout: refused as wasmtime's failure; only wasmer failing names wasmer.
 - `runner_executes_audited_entrypoint` — the manifest names `main.wasm` beside
-  another `capsule.wasm`: both engines get the staged `main.wasm`, whose bytes
-  are the verified `entrypoint()`.
+  another `capsule.wasm`: both engines get `./main.wasm` and print its bytes,
+  which are the verified `entrypoint()`.
 - `runner_stages_all_verified_entries` — a bundle with nested entries: the
   staged folder holds exactly the verified entries (four), and has the verified
   lab CID, even though the source module changes once `staged/` is made; the
-  engines get the staged module, not the bundle's.
+  engines print the verified bytes, not the bundle's new ones.
 - `runner_refuses_staged_name_mismatch` — a file planted in `staged/` before
   it is named: refused with both lab CIDs, and no stand-in is called.
+- `an_option_like_out_dir_runs_the_verified_module` — OUT_DIR is the relative
+  `--env=WC5_REVIEW_PROBE=<pid>` (made in the test's own folder and removed
+  after): no engine argument holds it, each gets `./capsule.wasm`, and both
+  print the verified module's bytes.
+- `staging_never_writes_through_a_planted_link` — a link to a folder outside
+  OUT_DIR planted where `data/` goes, and a link planted where `capsule.json`
+  goes: each refused with its own reason ("already exists"), the outside
+  folder stays empty, and no stand-in is called.
+- `runner_keeps_the_checked_bytes_through_both_runs` — three cases, each
+  refused as "changed after it was sealed" with no receipt: wasmtime's
+  `--version` writes other bytes into the staged module (no engine runs it);
+  wasmtime's run swaps the module out and puts the same bytes back (wasmer
+  never runs); and before the seal another file with the same bytes replaces
+  the module (no engine runs it).
 - `receipt_records_observed_engine_versions` — stand-ins print other versions;
   the result and the receipt carry those, not fixed ones.
 - `runner_operation_failures_keep_their_cause` — OUT_DIR already there, its
-  parent missing, a file where a staged folder or entry goes, a version query
+  parent missing, OUT_DIR replaced by a link once made (the outside folder
+  stays empty), a file where a staged folder or entry goes, a version query
   that cannot start or fails, an engine gone after `--version`, and a file
   already at the receipt's path: each has its own reason, path and system
   cause.
@@ -636,7 +676,7 @@ scripts; every key is fresh in memory:
 ## Falsifiers
 
 `falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, 22
-wc-004 and 18 wc-005 planted bugs in the provider format (`command: "lab"`). Each requires
+wc-004 and 23 wc-005 planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -646,7 +686,7 @@ still name the retired `tools/src/lab_name.rs` and none of `tools/src/lib.rs`,
 restore those files (ask **R1**, pending). So the falsifiers up to wc-004 were
 proved by the repo's break → named test fails → revert method with `cargo
 test` in this workspace, and are listed as hand-proven, pending R1. wc-005's
-18, wc-004's new F-WC4-ENTRYPOINT-ACCESSOR, and the five wc-004 entries whose
+23, wc-004's new F-WC4-ENTRYPOINT-ACCESSOR, and the five wc-004 entries whose
 anchor text wc-005 moved were run by the canonical runner
 (`falsify.py --from lab/wasm-capsule/falsifiers.json`) and are runner-caught
 (LOG.md has the run).
@@ -724,7 +764,7 @@ updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
 - F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT — a second signature check or a
   second audit call in the tools crate.
 
-wc-005's 18, runner-caught. wc-004 gains F-WC4-ENTRYPOINT-ACCESSOR (the
+wc-005's 23, runner-caught. wc-004 gains F-WC4-ENTRYPOINT-ACCESSOR (the
 verified value's `entrypoint()` returns the first entry), also runner-caught.
 wc-005 moved the anchor text of F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
 -ORDER-AUDIT-FIRST, -SEALED-NEW and -SECOND-AUDIT (the verifier now finds the
@@ -753,3 +793,15 @@ again.
 - F-WC5-ENGINE-ENV — an environment variable can replace the wasmer program.
 - F-WC5-SECOND-SPAWN — the module run starts its engine outside the one start
   function.
+- F-WC5-OPTION-OUT-DIR — each engine gets the module by a path built from
+  OUT_DIR, so an option-like OUT_DIR reaches its command line.
+- F-WC5-STAGE-LINK — staging uses a folder it did not make and follows a link
+  to it, so it writes outside OUT_DIR. (Both rules are planted out together:
+  with `mkdirat`'s refusal alone gone, `O_NOFOLLOW` still refuses the link,
+  and `O_NOFOLLOW` alone guards only a link swapped in after `mkdirat`, which
+  no test can time.)
+- F-WC5-OUT-DIR-LINK — OUT_DIR is opened through a link that replaced it.
+- F-WC5-SEAL-SKIP — the seal is never checked, so bytes changed after the name
+  check run.
+- F-WC5-SEAL-LINK — the seal does not check that each name still leads to the
+  file the runner wrote.

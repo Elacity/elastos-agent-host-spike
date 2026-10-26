@@ -8,7 +8,7 @@
 //! not on the Component ABI. Every other test points the runner at stand-in
 //! engines, small scripts this file writes into the test's own temp dir.
 //! A stand-in logs each call's arguments and prints what the test told it
-//! to, so no real engine starts. The engines are runner inputs, never the
+//! to, or the bytes of the module it was given, so no real engine starts. The engines are runner inputs, never the
 //! environment: the tests share one process, and none changes process-wide
 //! state.
 //!
@@ -23,7 +23,7 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use wasm_capsule_tools::run::{
     run, run_observed, Engine, Engines, Moment, Reason, RunRefusal, TwoEngineRun, INVOKE_ARGUMENTS,
@@ -154,10 +154,26 @@ struct Shim<'a> {
     version_status: u8,
     /// Delete itself after answering `--version`, so the run cannot start.
     vanish_after_version: bool,
+    /// A shell command it runs after answering `--version`.
+    on_version: &'a str,
     /// What it prints on stdout when asked to run a module.
     stdout: &'a [u8],
+    /// Print the bytes of the module it was given instead of `stdout`.
+    print_module: bool,
+    /// A shell command it runs, in the folder it was started in, after
+    /// printing.
+    on_run: &'a str,
     /// Its exit status when asked to run a module.
     status: u8,
+}
+
+impl Shim<'_> {
+    fn printing() -> Self {
+        Shim {
+            print_module: true,
+            ..Shim::default()
+        }
+    }
 }
 
 impl Default for Shim<'_> {
@@ -166,7 +182,10 @@ impl Default for Shim<'_> {
             version: "stand-in 0.0.0",
             version_status: 0,
             vanish_after_version: false,
+            on_version: "",
             stdout: b"42\n",
+            print_module: false,
+            on_run: "",
             status: 0,
         }
     }
@@ -191,20 +210,29 @@ impl StandIn {
         } else {
             ""
         };
+        // The module is the fourth argument: run --invoke digest MODULE.
+        let print = if shim.print_module {
+            "cat \"$4\"".to_owned()
+        } else {
+            format!("cat '{}'", stdout.display())
+        };
         let script = format!(
             "#!/bin/bash\n\
              (IFS=$'\\x1f'; printf '%s\\n' \"$*\") >> '{log}'\n\
              if [ \"$1\" = \"--version\" ]; then\n\
              printf '%s\\n' '{version}'\n\
+             {on_version}\n\
              {vanish}\
              exit {version_status}\n\
              fi\n\
-             cat '{stdout}'\n\
+             {print}\n\
+             {on_run}\n\
              exit {status}\n",
             log = log.display(),
             version = shim.version,
+            on_version = shim.on_version,
             version_status = shim.version_status,
-            stdout = stdout.display(),
+            on_run = shim.on_run,
             status = shim.status,
         );
         fs::write(&program, script).expect("write the stand-in");
@@ -244,6 +272,11 @@ impl StandIns {
         StandIns::new(tmp, Shim::default(), Shim::default())
     }
 
+    /// Two stand-ins that each print the module they were given.
+    fn printing_the_module(tmp: &TempDir) -> StandIns {
+        StandIns::new(tmp, Shim::printing(), Shim::printing())
+    }
+
     fn engines(&self) -> Engines<'_> {
         Engines {
             wasmtime: &self.wasmtime.program,
@@ -276,13 +309,15 @@ fn refused(result: Result<TwoEngineRun, RunRefusal>) -> RunRefusal {
     }
 }
 
-/// The run arguments each engine must get for `module`, exactly.
-fn expected_run_args(module: &Path) -> Vec<String> {
+/// The run arguments each engine must get for the entrypoint `module`,
+/// exactly. The engine starts in the staged folder and gets the module as
+/// `./` and its path, never a path with OUT_DIR in it.
+fn expected_run_args(module: &str) -> Vec<String> {
     let mut args = vec![
         "run".to_owned(),
         "--invoke".to_owned(),
         INVOKE_FUNCTION.to_owned(),
-        module.display().to_string(),
+        format!("./{module}"),
     ];
     args.extend(INVOKE_ARGUMENTS.iter().map(|arg| (*arg).to_owned()));
     args
@@ -462,7 +497,6 @@ fn runner_passes_no_directory_env_or_network_flags() {
     let out = tmp.path().join("out");
 
     ran(bundle.run(stand_ins.engines(), &out));
-    let module = out.join("staged").join("capsule.wasm");
     for (engine, stand_in) in [
         ("wasmtime", &stand_ins.wasmtime),
         ("wasmer", &stand_ins.wasmer),
@@ -470,7 +504,10 @@ fn runner_passes_no_directory_env_or_network_flags() {
         let calls = stand_in.calls();
         assert_eq!(
             calls,
-            [vec!["--version".to_owned()], expected_run_args(&module)],
+            [
+                vec!["--version".to_owned()],
+                expected_run_args("capsule.wasm")
+            ],
             "{engine}'s command lines"
         );
         for arg in calls.iter().flatten() {
@@ -588,7 +625,7 @@ fn matching_engine_failures_are_refused() {
 fn runner_executes_audited_entrypoint() {
     // The manifest names main.wasm; capsule.wasm is another module beside it.
     let tmp = TempDir::new("run-entrypoint");
-    let stand_ins = StandIns::agreeing(&tmp);
+    let stand_ins = StandIns::printing_the_module(&tmp);
     let bundle = signed(bundle_with(
         &tmp,
         "bundle",
@@ -599,24 +636,29 @@ fn runner_executes_audited_entrypoint() {
     assert_eq!(verified.entrypoint().path, "main.wasm");
     let out = tmp.path().join("out");
 
-    ran(bundle.run(stand_ins.engines(), &out));
-    let module = out.join("staged").join("main.wasm");
+    let result = ran(bundle.run(stand_ins.engines(), &out));
     for stand_in in [&stand_ins.wasmtime, &stand_ins.wasmer] {
         let calls = stand_in.calls();
         assert_eq!(calls.len(), 2, "calls: {calls:?}");
-        assert_eq!(calls[1], expected_run_args(&module), "not the entrypoint");
+        assert_eq!(
+            calls[1],
+            expected_run_args("main.wasm"),
+            "not the entrypoint"
+        );
     }
+    // Each engine printed the bytes it was given: the audited module's.
     assert_eq!(
-        fs::read(&module).expect("read the staged entrypoint"),
+        result.stdout,
         verified.entrypoint().content,
         "the engines did not get the audited bytes"
     );
+    assert_eq!(result.stdout, MODULE);
 }
 
 #[test]
 fn runner_stages_all_verified_entries() {
     let tmp = TempDir::new("run-stage");
-    let stand_ins = StandIns::agreeing(&tmp);
+    let stand_ins = StandIns::printing_the_module(&tmp);
     let bundle = signed(bundle_with(
         &tmp,
         "bundle",
@@ -644,15 +686,20 @@ fn runner_stages_all_verified_entries() {
     assert_eq!(bundle_identity(&staged).expect("named"), verified.cid());
     assert_eq!(result.cid, verified.cid());
 
-    // The engines run the staged copy, not the bundle's own file.
-    let module = staged.join("capsule.wasm");
+    // The engines run the staged copy, not the bundle's own file, which now
+    // holds other bytes.
     for stand_in in [&stand_ins.wasmtime, &stand_ins.wasmer] {
         assert_eq!(
             stand_in.calls()[1],
-            expected_run_args(&module),
+            expected_run_args("capsule.wasm"),
             "the engine did not get the staged module"
         );
     }
+    assert_eq!(fs::read(&source).expect("read the source"), OTHER_MODULE);
+    assert_eq!(
+        result.stdout, MODULE,
+        "the engines did not run the verified bytes"
+    );
 }
 
 #[test]
@@ -694,6 +741,191 @@ fn runner_refuses_staged_name_mismatch() {
     stand_ins.assert_none_started();
 }
 
+/// A folder OUT_DIR names relative to the test process's own folder, removed
+/// again when dropped. The tests never change that folder.
+struct RelativeOutDir(PathBuf);
+
+impl Drop for RelativeOutDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn an_option_like_out_dir_runs_the_verified_module() {
+    // A relative OUT_DIR that reads as an engine's environment option. No part
+    // of it may reach an engine's command line: each engine starts in the
+    // staged folder and gets `./capsule.wasm`.
+    let tmp = TempDir::new("run-option-out");
+    let stand_ins = StandIns::printing_the_module(&tmp);
+    let bundle = signed(fixture(&tmp));
+    let out = RelativeOutDir(PathBuf::from(format!(
+        "--env=WC5_REVIEW_PROBE={}",
+        std::process::id()
+    )));
+    assert!(out.0.is_relative());
+    assert!(!out.0.exists(), "{} is already there", out.0.display());
+
+    let result = ran(bundle.run(stand_ins.engines(), &out.0));
+    for stand_in in [&stand_ins.wasmtime, &stand_ins.wasmer] {
+        let calls = stand_in.calls();
+        assert_eq!(calls[1], expected_run_args("capsule.wasm"));
+        for arg in calls.iter().flatten() {
+            assert!(!arg.contains("WC5_REVIEW_PROBE"), "OUT_DIR reached {arg:?}");
+        }
+    }
+    // Each engine printed the bytes it ran: the verified module's.
+    assert_eq!(result.stdout, MODULE);
+    assert_eq!(result.receipt, out.0.join("receipt.txt"));
+}
+
+#[test]
+fn staging_never_writes_through_a_planted_link() {
+    let tmp = TempDir::new("run-planted-link");
+    let stand_ins = StandIns::agreeing(&tmp);
+    let bundle = signed(bundle_with(
+        &tmp,
+        "bundle",
+        CAPSULE_MANIFEST,
+        &[("capsule.wasm", MODULE), ("data/notes.txt", b"nested\n")],
+    ));
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).expect("create the folder outside OUT_DIR");
+
+    // A link to a folder outside OUT_DIR where the folder `data` goes.
+    let out = tmp.path().join("out-folder");
+    let refusal = refused(
+        bundle.run_observed(stand_ins.engines(), &out, |moment, staged| {
+            if moment == Moment::StagedFolderMade {
+                symlink(&elsewhere, staged.join("data")).expect("plant a folder link");
+            }
+        }),
+    );
+    assert_failure(
+        &refusal,
+        &out.join("staged").join("data"),
+        "a staged folder cannot be created",
+        ErrorKind::AlreadyExists,
+        |reason| matches!(reason, Reason::FolderNotStaged(_)),
+    );
+
+    // A link to a file outside OUT_DIR where the entry `capsule.json` goes.
+    let out = tmp.path().join("out-file");
+    let target = elsewhere.join("capsule.json");
+    let refusal = refused(
+        bundle.run_observed(stand_ins.engines(), &out, |moment, staged| {
+            if moment == Moment::StagedFolderMade {
+                symlink(&target, staged.join("capsule.json")).expect("plant a file link");
+            }
+        }),
+    );
+    assert_failure(
+        &refusal,
+        &out.join("staged").join("capsule.json"),
+        "a verified entry cannot be staged",
+        ErrorKind::AlreadyExists,
+        |reason| matches!(reason, Reason::EntryNotStaged(_)),
+    );
+
+    let written: Vec<_> = fs::read_dir(&elsewhere)
+        .expect("list the folder outside OUT_DIR")
+        .collect();
+    assert!(
+        written.is_empty(),
+        "staging wrote outside OUT_DIR: {written:?}"
+    );
+    stand_ins.assert_none_started();
+}
+
+/// The refusal for a staged module changed at `path` after it was sealed.
+fn assert_module_changed(refusal: &RunRefusal, path: &Path) {
+    assert!(
+        matches!(refusal.reason, Reason::StagedModuleChanged),
+        "not the changed-module reason: {refusal}"
+    );
+    assert_eq!(refusal.path, path);
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: the staged module or a folder on its path changed after it was sealed: no further engine started and no receipt written",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn runner_keeps_the_checked_bytes_through_both_runs() {
+    // After the staged copy is named, another process writes other bytes
+    // into the staged module while wasmtime answers --version.
+    let tmp = TempDir::new("run-substitute");
+    let bundle = signed(fixture(&tmp));
+    let out = tmp.path().join("out-version");
+    let module = out.join("staged").join("capsule.wasm");
+    let substitute = format!("printf 'substituted' > '{}'", module.display());
+    let stand_ins = StandIns::new(
+        &tmp,
+        Shim {
+            on_version: &substitute,
+            ..Shim::printing()
+        },
+        Shim::printing(),
+    );
+    let refusal = refused(bundle.run(stand_ins.engines(), &out));
+    assert_module_changed(&refusal, &module);
+    assert_eq!(fs::read(&module).expect("read"), b"substituted");
+    for stand_in in [&stand_ins.wasmtime, &stand_ins.wasmer] {
+        assert_eq!(stand_in.calls(), [vec!["--version".to_owned()]], "a run");
+    }
+    assert!(!out.join("receipt.txt").exists(), "a receipt");
+
+    // While wasmtime runs, another process swaps the module out and puts the
+    // same bytes back, so wasmer would read the checked bytes again.
+    let tmp = TempDir::new("run-swap-restore");
+    let swap = "mv \"$4\" ./held && printf 'x' > \"$4\" && rm \"$4\" && mv ./held \"$4\"";
+    let stand_ins = StandIns::new(
+        &tmp,
+        Shim {
+            on_run: swap,
+            ..Shim::printing()
+        },
+        Shim::printing(),
+    );
+    let out = tmp.path().join("out-run");
+    let refusal = refused(bundle.run(stand_ins.engines(), &out));
+    let staged = out.join("staged");
+    assert_module_changed(&refusal, &staged);
+    assert_eq!(fs::read(staged.join("capsule.wasm")).expect("read"), MODULE);
+    assert_eq!(stand_ins.wasmtime.calls().len(), 2, "wasmtime ran once");
+    assert_eq!(
+        stand_ins.wasmer.calls(),
+        [vec!["--version".to_owned()]],
+        "wasmer ran"
+    );
+    assert!(!out.join("receipt.txt").exists(), "a receipt");
+
+    // Before the module is sealed, another process puts its own file with the
+    // same bytes at the module's name. The name check passes, but the engines
+    // would read a file the runner did not write, which that process can
+    // change at any time.
+    let tmp = TempDir::new("run-replaced-entry");
+    let stand_ins = StandIns::printing_the_module(&tmp);
+    let out = tmp.path().join("out-entry");
+    let refusal = refused(
+        bundle.run_observed(stand_ins.engines(), &out, |moment, staged| {
+            if moment == Moment::EntriesStaged {
+                let theirs = staged.join("theirs");
+                fs::write(&theirs, MODULE).expect("write a look-alike");
+                fs::rename(&theirs, staged.join("capsule.wasm")).expect("replace the module");
+            }
+        }),
+    );
+    assert_module_changed(&refusal, &out.join("staged").join("capsule.wasm"));
+    for stand_in in [&stand_ins.wasmtime, &stand_ins.wasmer] {
+        assert_eq!(stand_in.calls(), [vec!["--version".to_owned()]], "a run");
+    }
+    assert!(!out.join("receipt.txt").exists(), "a receipt");
+}
+
 #[test]
 fn receipt_records_observed_engine_versions() {
     let tmp = TempDir::new("run-versions");
@@ -729,6 +961,7 @@ fn receipt_records_observed_engine_versions() {
 fn cause(reason: &Reason) -> &std::io::Error {
     match reason {
         Reason::OutDirNotCreated(cause)
+        | Reason::OutDirNotOpened(cause)
         | Reason::FolderNotStaged(cause)
         | Reason::EntryNotStaged(cause)
         | Reason::ReceiptNotWritten(cause)
@@ -785,6 +1018,29 @@ fn runner_operation_failures_keep_their_cause() {
         ErrorKind::NotFound,
         |reason| matches!(reason, Reason::OutDirNotCreated(_)),
     );
+
+    // OUT_DIR is replaced by a link to another folder once it is made. A
+    // link opened as a folder without following it is "not a directory" on
+    // this Mac.
+    let elsewhere = out("elsewhere");
+    fs::create_dir(&elsewhere).expect("create a folder");
+    let replaced = out("replaced");
+    let refusal = refused(
+        bundle.run_observed(agreeing.engines(), &replaced, |moment, path| {
+            if moment == Moment::OutDirMade {
+                fs::remove_dir(path).expect("remove OUT_DIR");
+                symlink(&elsewhere, path).expect("link OUT_DIR elsewhere");
+            }
+        }),
+    );
+    assert_failure(
+        &refusal,
+        &replaced,
+        "the OUT_DIR the runner made cannot be opened as a folder without following a link",
+        ErrorKind::NotADirectory,
+        |reason| matches!(reason, Reason::OutDirNotOpened(_)),
+    );
+    assert_eq!(fs::read_dir(&elsewhere).expect("list").count(), 0);
 
     let plant = |name: &'static str| {
         move |moment: Moment, staged: &Path| {
