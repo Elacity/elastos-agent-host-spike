@@ -8,7 +8,7 @@ The grant names the root `UsersAI/<identity>/<session>/<instance>`. Those fields
 
 A path into another agent's root is refused with a reason. The refused paths are the other agent's host path, a `..` path, a symlink that leaves the root, and the shared temp directory `/tmp/elastos/storage`. Cleanup removes the yard. Drop removes it too. When removal fails, the yard is sealed so it cannot be read.
 
-This crate does not change the Runtime. AC-006-STORAGE stays open until the launcher derives storage from the selected Home.
+This crate does not change the Runtime. `elastos run` still calls `create_runtime("/tmp/elastos/storage")` and has no per-instance argument. The real-Runtime rows stay BLOCKED. `PROPOSED-LAUNCHER-CHANGE.md` is the exact change: use `crate::default_data_dir().join("storage")` at the three call sites in `run_cmd.rs`. No component is started from here. `elastos serve --storage-path` is a different command, and object reads do not use the provider that flag selects.
 
 ## Checks
 

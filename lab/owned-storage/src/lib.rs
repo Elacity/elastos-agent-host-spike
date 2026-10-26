@@ -15,13 +15,16 @@
 //! handle. It keeps the root that binding named and refuses every path that
 //! leaves it.
 //!
-//! Lab stand-in, not the Runtime. AC-006-STORAGE stays open until the
-//! launcher derives storage from the selected Home.
+//! Lab stand-in, not the Runtime. `elastos run` still has no per-instance
+//! root. The real-Runtime rows stay BLOCKED. The exact change is in
+//! `PROPOSED-LAUNCHER-CHANGE.md`.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub mod launch;
 
 #[cfg(test)]
 mod plant;
