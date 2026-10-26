@@ -1047,3 +1047,66 @@ fn instance_receipt_requires_both_launches_and_scope() {
         }
     }
 }
+
+#[test]
+fn a5_rows_have_session_binding_label() {
+    let listed = "\
+grant_refused_from_another_session: test
+grant_refused_from_a_new_session: test
+grant_record_names_agent_identity: test
+";
+    let output = "\
+test grant_refused_from_another_session ... ok
+test grant_refused_from_a_new_session ... ok
+test grant_record_names_agent_identity ... ignored, blocked: AC-038-GRANT-PRINCIPAL
+";
+    let gaps = "| `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPAL | The Runtime binds each minted token to the principal and session it verified. |\n";
+    let (text, passed) = table(listed, output, true, Some(gaps));
+    assert!(passed, "{text}");
+    let label = "session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit";
+    for name in [
+        "grant_refused_from_another_session",
+        "grant_refused_from_a_new_session",
+    ] {
+        assert!(
+            text.contains(&format!("{name} | PASS | {label}\n")),
+            "missing session-binding label for {name}: {text}"
+        );
+    }
+    assert!(text.contains("grant_record_names_agent_identity | BLOCKED (AC-038-GRANT-PRINCIPAL)\n"));
+}
+
+#[test]
+fn session_binding_rows_need_no_launched_probe() {
+    use agent_conformance::report::render_run;
+    let (observations, git) = synthetic(9, false);
+    let natives: Vec<_> = observations
+        .into_iter()
+        .filter(|observation| matches!(observation, Observation::Native { .. }))
+        .collect();
+    assert_eq!(natives.len(), 2);
+    let mut output = String::new();
+    for name in [
+        "grant_refused_from_another_session",
+        "grant_refused_from_a_new_session",
+    ] {
+        output.push_str(&format!("test {name} ... ok\n"));
+    }
+    for observation in &natives {
+        output.push_str(&observation.line());
+        output.push('\n');
+    }
+    let report = render_run(
+        "grant_refused_from_another_session: test\ngrant_refused_from_a_new_session: test\n",
+        &output,
+        true,
+        Ok(git),
+        Some(""),
+    );
+    assert!(
+        report.failures.is_empty(),
+        "a session-binding row launches no probe: {:?}",
+        report.failures
+    );
+    assert!(report.passed, "{}", report.table);
+}

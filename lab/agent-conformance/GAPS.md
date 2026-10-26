@@ -900,3 +900,21 @@ retry check. The original orphan is matched in full and excluded only until
 its measured settlement. The two-second quiet window and existing root census
 supply bounded observation evidence, rather than a permanent retry guarantee.
 AC-021-GRANTS, AC-006-STORAGE and RT4 retain their separate scopes.
+
+## AC-038-GRANT-PRINCIPAL — the grant record names the session
+
+`grant_record_names_agent_identity` is
+`#[ignore = "blocked: AC-038-GRANT-PRINCIPAL"]`. A lab client session on the
+run client's route reads a seeded Public file after the shell grants that
+request with duration `session`. A second client session that presents the
+same token receives the Runtime's `Capability denied: wrong capsule` reason.
+That refusal binds the token to the requesting session. The Runtime's own
+`capability_grant` audit record stores that session in `capsule_id` and has
+no verified agent principal. `elastos/crates/elastos-server/src/api/handlers/capability.rs:339-346`
+mints the token with the requesting session. `elastos/crates/elastos-runtime/src/capability/manager.rs:408-415`
+refuses a different caller. Anders owns the change. A permitted Public read
+earns no A5 credit. Owned storage is a separate gap.
+
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPAL | Anders: the Runtime binds each minted token to the principal and session it verified (https://github.com/Elacity/elastos-runtime/issues/464). `capability.rs` grant_request mints with the requesting session at lines 339-346, and `manager.rs` validate_recurring checks that session at lines 408-415. |

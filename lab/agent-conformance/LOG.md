@@ -5716,3 +5716,69 @@ The current branch is zero commits ahead and 11 commits behind the cached
 this worktree's HEAD remains the tested base `04f1e93b4789d3f86474abe77d89aeadf12e35a0`.
 The builder made zero fetches or Git-state changes under the network rule.
 The supervisor owns current-base integration, review and publication.
+
+## 038 — a grant is refused from another session or a new session
+
+Lab client sessions on the run client's attach and provider routes. Rows (a) and (b) pass on the Runtime's wrong-capsule refusal. Row (d) stays `BLOCKED (AC-038-GRANT-PRINCIPAL)`. A permitted Public read is the positive control and earns no A5 credit. `Cargo.toml` SHA-256 `eb01b46e12a462a21fc2f8e5cb9cbf4de4ae2faf166828c55bf6dab30bc131cc` and `Cargo.lock` SHA-256 `0142356a31cb18c2564341ba687192c16eb37c4a7ff810c75c379c15052d42c6` are unchanged. No `falsifiers.json` edit.
+
+### Ignored journey
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_record_names_agent_identity --ignored --exact --nocapture` was run twice. The first exited 101 in 17.16s on the known cleanup-census flake, with the source left unchanged:
+
+```text
+cleanup census refused leftovers; see checked reason: "cleanup census: FAIL retained:target/home-32394-1793035424550708000-0; process leftover; processes:2 paths:[\"home/Library/Application Support/elastos/identity/device.key\", \"home/Library/Application Support/elastos/tls.key\"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
+```
+
+The rerun exited 101 in 11.52s on the principal assertion. The 403 expected id and the audit `capsule_id` are both A's session id:
+
+```text
+thread 'grant_record_names_agent_identity' panicked at tests/effects.rs:975:5:
+grant record names only the requesting session; 403 expected ID equals A's session ID: true; audit capsule_id equals A's session ID: true
+```
+
+### Hand-run falsifiers
+
+Each code falsifier passed unmutated, failed once planted, and passed after the original bytes were restored. Planted assertions:
+
+| Id | Planted bytes | Caught by | Assertion |
+| --- | --- | --- | --- |
+| F-credential-bearer | `remember_client_bearer` returns `Ok(2)` and does not call `remember` | `client_session_credentials_are_guarded` | `assertion left == right failed: client bearer must be registered before it can be printed` left `Ok(())` right `Err("fixture credential detected: printed journey")` |
+| F-credential-capability | `remember_capability` returns `Ok(3)` and does not call `remember` | same test | `capability token must be registered before it can be printed` left `Ok(())` right `Err("fixture credential detected: printed journey")` |
+| F-parser-bypass | a 403 returns before the framed length and encoding checks | `controller_refuses_failed_attach_and_http_responses` | `plain-text 403 keeps the framed length check` left `Ok(FixtureResponse { status: 403, text: "{}", json: None })` right `Err("fixture response length mismatch")` |
+| F-expected-id | `if false && expected != expected_session` | `wrong_capsule_refusal_requires_expected_session` only; got and text stayed ok | `expected id mismatch keeps its own reason` |
+| F-got-id | `if false && got != got_session` | `wrong_capsule_refusal_requires_got_session` only | `got id mismatch keeps its own reason` |
+| F-refusal-text | `strip_prefix(...).unwrap_or("session-a, got session-b")` | `wrong_capsule_refusal_requires_runtime_text` only | `refusal text mismatch keeps its own reason` left `Ok(("session-a", "session-b"))` right `Err("grant refusal text is not the Runtime wrong-capsule reason")` |
+| F-principal | `grant_names_verified_agent` returns `Ok(())` | `grant_record_requires_a_verified_principal` | left `Ok(())` right `Err("grant record names only the requesting session")` |
+| F-label | the session-binding `push_str` in `table` is removed | `a5_rows_have_session_binding_label` | `missing session-binding label for grant_refused_from_another_session` |
+| F-no-launch | an empty launch set fails every report | `session_binding_rows_need_no_launched_probe` | `a session-binding row launches no probe: ["missing launched probe identity"]` |
+| F-a5-other-session | `SessionBinding::OtherSession => &owner` | `grant_refused_from_another_session` | `another session cannot present the grant: "presenting session was not refused"` |
+| F-a5-new-session | `SessionBinding::NewSession => &owner` | `grant_refused_from_a_new_session` | `a new session cannot present the grant: "presenting session was not refused"` |
+
+F-a5-gap-row changes only the new `GAPS.md` ID cell from `AC-038-GRANT-PRINCIPAL` to `AC-038-GRANT-PRINCIPALX`. The ignored libtest stays ignored, so the catch is the report. `./run.sh` three times from the repo root:
+
+| Step | Exit | Seconds | Row |
+| --- | --- | --- | --- |
+| Unmutated | 0 | 268.025 | `grant_record_names_agent_identity \| BLOCKED (AC-038-GRANT-PRINCIPAL)` |
+| Planted | 1 | 242.704 | `grant_record_names_agent_identity \| FAIL \| GAPS.md: grant_record_names_agent_identity: missing blocker IDs: [AC-038-GRANT-PRINCIPAL]; extra blocker IDs: [AC-038-GRANT-PRINCIPALX]` |
+| Restored | 0 | 261.683 | `grant_record_names_agent_identity \| BLOCKED (AC-038-GRANT-PRINCIPAL)` |
+
+The planted stderr also printed `versions receipt failure:` with that same missing/extra ID text. Rows (a) and (b) stayed PASS on all three runs. The restored table has no FAIL row. The ID cell is restored.
+
+### Gates
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0 in 0.110 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0` exited 0 in 271.575 seconds: 93 passed, 0 failed, 12 ignored. Both are inside 600 seconds. The lane target env was `CARGO_TARGET_DIR=lab/agent-conformance/target/host` and `CARGO_BUILD_BUILD_DIR=lab/agent-conformance/target/host-build`, with `CARGO_NET_OFFLINE=true`.
+
+The restored `./run.sh` above is the acceptance run: exit 0, rows (a) and (b) PASS with the session-binding label, row (d) `BLOCKED (AC-038-GRANT-PRINCIPAL)`, and no FAIL row.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Named by hash? | No | `tests/effects.rs:831` records the Runtime SHA-256; `tests/common/grants.rs:441` uses the existing fixture resource path. |
+| 2. Ambient authority? | No | `tests/common/grants.rs:975` accepts a cross-session presentation only as the Runtime refusal. |
+| 3. One path? | No | `tests/common/grants.rs:1520` is the one attach; `tests/common/grants.rs:1651` is the one HTTP helper; `tests/common/grants.rs:864` is the one credential push. |
+| 4. Trusted core grows? | No | The diff stays under `lab/agent-conformance/`. |
+| 5. Fail closed? | Yes | `tests/common/grants.rs:1597` and `:1600` each return their own refusal reason. |
+| 6. Self-contained? | Yes | `tests/common/grants.rs:998` calls `/api/provider/localhost/read` with the granted token. |
+| 7. Tests and falsifiers? | Yes | `tests/effects.rs:951` fails under F-a5-other-session; `tests/report.rs:1052` fails under F-label. |
+| 8. Separate decisions? | Yes | `tests/effects.rs:869` keeps the Public read off the A5 credit; `tests/effects.rs:965` keeps the principal check blocked. |

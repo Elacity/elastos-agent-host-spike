@@ -241,6 +241,12 @@ impl Evidence {
             if name == "killed_worker_settlement_recorded_without_retry" {
                 text.push_str(" | kill-worker settlement, lab half of A11 (A12 census); orphan settled by the fixture (AC-027-ORPHAN)");
             }
+            if matches!(
+                name.as_str(),
+                "grant_refused_from_another_session" | "grant_refused_from_a_new_session"
+            ) {
+                text.push_str(" | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit");
+            }
             text.push('\n');
         }
         (text, passed)
@@ -268,9 +274,10 @@ impl Evidence {
             self.failures
                 .push("missing localhost-provider SHA-256".into());
         }
-        if self.identities.launched.is_empty() {
-            self.failures.push("missing launched probe identity".into());
-        }
+        // A row that launches no probe has an empty required-effect list, so
+        // it does not demand a launched identity. A row that names effects
+        // still fails closed when that launch is missing.
+        let mut needs_launch = false;
         for (name, values) in &self.rows {
             // These are identity requirements of existing journeys, not a test
             // inventory or grader. Cargo still supplies both of those. Failed
@@ -279,12 +286,20 @@ impl Evidence {
             if result.starts_with("BLOCKED") || result.starts_with("SKIPPED") {
                 continue;
             }
-            for effect in required_effects(name) {
+            let effects = required_effects(name);
+            if effects.is_empty() {
+                continue;
+            }
+            needs_launch = true;
+            for effect in effects {
                 if !self.identities.launched.contains_key(*effect) {
                     self.failures
                         .push(format!("missing launched probe identity: {effect}"));
                 }
             }
+        }
+        if needs_launch && self.identities.launched.is_empty() {
+            self.failures.push("missing launched probe identity".into());
         }
     }
 }

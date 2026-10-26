@@ -405,6 +405,42 @@ pub struct Controller {
     requests: Vec<Value>,
 }
 
+/// One attached client session on the run client's attach route.
+/// The index selects the bearer already stored in the controller credentials.
+pub struct ClientSession {
+    bearer_index: usize,
+    session_id: String,
+}
+
+impl ClientSession {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+/// A session-duration grant. The session id is the one from the pending list.
+pub struct SessionGrant {
+    session_id: String,
+    capability: usize,
+}
+
+impl SessionGrant {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+/// The Runtime `capability_grant` audit record for one resource.
+pub struct AgentRecord {
+    pub session_id: String,
+    pub capsule_id: String,
+    pub principal: Option<String>,
+    pub refusal_expected: String,
+}
+
+pub const GRANTED_READ_RESOURCE: &str = "localhost://Public/agent-conformance-grants/granted.txt";
+pub const SIBLING_READ_RESOURCE: &str = "localhost://Public/agent-conformance-grants/sibling.txt";
+
 impl Controller {
     pub fn attach(home: &ThrowawayHome, port: u16, fixture: Fixture) -> Result<Self> {
         home.guard(home.home(), home.data())?;
@@ -416,7 +452,8 @@ impl Controller {
         }
         let bytes = fs::read(path).map_err(|_| "could not read fixture coordinates")?;
         let secret = attach_secret(&bytes)?;
-        let token = shell_attach(port, &secret)?;
+        let attached = shell_attach(port, &secret, "shell")?;
+        let token = field(&attached, "token")?.to_owned();
         Ok(Self {
             port,
             credentials: vec![secret, token],
@@ -430,17 +467,24 @@ impl Controller {
     }
 
     fn call(&self, method: &str, path: &str, body: &Value) -> Result<Value> {
-        http(self.port, method, path, Some(&self.credentials[1]), body)
+        require_json(http(
+            self.port,
+            method,
+            path,
+            Some(&self.credentials[1]),
+            None,
+            body,
+        )?)
     }
 
     /// Seed through the production Runtime provider route. Runtime owns the
     /// stored representation; the guest later reads it using its own grant.
     pub fn seed_read_files(&self) -> Result<()> {
-        let mut files: Vec<_> = ["granted.txt", "sibling.txt"]
+        let mut files: Vec<_> = [GRANTED_READ_RESOURCE, SIBLING_READ_RESOURCE]
             .iter()
-            .map(|name| {
+            .map(|resource| {
                 (
-                    format!("localhost://Public/agent-conformance-grants/{name}"),
+                    (*resource).to_owned(),
                     include_bytes!("../../fixtures/granted-bytes.txt").to_vec(),
                 )
             })
@@ -797,6 +841,234 @@ impl Controller {
         Ok(response)
     }
 
+    /// Attach one client session with the secret this controller already holds.
+    pub fn client_session(&mut self) -> Result<ClientSession> {
+        let secret = self
+            .credentials
+            .first()
+            .ok_or("fixture client attach failed")?
+            .clone();
+        let attached = shell_attach(self.port, &secret, "client")?;
+        let bearer_index = self.remember_client_bearer(&attached)?;
+        let info = self.exchange(bearer_index, "GET", "/api/session", None, &Value::Null)?;
+        let info = require_json(info)?;
+        if field(&info, "session_type")? != "capsule" {
+            return Err("fixture client attach returned the wrong session type");
+        }
+        Ok(ClientSession {
+            bearer_index,
+            session_id: field(&info, "session_id")?.to_owned(),
+        })
+    }
+
+    fn remember(&mut self, token: &str) -> Result<usize> {
+        if !header_token(token) {
+            return Err("invalid fixture authorization header");
+        }
+        self.credentials.push(token.to_owned());
+        Ok(self.credentials.len() - 1)
+    }
+
+    fn remember_client_bearer(&mut self, response: &Value) -> Result<usize> {
+        if field(response, "session_type")? != "capsule" {
+            return Err("fixture client attach returned the wrong session type");
+        }
+        self.remember(field(response, "token")?)
+    }
+
+    fn remember_capability(&mut self, response: &Value) -> Result<usize> {
+        if field(response, "status")? != "granted" {
+            return Err("fixture client grant is not granted");
+        }
+        self.remember(field(response, "token")?)
+    }
+
+    /// Request, grant for this session only, and take the token the client reads.
+    pub fn open_session_read(
+        &mut self,
+        session: &ClientSession,
+        resource: &str,
+        reason: &str,
+    ) -> Result<SessionGrant> {
+        let response = self.exchange(
+            session.bearer_index,
+            "POST",
+            "/api/capability/request",
+            None,
+            &json!({
+                "resource": resource,
+                "action": "read",
+                "reason": reason
+            }),
+        )?;
+        let response = require_json(response)?;
+        if response["status"] != "pending" {
+            return Err("client read request was not pending");
+        }
+        let request_id = field(&response, "request_id")?;
+        if !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("fixture request id is not a single path segment");
+        }
+        let pending_session = self.pending_session(request_id)?;
+        if pending_session != session.session_id {
+            return Err("pending session is not the attached client session");
+        }
+        let granted = self.call(
+            "POST",
+            "/api/capability/grant",
+            &json!({
+                "request_id": request_id,
+                "duration": "session",
+                "rationale": "isolated conformance fixture"
+            }),
+        )?;
+        require_success(&granted)?;
+        field(&granted, "token")?;
+        let status = self.exchange(
+            session.bearer_index,
+            "GET",
+            &format!("/api/capability/request/{request_id}"),
+            None,
+            &Value::Null,
+        )?;
+        let status = require_json(status)?;
+        let capability = self.remember_capability(&status)?;
+        Ok(SessionGrant {
+            session_id: pending_session,
+            capability,
+        })
+    }
+
+    fn pending_session(&self, request_id: &str) -> Result<String> {
+        let response = self.pending()?;
+        let requests = response["requests"].as_array().unwrap();
+        let request = requests
+            .iter()
+            .find(|request| request["request_id"] == request_id)
+            .ok_or("pending request is missing")?;
+        Ok(field(request, "session_id")?.to_owned())
+    }
+
+    pub fn read_seeded(
+        &self,
+        session: &ClientSession,
+        resource: &str,
+        grant: &SessionGrant,
+    ) -> Result<()> {
+        match self.provider_read(session, resource, grant.capability)? {
+            ProviderReply::Granted(body) => require_seeded_bytes(&body),
+            ProviderReply::Refused { .. } => Err("granted read was refused"),
+        }
+    }
+
+    pub fn note_seeded_read(&self, resource: &str, detail: &str) -> Result<()> {
+        let bytes = seeded_bytes()?.len();
+        self.print_checked(&format!(
+            "session grant: read {resource} status:ok bytes:{bytes}; {detail}"
+        ))
+    }
+
+    /// Present a grant through the provider route. A refusal returns its text.
+    pub fn present_grant(
+        &self,
+        session: &ClientSession,
+        resource: &str,
+        grant: &SessionGrant,
+    ) -> Result<String> {
+        match self.provider_read(session, resource, grant.capability)? {
+            ProviderReply::Refused { status: 403, text } => Ok(text),
+            ProviderReply::Refused { .. } | ProviderReply::Granted(_) => {
+                Err("presenting session was not refused")
+            }
+        }
+    }
+
+    fn provider_read(
+        &self,
+        session: &ClientSession,
+        resource: &str,
+        capability: usize,
+    ) -> Result<ProviderReply> {
+        let response = self.exchange(
+            session.bearer_index,
+            "POST",
+            "/api/provider/localhost/read",
+            Some(capability),
+            &json!({ "path": resource, "encoding": "utf8" }),
+        )?;
+        match response.status {
+            200 => Ok(ProviderReply::Granted(require_json(response)?)),
+            403 => Ok(ProviderReply::Refused {
+                status: 403,
+                text: response.text,
+            }),
+            _ => Err("fixture HTTP request was refused"),
+        }
+    }
+
+    /// The shell audit record of the minted grant. It is not the 403 text.
+    pub fn grant_record(&self, resource: &str) -> Result<(String, Option<String>)> {
+        let response = self.call(
+            "GET",
+            "/api/audit?type=capability_grant&limit=100",
+            &Value::Null,
+        )?;
+        let events = response["events"]
+            .as_array()
+            .ok_or("audit response requires an event list")?;
+        let mut found = None;
+        for event in events {
+            if event["type"] != "capability_grant" || event["resource"] != resource {
+                continue;
+            }
+            if found.is_some() {
+                return Err("audit grant record is not unique");
+            }
+            found = Some(event);
+        }
+        let event = found.ok_or("audit grant record is missing")?;
+        let principal = event
+            .get("principal")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+        Ok((field(event, "capsule_id")?.to_owned(), principal))
+    }
+
+    fn exchange(
+        &self,
+        bearer_index: usize,
+        method: &str,
+        path: &str,
+        capability: Option<usize>,
+        body: &Value,
+    ) -> Result<FixtureResponse> {
+        let bearer = self
+            .credentials
+            .get(bearer_index)
+            .ok_or("fixture client session is missing")?;
+        let capability = match capability {
+            Some(index) => Some(
+                self.credentials
+                    .get(index)
+                    .ok_or("fixture capability token is missing")?
+                    .as_str(),
+            ),
+            None => None,
+        };
+        http(
+            self.port,
+            method,
+            path,
+            Some(bearer.as_str()),
+            capability,
+            body,
+        )
+    }
+
     /// Exercise the caller's actual census wiring with one shell-owned pending
     /// control. Deny that control, then take the final empty-pending census.
     pub fn check_cleanup_wiring(
@@ -905,6 +1177,17 @@ impl Controller {
                 .any(|line| line.starts_with("absent-policy settlement:"))
         {
             return Err("required orphan settlement evidence is missing");
+        }
+        if matches!(
+            name,
+            "grant_refused_from_another_session"
+                | "grant_refused_from_a_new_session"
+                | "grant_record_names_agent_identity"
+        ) && !["session grant:", "session grant refusal:"]
+            .iter()
+            .all(|prefix| printed.lines().any(|line| line.starts_with(prefix)))
+        {
+            return Err("required session-grant evidence is missing");
         }
         self.check_inventory(
             &report_inventory(name, observations, &printed, passed)?,
@@ -1234,20 +1517,22 @@ fn attach_secret(bytes: &[u8]) -> Result<String> {
         .map_err(|_| "fixture coordinates require attach_secret")
 }
 
-fn shell_attach(port: u16, secret: &str) -> Result<String> {
+fn shell_attach(port: u16, secret: &str, scope: &str) -> Result<Value> {
     let response = http(
         port,
         "POST",
         "/api/auth/attach",
         None,
-        &json!({"secret": secret, "scope": "shell"}),
+        None,
+        &json!({"secret": secret, "scope": scope}),
     )
     .map_err(|_| "fixture shell attach failed")?;
+    let response = require_json(response).map_err(|_| "fixture shell attach failed")?;
     let token = field(&response, "token").map_err(|_| "fixture shell attach returned no token")?;
     if !header_token(token) {
         return Err("fixture shell attach returned an invalid token");
     }
-    Ok(token.to_owned())
+    Ok(response)
 }
 
 fn require_success(value: &Value) -> Result<()> {
@@ -1261,9 +1546,116 @@ fn header_token(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+#[derive(Debug, PartialEq)]
+struct FixtureResponse {
+    status: u16,
+    text: String,
+    json: Option<Value>,
+}
+
+enum ProviderReply {
+    Granted(Value),
+    Refused { status: u16, text: String },
+}
+
+fn require_json(response: FixtureResponse) -> Result<Value> {
+    if response.status != 200 {
+        return Err("fixture HTTP request was refused");
+    }
+    response.json.ok_or("invalid fixture response JSON")
+}
+
+fn seeded_bytes() -> Result<&'static str> {
+    std::str::from_utf8(include_bytes!("../../fixtures/granted-bytes.txt"))
+        .map_err(|_| "seeded file is not UTF-8")
+}
+
+fn require_seeded_bytes(body: &Value) -> Result<()> {
+    if body["status"] != "ok" {
+        return Err("granted read did not succeed");
+    }
+    let content = body["data"]["content"]
+        .as_str()
+        .ok_or("granted read returned no text")?;
+    let size = body["data"]["size"]
+        .as_u64()
+        .ok_or("granted read returned no size")?;
+    let seeded = seeded_bytes()?;
+    if content != seeded || size != seeded.len() as u64 {
+        return Err("granted read bytes differ from the seeded file");
+    }
+    Ok(())
+}
+
+/// The Runtime's wrong-capsule refusal. Each mismatch keeps its own reason.
+pub fn check_wrong_capsule<'a>(
+    text: &'a str,
+    expected_session: &str,
+    got_session: &str,
+) -> Result<(&'a str, &'a str)> {
+    let (expected, got) = parse_wrong_capsule(text)?;
+    if expected != expected_session {
+        return Err("grant refusal expected session is not the granting session");
+    }
+    if got != got_session {
+        return Err("grant refusal got session is not the presenting session");
+    }
+    Ok((expected, got))
+}
+
+fn parse_wrong_capsule(text: &str) -> Result<(&str, &str)> {
+    let rest = text
+        .trim()
+        .strip_prefix("Capability denied: wrong capsule: expected ")
+        .ok_or("grant refusal text is not the Runtime wrong-capsule reason")?;
+    let (expected, got) = rest
+        .split_once(", got ")
+        .ok_or("grant refusal text is not the Runtime wrong-capsule reason")?;
+    if expected.is_empty()
+        || got.is_empty()
+        || expected.chars().any(char::is_whitespace)
+        || got.chars().any(char::is_whitespace)
+    {
+        return Err("grant refusal text is not the Runtime wrong-capsule reason");
+    }
+    Ok((expected, got))
+}
+
+pub fn redact_refusal(text: &str, expected: &str, got: &str, got_label: &str) -> Result<String> {
+    let (parsed_expected, parsed_got) = parse_wrong_capsule(text)?;
+    if parsed_expected != expected || parsed_got != got {
+        return Err("redaction requires the checked session ids");
+    }
+    if !matches!(got_label, "<session-B>" | "<session-A2>") {
+        return Err("redaction label must hide the session id");
+    }
+    Ok(format!(
+        "session grant refusal: Capability denied: wrong capsule: expected <session-A>, got {got_label}"
+    ))
+}
+
+/// A verified agent principal on the grant record, distinct from the session.
+pub fn grant_names_verified_agent(
+    _capsule_id: &str,
+    principal: Option<&str>,
+    session_id: &str,
+) -> Result<()> {
+    match principal {
+        Some(principal) if !principal.is_empty() && principal != session_id => Ok(()),
+        _ => Err("grant record names only the requesting session"),
+    }
+}
+
 /// Only a port is accepted; neither coordinates nor HTTP responses can select
 /// a host or redirect. Bounded HTTP/1.1 with Content-Length is what Axum serves.
-fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &Value) -> Result<Value> {
+fn http(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    capability: Option<&str>,
+    body: &Value,
+) -> Result<FixtureResponse> {
     let bound = Duration::from_secs(2);
     let started = Instant::now();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -1283,6 +1675,12 @@ fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &Value) 
             return Err("invalid fixture authorization header");
         }
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    if let Some(capability) = capability {
+        if !header_token(capability) {
+            return Err("invalid fixture authorization header");
+        }
+        head.push_str(&format!("X-Capability-Token: {capability}\r\n"));
     }
     head.push_str("\r\n");
     stream
@@ -1313,7 +1711,7 @@ fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &Value) 
     response_json(&bytes)
 }
 
-fn response_json(bytes: &[u8]) -> Result<Value> {
+fn response_json(bytes: &[u8]) -> Result<FixtureResponse> {
     let split = bytes
         .windows(4)
         .position(|b| b == b"\r\n\r\n")
@@ -1321,10 +1719,18 @@ fn response_json(bytes: &[u8]) -> Result<Value> {
     let head =
         std::str::from_utf8(&bytes[..split]).map_err(|_| "invalid fixture response headers")?;
     let mut lines = head.split("\r\n");
-    if !lines
+    let status_line = lines.next().ok_or("fixture response lacks HTTP headers")?;
+    let mut parts = status_line.split(' ');
+    if parts.next() != Some("HTTP/1.1") {
+        return Err("fixture HTTP request was refused");
+    }
+    let status = parts
         .next()
-        .is_some_and(|line| line.starts_with("HTTP/1.1 200 "))
-    {
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or("fixture HTTP request was refused")?;
+    // A refusal other than the plain-text capability 403 keeps the old reason
+    // before framing, so a redirect cannot be read as a body.
+    if status != 200 && status != 403 {
         return Err("fixture HTTP request was refused");
     }
     let mut length = None;
@@ -1351,7 +1757,22 @@ fn response_json(bytes: &[u8]) -> Result<Value> {
     if length != Some(body.len()) {
         return Err("fixture response length mismatch");
     }
-    serde_json::from_slice(body).map_err(|_| "invalid fixture response JSON")
+    let text = std::str::from_utf8(body)
+        .map_err(|_| "invalid fixture response text")?
+        .to_owned();
+    if status == 403 {
+        return Ok(FixtureResponse {
+            status,
+            text,
+            json: None,
+        });
+    }
+    let json = serde_json::from_slice(body).map_err(|_| "invalid fixture response JSON")?;
+    Ok(FixtureResponse {
+        status,
+        text,
+        json: Some(json),
+    })
 }
 
 #[cfg(test)]
@@ -1622,21 +2043,186 @@ mod tests {
         // Port zero cannot be an API listener. Only a synthetic in-memory value
         // is supplied, and the refusal never includes the response or credential.
         assert!(matches!(
-            shell_attach(0, "fixture-canary"),
+            shell_attach(0, "fixture-canary", "shell"),
             Err("fixture shell attach failed")
         ));
-        assert!(response_json(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").is_ok());
-        for bytes in [
-            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
-            b"HTTP/1.1 302 Found\r\nLocation: https://example.invalid\r\n\r\n",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
-        ] {
-            assert!(response_json(bytes).is_err());
-        }
+        let ok = response_json(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+        assert_eq!(ok.status, 200);
+        assert_eq!(ok.json, Some(json!({})));
+        let denied = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 51\r\n\r\nCapability denied: wrong capsule: expected a, got b";
+        let denied = response_json(denied).expect("plain-text 403 is a refusal, not a parse error");
+        assert_eq!(denied.status, 403);
+        assert_eq!(
+            denied.text,
+            "Capability denied: wrong capsule: expected a, got b"
+        );
+        assert!(denied.json.is_none(), "plain-text 403 is not a JSON body");
+        let looking = response_json(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\n\r\n{}")
+            .expect("a JSON-looking 403 stays a refusal");
+        assert_eq!(looking.status, 403, "a JSON-looking 403 stays a refusal");
+        assert!(
+            looking.json.is_none(),
+            "a JSON-looking 403 is not parsed as success"
+        );
+        assert_eq!(
+            response_json(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 1\r\n\r\n{}"),
+            Err("fixture response length mismatch"),
+            "plain-text 403 keeps the framed length check"
+        );
+        assert_eq!(
+            response_json(
+                b"HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"
+            ),
+            Err("unsupported fixture response encoding"),
+            "plain-text 403 keeps the framed encoding check"
+        );
+        assert_eq!(
+            response_json(b"HTTP/1.1 302 Found\r\nLocation: https://example.invalid\r\n\r\n"),
+            Err("fixture HTTP request was refused"),
+            "a redirect is a refusal"
+        );
+        assert_eq!(
+            response_json(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}"),
+            Err("fixture response length mismatch"),
+            "a short body keeps the length check"
+        );
+        assert_eq!(
+            response_json(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}"),
+            Err("repeated fixture response length"),
+            "a repeated length keeps its own reason"
+        );
+        assert_eq!(
+            response_json(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"),
+            Err("unsupported fixture response encoding"),
+            "chunked encoding keeps its own reason"
+        );
+        assert_eq!(
+            response_json(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"),
+            Err("invalid fixture response JSON"),
+            "a success body must be JSON"
+        );
         assert!(require_success(&json!({"success":false})).is_err());
         assert!(require_success(&json!({})).is_err());
+    }
+
+    #[test]
+    fn client_session_credentials_are_guarded() {
+        let mut controller = Controller {
+            port: 1,
+            printed: RefCell::default(),
+            credentials: vec!["attach-secret".into(), "shell-bearer".into()],
+            fixture: fixture(),
+            used: BTreeSet::new(),
+            decisions: Decisions::default(),
+            overlap: None,
+            requests: Vec::new(),
+        };
+        assert_eq!(
+            controller.remember_client_bearer(
+                &json!({"token": "client-bearer-canary", "session_type": "shell"})
+            ),
+            Err("fixture client attach returned the wrong session type"),
+            "a shell attach is not a client session"
+        );
+        let bearer = controller
+            .remember_client_bearer(
+                &json!({"token": "client-bearer-canary", "session_type": "capsule"}),
+            )
+            .expect("client bearer registers");
+        assert_eq!(bearer, 2);
+        assert_eq!(
+            controller.print_checked("client-bearer-canary"),
+            Err("fixture credential detected: printed journey"),
+            "client bearer must be registered before it can be printed"
+        );
+        assert_eq!(
+            controller.remember_capability(&json!({"status": "pending"})),
+            Err("fixture client grant is not granted")
+        );
+        let capability = controller
+            .remember_capability(&json!({"status": "granted", "token": "capability-token-canary"}))
+            .expect("capability token registers");
+        assert_eq!(capability, 3);
+        assert_eq!(
+            controller.print_checked("capability-token-canary"),
+            Err("fixture credential detected: printed journey"),
+            "capability token must be registered before it can be printed"
+        );
+        assert!(controller
+            .print_checked("ordinary session grant line")
+            .is_ok());
+    }
+
+    #[test]
+    fn wrong_capsule_refusal_requires_expected_session() {
+        let text = "Capability denied: wrong capsule: expected session-a, got session-b";
+        assert_eq!(
+            check_wrong_capsule(text, "session-a", "session-b").map(|_| ()),
+            Ok(())
+        );
+        assert_eq!(
+            check_wrong_capsule(text, "session-x", "session-b"),
+            Err("grant refusal expected session is not the granting session"),
+            "expected id mismatch keeps its own reason"
+        );
+    }
+
+    #[test]
+    fn wrong_capsule_refusal_requires_got_session() {
+        let text = "Capability denied: wrong capsule: expected session-a, got session-b";
+        assert_eq!(
+            check_wrong_capsule(text, "session-a", "session-x"),
+            Err("grant refusal got session is not the presenting session"),
+            "got id mismatch keeps its own reason"
+        );
+    }
+
+    #[test]
+    fn wrong_capsule_refusal_requires_runtime_text() {
+        assert_eq!(
+            check_wrong_capsule("Capability denied: missing token", "session-a", "session-b"),
+            Err("grant refusal text is not the Runtime wrong-capsule reason"),
+            "refusal text mismatch keeps its own reason"
+        );
+        assert_eq!(
+            check_wrong_capsule(
+                "Capability denied: wrong capsule: expected session-a, got session b",
+                "session-a",
+                "session b"
+            ),
+            Err("grant refusal text is not the Runtime wrong-capsule reason")
+        );
+    }
+
+    #[test]
+    fn grant_record_requires_a_verified_principal() {
+        assert_eq!(
+            grant_names_verified_agent("session-a", None, "session-a"),
+            Err("grant record names only the requesting session")
+        );
+        assert_eq!(
+            grant_names_verified_agent("session-a", Some("session-a"), "session-a"),
+            Err("grant record names only the requesting session")
+        );
+        assert_eq!(
+            grant_names_verified_agent("session-a", Some(""), "session-a"),
+            Err("grant record names only the requesting session")
+        );
+        assert_eq!(
+            grant_names_verified_agent("session-a", Some("agent-principal"), "session-a"),
+            Ok(())
+        );
+        let text = "Capability denied: wrong capsule: expected session-a, got session-b";
+        let line = redact_refusal(text, "session-a", "session-b", "<session-B>").unwrap();
+        assert_eq!(
+            line,
+            "session grant refusal: Capability denied: wrong capsule: expected <session-A>, got <session-B>"
+        );
+        assert!(!line.contains("session-a") && !line.contains("session-b"));
+        assert_eq!(
+            redact_refusal(text, "session-a", "session-b", "<session-A2>").unwrap(),
+            "session grant refusal: Capability denied: wrong capsule: expected <session-A>, got <session-A2>"
+        );
     }
 
     #[test]
