@@ -1,0 +1,10 @@
+[package]
+name = "a6-a12-evidence-fix"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+agent-conformance = { path = "../agent-conformance" }
