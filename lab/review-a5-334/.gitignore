@@ -1,0 +1,4 @@
+mutants/results/*.log
+mutants/results/stub-*.err
+mutants/results/stub-*.pid
+mutants/results/stub-*.port
