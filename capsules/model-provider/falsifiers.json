@@ -2239,6 +2239,22 @@
       "tests": [
         "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
       ]
+    },
+    {
+      "id": "MP23",
+      "title": "a retry of an open run is dispatched again",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {",
+          "new": "        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)?.filter(|run| run.status.is_terminal()) {"
+        }
+      ],
+      "tests": [
+        "hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect"
+      ]
     }
   ]
 }

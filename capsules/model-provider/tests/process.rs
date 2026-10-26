@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -747,12 +747,15 @@ impl RecordedRequest {
 /// and `src/test_support.rs` is under `src/`, where a change needs a fresh
 /// Sasha note. It counts each connection when `accept` returns it, reads that
 /// connection's one request to its end, records the request, and answers as the
-/// Runtime refuses before dispatch.
+/// Runtime refuses before dispatch. `hold_answer` keeps that answer back, so
+/// the run stays open for as long as the test needs it.
 struct HostedEffectStandIn {
     path: PathBuf,
     listener: Arc<UnixListener>,
     connections: Arc<AtomicUsize>,
     requests: Receiver<RecordedRequest>,
+    /// False while `hold_answer` holds each answer back.
+    answer_released: Arc<(Mutex<bool>, Condvar)>,
     stop: Arc<AtomicBool>,
     accept_loop: Option<thread::JoinHandle<()>>,
 }
@@ -773,10 +776,12 @@ impl HostedEffectStandIn {
         let listener = Arc::new(listener);
         let connections = Arc::new(AtomicUsize::new(0));
         let (request_tx, requests) = mpsc::channel();
+        let answer_released = Arc::new((Mutex::new(true), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let accept_loop = {
             let listener = Arc::clone(&listener);
             let connections = Arc::clone(&connections);
+            let answer_released = Arc::clone(&answer_released);
             let stopping = Arc::clone(&stop);
             thread::spawn(move || {
                 while !stopping.load(Ordering::Relaxed) {
@@ -784,7 +789,10 @@ impl HostedEffectStandIn {
                         Ok((stream, _)) => {
                             connections.fetch_add(1, Ordering::Relaxed);
                             let request_tx = request_tx.clone();
-                            thread::spawn(move || serve_hosted_effect(stream, request_tx));
+                            let answer_released = Arc::clone(&answer_released);
+                            thread::spawn(move || {
+                                serve_hosted_effect(stream, request_tx, answer_released)
+                            });
                         }
                         Err(_) => thread::sleep(Duration::from_millis(5)),
                     }
@@ -796,8 +804,42 @@ impl HostedEffectStandIn {
             listener,
             connections,
             requests,
+            answer_released,
             stop,
             accept_loop: Some(accept_loop),
+        }
+    }
+
+    /// Holds each answer back until `release_answer`, so the hosted run stays
+    /// open. Call it before the provider starts.
+    fn hold_answer(&self) {
+        let (released, _) = &*self.answer_released;
+        *released.lock().unwrap() = false;
+    }
+
+    /// Lets every held answer go with the Runtime's refusal.
+    fn release_answer(&self) {
+        let (released, wake) = &*self.answer_released;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+    }
+
+    /// The connections the accept loop has returned so far.
+    fn connection_count(&self) -> usize {
+        self.connections.load(Ordering::Relaxed)
+    }
+
+    /// Waits for the accept loop to return `expected` connections, failing
+    /// after `FIXTURE_EVENT_TIMEOUT`.
+    fn wait_for_connections(&self, expected: usize) {
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        while self.connection_count() < expected {
+            assert!(
+                Instant::now() < deadline,
+                "the hosted run opened {} connections, not {expected}",
+                self.connection_count()
+            );
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -808,12 +850,14 @@ impl HostedEffectStandIn {
         }
     }
 
-    /// The connections accepted and the requests read. It waits for the first
+    /// The connections accepted and every request read. It waits for the first
     /// recorded request, stops the accept loop, then counts every connection
     /// still queued on the listener. The stand-in records a request before it
-    /// answers it, so a run that settled on the refusal always finds its record.
+    /// answers it, so a run that settled on the refusal always finds its record,
+    /// and the short wait after the accept loop stops lets the last serving
+    /// thread finish its record.
     fn observe(mut self) -> (usize, Vec<RecordedRequest>) {
-        let recorded = self
+        let first = self
             .requests
             .recv_timeout(FIXTURE_EVENT_TIMEOUT)
             .expect("the hosted effect request must reach the Runtime socket stand-in");
@@ -822,7 +866,16 @@ impl HostedEffectStandIn {
             self.connections.fetch_add(1, Ordering::Relaxed);
             drop(stream);
         }
-        (self.connections.load(Ordering::Relaxed), vec![recorded])
+        let mut recorded = vec![first];
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            match self.requests.recv_timeout(Duration::from_millis(20)) {
+                Ok(request) => recorded.push(request),
+                Err(_) if Instant::now() < deadline => continue,
+                Err(_) => break,
+            }
+        }
+        (self.connections.load(Ordering::Relaxed), recorded)
     }
 }
 
@@ -833,9 +886,22 @@ impl Drop for HostedEffectStandIn {
     }
 }
 
-fn serve_hosted_effect(stream: UnixStream, request_tx: mpsc::Sender<RecordedRequest>) {
+fn serve_hosted_effect(
+    stream: UnixStream,
+    request_tx: mpsc::Sender<RecordedRequest>,
+    answer_released: Arc<(Mutex<bool>, Condvar)>,
+) {
     let recorded = read_hosted_effect_request(&stream);
     let _ = request_tx.send(recorded);
+    // The request is recorded before any wait, so a held answer still counts
+    // the send the provider made.
+    {
+        let (released, wake) = &*answer_released;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+    }
     let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
 }
 
@@ -1045,6 +1111,178 @@ fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_k
         !recorded.head().contains("fixture-key"),
         "the offer's key must appear nowhere in the recorded request head: {}",
         recorded.head()
+    );
+
+    provider.shutdown();
+}
+
+/// The hosted `open_ai_compatible_text` offer task 035 uses, with the fixture
+/// key that a hosted run must never put on the Runtime socket. A second test
+/// builds the same offer here, so the two tests cannot drift apart.
+fn hosted_effect_offer() -> Value {
+    let policy = json!({
+        "concurrency_limit": 1, "input_bytes_limit": 8192,
+        "inline_output_bytes_limit": 8192, "event_bytes_limit": 8192,
+        "runtime_ms_limit": 30000, "retention_secs": 60,
+        "cancel_settlement_timeout_ms": 20
+    });
+    let hosted = json!({
+        "backend_provider_label": "Fixture Provider", "selection_mode": "pinned",
+        "privacy_policy_ref": "fixture:privacy:v1", "terms_ref": "fixture:terms:v1",
+        "upstream_routing_fallback_assertion": "operator_asserted_disabled",
+        "model_privacy": ""
+    });
+    json!({
+        "id": HOSTED_EFFECT_OFFER, "title": "Hosted Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"], "output_modalities": ["text/plain"],
+        "policy": policy,
+        "adapter": {"kind": "open_ai_compatible_text",
+        "api_url": "https://hosted.invalid/v1/chat/completions",
+        "api_key": "fixture-key", "model": "fixture/text", "hosted": hosted},
+        "enabled": true
+    })
+}
+
+/// A retry of an open hosted run is a replay, not a second send. The stored
+/// run owns its result (`src/state.rs:515-530`): the retry returns the same run
+/// before any dispatch (`src/state.rs:623`), and the third request returns the
+/// settled result. The held stand-in keeps the first effect open, so the test
+/// can count connections and requests while the run is still running and after
+/// it settles. A second send here would give the Runtime two hosted effects for
+/// one run, which the one account across retries must not see. Off macOS the
+/// provider refuses every hosted run before any socket, so the test prints one
+/// `SKIP` line and returns.
+#[test]
+fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted open-run retry: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-open-run-retry");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-open-run-retry");
+    stand_in.hold_answer();
+    let init = json!({"op": "init", "config": {
+        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
+        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
+        "offers": [hosted_effect_offer()], "runtime_hosted_socket": stand_in.path}
+    }});
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "hosted open run retry"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:hosted-open-run-retry"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        create["data"]["terminal"].is_null(),
+        "the first hosted run must stay open while the Runtime socket holds its answer: {create}"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    let retry = provider.request(create_request.clone());
+    assert_eq!(retry["status"], "ok", "unexpected retry response: {retry}");
+    assert_eq!(
+        retry["data"]["run_id"], expected_run_id,
+        "the retry must return the same run id"
+    );
+    assert!(
+        retry["data"]["terminal"].is_null(),
+        "the retry of an open run must return its open status: {retry}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the retry must send no second hosted effect: {retry}"
+    );
+
+    stand_in.release_answer();
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "the Runtime refusal must fail the held run: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the Runtime refusal must settle the run with its reason: {settled}"
+    );
+
+    let replay = provider.request(create_request);
+    assert_eq!(
+        replay["status"], "ok",
+        "unexpected replay response: {replay}"
+    );
+    assert_eq!(
+        replay["data"]["run_id"], expected_run_id,
+        "the settled retry must return the same run id"
+    );
+    assert_eq!(
+        replay["data"]["status"], "failed",
+        "the settled retry must return the stored terminal status: {replay}"
+    );
+    assert_eq!(
+        replay["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the settled retry must return the stored reason: {replay}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the open-run retry must not open a second connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the open-run retry must not send a second hosted request"
     );
 
     provider.shutdown();
