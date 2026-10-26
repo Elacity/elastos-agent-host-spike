@@ -276,12 +276,22 @@ no macOS counterpart is named here for the first time.
   and `resolve` under the Linux policy and requires each answer and each file
   under `STORAGE_ROOT`. The test harness places a copy of
   `PROVIDER_EXECUTABLE` in `STORAGE_ROOT`, under a name other than the
-  original, before the confined probe starts and outside the policy. Under the
-  policy the probe first shows the copy is present and readable under the
-  `STORAGE_ROOT` grant, and only then requires the exec of the copy to fail; a
-  failure before the exec is reported as missing evidence with its cause, not
-  as the exec rule's refusal. A copy outside every grant would also fail its
-  read, so that probe would not decide the exec rule. It fails
+  original, before the confined probe starts and outside the policy.
+  The harness then checks, outside the policy and before the confined probe
+  starts, that the copy can run: either because its mode gives the probe's
+  uid an execute bit and the mount that holds `STORAGE_ROOT` carries no
+  `noexec` flag, or because the harness starts the copy once outside the
+  policy and the start succeeds. A copy the harness cannot show running is
+  reported as missing evidence with its cause, not as the exec rule's
+  refusal. A missing execute bit or a `noexec` mount makes that exec fail
+  with `EACCES`, the same error the Landlock refusal gives, so without this
+  check the exec-row falsifier would leave the exec failing and would not be
+  caught.
+  Under the policy the probe first shows the copy is present and readable
+  under the `STORAGE_ROOT` grant, and only then requires the exec of the copy
+  to fail; a failure before the exec is reported as missing evidence with its
+  cause, not as the exec rule's refusal. A copy outside every grant would
+  also fail its read, so that probe would not decide the exec rule. It fails
   without the `EXECUTE` rule (the start is refused), without the `STORAGE_ROOT`
   read and write rights (the identity write is denied) and without the rule
   that carries the loader's start reads. Falsifier for the exec row: add a
@@ -296,12 +306,23 @@ no macOS counterpart is named here for the first time.
   `ListAccounts`, and requires the account and the storage key under the wallet
   root. The test harness places a copy of `PROVIDER_EXECUTABLE` in
   `STORAGE_ROOT`, under a name other than the original, before the confined
-  probe starts and outside the policy. Under the policy the probe first shows
-  the copy is present and readable under the `STORAGE_ROOT` grant, and only
-  then requires the exec of the copy to fail; a failure before the exec is
+  probe starts and outside the policy.
+  The harness then checks, outside the policy and before the confined probe
+  starts, that the copy can run: either because its mode gives the probe's
+  uid an execute bit and the mount that holds `STORAGE_ROOT` carries no
+  `noexec` flag, or because the harness starts the copy once outside the
+  policy and the start succeeds. A copy the harness cannot show running is
   reported as missing evidence with its cause, not as the exec rule's
-  refusal. A copy outside every grant would also fail its read, so that probe
-  would not decide the exec rule. Falsifier for the exec
+  refusal. A missing execute bit or a `noexec` mount makes that exec fail
+  with `EACCES`, the same error the Landlock refusal gives, so without this
+  check the exec-row falsifier would leave the exec failing and would not be
+  caught.
+  Under the policy the probe first shows the copy is present and readable
+  under the `STORAGE_ROOT` grant, and only then requires the exec of the copy
+  to fail; a failure before the exec is reported as missing evidence with its
+  cause, not as the exec rule's refusal. A copy outside every grant would
+  also fail its read, so that probe would not decide the exec rule. Falsifier
+  for the exec
   row: add a Landlock `EXECUTE` rule for the copy under `STORAGE_ROOT`; the
   copy is readable and runs, and the test fails. Falsifier for the state row:
   drop the `STORAGE_ROOT` write right; the test fails on the denied account
@@ -438,7 +459,18 @@ no macOS counterpart is named here for the first time.
   probe under the same policy to fail to exec a copy of `PROVIDER_EXECUTABLE`.
   The test harness places a copy of `PROVIDER_EXECUTABLE` in `STORAGE_ROOT`,
   under a name other than the original, before the confined probe starts and
-  outside the policy. Under the policy the probe first shows the copy is
+  outside the policy.
+  The harness then checks, outside the policy and before the confined probe
+  starts, that the copy can run: either because its mode gives the probe's
+  uid an execute bit and the mount that holds `STORAGE_ROOT` carries no
+  `noexec` flag, or because the harness starts the copy once outside the
+  policy and the start succeeds. A copy the harness cannot show running is
+  reported as missing evidence with its cause, not as the exec rule's
+  refusal. A missing execute bit or a `noexec` mount makes that exec fail
+  with `EACCES`, the same error the Landlock refusal gives, so without this
+  check the exec-row falsifier would leave the exec failing and would not be
+  caught.
+  Under the policy the probe first shows the copy is
   present and readable under the `STORAGE_ROOT` grant, and only then requires
   the exec of the copy to fail; a failure before the exec is reported as
   missing evidence with its cause, not as the exec rule's refusal. A copy
@@ -506,15 +538,15 @@ no macOS counterpart is named here for the first time.
   the probe's `bpf(BPF_MAP_CREATE, ...)` request
   ([bpf(2)](https://man7.org/linux/man-pages/man2/bpf.2.html)) names a map
   type an unprivileged caller may create, and the process holds a memlock or
-  memory-cgroup budget for that map; no primary documentation states which
-  budget the kernel charges that map to, so the design treats this condition
-  as an open precondition the check reads, not a settled kernel fact. The
-  design's empty capability set leaves
-  the probe without `CAP_BPF` or `CAP_SYS_ADMIN`, so the kernel treats it as
-  unprivileged. A value of 1 or 2 makes the kernel refuse the call with
-  `EPERM` without `CAP_SYS_ADMIN` or `CAP_BPF`, and a request outside those
-  other conditions is refused by the kernel even when the filter permits it;
-  those cases are masked, so the design leaves them unclaimed. The design
+  memory-cgroup budget for that map; the design found no primary source that
+  states which budget the kernel charges that map to, so the design treats
+  this condition as an open precondition the check reads, not a settled kernel
+  fact. The design's empty capability set leaves the probe without `CAP_BPF`
+  or `CAP_SYS_ADMIN`, so the kernel treats it as unprivileged. A value of 1 or
+  2 makes the kernel refuse the call with `EPERM` without `CAP_SYS_ADMIN` or
+  `CAP_BPF`, and a request outside those other conditions is refused by the
+  kernel even when the filter permits it; those cases are masked, so the
+  design leaves them unclaimed. The design
   claims no falsifier for `perf_event_open`, because a
   `perf_event_paranoid` value that refuses the probe's event to an unprivileged
   caller can keep the refusal after the filter permits the call
