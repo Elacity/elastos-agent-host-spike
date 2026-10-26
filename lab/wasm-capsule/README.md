@@ -131,8 +131,10 @@ builds then differ.
 
 A lab bundle of this capsule is a folder holding this capsule's manifest as
 `capsule.json` and the module as `capsule.wasm`. Its name is
-cc-capsule-identity's **lab CID**, `lab-cid:sha256:<64 lowercase hex>`. The lab
-CID covers every regular file in the folder, so a file added beside the two
+cc-capsule-identity's **lab CID**: the CIDv1 SHA-256 UnixFS directory root of
+the bundle, printed as 59 characters that start `bafybei` (that lane's task
+018 swapped the printed form to this root; the rules are in
+`lab/capsule-identity/README.md`, "The encoding"). The lab CID covers every regular file in the folder, so a file added beside the two
 changes the name; the shared walk refuses links, FIFOs, sockets, devices and
 names that are not UTF-8.
 
@@ -153,13 +155,15 @@ Runtime's `CapsuleManifest` parse, then `validate()`). Callers treat a
 prefix, the hash and any CID codec to that lane. The encoding and the walk's
 rules are in `lab/capsule-identity/README.md` ("The encoding").
 
-The direction is cc-capsule-identity's too. Anders has proposed a CIDv1
-SHA-256 UnixFS directory root as the bundle identity; that lane owns it, and
-its reproducibility tests are the gate before that profile is frozen. It also
-owns the separate signed record kept outside the package. A future switch
-changes this one export to that lane's replacement function, with the same call
-contract and the same name, `bundle_identity`. This lane keeps one identity
-path: no UnixFS code, fallback or choice of rule of its own.
+The direction is cc-capsule-identity's too. Anders proposed a CIDv1 SHA-256
+UnixFS directory root as the bundle identity, and that lane's task 018 made
+`lab_cid` print it; `bundle_identity` needed no change. The root is still a
+prototype: that lane owns it, and its reproducibility tests are the gate before
+that profile is frozen. It also owns the separate signed record kept outside
+the package. This lane keeps one identity path: no UnixFS code, fallback or
+choice of rule of its own. When a test needs to read a printed lab CID, it uses
+that lane's one parse (`str::parse::<capsule_identity::LabCid>`), never a
+format check of its own.
 
 ### A lab CID, not a CID
 
@@ -168,17 +172,24 @@ published capsule by the CID its IPFS provider gets for the capsule archive
 (ADOPTION.md, the wc-003 discovery). No Runtime admission or launch path reads a
 lab CID.
 
-This lane's pinned vector, in `this_capsule_bundle_has_the_pinned_lab_cid`: the
-bundle of this capsule's 277-byte `capsule/capsule.json` and the 8-byte empty
-module `00 61 73 6d 01 00 00 00` is
+This lane's pinned vector, `MODULE_BUNDLE_LAB_CID` in `tests/common/mod.rs`,
+used by `this_capsule_bundle_has_the_pinned_lab_cid` and
+`tools_bundle_name_mode_prints_the_lab_cid`: the bundle of this capsule's
+277-byte `capsule/capsule.json` and the 8-byte empty module
+`00 61 73 6d 01 00 00 00` is
 
 ```
-lab-cid:sha256:dd6673dafaf1a3180310d3207cccc59b3e414b584b2d93002bb81c8d293a3c47
+bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy
 ```
 
-It was computed outside the lab code, with Python's `hashlib` over
-capsule-identity's README encoding, and then pinned. It also guards this lane:
-if the shared rule changes under it, this test fails.
+Task 024 recomputed it outside the lab code, with a `python3 -I` script
+(standard library only) written from cc-capsule-identity's README rules, not
+from its Rust code. The script first gave that lane's committed
+`content-sample` pin, and a different value after one byte of that fixture
+changed. It was pinned only because it equals what `bundle_identity` prints for
+the same folder. The script is not committed; LOG quotes its full text and the
+runs. It also guards this lane: if the shared rule changes under it, this test
+fails.
 
 ### This capsule's manifest
 
@@ -302,12 +313,14 @@ same limit.
 manifest beside `capsule.wasm` `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`:
 
 ```
-lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930
+bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
 ```
 
-`tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it. It was
-also recomputed outside the lab code, with Python's `hashlib` over
-capsule-identity's encoding. It is a lab CID, not the Runtime's CID.
+`tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it
+(`REFERENCE_LAB_CID`). Task 024 recomputed it with the same outside
+`python3 -I` script, over the bundle `tools/bundle` wrote on this Mac, and
+pinned it only because it equals what `bundle_identity` prints for that folder.
+It is a lab CID, not the Runtime's CID.
 
 **The test seam.** `run(mode, build_script)` takes the build script's path, so
 the tests pass small stand-in scripts from `tests/bundle_builds/` (one plants a
@@ -566,7 +579,7 @@ on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`):
 
 ```
 schema: wc-005.run-receipt/v1
-bundle: lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930
+bundle: bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
 function: digest
 argument: 1592590337
 wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"
@@ -578,7 +591,10 @@ wasmer_stdout: "230101071268130872\n"
 ```
 
 `bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
-pinned lab CID of this capsule's bundle. The engine versions sit beside it and
+pinned lab CID of this capsule's bundle. The run above was before task 024, so
+its receipt printed the old lab CID form; the `bundle` line here shows the same
+bundle's lab CID in the current form, the reference value above (same
+manifest, same `capsule.wasm`). The other lines are that run's. The engine versions sit beside it and
 are no part of it: the same bundle run under other versions has the same name
 (P15: the hash names the content; versions are provenance beside it).
 `function` and `argument` are the runner's own `DIGEST_EXPORT` and

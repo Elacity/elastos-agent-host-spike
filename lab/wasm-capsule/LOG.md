@@ -222,3 +222,124 @@
   says falsifiers.json holds 121 planted bugs, but it holds 122"; reverted, `git hash-object` unchanged. Both
   retired-label merge-gate greps (`git grep -n` on the lane, `grep -rn --exclude-dir=target` on the lane): empty,
   exit 1.
+- Task 024: adopt cc-capsule-identity 018's lab CID (the 59-character CIDv1 SHA-256 UnixFS directory root,
+  `bafybei...`). Base `352e8de07`: `cargo test --locked --no-fail-fast` failed 4 tests, all lab CID form or pin:
+  `tests/bundle.rs:224` and `:520`, `tests/lab_cid.rs:78`, `tests/run.rs:1402` (each `left` a `bafybei...` value).
+  The outside recomputation, written from `lab/capsule-identity/README.md` ("The encoding") only, standard library
+  only, kept at `target/recompute-024/outside_cid.py` and never committed:
+  ```python
+  """Print a bundle folder's lab CID, from cc-capsule-identity's README rules.
+
+  Usage: python3 -I outside_cid.py BUNDLE_DIR
+  Standard library only. Written from lab/capsule-identity/README.md,
+  "## The encoding"; never from that lane's Rust code.
+  """
+  import hashlib
+  import os
+  import stat
+  import sys
+
+  CHUNK_LIMIT = 262144
+  ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+
+
+  def uvarint(value):
+      out = bytearray()
+      while value >= 0x80:
+          out.append((value & 0x7F) | 0x80)
+          value >>= 7
+      out.append(value)
+      return bytes(out)
+
+
+  def pb_bytes(number, payload):
+      return bytes([(number << 3) | 2]) + uvarint(len(payload)) + payload
+
+
+  def block_cid(codec, block):
+      return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
+
+
+  def dir_node(children):
+      links = b""
+      tsize_sum = 0
+      for name in sorted(children, key=lambda part: part.encode("utf-8")):
+          child = children[name]
+          if isinstance(child, dict):
+              child_cid, child_tsize = dir_node(child)
+          else:
+              if len(child) > CHUNK_LIMIT:
+                  sys.exit(f"refused: {name} is {len(child)} bytes, over {CHUNK_LIMIT}")
+              child_cid, child_tsize = block_cid(0x55, child), len(child)
+          link = pb_bytes(1, child_cid) + pb_bytes(2, name.encode("utf-8"))
+          link += b"\x18" + uvarint(child_tsize)
+          links += pb_bytes(2, link)
+          tsize_sum += child_tsize
+      block = links + pb_bytes(1, b"\x08\x01")
+      if len(block) > CHUNK_LIMIT:
+          sys.exit("refused: a directory block is over the limit")
+      return block_cid(0x70, block), len(block) + tsize_sum
+
+
+  def collect_files(root):
+      tree = {}
+      for parent, folders, files in os.walk(root):
+          folders.sort()
+          for name in folders + files:
+              mode = os.lstat(os.path.join(parent, name)).st_mode
+              if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                  sys.exit(f"refused: {name} is not a regular file or folder")
+          rel = os.path.relpath(parent, root)
+          node = tree
+          if rel != ".":
+              for part in rel.split(os.sep):
+                  node = node.setdefault(part, {})
+          for name in files:
+              with open(os.path.join(parent, name), "rb") as handle:
+                  node[name] = handle.read()
+      return tree
+
+
+  def base32_print(raw):
+      bits = "".join(f"{byte:08b}" for byte in raw)
+      bits += "0" * (-len(bits) % 5)
+      return "b" + "".join(ALPHABET[int(bits[i:i + 5], 2)] for i in range(0, len(bits), 5))
+
+
+  def main():
+      root_cid, _ = dir_node(collect_files(sys.argv[1]))
+      print(base32_print(root_cid))
+
+
+  main()
+  ```
+  Checks before trusting it (from the repo root; S = `lab/wasm-capsule/target/recompute-024/outside_cid.py`):
+  (a) `python3 -I $S lab/capsule-identity/fixtures/content-sample` printed
+  `bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi`, that lane's committed pin; (b) a copy at
+  `lab/wasm-capsule/target/recompute-024/content-sample-changed` with byte 1 of `sample.example` changed (`cmp -l`:
+  `1 145 130`), `python3 -I $S lab/wasm-capsule/target/recompute-024/content-sample-changed` printed
+  `bafybeihe2nuwvsnlpuwclyyvcxa6b254k6azmm7t3vixhodnpb5m365gva`, a different value. Bundle (i), from
+  `lab/wasm-capsule/`: `target/recompute-024/module-bundle/` = `capsule/capsule.json` + the 8 bytes `00 61 73 6d 01
+  00 00 00` as `capsule.wasm`; `python3 -I target/recompute-024/outside_cid.py target/recompute-024/module-bundle`
+  printed `bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy`, and `tools/bundle --name
+  target/recompute-024/module-bundle` (`bundle_identity`) printed the same. Bundle (ii): `tools/bundle
+  target/recompute-024/reference-out` built and printed `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse`;
+  `shasum -a 256` of its `bundle/capsule.wasm` is `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`
+  (= `PINNED_ARTIFACT_SHA256`); the script on `target/recompute-024/reference-out/bundle` and `tools/bundle --name`
+  on it both printed `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse`. Both agree, so both became pins
+  (no mismatch finding). One module-bundle pin, `MODULE_BUNDLE_LAB_CID` in `tests/common/mod.rs`, used by
+  `this_capsule_bundle_has_the_pinned_lab_cid` and `tools_bundle_name_mode_prints_the_lab_cid` (the copies in
+  `tests/lab_cid.rs` and `tests/bundle.rs` removed); `REFERENCE_LAB_CID` holds bundle (ii)'s value.
+  `receipt_records_observed_engine_versions` now parses the printed name with `capsule_identity::LabCid`'s `FromStr`
+  and asserts it prints back the same string, in place of a hand prefix check. README ("The lab name",
+  "tools/bundle", the receipt example) and ADOPTION (claim scope, the identity decision, proposal 1 and 2) describe
+  the new form and pins; no UnixFS code in the lane. No change to `tools/`, `capsule/`, `Cargo.toml`, `Cargo.lock`
+  or `falsifiers.json` (no new entry). Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py
+  --from lab/wasm-capsule/falsifiers.json F-WC3-LABCID-PIN F-WC5-RECEIPT-CID F-WC3-RETIRED-LABEL-DOC F-WC4g
+  F-WC-README-COUNT` (the last three are anchored in files this task edits; each anchor found exactly once):
+  "baseline: 5 named tests pass without an edit, 0 do not", "summary: 5 CAUGHT of 5", exit 0 (runner-caught). By
+  hand (hand-proven, pending R1; not in runner-caught totals): the last character of `MODULE_BUNDLE_LAB_CID` `y` →
+  `z`; `this_capsule_bundle_has_the_pinned_lab_cid` failed at `tests/lab_cid.rs:74` and
+  `tools_bundle_name_mode_prints_the_lab_cid` at `tests/bundle.rs:223`, each "assertion `left == right` failed",
+  left `...qhpcy`, right `...qhpcz`; restored from a copy, `git diff --no-index --exit-code` against that copy: exit
+  0. `cargo test --locked` and both fmt checks green. Retired-label greps: both empty, exit 1.
