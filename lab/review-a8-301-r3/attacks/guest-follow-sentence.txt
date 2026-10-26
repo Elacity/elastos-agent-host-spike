@@ -1,0 +1,17 @@
+        if core::hint::black_box(true) {
+            use elastos::bus::capabilities;
+            use elastos::bus::types::CapabilityRequest;
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["write".into()],
+                reason: "Agent Host task journal".into(),
+            });
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["read".into()],
+                reason: "Agent Host task journal".into(),
+            });
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the journal append did not follow its grants".into(),
+            ));
+        }
