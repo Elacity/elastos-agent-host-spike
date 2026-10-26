@@ -2,9 +2,9 @@ id: F-A7-handle
 file: src/ledger.rs
 test: ledger::model_settle_on_another_handle_is_refused
 --- old
-        if bound != request.handle {
+        if !handles_match(bound, request.handle) {
             return Err(SettleRefuse::OtherHandle);
         }
 --- new
-        let _bound = bound == request.handle;
+        let _same = handles_match(bound, request.handle);
 --- end
