@@ -1,0 +1,6 @@
+/last-run.json
+/mutants-run.json
+/probe-out.txt
+/official-out.txt
+/scratch/
+*.falsify-original
