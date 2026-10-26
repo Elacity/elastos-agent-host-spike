@@ -2684,6 +2684,22 @@
         "a_wasm_app_binds_one_portable_variant",
         "the_portable_label_stands_alone"
       ]
+    },
+    {
+      "id": "F-CI17a",
+      "title": "the checked variant verifier also refuses a variant whose entries do not hold its label's bytes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_recipe_cid(binding, recipe)?;\n",
+          "new": "    require_recipe_cid(binding, recipe)?;\n    for (platform, checked) in variants {\n        let label = platform.as_bytes();\n        if !checked.entries().iter().any(|entry| entry.content.windows(label.len()).any(|bytes| bytes == label)) {\n            return Err(Refusal::NoVariants { list: \"given\" });\n        }\n    }\n"
+        }
+      ],
+      "tests": [
+        "a_variant_label_is_the_signers_claim"
+      ]
     }
   ]
 }

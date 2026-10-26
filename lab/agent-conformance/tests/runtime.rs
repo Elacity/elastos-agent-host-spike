@@ -358,6 +358,39 @@ fn cleanup_census_refuses_each_leftover() {
     child.stop().unwrap();
     drop(child);
 
+    // Bind by a relative path: the macOS sockaddr_un path limit is smaller
+    // than this worktree's absolute throwaway-Home path.
+    let mut socket_child = home.start(
+        std::path::Path::new("/usr/bin/python3"),
+        &["-c", "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('cleanup.sock'); s.listen(1); open('socket-ready','w').close(); time.sleep(20)"],
+    ).unwrap();
+    let started = std::time::Instant::now();
+    while !home.home().join("socket-ready").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "Unix socket control readiness exceeded 5 seconds"
+        );
+        assert!(
+            socket_child.is_alive().unwrap(),
+            "Unix socket control exited before binding"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let socket_result = cleanup(&home, port);
+    socket_child.stop().unwrap();
+    drop(socket_child);
+    fs::remove_file(home.home().join("cleanup.sock")).unwrap();
+    fs::remove_file(home.home().join("socket-ready")).unwrap();
+    let reason = socket_result.unwrap_err();
+    // This Mac's +D census sees the holder through cwd/captures, but does
+    // not select its relative-path Unix socket. Keep the scope explicit.
+    assert!(reason.contains("process leftover"), "{reason}");
+    assert!(
+        !reason.contains("cleanup.sock"),
+        "recheck the documented Unix socket visibility limit"
+    );
+    println!("cleanup socket control: bound Unix socket omitted by root selection; holder refused as process leftover; Unix socket absence unmeasured");
+
     let line = cleanup(&home, port).unwrap();
     assert!(line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]"));
     assert!(line.contains("excludes only test PID"));

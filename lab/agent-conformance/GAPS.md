@@ -703,10 +703,17 @@ Each read journey prints one checked `cleanup census:` line. A leftover fails
 the journey and identifies the retained Home by its lane-relative name.
 
 The physical check covers handles on named files, directories, current
-directories and sockets under this throwaway root, the operator's loopback API
+directories under this throwaway root, the operator's loopback API
 port, and entries in this root's `tmp/`. The root scan uses one bounded lsof
 call. Its tool runs through the existing spawn site in a separate scratch Home;
 after exit, its captures move into the journey's existing capture inventory.
+Task 026 plants a bound Unix socket in a bounded child through the one spawn
+site. On this Mac, `lsof +D` sees its cwd and capture handles but omits the
+socket. The child fails the process census and is stopped. Unix socket absence
+under the root remains unmeasured; `root checks PASS` covers the selected
+file/directory handles, API port and tmp entries only. A socket-absence claim
+needs a census selector with a passing bound-socket control.
+
 Only the test PID is excluded. On macOS, lsof exit 1 means that some selected
 `+D` entries have zero handles, even when other entries match. That selection
 result is parsed; warnings, other exit codes and malformed records fail.
@@ -715,8 +722,8 @@ The live socket samples retain their existing success requirement.
 This is a point-in-time census, with a five-second lsof limit and a 200 ms API
 connection limit. Pending requests must be empty for the granted and denied
 fixture journeys. The earlier absent-policy journey keeps its refusal scope
-and reports its pending/grant checks as unmeasured. Cancel, worker kill,
-settlement and whole-device cleanup need the later journey. AC-006-STORAGE
+and reports its pending/grant checks as unmeasured. Task 026 below adds pending-request cancellation and settlement. Worker kill
+and whole-device cleanup need their own journey. AC-006-STORAGE
 remains open: `/tmp/elastos/storage` is the known outside-root leftover. The
 census neither enumerates nor reads nor removes that directory. The table's
 scope and the same invocation's VERSIONS.json keep these limits visible.
@@ -778,3 +785,38 @@ inside one operator. The task's scope label appears in the table and receipt.
 The controller seeds the files to keep this journey to two read requests per
 instance. A guest-write variant needs an additional action grant, which the
 Runtime supports; it is outside this task's small scope.
+
+
+## 026 — Cancel at the pending-request point
+
+`cancelled_instance_settles_with_reason_sibling_completes` covers the lab half
+of A10 with the A12 census. One fixture operator serves the two existing
+instance builds. The first overlap barrier observes two live clients and two
+pending first requests in distinct sessions. In that decision pass the shell
+controller grants instance-2's own read and denies instance-1 with
+`fixture cancel: instance-1 cancelled mid-run`. The cancelled guest exits with
+the delivered denied status and exact reason. Instance-2 checks its own bytes,
+then receives the existing sibling-read denial.
+
+The collector starts each client once. From cancellation through both exits,
+the controller refuses a further pending request from instance-1's session.
+The one allowed later request for instance-1's resource is instance-2's required
+sibling read, with a new request ID in its original session. The task's
+“no request names instance 1's own resource again” applies to a retry: applying
+it to this expected sibling request would contradict the sibling acceptance.
+The final live pending census also checks the interval after the last poll.
+
+This is cancellation at a pending request. Resident cancellation stays RT4:
+component/v1 is a bounded activation contract with no resident stop operation,
+and a `run` component is outside the operator's capsule list. A resident proof
+needs Runtime lifecycle support. The existing grant-visibility and outside-root
+storage blockers retain their scope above.
+
+The live cleanup call has a shell-owned pending positive control. It first
+checks the completed journey, creates the control through the existing request
+API, requires `pending request leftover`, denies the control, and runs the same
+check again. The operator then stops through `finish_check` and the existing
+physical census runs. F-cleanup-live-wiring bypasses that exact caller's check
+while the control remains pending. The control uses the one controller and
+gives zero resource allowance. The existing credential checker covers the
+captures, checked settlement line, report, receipt and lane sources.

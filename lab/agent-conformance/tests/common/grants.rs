@@ -1,7 +1,7 @@
 //! The fixture's one shell approver. Credentials and HTTP bodies stay in memory.
 
 use agent_conformance::build::repository;
-use agent_conformance::harness::{RunningInstances, ThrowawayHome};
+use agent_conformance::harness::{Completion, RunningInstances, ThrowawayHome};
 use agent_conformance::identity::Observation;
 use agent_conformance::report::{render_run, GitIdentity};
 use serde_json::{json, Value};
@@ -136,6 +136,7 @@ pub struct Decisions {
 }
 
 const OVERLAP_BOUND: Duration = Duration::from_secs(10);
+pub const CANCEL_REASON: &str = "fixture cancel: instance-1 cancelled mid-run";
 
 // Session and request IDs stay in memory. Printed evidence uses local labels.
 struct Overlap {
@@ -146,6 +147,8 @@ struct Overlap {
     first: Vec<Value>,
     waits: Vec<Duration>,
     duration: Duration,
+    cancel: bool,
+    cancelled_at: Option<Instant>,
 }
 
 impl Overlap {
@@ -158,6 +161,8 @@ impl Overlap {
             first: Vec::new(),
             waits: Vec::new(),
             duration: Duration::ZERO,
+            cancel: false,
+            cancelled_at: None,
         }
     }
 
@@ -167,6 +172,9 @@ impl Overlap {
         fixture: &Fixture,
         running: &mut RunningInstances<'_>,
     ) -> Result<bool> {
+        if self.cancel && self.stage > 0 {
+            return self.ready_after_cancel(pending);
+        }
         if self.stage == 2 {
             return if pending.is_empty() {
                 Ok(false)
@@ -251,6 +259,33 @@ impl Overlap {
             return Err("overlap: zero measured duration");
         }
         Ok(true)
+    }
+
+    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {
+        for request in pending {
+            if request["session_id"] == self.first[0]["session_id"] {
+                return Err("cancel: cancelled instance made a further request");
+            }
+            // The sibling's required cross-read is the sole later request for
+            // instance-1's resource. It must be new and in instance-2's session.
+            if self.stage != 1
+                || request["session_id"] != self.first[1]["session_id"]
+                || request["resource"] != self.first[0]["resource"]
+                || request["reason"] != "agent conformance: instance-2 sibling"
+                || request["action"] != "read"
+                || self
+                    .first
+                    .iter()
+                    .any(|first| first["request_id"] == request["request_id"])
+                || pending.len() != 1
+            {
+                return Err("cancel: unexpected request after cancellation");
+            }
+        }
+        if self.stage == 1 && self.barrier_started.elapsed() >= OVERLAP_BOUND {
+            return Err("cancel: sibling request exceeded 10 seconds");
+        }
+        Ok(!pending.is_empty())
     }
 
     fn advance(&mut self) {
@@ -343,6 +378,40 @@ impl Controller {
         self.overlap = Some(Overlap::new());
     }
 
+    pub fn require_cancel(&mut self) {
+        self.require_overlap();
+        self.overlap.as_mut().unwrap().cancel = true;
+    }
+
+    pub fn check_cancel(&self, completions: Option<&[Completion]>) -> Result<()> {
+        let overlap = self.overlap.as_ref().ok_or("cancel: evidence is missing")?;
+        let children: Vec<_> = (0..2)
+            .map(|index| {
+                let completion = completions.and_then(|items| items.get(index));
+                format!(
+                    "instance-{} exit:{:?} elapsed:{:.6}s",
+                    index + 1,
+                    completion.and_then(|item| item.output.status.code()),
+                    completion.map_or(0.0, |item| item.elapsed.as_secs_f64())
+                )
+            })
+            .collect();
+        self.print_checked(&format!(
+            "cancel settlement: {}; reason:{CANCEL_REASON}; first:{:.6}s overlap:{:.6}s since_cancel:{:.6}s; cancel at the pending-request point, lab half of A10 (A12 census)",
+            children.join("; "), overlap.waits.first().copied().unwrap_or_default().as_secs_f64(),
+            overlap.duration.as_secs_f64(), overlap.cancelled_at.map_or(0.0, |at| at.elapsed().as_secs_f64())
+        ))?;
+        if !overlap.cancel
+            || overlap.stage != 2
+            || overlap.cancelled_at.is_none()
+            || overlap.duration.is_zero()
+            || completions.is_none_or(|items| items.len() != 2)
+        {
+            return Err("cancel: first overlap, cancellation and sibling settlement are required");
+        }
+        Ok(())
+    }
+
     pub fn check_overlap(&self) -> Result<()> {
         let overlap = self
             .overlap
@@ -382,7 +451,16 @@ impl Controller {
                 return Err(reason);
             }
         };
+        let mut cancellations = Vec::new();
         for (request, decision) in pending.iter().zip(decisions) {
+            if self.overlap.as_ref().is_some_and(|overlap| {
+                overlap.cancel
+                    && overlap.stage == 0
+                    && request["session_id"] == overlap.first[0]["session_id"]
+            }) {
+                cancellations.push(request);
+                continue;
+            }
             if let Some(index) = decision {
                 self.decisions.matched += 1;
                 let response = self.call(
@@ -403,6 +481,12 @@ impl Controller {
                 let reason = self.fixture.deny_reason.clone();
                 self.deny(request, &reason)?;
             }
+        }
+        // The sibling's first grant and chosen cancellation use one snapshot
+        // and decision pass, after the existing both-alive overlap barrier.
+        for request in cancellations {
+            self.deny(request, CANCEL_REASON)?;
+            self.overlap.as_mut().unwrap().cancelled_at = Some(Instant::now());
         }
         if let Some(overlap) = &mut self.overlap {
             overlap.advance();
@@ -431,6 +515,38 @@ impl Controller {
         require_empty_pending(&pending)?;
         let grants = self.call("GET", "/api/capability/list", &Value::Null)?;
         live_grant_state(&grants)
+    }
+
+    /// Exercise the caller's actual census wiring with one shell-owned pending
+    /// control. Deny that control, then take the final empty-pending census.
+    pub fn check_cleanup_wiring(
+        &mut self,
+        check: impl Fn(&Self) -> Result<&'static str>,
+    ) -> Result<&'static str> {
+        check(self)?;
+        let request = self.call(
+            "POST",
+            "/api/capability/request",
+            &json!({
+                "resource": "localhost://Public/agent-conformance-grants/cleanup-control",
+                "action": "read", "reason": "agent conformance: cleanup control"
+            }),
+        )?;
+        if request["status"] != "pending" {
+            return Err("cleanup control requires a pending request");
+        }
+        field(&request, "request_id")?;
+        let planted = check(self);
+        // Keep journey decision counts separate from this shell-owned control.
+        let denied = self.deny(&request, "fixture cleanup control settled");
+        if denied.is_ok() {
+            self.decisions.denied -= 1;
+        }
+        denied?;
+        if planted != Err("pending request leftover") {
+            return Err("live cleanup wiring accepted a planted pending request");
+        }
+        check(self)
     }
 
     pub fn print_checked(&self, line: &str) -> Result<()> {
@@ -481,9 +597,13 @@ impl Controller {
         // Use the exact lines printed by this controller, including decisions
         // made before a grant token arrived. Recheck with all credentials known.
         let printed = self.printed.borrow();
-        if self.overlap.is_some() {
+        if let Some(overlap) = &self.overlap {
             for prefix in [
-                "instance overlap:",
+                if overlap.cancel {
+                    "cancel settlement:"
+                } else {
+                    "instance overlap:"
+                },
                 "fixture controller:",
                 "fixture read: instance-1",
                 "fixture read: instance-2",
@@ -1049,8 +1169,48 @@ mod tests {
     }
 
     #[test]
+    fn cancel_refuses_retries_and_unexpected_requests() {
+        let mut overlap = Overlap::new();
+        overlap.cancel = true;
+        overlap.stage = 1;
+        overlap.first = vec![
+            json!({"request_id":"first-a", "session_id":"session-a", "resource":"fixture-a"}),
+            json!({"request_id":"first-b", "session_id":"session-b", "resource":"fixture-b"}),
+        ];
+        let sibling = json!({"request_id":"sibling-b", "session_id":"session-b",
+            "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-2 sibling"});
+        assert_eq!(overlap.ready_after_cancel(&[]), Ok(false));
+        assert_eq!(overlap.ready_after_cancel(&[sibling.clone()]), Ok(true));
+        let mut retry = sibling.clone();
+        retry["session_id"] = json!("session-a");
+        assert_eq!(
+            overlap.ready_after_cancel(&[retry]),
+            Err("cancel: cancelled instance made a further request")
+        );
+        for (field, value) in [
+            ("resource", "fixture-b"),
+            ("session_id", "session-c"),
+            ("request_id", "first-a"),
+            ("reason", "agent conformance: instance-1 own"),
+            ("action", "write"),
+        ] {
+            let mut request = sibling.clone();
+            request[field] = json!(value);
+            assert_eq!(
+                overlap.ready_after_cancel(&[request]),
+                Err("cancel: unexpected request after cancellation")
+            );
+        }
+        assert!(overlap
+            .ready_after_cancel(&[sibling.clone(), sibling.clone()])
+            .is_err());
+        overlap.advance();
+        assert!(overlap.ready_after_cancel(&[sibling]).is_err());
+    }
+
+    #[test]
     fn instance_journey_requires_all_printed_surfaces() {
-        let controller = Controller {
+        let mut controller = Controller {
             port: 0,
             credentials: vec!["synthetic-canary".into()],
             printed: RefCell::default(),
@@ -1075,6 +1235,30 @@ mod tests {
                 .join("\n");
             assert_eq!(
                 controller.check_journey("two_instances_overlap_with_separate_grants", &[], true),
+                Err("required instance journey evidence is missing")
+            );
+        }
+        controller.require_cancel();
+        for missing in 0..lines.len() {
+            *controller.printed.borrow_mut() = lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != missing)
+                .map(|(index, line)| {
+                    if index == 0 {
+                        "cancel settlement: synthetic"
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                controller.check_journey(
+                    "cancelled_instance_settles_with_reason_sibling_completes",
+                    &[],
+                    true
+                ),
                 Err("required instance journey evidence is missing")
             );
         }

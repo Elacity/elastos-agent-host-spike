@@ -80,8 +80,13 @@
 //!
 //! A [`VariantBinding`] sits outside every bundle and groups the printed lab
 //! CIDs of a capsule's platform variants, each under a platform label from
-//! [`VARIANT_PLATFORMS`], with the lab CID of their recipe. The label lives
-//! only in the binding: no manifest or bundle holds one. Its bytes are
+//! [`VARIANT_PLATFORMS`], with the lab CID of their recipe. No manifest
+//! field, folder name or path holds a platform label, so the binding is the
+//! label's only home as metadata. The stand-in payloads of the variant
+//! fixtures hold the words only so their CIDs differ; the lab never reads
+//! them. A label, the portable `*` too, is the signer's claim: the lab never
+//! reads one from a manifest, path or payload, so it does not check that a
+//! variant's bytes were built for its label. Its bytes are
 //! [`VariantBinding::variant_binding_payload`], compact JSON with the keys
 //! `recipe`, `schema` ([`VARIANT_BINDING_SCHEMA`]), `signer_did` and
 //! `variants`, and no name or group identity field. [`sign_variant_binding`]
@@ -169,7 +174,10 @@ pub const PORTABLE_PLATFORM: &str = "*";
 
 /// The labels a variant binding may hold, in byte order: the portable label
 /// and the three platforms the Runtime's release script uses. A label is not
-/// identity: it lives only in the binding, never in a bundle.
+/// identity. No manifest field, folder name or path holds one, so as metadata
+/// it lives only in the binding. A stand-in payload may hold a label's words
+/// (the variant fixtures' do, only so their CIDs differ), but the lab never
+/// reads them: a label is the signer's claim.
 pub const VARIANT_PLATFORMS: [&str; 4] = [
     PORTABLE_PLATFORM,
     "aarch64-darwin",
@@ -1239,6 +1247,11 @@ pub fn sign_variant_binding(
 ///
 /// It reads nothing from disk. `Ok(())` means all eight passed. It is not a
 /// trust, admission or launch value, and it grants nothing.
+///
+/// Each label is the signer's claim. No check reads a label from a manifest,
+/// path or payload, so it is not checked against the bundle's bytes: a
+/// variant built for one platform verifies under another label if the signer
+/// bound it there.
 pub fn verify_checked_variant_binding(
     binding: &VariantBinding,
     variants: &[(&str, &CheckedBundle)],
