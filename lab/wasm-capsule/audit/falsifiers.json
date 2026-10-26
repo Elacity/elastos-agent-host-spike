@@ -689,6 +689,118 @@
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA14a",
+      "title": "Match the module and name against separate declared entries",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !(declared.iter().any(|entry| entry.module == import.module) && declared.iter().any(|entry| entry.name == import.name)) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA15a",
+      "title": "Match the import name by a declared prefix while the module matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| entry.module == import.module && import.name.starts_with(entry.name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA15b",
+      "title": "Match the import module by a declared prefix while the name matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| import.module.starts_with(entry.module.as_str()) && entry.name == import.name) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA16a",
+      "title": "Match the whole interface name ignoring ASCII case",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.eq_ignore_ascii_case(name)) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA16b",
+      "title": "Match after lowercasing only the declared interface",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.to_ascii_lowercase() == name.as_str()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA17a",
+      "title": "Match the import name by a declared suffix while the module matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| entry.module == import.module && import.name.ends_with(entry.name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA17b",
+      "title": "Match the import module by a declared suffix while the name matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| import.module.ends_with(entry.module.as_str()) && entry.name == import.name) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
     }
   ]
 }

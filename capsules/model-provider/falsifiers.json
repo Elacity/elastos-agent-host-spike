@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. Files are relative to examples/agent-host.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. PV54 and PV55 remove or over-extend the failed test's own captured section that keeps a quoted child standard error out of the harness error search, and PV56-PV59 accept the end of the output as its closing delimiter, match the section header anywhere on a line, end the section at its last delimiter, remove only the first section, and PV60 matches the closing delimiter inside a line. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -1112,6 +1112,118 @@
       ],
       "tests": [
         "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV54",
+      "title": "the failed test's own section stays checked",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    output = OWN_FAILURE_TEXT.sub(\"\", output)\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a provider failure with stderr counts"
+      ]
+    },
+    {
+      "id": "PV55",
+      "title": "the section removal runs to the end of the output",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?^failures:$\\n?\", re.MULTILINE)",
+          "new": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*\", re.MULTILINE)"
+        }
+      ],
+      "tests": [
+        "a named test that does not run is not a catch"
+      ]
+    },
+    {
+      "id": "PV56",
+      "title": "the removal accepts the end of the output as a closing delimiter",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?^failures:$\\n?\", re.MULTILINE)",
+          "new": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?(?:^failures:$\\n?|\\Z)\", re.MULTILINE)"
+        }
+      ],
+      "tests": [
+        "an unterminated failure section stays checked"
+      ]
+    },
+    {
+      "id": "PV57",
+      "title": "the section header matches anywhere on a line",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?^failures:$\\n?\", re.MULTILINE)",
+          "new": "    r\"---- .+ stdout ----\\n(?:.*\\n)*?^failures:$\\n?\", re.MULTILINE)"
+        }
+      ],
+      "tests": [
+        "the section header is an exact line"
+      ]
+    },
+    {
+      "id": "PV58",
+      "title": "the section ends at its last delimiter",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?^failures:$\\n?\", re.MULTILINE)",
+          "new": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*^failures:$\\n?\", re.MULTILINE)"
+        }
+      ],
+      "tests": [
+        "a section stops at its first delimiter"
+      ]
+    },
+    {
+      "id": "PV59",
+      "title": "only the first failure section is removed",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    output = OWN_FAILURE_TEXT.sub(\"\", output)",
+          "new": "    output = OWN_FAILURE_TEXT.sub(\"\", output, count=1)"
+        }
+      ],
+      "tests": [
+        "every failure section is removed"
+      ]
+    },
+    {
+      "id": "PV60",
+      "title": "the closing delimiter matches inside a line",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?^failures:$\\n?\", re.MULTILINE)",
+          "new": "    r\"^---- .+ stdout ----\\n(?:.*\\n)*?failures:\\n?\", re.MULTILINE)"
+        }
+      ],
+      "tests": [
+        "the closing delimiter is an exact line"
       ]
     }
   ]

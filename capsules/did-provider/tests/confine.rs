@@ -179,8 +179,11 @@ impl std::fmt::Display for ChildExit {
 ///
 /// `spawn` is the only spawn path. It pipes all three streams and drains
 /// standard error on its own thread from the moment the child starts, so a
-/// child that fills the pipe still reaches its own exit. `unanswered` is the
-/// only failure message.
+/// child that fills the pipe still reaches its own exit. A request the child
+/// never answered fails with the one message from `unanswered`, which names the
+/// request, the child's exit status and all the child wrote to standard error.
+/// An answer that is not JSON fails with its own message, which names the
+/// request, the parse error and the answer.
 struct ConfinedProvider {
     child: Child,
     stdin: ChildStdin,
@@ -224,16 +227,22 @@ impl ConfinedProvider {
         Self::spawn(confinement_command(profile, &canonical_bindings(base)))
     }
 
-    /// Sends one request and returns its answer; a failure panics with the one
-    /// message from `unanswered`.
+    /// Sends one request and returns its answer; a failure panics with the
+    /// message from `try_send`. A request the child never answered fails with
+    /// the one message from `unanswered`, which names the request, the child's
+    /// exit status and all the child wrote to standard error. An answer that is
+    /// not JSON fails with its own message, which names the request, the parse
+    /// error and the answer.
     fn send(&mut self, request: Value) -> Value {
         self.try_send(&request)
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// Sends one request and returns its answer, or the one failure message,
-    /// which names the request, the child's exit status and all the child
-    /// wrote to standard error.
+    /// Sends one request and returns its answer. A request the child never
+    /// answered fails with the one message from `unanswered`, which names the
+    /// request, the child's exit status and all the child wrote to standard
+    /// error. An answer that is not JSON fails with its own message, which
+    /// names the request, the parse error and the answer.
     fn try_send(&mut self, request: &Value) -> Result<Value, String> {
         let written = writeln!(self.stdin, "{request}").and_then(|()| self.stdin.flush());
         if let Err(err) = written {
@@ -620,6 +629,24 @@ fn outside_read_denied() {
 /// denied start loses `Operation not permitted`, so this test fails on that
 /// assertion at the first case, and the silent child's failure loses the line
 /// it wrote.
+///
+/// Falsifier: omit the request from `unanswered` (DID14); the denied start's
+/// failure no longer names the request, so this test fails on its request
+/// assertion at the first case.
+///
+/// Falsifier: omit the exit status from `unanswered` (DID15); the denied
+/// start's failure no longer names the child's exit status, so this test fails
+/// on its exit-status assertion at the first case.
+///
+/// Falsifier: return a fixed message from the failed-write branch instead of
+/// the shared diagnostic (DID16); the denied start's failure reads `provider
+/// stdin must accept a request`, so this test fails on its request assertion at
+/// the first case.
+///
+/// Falsifier: return a fixed message from the response-stream branch instead of
+/// the shared diagnostic (DID17); the silent child's failure reads `provider
+/// exited without a response`, so this test fails on its request assertion in
+/// the second case.
 #[test]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available() {
@@ -756,9 +783,9 @@ fn assert_startup_is_refused(
 ///
 /// Three profiles cannot load on this Mac: one whose path does not exist, one
 /// that does not parse because its last `)` is removed, and the real profile
-/// with every parameter bound except `STORAGE_ROOT`. `sandbox-exec` exits 65
-/// for each before it reaches the exec, and the one harness reports its reason
-/// from standard error.
+/// with every parameter bound except `STORAGE_ROOT`. `sandbox-exec` exits with
+/// a status other than 0 for each before it reaches the exec, and the one
+/// harness reports its reason from standard error.
 ///
 /// Falsifier: start the provider binary directly when the profile file does
 /// not exist (DID21); the provider stays alive to the deadline instead of
@@ -825,9 +852,9 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// exits with status 7. The harness must reach that status within its bounded
 /// deadline and collect every byte.
 ///
-/// Falsifier: drop the stderr pipe instead of draining it (DID13); the child
-/// dies on a closed pipe, so the status is not 7 and the collected text is
-/// empty, and this test fails.
+/// Falsifier: drop the stderr pipe instead of draining it (DID13); only `dd`
+/// dies on the closed pipe, so the shell still exits 7, and the collected text
+/// is empty, so this test fails on its byte count, `left: 0`, `right: 131072`.
 #[test]
 fn stderr_is_drained_before_wait() {
     let mut child = ConfinedProvider::spawn({
