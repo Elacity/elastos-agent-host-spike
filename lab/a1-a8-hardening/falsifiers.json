@@ -1,0 +1,69 @@
+{
+  "note": "Apply one entry at a time, run its named tests, then restore the exact bytes. 'lab' entries edit files under lab/a1-a8-hardening. 'runtime-local' entries edit Runtime source temporarily on the test machine only; restore them byte-identical (compare SHA-256) and never commit them. A build failure, harness error or timeout does not count as caught: the named test must run and fail at its refusal assertion.",
+  "falsifiers": [
+    {
+      "id": "F-A1a",
+      "title": "stage the control build (elastos:bus only) where the WASI build belongs",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/a1_wasi_import.rs",
+          "old": "    let refused_dir = home.stage(\"wasi-env\", &wasi.bytes, &wasi.manifest);",
+          "new": "    let refused_dir = home.stage(\"wasi-env\", &control.bytes, &control.manifest);"
+        }
+      ],
+      "tests": [
+        "wasi_import_is_refused_at_admission"
+      ]
+    },
+    {
+      "id": "F-A1-runtime",
+      "title": "turn off the Runtime's component-import allowlist check",
+      "command": "runtime-local",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "elastos/crates/elastos-server/src/component.rs",
+          "old": "                    if !ALLOWED_BUS_IMPORTS.contains(&name) {",
+          "new": "                    if false && !ALLOWED_BUS_IMPORTS.contains(&name) {"
+        }
+      ],
+      "tests": [
+        "wasi_import_is_refused_at_admission"
+      ]
+    },
+    {
+      "id": "F-A8a",
+      "title": "declare the fake host key in the staged agent-host manifest, removing the manifest denial",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "    let manifest = injected.manifest.clone();",
+          "new": "    let manifest = String::from_utf8(injected.manifest.clone()).unwrap().replace(\"\\\"localhost://Users/self/.AppData/Agents/agent-host/*\\\"\", \"\\\"localhost://Users/self/.AppData/Agents/agent-host/*\\\", \\\"localhost://Public/../../../../.ssh/id_ed25519\\\"\").into_bytes();"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-runtime",
+      "title": "remove the Runtime's manifest-authority refusal for capability requests",
+      "command": "runtime-local",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "elastos/crates/elastos-server/src/resource_bridge.rs",
+          "old": "            if !manifest_allows_resource(manifest_capabilities, resource, principal_id) {",
+          "new": "            if false && !manifest_allows_resource(manifest_capabilities, resource, principal_id) {"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    }
+  ]
+}
