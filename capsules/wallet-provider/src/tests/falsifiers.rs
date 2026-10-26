@@ -102,8 +102,11 @@ use std::process::Command;
 /// `model_declared_rights_read_on_the_did_and_wallet_template` fail because the
 /// did, wallet and model files no longer hold that key, and WP87 drops the
 /// justification refusal, so `declared_rights_trace_refuses_each_bad_input`
-/// fails on its missing-justification case.
-const EXPECTED_FALSIFIERS: usize = 85;
+/// fails on its missing-justification case. Task 072's WP88 appends a read and
+/// write grant on `STORAGE_PARENT` to this profile, so
+/// `account_operations_beneath_storage_parent_are_refused` fails because the
+/// sibling `init` and the account call succeed.
+const EXPECTED_FALSIFIERS: usize = 86;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -3,23 +3,44 @@ file: src/lib.rs
 test: model_host_path_root_is_refused
 test: model_dotdot_in_the_owned_root_is_refused
 test: model_owned_root_must_sit_under_the_agent
+test: model_use_path_dotdot_is_refused
+test: model_use_path_outside_the_owned_root_is_refused
+test: model_symlink_shaped_use_path_is_refused
+test: model_public_storage_read_is_refused
 --- old
     if name.contains('\\') || name.starts_with('/') {
         return Err(Refuse::HostPath);
     }
     let parts: Vec<&str> = name.split('/').collect();
-    if parts.len() < 3
-        || parts
-            .iter()
-            .any(|part| part.is_empty() || *part == "." || *part == "..")
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
     {
         return Err(Refuse::HostPath);
     }
-    if parts[0] != "UsersAI" || parts[1] != agent {
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
+    }
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
         return Err(Refuse::OutsidePrincipal);
+    }
+    if !parts.iter().skip(2).all(|part| {
+        part.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    }) {
+        return Err(Refuse::SymlinkShaped);
+    }
+    if let Some(root) = owned_root {
+        let inside = name
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        if !inside {
+            return Err(Refuse::OutsideRoot);
+        }
     }
     Ok(name.to_owned())
 --- new
     let _ = agent;
+    let _ = owned_root;
     Ok(name.to_owned())
 --- end

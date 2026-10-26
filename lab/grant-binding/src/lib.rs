@@ -86,6 +86,9 @@ pub enum Refuse {
     UnknownHandle,
     HostPath,
     OutsidePrincipal,
+    SymlinkShaped,
+    OutsideRoot,
+    PublicRead,
 }
 
 impl std::fmt::Display for Refuse {
@@ -98,6 +101,9 @@ impl std::fmt::Display for Refuse {
             Refuse::UnknownHandle => "unknown handle",
             Refuse::HostPath => "owned root is a host path",
             Refuse::OutsidePrincipal => "owned root is outside the agent principal",
+            Refuse::SymlinkShaped => "use path has a symlink-shaped segment",
+            Refuse::OutsideRoot => "use path leaves the owned root",
+            Refuse::PublicRead => "public storage read does not bind",
         })
     }
 }
@@ -162,7 +168,7 @@ impl Verifier {
             .registry
             .get(&instance)
             .ok_or(Refuse::UnknownInstance)?;
-        let owned_root = resource_name(&record.identity, resource)?;
+        let owned_root = resource_name(&record.identity, resource, None)?;
         self.next_handle += 1;
         let handle = Handle(self.next_handle);
         self.grants.insert(
@@ -224,6 +230,14 @@ impl Verifier {
         Ok(grant)
     }
 
+    /// Uses a grant for one path. The path must be the stored owned root or a
+    /// child under it. The guest's claims are not read.
+    pub fn use_path(&self, call: &Call, request: &GuestRequest, path: &str) -> Result<(), Refuse> {
+        let record = self.resolve(*call, request.handle)?;
+        resource_name(&record.identity, path, Some(&record.owned_root))?;
+        Ok(())
+    }
+
     /// Uses a grant. The guest's claims are not read.
     pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
         let record = self.resolve(call, request.handle)?;
@@ -243,22 +257,39 @@ impl Default for Verifier {
     }
 }
 
-/// The one name check, used at bind: `UsersAI/<agent>/<rest>` with at least one
-/// further plain segment.
-fn resource_name(agent: &str, name: &str) -> Result<String, Refuse> {
+/// The one name check. At bind the name is the owned root; a use path also
+/// carries the owned root it must stay inside. The walk order is host-shaped,
+/// public read, outside principal, symlink-shaped, outside root.
+fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {
     if name.contains('\\') || name.starts_with('/') {
         return Err(Refuse::HostPath);
     }
     let parts: Vec<&str> = name.split('/').collect();
-    if parts.len() < 3
-        || parts
-            .iter()
-            .any(|part| part.is_empty() || *part == "." || *part == "..")
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
     {
         return Err(Refuse::HostPath);
     }
-    if parts[0] != "UsersAI" || parts[1] != agent {
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
+    }
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
         return Err(Refuse::OutsidePrincipal);
+    }
+    if !parts.iter().skip(2).all(|part| {
+        part.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    }) {
+        return Err(Refuse::SymlinkShaped);
+    }
+    if let Some(root) = owned_root {
+        let inside = name
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        if !inside {
+            return Err(Refuse::OutsideRoot);
+        }
     }
     Ok(name.to_owned())
 }
@@ -505,6 +536,127 @@ fn model_owned_root_must_sit_under_the_agent() {
         refusal.to_string(),
         "owned root is outside the agent principal"
     );
+}
+
+#[test]
+fn model_public_storage_read_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "Public/notes", rights())
+        .expect_err("public storage read");
+    assert_eq!(refusal, Refuse::PublicRead);
+    assert_eq!(refusal.to_string(), "public storage read does not bind");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    for path in ["Public/notes", "Public/notes/page.md"] {
+        let refusal = verifier
+            .use_path(&call, &request, path)
+            .expect_err("public storage read");
+        assert_eq!(refusal, Refuse::PublicRead);
+        assert_eq!(refusal.to_string(), "public storage read does not bind");
+    }
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/Public")
+        .expect("a later Public segment is a normal child path");
+}
+
+#[test]
+fn model_use_path_under_the_owned_root_is_allowed() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes")
+        .expect("the owned root");
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("a child of the owned root");
+}
+
+#[test]
+fn model_use_path_dotdot_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let refusal = verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/notes/../other",
+        )
+        .expect_err("dotdot use path");
+    assert_eq!(refusal, Refuse::HostPath);
+    assert_eq!(refusal.to_string(), "owned root is a host path");
+}
+
+#[test]
+fn model_use_path_outside_the_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    for path in ["UsersAI/agent-1/other", "UsersAI/agent-1/notes-extra"] {
+        let refusal = verifier
+            .use_path(&call, &request, path)
+            .expect_err("outside the owned root");
+        assert_eq!(refusal, Refuse::OutsideRoot);
+        assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    }
+}
+
+#[test]
+fn model_symlink_shaped_use_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/link->out")
+        .expect_err("symlink-shaped segment");
+    assert_eq!(refusal, Refuse::SymlinkShaped);
+    assert_eq!(refusal.to_string(), "use path has a symlink-shaped segment");
+    for path in ["UsersAI/agent-1/notes/.", "UsersAI/agent-1/notes/.."] {
+        let refusal = verifier
+            .use_path(&call, &request, path)
+            .expect_err("host-shaped segment");
+        assert_eq!(refusal, Refuse::HostPath);
+        assert_eq!(refusal.to_string(), "owned root is a host path");
+    }
+}
+
+#[test]
+fn model_use_path_on_a_sibling_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let refusal = verifier
+        .use_path(
+            &verifier.open_call(sibling),
+            &guest(handle),
+            "UsersAI/agent-1/notes",
+        )
+        .expect_err("sibling instance");
+    assert_eq!(refusal, Refuse::Instance);
+    assert_eq!(refusal.to_string(), "instance does not match the grant");
 }
 
 #[test]
