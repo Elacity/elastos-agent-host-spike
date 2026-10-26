@@ -9,7 +9,8 @@ Do this list first. The paste below does not add these tools.
 - Apple's command line tools. In Terminal, type `xcode-select --install` and
   follow the window. If it says they are already installed, that is fine. They
   include `git`, `python3` and `ssh-keygen`, which signs the receipts.
-- Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
+- Rust. If `rustup --version` already works, skip this. Otherwise go to
+  <https://rustup.rs> and run the install command shown on that page. Then close
   Terminal and open it again.
 - The Rust pin and wasm target the demo builds for. These two commands install
   the pin in `rust-toolchain.toml` and put the wasm target on that pin. The
@@ -20,10 +21,11 @@ rustup toolchain install 1.91.0
 rustup target add wasm32-unknown-unknown --toolchain 1.91.0
 ```
 
-- A brand-new clone made by the morning block (`git clone --branch`). Do not
-  run `git checkout` in a tree you already have. A zip from a browser can make
-  macOS refuse to run the built programs. Preflight reports
-  `com.apple.quarantine` and does not strip it.
+- Do not clone first. The morning block itself creates a fresh
+  `$HOME/a14-run-<time>` clone (`git clone --branch`). Do not run `git checkout`
+  in a tree you already have. A zip from a browser can make macOS refuse to run
+  the built programs. Preflight reports `com.apple.quarantine` and does not
+  strip it.
 
 ## Sash's morning steps
 
@@ -31,6 +33,9 @@ Paste this whole block. It is one script. A failed line stops the rest.
 It clones into a **new** folder. It never runs `git checkout` in an existing
 tree. Leave `/Users/sash/code/wt-agent-host` and
 `~/code/elastos-agent-host-spike` as they are.
+
+Sign in to GitHub the way you usually do. The block uses
+`A14_REMOTE=git@github.com:Elacity/elastos-agent-host-spike.git` (SSH key).
 
 ```bash
 set -euo pipefail
