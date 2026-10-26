@@ -1,0 +1,19 @@
+id: M-A12-HARDCODE-FAIL
+file: src/a12.rs
+test: tests::a12_clean_isolated_root_passes
+--- old
+    let leftovers = leftovers_under(roots)?;
+    if leftovers.is_empty() {
+        Ok(format!(
+            "runtime-temp census: PASS leftovers:0 roots:{roots:?}"
+        ))
+    } else {
+        Err(format!(
+            "runtime-temp census: FAIL leftovers:{} paths:{leftovers:?}",
+            leftovers.len()
+        ))
+    }
+--- new
+    let _leftovers = leftovers_under(roots)?;
+    Err("runtime-temp census: FAIL leftovers:3 paths:[hardcoded]".into())
+--- end

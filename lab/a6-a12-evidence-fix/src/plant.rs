@@ -86,11 +86,16 @@ impl Plant {
             "plant {id}: id must be one token"
         );
         let file = file.unwrap_or_else(|| panic!("plant {id}: missing file"));
+        let file_path = Path::new(&file);
         assert!(
-            Path::new(&file)
+            file_path
                 .components()
-                .all(|part| matches!(part, Component::Normal(_))),
-            "plant {id}: file must be a plain relative path without .."
+                .all(|part| matches!(part, Component::Normal(_) | Component::ParentDir)),
+            "plant {id}: file must be a relative path"
+        );
+        assert!(
+            !file_path.is_absolute(),
+            "plant {id}: file must be relative"
         );
         assert!(!tests.is_empty(), "plant {id}: missing test");
         assert!(
@@ -107,6 +112,34 @@ impl Plant {
             new: new.join("\n"),
         }
     }
+}
+
+fn resolve_plant_file(crate_dir: &Path, file: &Path, id: &str) -> PathBuf {
+    let repo = crate_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(crate_dir);
+    let mut resolved = crate_dir.to_path_buf();
+    for part in file.components() {
+        match part {
+            Component::ParentDir => {
+                assert!(resolved.pop(), "plant {id}: path escaped the crate root");
+            }
+            Component::Normal(name) => resolved.push(name),
+            _ => {}
+        }
+    }
+    let repo_canon = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let resolved_parent = resolved
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .unwrap_or_else(|| resolved.clone());
+    assert!(
+        resolved_parent.starts_with(&repo_canon) || resolved.starts_with(crate_dir),
+        "plant {id}: file {} is outside the repo",
+        resolved.display()
+    );
+    resolved
 }
 
 /// A catch is a compiled child run whose named test line ends with `FAILED`.
@@ -136,7 +169,7 @@ pub(crate) fn run_all() {
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let plant = Plant::parse(&source, &path);
-        let target = crate_dir.join(&plant.file);
+        let target = resolve_plant_file(&crate_dir, &plant.file, &plant.id);
         let original = fs::read_to_string(&target).unwrap_or_else(|error| {
             panic!(
                 "plant {}: cannot read {}: {error}",
@@ -181,7 +214,8 @@ pub(crate) fn run_all() {
 fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let manifest = crate_dir.join("Cargo.toml");
-    let target_dir = crate_dir.join("target").join(format!("plant-{plant_id}"));
+    let inherited = std::env::var_os("CARGO_TARGET_DIR");
+    let fallback = crate_dir.join("target");
     let output = Command::new(cargo)
         .current_dir(crate_dir)
         .args(["test", "--lib", "--locked", "--offline", "--manifest-path"])
@@ -191,7 +225,10 @@ fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
         .arg("--exact")
         .arg(test)
         .env("A6A12_PLANT_CHILD", "1")
-        .env("CARGO_TARGET_DIR", &target_dir)
+        .env(
+            "CARGO_TARGET_DIR",
+            inherited.unwrap_or_else(|| fallback.into_os_string()),
+        )
         .output()
         .unwrap_or_else(|error| panic!("plant {plant_id}: cannot run cargo for {test}: {error}"));
     assert!(

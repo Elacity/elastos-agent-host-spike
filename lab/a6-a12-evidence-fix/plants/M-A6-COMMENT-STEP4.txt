@@ -1,0 +1,14 @@
+id: M-A6-COMMENT-STEP4
+file: ../../elastos/crates/elastos-runtime/src/capability/manager.rs
+test: tests::a6_sibling_presenting_owner_token_is_refused
+--- old
+        if token.capsule != caller_capsule_id {
+            self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");
+            return Err(ValidationError::WrongCapsule {
+                expected: token.capsule.clone(),
+                got: caller_capsule_id.to_string(),
+            });
+        }
+--- new
+        // step 4 commented out
+--- end

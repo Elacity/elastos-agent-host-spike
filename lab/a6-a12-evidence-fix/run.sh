@@ -10,4 +10,5 @@ cargo fmt --manifest-path lab/a6-a12-evidence-fix/Cargo.toml -- --check
 cargo test --locked --offline --manifest-path lab/a6-a12-evidence-fix/Cargo.toml --lib -- --nocapture
 
 printf '\nA6/A12 evidence-fix: lib tests finished. See FINDINGS.md for verdicts.\n'
-printf 'Full agent-conformance A6/A12 journeys: NOT RUN unless this host builds a throwaway Home.\n'
+printf 'ELASTOS_TMP_ROOT=%s (unset means /tmp/elastos).\n' "${ELASTOS_TMP_ROOT:-}"
+printf 'Resident A6/A12 and ThrowawayHome census: NOT RUN unless this host is macOS.\n'

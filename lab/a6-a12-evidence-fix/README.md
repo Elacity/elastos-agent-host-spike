@@ -1,21 +1,23 @@
 # A6 / A12 evidence fix
 
-Lab-only corrected checks for the two #294 evidence holes that #323 left as
-NEEDS RUNTIME. This folder invokes the agent-conformance census and
-`ThrowawayHome` by source and name (`existing.rs`, `EXISTING_CLEANUP`).
-It does not compile that crate and does not edit that lane, `BACKLOG.md`,
-`lane.env`, `scripts/`, or Runtime source.
+Lab-only checks for the two #294 holes that #323 left as NEEDS RUNTIME.
+This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
+`census::cleanup` / `ThrowawayHome`. It does not edit those crates,
+`BACKLOG.md`, `lane.env`, or `scripts/`.
 
 ## What the checks prove
 
-- **A6:** instance-1 may use its session token. Instance-2 presenting that
-  token is refused with `wrong_capsule`. The Runtime source still has
-  `validate` step 4 (`token.capsule != caller_capsule_id`). The existing A6
-  rows never present a token, so they stay a documented gap.
-- **A12:** the cleanup census includes `/tmp/elastos/storage` and
-  `/tmp/elastos`. A leftover (including an empty directory or a planted file)
-  fails the check. The existing census still inspects only the throwaway
-  TMPDIR.
+- **A6:** instance-1 is granted a real session token. `validate` accepts that
+  token as instance-1. The same token as instance-2 is `WrongCapsule
+  { expected: instance-1, got: instance-2 }` (fields compared, not
+  substrings). `instance-1-evil` and an empty token capsule are refused the
+  same way. This is an in-process Runtime library journey. It is not two
+  resident capsule instances inside one Home.
+- **A12:** leftover census honours `ELASTOS_TMP_ROOT` (default `/tmp/elastos`
+  when unset). A run that creates `{root}/storage` is scanned. Symlink roots
+  are resolved. Renamed leftover trees are found by marker bytes. A clean
+  isolated root is PASS. `ThrowawayHome::new` + `census::cleanup` are called;
+  on Linux that construction is NOT RUN.
 
 ## How to run
 
@@ -31,10 +33,27 @@ cargo test --locked --offline --manifest-path lab/a6-a12-evidence-fix/Cargo.toml
 
 Or `./lab/a6-a12-evidence-fix/run.sh`.
 
-`planted_bugs_are_caught` applies `plants/F-A6-NO-TOKEN-CHECK.txt` and
-`plants/F-A12-DROP-ROOTS.txt` in a child crate build and requires those named
-tests to print `FAILED`.
+The Mac evidence pack can point leftovers at an isolated folder:
 
-The full agent-conformance A6/A12 journeys need a macOS throwaway Home and
-Runtime resident instances. On Linux they are NOT RUN. That does not count
-as a pass, and it does not move A6 or A12 off in-flight.
+```sh
+ELASTOS_TMP_ROOT=/path/to/isolated-tmp ./lab/a6-a12-evidence-fix/run.sh
+```
+
+`planted_bugs_are_caught` applies the plants under `plants/` and requires
+each named test to print `FAILED`.
+
+## NOT RUN on Linux
+
+Resident instances and throwaway Homes need macOS:
+
+```sh
+cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
+  two_instances_overlap_with_separate_grants -- --nocapture
+cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
+  instance_grant_does_not_authorise_sibling -- --nocapture
+cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime \
+  cleanup_census_refuses_each_leftover -- --nocapture
+```
+
+Those skips are not passes. A6 and A12 stay in-flight for Anders's
+resident-instance rule.

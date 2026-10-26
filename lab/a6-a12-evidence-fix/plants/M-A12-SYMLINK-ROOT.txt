@@ -1,0 +1,16 @@
+id: M-A12-SYMLINK-ROOT
+file: src/a12.rs
+test: tests::a12_symlink_root_is_scanned_through
+--- old
+        if follow_root_symlink {
+            let target = fs::canonicalize(root).map_err(|_| {
+                format!("could not resolve symlink root {}", root.display())
+            })?;
+            found.insert(target.clone());
+            walk_resolved(&target, found)?;
+        }
+--- new
+        if follow_root_symlink {
+            // hide nested leftovers behind the symlink
+        }
+--- end

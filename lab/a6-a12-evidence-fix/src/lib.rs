@@ -1,6 +1,5 @@
-//! Corrected A6 and A12 evidence. Reuses the agent-conformance harness
-//! (import of `census` / `ThrowawayHome`, and invoke of those types) and
-//! does not edit that lane.
+//! Corrected A6 and A12 evidence. Calls Runtime `grant`/`validate` and
+//! owner `census::cleanup` / `ThrowawayHome`. Does not edit those crates.
 
 pub mod a12;
 pub mod a6;
@@ -12,6 +11,8 @@ mod plant;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
 
     #[test]
     fn a6_owner_may_use_own_session_token() {
@@ -23,26 +24,25 @@ mod tests {
     #[test]
     fn a6_sibling_presenting_owner_token_is_refused() {
         let line = a6::sibling_presenting_owner_token_is_refused().expect("A6 sibling refusal");
-        assert!(line.contains("wrong_capsule"), "{line}");
-        assert!(line.contains("expected:instance-1"), "{line}");
-        assert!(line.contains("got:instance-2"), "{line}");
+        assert!(
+            line.contains("WrongCapsule")
+                && line.contains("expected:instance-1")
+                && line.contains("got:instance-2"),
+            "{line}"
+        );
         println!("{line}");
     }
 
     #[test]
-    fn a6_runtime_session_token_check_is_present() {
-        let source = existing::runtime_validate_source();
-        let line = a6::runtime_step4_present(source).expect("Runtime step 4");
+    fn a6_prefix_capsule_id_is_refused() {
+        let line = a6::prefix_capsule_id_is_refused().expect("A6 exact-match capsule id");
         println!("{line}");
     }
 
     #[test]
-    fn a6_absent_runtime_session_token_check_is_caught() {
-        let source = existing::runtime_validate_source()
-            .replace("        if token.capsule != caller_capsule_id {\n", "");
-        let err = a6::runtime_step4_present(&source).expect_err("absent step 4 must be caught");
-        assert!(err.contains("session-token check is absent"), "{err}");
-        println!("A6 falsifier (source): {err}");
+    fn a6_empty_token_capsule_is_refused() {
+        let line = a6::empty_token_capsule_is_refused().expect("A6 empty token");
+        println!("{line}");
     }
 
     #[test]
@@ -60,19 +60,37 @@ mod tests {
     #[test]
     fn a12_census_lists_runtime_storage() {
         let roots = a12::runtime_owned_temp_roots();
-        assert!(
-            roots
-                .iter()
-                .any(|root| root == std::path::Path::new("/tmp/elastos/storage")),
-            "A12 census must name /tmp/elastos/storage: {roots:?}"
-        );
-        assert!(
-            roots
-                .iter()
-                .any(|root| root == std::path::Path::new("/tmp/elastos")),
-            "A12 census must name /tmp/elastos: {roots:?}"
-        );
+        let storage = a12::storage_root();
+        let tmp = a12::elastos_tmp_root();
+        assert!(roots.iter().any(|root| root == &storage), "{roots:?}");
+        assert!(roots.iter().any(|root| root == &tmp), "{roots:?}");
         println!("A12 roots: {roots:?}");
+    }
+
+    #[test]
+    fn a12_default_tmp_root_is_shared_path_when_env_unset() {
+        let _lock = a12::lock_real_root();
+        let previous = std::env::var_os("ELASTOS_TMP_ROOT");
+        std::env::remove_var("ELASTOS_TMP_ROOT");
+        assert_eq!(a12::elastos_tmp_root(), a12::default_tmp_root());
+        assert_eq!(
+            a12::storage_root(),
+            std::path::PathBuf::from("/tmp/elastos/storage")
+        );
+        match previous {
+            Some(value) => std::env::set_var("ELASTOS_TMP_ROOT", value),
+            None => std::env::remove_var("ELASTOS_TMP_ROOT"),
+        }
+    }
+
+    #[test]
+    fn a12_clean_isolated_root_passes() {
+        let dir = a12::isolated_dir("clean-pass");
+        let missing = dir.join("does-not-exist");
+        let line = a12::runtime_temp_census_at(&[missing]).expect("clean isolated root");
+        assert!(line.contains("PASS leftovers:0"), "{line}");
+        a12::remove_isolated(&dir);
+        println!("{line}");
     }
 
     #[test]
@@ -87,42 +105,118 @@ mod tests {
     #[test]
     fn a12_isolated_walk_catches_a_nested_file() {
         let dir = a12::isolated_dir("nested");
-        let file = dir.join("child").join("planted");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, b"plant").unwrap();
+        let leftover = a12::create_runtime_storage_leftover(&dir).expect("create storage");
         let leftovers = a12::leftovers_under(&[dir.clone()]).expect("walk");
-        assert!(leftovers.contains(&file), "{leftovers:?}");
+        assert!(leftovers.contains(&leftover), "{leftovers:?}");
         a12::remove_isolated(&dir);
-        println!("A12 nested leftover: {}", file.display());
+        println!("A12 nested leftover: {}", leftover.display());
     }
 
     #[test]
-    fn a12_symlink_root_is_leftover_and_not_followed() {
+    fn a12_symlink_root_is_scanned_through() {
         let dir = a12::isolated_dir("symlink-root");
-        let outside = a12::isolated_dir("symlink-outside");
-        let secret = outside.join("secret");
-        std::fs::write(&secret, b"outside").unwrap();
-        let link = dir.join("link-out");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let leftovers = a12::leftovers_under(&[dir.clone()]).expect("walk");
-        assert!(leftovers.contains(&link), "{leftovers:?}");
+        let real = a12::isolated_dir("symlink-real");
+        let leftover = a12::create_runtime_storage_leftover(&real).expect("create storage");
+        let link = dir.join("linked-root");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let leftovers = a12::leftovers_under(&[link.clone()]).expect("walk");
         assert!(
-            !leftovers.contains(&secret),
-            "census must not follow a symlink out of the root: {leftovers:?}"
+            leftovers
+                .iter()
+                .any(|path| path == &leftover || path.ends_with(leftover.file_name().unwrap())),
+            "census must resolve a symlink root and see the leftover: {leftovers:?}"
         );
         a12::remove_isolated(&dir);
-        a12::remove_isolated(&outside);
-        println!("A12 symlink leftover without follow: {}", link.display());
+        a12::remove_isolated(&real);
+        println!("A12 symlink root scanned through to {}", leftover.display());
+    }
+
+    #[test]
+    fn a12_renamed_root_is_found_by_marker() {
+        let parent = a12::isolated_dir("rename-parent");
+        let named = parent.join("named-root");
+        fs::create_dir_all(&named).unwrap();
+        let leftover = a12::create_runtime_storage_leftover(&named).expect("create storage");
+        let bak = parent.join("named-root.bak");
+        fs::rename(&named, &bak).unwrap();
+        fs::create_dir_all(&named).unwrap();
+        let leftovers = a12::leftovers_under(&[named.clone()]).expect("walk");
+        assert!(
+            leftovers.iter().any(|path| {
+                fs::read(path).ok().as_deref() == Some(a12::LEFTOVER_MARKER)
+                    || path.ends_with(leftover.file_name().unwrap())
+            }),
+            "renamed leftover must be found by marker, not the old name: {leftovers:?}"
+        );
+        a12::remove_isolated(&parent);
+        println!(
+            "A12 renamed leftover found by marker under {}",
+            bak.display()
+        );
     }
 
     #[test]
     fn a12_planted_storage_file_is_caught() {
-        let plant = a12::StoragePlant::place().expect("plant /tmp/elastos/storage");
+        let isolated = a12::isolated_dir("plant-storage");
+        let _lock = a12::lock_real_root();
+        let previous = std::env::var_os("ELASTOS_TMP_ROOT");
+        std::env::set_var("ELASTOS_TMP_ROOT", &isolated);
+        let plant = a12::StoragePlant::place().expect("plant storage");
         let err = a12::runtime_temp_census().expect_err("planted storage leftover must fail A12");
         assert!(err.contains(plant.path().to_str().unwrap()), "{err}");
         assert!(err.contains("runtime-temp census: FAIL"), "{err}");
         println!("A12 planted-file falsifier: {err}");
         drop(plant);
+        match previous {
+            Some(value) => std::env::set_var("ELASTOS_TMP_ROOT", value),
+            None => std::env::remove_var("ELASTOS_TMP_ROOT"),
+        }
+        a12::remove_isolated(&isolated);
+    }
+
+    #[test]
+    fn a12_elastos_tmp_root_writes_nothing_under_shared_tmp() {
+        let isolated = a12::isolated_dir("env-redirect");
+        let shared = Path::new("/tmp/elastos");
+        let existed_before = shared.exists();
+        let _lock = a12::lock_real_root();
+        let previous = std::env::var_os("ELASTOS_TMP_ROOT");
+        std::env::set_var("ELASTOS_TMP_ROOT", &isolated);
+        let leftover = a12::create_runtime_storage_leftover(&a12::elastos_tmp_root())
+            .expect("create storage under isolated root");
+        let _ = a12::runtime_temp_census();
+        let plant = a12::StoragePlant::place().expect("plant under isolated root");
+        assert!(
+            leftover.starts_with(&isolated),
+            "leftover must stay under ELASTOS_TMP_ROOT: {}",
+            leftover.display()
+        );
+        assert!(
+            plant.path().starts_with(&isolated),
+            "plant must stay under ELASTOS_TMP_ROOT: {}",
+            plant.path().display()
+        );
+        if existed_before {
+            let planted_shared = shared.join("storage").join("a6-a12-evidence-fix-planted");
+            assert!(
+                !planted_shared.exists(),
+                "ELASTOS_TMP_ROOT set, but shared leftover exists: {}",
+                planted_shared.display()
+            );
+        } else {
+            assert!(
+                !shared.exists(),
+                "ELASTOS_TMP_ROOT set, but {} was created",
+                shared.display()
+            );
+        }
+        drop(plant);
+        match previous {
+            Some(value) => std::env::set_var("ELASTOS_TMP_ROOT", value),
+            None => std::env::remove_var("ELASTOS_TMP_ROOT"),
+        }
+        a12::remove_isolated(&isolated);
+        println!("A12 ELASTOS_TMP_ROOT kept leftovers out of /tmp/elastos");
     }
 
     #[test]
@@ -154,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_cleanup_invokes_existing_census_by_name() {
+    fn combined_cleanup_calls_existing_census_and_isolated_temps() {
         assert_eq!(a12::EXISTING_CLEANUP, "agent_conformance::census::cleanup");
         assert_eq!(
             a12::EXISTING_HOME,
@@ -163,23 +257,21 @@ mod tests {
         let in_root = a12::in_root_census_on_this_host();
         match &in_root {
             a12::HostPart::NotRun(reason) => println!("NOT RUN: {reason}"),
-            other => panic!("expected NOT RUN on this task, got {other:?}"),
+            a12::HostPart::Pass(line) => println!("in-root census: {line}"),
+            a12::HostPart::Fail(line) => panic!("in-root census failed: {line}"),
         }
-        let plant = a12::StoragePlant::place().expect("plant storage");
-        let existing_pass = Ok(
-            "cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
-                .into(),
-        );
-        let err = a12::cleanup_with_runtime_temps(existing_pass)
-            .expect_err("existing PASS plus storage leftover must fail the wrap");
+        let isolated = a12::isolated_dir("combined");
+        let leftover = a12::create_runtime_storage_leftover(&isolated).expect("create storage");
+        let temps = a12::runtime_temp_census_at(&[isolated.join("storage"), isolated.clone()]);
+        let err = a12::merge_host(in_root, temps)
+            .expect_err("existing host part plus storage leftover must fail the wrap");
+        assert!(err.contains("runtime-temp census: FAIL"), "{err}");
         assert!(
-            err.contains("outside-root:BLOCKED(AC-006-STORAGE)"),
+            err.contains(leftover.to_str().unwrap()) || err.contains("leftover-marker"),
             "{err}"
         );
-        assert!(err.contains("runtime-temp census: FAIL"), "{err}");
-        assert!(err.contains(plant.path().to_str().unwrap()), "{err}");
-        println!("combined wrap caught leftover while existing census would PASS: {err}");
-        drop(plant);
+        println!("combined wrap caught leftover after a storage-creating run: {err}");
+        a12::remove_isolated(&isolated);
     }
 
     #[test]

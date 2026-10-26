@@ -5,3 +5,8 @@ edition = "2021"
 publish = false
 
 [workspace]
+
+[dependencies]
+agent-conformance = { path = "../agent-conformance" }
+elastos-runtime = { path = "../../elastos/crates/elastos-runtime" }
+tokio = { version = "1", features = ["rt"] }

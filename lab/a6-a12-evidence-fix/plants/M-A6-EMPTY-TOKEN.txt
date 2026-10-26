@@ -1,0 +1,8 @@
+id: M-A6-EMPTY-TOKEN
+file: ../../elastos/crates/elastos-runtime/src/capability/manager.rs
+test: tests::a6_empty_token_capsule_is_refused
+--- old
+        if token.capsule != caller_capsule_id {
+--- new
+        if !token.capsule.is_empty() && token.capsule != caller_capsule_id {
+--- end

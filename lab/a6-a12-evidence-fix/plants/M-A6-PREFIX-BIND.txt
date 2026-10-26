@@ -1,0 +1,8 @@
+id: M-A6-PREFIX-BIND
+file: ../../elastos/crates/elastos-runtime/src/capability/manager.rs
+test: tests::a6_prefix_capsule_id_is_refused
+--- old
+        if token.capsule != caller_capsule_id {
+--- new
+        if !caller_capsule_id.starts_with(token.capsule.as_str()) {
+--- end
