@@ -1,0 +1,800 @@
+{
+  "declared_rights": "capsules/model-provider/tests/fixtures/confine/declared-rights.json",
+  "fail_closed_linux": {
+    "pr": 307,
+    "sha": "2c70a0d845f9acc15144a2afec889370612cca66"
+  },
+  "linux_confine": {
+    "pr": 296,
+    "sha": "2dc3c565c6649d668f1e50efefeea7d964330f9c"
+  },
+  "macos_profile": "capsules/model-provider/confine.sb",
+  "mismatches": [
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "the guard unshares only CLONE_NEWUSER and grants the storage root",
+        "rule": "no STORAGE_PARENT path rule",
+        "verdict": "missing"
+      },
+      "fix": "Either drop the STORAGE_PARENT literal read from the C8 storage right once a named test shows each provider starts without it, or teach the Linux labs one private-parent mount for every provider, not only wallet (lab/linux-confine/helper/setup.c:251).",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 251,
+        "note": "Landlock has no literal-directory rule; did and model get no host-parent grant",
+        "rule": "no Landlock rule on the host STORAGE_PARENT",
+        "verdict": "missing"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 23,
+        "rule": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+        "verdict": "allow"
+      },
+      "provider": "model-provider",
+      "right": "storage.parent",
+      "right_lab": "linux-confine",
+      "title": "literal read of STORAGE_PARENT only",
+      "why": "allow on macOS, missing on Linux #296"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "the guard unshares only CLONE_NEWUSER and grants the storage root",
+        "rule": "no STORAGE_PARENT path rule",
+        "verdict": "missing"
+      },
+      "fix": "Either drop the STORAGE_PARENT literal read from the C8 storage right once a named test shows each provider starts without it, or teach the Linux labs one private-parent mount for every provider, not only wallet (lab/linux-confine/helper/setup.c:251).",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 251,
+        "note": "Landlock has no literal-directory rule; did and model get no host-parent grant",
+        "rule": "no Landlock rule on the host STORAGE_PARENT",
+        "verdict": "missing"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 23,
+        "rule": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+        "verdict": "allow"
+      },
+      "provider": "model-provider",
+      "right": "storage.parent",
+      "right_lab": "fail-closed-linux",
+      "title": "literal read of STORAGE_PARENT only",
+      "why": "allow on macOS, missing on Linux #307"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "the guard does not grant the startup root-directory read",
+        "rule": "no Landlock rule on /",
+        "verdict": "missing"
+      },
+      "fix": "Keep the macOS baseline only while a named test needs `/`. If the Linux loader starts without that rule, move the baseline to a Linux-only loader grant and stop claiming one right.",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 38,
+        "note": "a rule on / would grant the whole tree, so the launcher adds none",
+        "rule": "no Landlock rule on /",
+        "verdict": "missing"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 19,
+        "rule": "(allow file-read-data (literal \"/\"))",
+        "verdict": "allow"
+      },
+      "provider": "model-provider",
+      "right": "startup-root-directory",
+      "right_lab": "linux-confine",
+      "title": "startup read of /",
+      "why": "allow on macOS, missing on Linux #296"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "the guard does not grant the startup root-directory read",
+        "rule": "no Landlock rule on /",
+        "verdict": "missing"
+      },
+      "fix": "Keep the macOS baseline only while a named test needs `/`. If the Linux loader starts without that rule, move the baseline to a Linux-only loader grant and stop claiming one right.",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 38,
+        "note": "a rule on / would grant the whole tree, so the launcher adds none",
+        "rule": "no Landlock rule on /",
+        "verdict": "missing"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 19,
+        "rule": "(allow file-read-data (literal \"/\"))",
+        "verdict": "allow"
+      },
+      "provider": "model-provider",
+      "right": "startup-root-directory",
+      "right_lab": "fail-closed-linux",
+      "title": "startup read of /",
+      "why": "allow on macOS, missing on Linux #307"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/real.rs",
+        "line": 122,
+        "note": "the seccomp layer is a deny-list; it does not name sysctl-read",
+        "rule": "no sysctl grant",
+        "verdict": "missing"
+      },
+      "fix": "Name the Linux syscalls that stand in for sysctl-read (uname and the loader set) in the C8 baseline, or drop the macOS sysctl-read once a named test shows the loader starts without it.",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 704,
+        "note": "Landlock has no sysctl; the provider filter admits the loader syscalls it needs",
+        "rule": "SYS_uname on the probe filter; no sysctl right",
+        "verdict": "partial"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 21,
+        "rule": "(allow sysctl-read)",
+        "verdict": "allow"
+      },
+      "provider": "model-provider",
+      "right": "startup-sysctl",
+      "right_lab": "linux-confine",
+      "title": "startup sysctl-read",
+      "why": "allow on macOS, partial on Linux #296"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/real.rs",
+        "line": 122,
+        "note": "the seccomp layer is a deny-list; it does not name sysctl-read",
+        "rule": "no sysctl grant",
+        "verdict": "missing"
+      },
+      "fix": "Name the Linux syscalls that stand in for sysctl-read (uname and the loader set) in the C8 baseline, or drop the macOS sysctl-read once a named test shows the loader starts without it.",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 704,
+        "note": "Landlock has no sysctl; the provider filter admits the loader syscalls it needs",
+        "rule": "SYS_uname on the probe filter; no sysctl right",
+        "verdict": "partial"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 21,
+        "rule": "(allow sysctl-read)",
+        "verdict": "allow"
+      },
+      "provider": "model-provider",
+      "right": "startup-sysctl",
+      "right_lab": "fail-closed-linux",
+      "title": "startup sysctl-read",
+      "why": "allow on macOS, missing on Linux #307"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/seccomp.rs",
+        "line": 31,
+        "note": "no AF_UNIX exception; this is stricter than the #296 provider filter",
+        "rule": "seccomp DENIED includes SYS_socketpair",
+        "verdict": "deny"
+      },
+      "fix": "Pick one declared right for AF_UNIX socketpair. Either add a named macOS network exception that the C8 contract accepts, or drop the #296 AF_UNIX exception so both Linux labs deny the pair like capsules/model-provider/confine.sb:14 and lab/fail-closed-linux/src/seccomp.rs:31.",
+      "kind": "polarity",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 373,
+        "note": "model Tokio needs the pair; did and wallet take the same filter; socket itself stays refused",
+        "rule": "provider filter allows socketpair only when arg0 is AF_UNIX",
+        "verdict": "allow"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 14,
+        "note": "macOS counts a Unix-domain pair under network*",
+        "rule": "(deny network*)",
+        "verdict": "deny"
+      },
+      "provider": "model-provider",
+      "right": "unix-socketpair",
+      "right_lab": "linux-confine",
+      "title": "AF_UNIX socketpair",
+      "why": "denied on macOS, allowed on Linux #296"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/seccomp.rs",
+        "line": 31,
+        "note": "no AF_UNIX exception; this is stricter than the #296 provider filter",
+        "rule": "seccomp DENIED includes SYS_socketpair",
+        "verdict": "deny"
+      },
+      "fix": "Pick one declared right for AF_UNIX socketpair. Either add a named macOS network exception that the C8 contract accepts, or drop the #296 AF_UNIX exception so both Linux labs deny the pair like capsules/model-provider/confine.sb:14 and lab/fail-closed-linux/src/seccomp.rs:31.",
+      "kind": "linux-split",
+      "left": "linux-confine",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 373,
+        "note": "model Tokio needs the pair; did and wallet take the same filter; socket itself stays refused",
+        "rule": "provider filter allows socketpair only when arg0 is AF_UNIX",
+        "verdict": "allow"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 14,
+        "note": "macOS counts a Unix-domain pair under network*",
+        "rule": "(deny network*)",
+        "verdict": "deny"
+      },
+      "provider": "model-provider",
+      "right": "unix-socketpair",
+      "right_lab": "fail-closed-linux",
+      "title": "AF_UNIX socketpair",
+      "why": "allowed on #296, denied on #307"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 777,
+        "note": "the guard unshares only CLONE_NEWUSER; a host signal is a named gap below ABI 6",
+        "rule": "LANDLOCK_SCOPE_SIGNAL at ABI 6; no PID namespace",
+        "verdict": "partial"
+      },
+      "fix": "Give the C0 guard the same carrier #296 already uses: a PID namespace that contains the provider (lab/linux-confine/helper/setup.c:671). LANDLOCK_SCOPE_SIGNAL at ABI 6 is not a substitute for a host pid that still exists in the same namespace.",
+      "kind": "coverage",
+      "left": "macos",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 671,
+        "note": "a host pid cannot be named inside the new PID namespace",
+        "rule": "unshare(CLONE_NEWPID)",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "no signal-outbound grant",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "provider": "model-provider",
+      "right": "signal.host",
+      "right_lab": "fail-closed-linux",
+      "title": "signal a host process",
+      "why": "deny on macOS, partial on Linux #307"
+    },
+    {
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 777,
+        "note": "the guard unshares only CLONE_NEWUSER; a host signal is a named gap below ABI 6",
+        "rule": "LANDLOCK_SCOPE_SIGNAL at ABI 6; no PID namespace",
+        "verdict": "partial"
+      },
+      "fix": "Give the C0 guard the same carrier #296 already uses: a PID namespace that contains the provider (lab/linux-confine/helper/setup.c:671). LANDLOCK_SCOPE_SIGNAL at ABI 6 is not a substitute for a host pid that still exists in the same namespace.",
+      "kind": "linux-split",
+      "left": "linux-confine",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 671,
+        "note": "a host pid cannot be named inside the new PID namespace",
+        "rule": "unshare(CLONE_NEWPID)",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "no signal-outbound grant",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "provider": "model-provider",
+      "right": "signal.host",
+      "right_lab": "fail-closed-linux",
+      "title": "signal a host process",
+      "why": "deny on #296, partial on #307"
+    }
+  ],
+  "operations_table": [
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "`model_provider_ops_under_profile` shows the creation of `runs/` under `STORAGE_ROOT`. The parent read rule is `(allow file-read* (literal (param \"STORAGE_PARENT\")))`; removing it is F-cc1-rm-parent and `model_provider_ops_under_profile` fails. The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))`; removing it is F-cc1-rm-storage and `model_provider_ops_under_profile` fails. `model_outside_write_denied` shows an outside `init` answers `journal_corrupt`. `model_outside_create_reports_access_denied` shows the refused create answers `journal_access_denied`.",
+      "operation": "init",
+      "right": "storage"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "`model_provider_ops_under_profile` shows the answer equals `init`'s. No named test shows a storage or socket right, or a read, write, settle or refusal, for this call.",
+      "operation": "status",
+      "right": "no named test shows this"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "`Provider::shutdown`, used by `model_provider_ops_under_profile` and `model_bound_copy_serves_under_profile`, shows `data.shutdown` true and a clean exit. No named test shows a storage or socket right for this call.",
+      "operation": "shutdown",
+      "right": "no named test shows this"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "`model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. No named test shows this op itself reading, writing, settling or using a socket.",
+      "operation": "offers_list",
+      "right": "no named test shows this"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "`model_outside_read_denied` stores one run with this op before `runs_get` reads it back. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. `(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))` for the `STORAGE_ROOT` write. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant.",
+      "operation": "runs_create",
+      "right": "storage"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "`model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))`. The outside read is refused under the fixture profile `READ_FIXTURE_RULE`. That refusal is a denial, not a grant. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. The test does not show which call connects.",
+      "operation": "runs_get",
+      "right": "storage"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "no named test shows this. no named test shows the right and the effect.",
+      "operation": "runs_events",
+      "right": "no named test shows this"
+    },
+    {
+      "file": "capsules/model-provider/CONFINEMENT.md",
+      "linux": "designed, not enforced",
+      "macos": "no named test shows this. no named test shows the right and the effect.",
+      "operation": "runs_cancel",
+      "right": "no named test shows this"
+    }
+  ],
+  "provider": "model-provider",
+  "rights": [
+    {
+      "declared": "bound-executable",
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 84,
+        "note": "the guard adds a path rule only for the named executable",
+        "rule": "EXECUTABLE_ACCESS = EXECUTE|READ_FILE",
+        "verdict": "allow"
+      },
+      "id": "bound-executable",
+      "kind": "declared",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 704,
+        "note": "Linux execve opens the binary for read and execute",
+        "rule": "Landlock EXECUTE|READ_FILE on PROVIDER_EXECUTABLE",
+        "verdict": "allow"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 17,
+        "rule": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
+        "verdict": "allow"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "exec the bound provider binary"
+    },
+    {
+      "declared": "storage",
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "same eight-right mask as #296; no REFER, no IOCTL_DEV",
+        "rule": "STORAGE_ROOT_ACCESS eight bits",
+        "verdict": "allow"
+      },
+      "id": "storage.root",
+      "kind": "declared",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 38,
+        "note": "read/write/truncate/make-reg/make-dir/remove; no ioctl, refer, or special-file create",
+        "rule": "LC_STORAGE_RIGHTS eight bits (0x41be)",
+        "verdict": "allow"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 25,
+        "rule": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+        "verdict": "allow"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "read and write under STORAGE_ROOT"
+    },
+    {
+      "declared": "storage",
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "the guard unshares only CLONE_NEWUSER and grants the storage root",
+        "rule": "no STORAGE_PARENT path rule",
+        "verdict": "missing"
+      },
+      "id": "storage.parent",
+      "kind": "declared",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 251,
+        "note": "Landlock has no literal-directory rule; did and model get no host-parent grant",
+        "rule": "no Landlock rule on the host STORAGE_PARENT",
+        "verdict": "missing"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 23,
+        "rule": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+        "verdict": "allow"
+      },
+      "match": false,
+      "mismatches": [
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "linux-confine",
+          "why": "allow on macOS, missing on Linux #296"
+        },
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "fail-closed-linux",
+          "why": "allow on macOS, missing on Linux #307"
+        }
+      ],
+      "title": "literal read of STORAGE_PARENT only"
+    },
+    {
+      "declared": "startup-root-directory",
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "the guard does not grant the startup root-directory read",
+        "rule": "no Landlock rule on /",
+        "verdict": "missing"
+      },
+      "id": "startup-root-directory",
+      "kind": "platform_baseline",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 38,
+        "note": "a rule on / would grant the whole tree, so the launcher adds none",
+        "rule": "no Landlock rule on /",
+        "verdict": "missing"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 19,
+        "rule": "(allow file-read-data (literal \"/\"))",
+        "verdict": "allow"
+      },
+      "match": false,
+      "mismatches": [
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "linux-confine",
+          "why": "allow on macOS, missing on Linux #296"
+        },
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "fail-closed-linux",
+          "why": "allow on macOS, missing on Linux #307"
+        }
+      ],
+      "title": "startup read of /"
+    },
+    {
+      "declared": "startup-sysctl",
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/real.rs",
+        "line": 122,
+        "note": "the seccomp layer is a deny-list; it does not name sysctl-read",
+        "rule": "no sysctl grant",
+        "verdict": "missing"
+      },
+      "id": "startup-sysctl",
+      "kind": "platform_baseline",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 704,
+        "note": "Landlock has no sysctl; the provider filter admits the loader syscalls it needs",
+        "rule": "SYS_uname on the probe filter; no sysctl right",
+        "verdict": "partial"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 21,
+        "rule": "(allow sysctl-read)",
+        "verdict": "allow"
+      },
+      "match": false,
+      "mismatches": [
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "linux-confine",
+          "why": "allow on macOS, partial on Linux #296"
+        },
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "fail-closed-linux",
+          "why": "allow on macOS, missing on Linux #307"
+        }
+      ],
+      "title": "startup sysctl-read"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "F14 plants a parent-covering storage rule",
+        "rule": "Landlock default denial outside STORAGE_ROOT",
+        "verdict": "deny"
+      },
+      "id": "outside.read",
+      "implied_by": "(deny default)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 38,
+        "note": "no path rule names an outside file",
+        "rule": "Landlock default denial outside STORAGE_ROOT",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "no allow names a path outside STORAGE_ROOT",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "read outside STORAGE_ROOT"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 75,
+        "note": "F14 plants a parent-covering storage rule",
+        "rule": "Landlock default denial outside STORAGE_ROOT",
+        "verdict": "deny"
+      },
+      "id": "outside.write",
+      "implied_by": "(deny default)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 38,
+        "note": "no path rule names an outside file",
+        "rule": "Landlock default denial outside STORAGE_ROOT",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "no allow writes outside STORAGE_ROOT",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "write outside STORAGE_ROOT"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/seccomp.rs",
+        "line": 30,
+        "note": "TCP bind/connect is not a launch requirement; the filter denies the call",
+        "rule": "seccomp DENIED includes SYS_socket",
+        "verdict": "deny"
+      },
+      "id": "network",
+      "implied_by": "(deny network*)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 404,
+        "note": "DENY_SOCKET stays true; connect/bind/listen/accept are refused by name",
+        "rule": "network namespace + seccomp denied[] includes SYS_socket",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 14,
+        "note": "explicit network denial",
+        "rule": "(deny network*)",
+        "verdict": "deny"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "network sockets"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/seccomp.rs",
+        "line": 31,
+        "note": "no AF_UNIX exception; this is stricter than the #296 provider filter",
+        "rule": "seccomp DENIED includes SYS_socketpair",
+        "verdict": "deny"
+      },
+      "id": "unix-socketpair",
+      "implied_by": "(deny network*)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 373,
+        "note": "model Tokio needs the pair; did and wallet take the same filter; socket itself stays refused",
+        "rule": "provider filter allows socketpair only when arg0 is AF_UNIX",
+        "verdict": "allow"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 14,
+        "note": "macOS counts a Unix-domain pair under network*",
+        "rule": "(deny network*)",
+        "verdict": "deny"
+      },
+      "match": false,
+      "mismatches": [
+        {
+          "kind": "polarity",
+          "left": "macos",
+          "right": "linux-confine",
+          "why": "denied on macOS, allowed on Linux #296"
+        },
+        {
+          "kind": "linux-split",
+          "left": "linux-confine",
+          "right": "fail-closed-linux",
+          "why": "allowed on #296, denied on #307"
+        }
+      ],
+      "title": "AF_UNIX socketpair"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 84,
+        "note": "Landlock EXECUTE is not granted on STORAGE_ROOT",
+        "rule": "EXECUTABLE_ACCESS only on the named file",
+        "verdict": "deny"
+      },
+      "id": "exec.other",
+      "implied_by": "(deny default)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 704,
+        "note": "a copy under STORAGE_ROOT is readable and not executable",
+        "rule": "Landlock EXECUTE only on PROVIDER_EXECUTABLE",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "only PROVIDER_EXECUTABLE has process-exec",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "exec a file other than PROVIDER_EXECUTABLE"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 777,
+        "note": "the guard unshares only CLONE_NEWUSER; a host signal is a named gap below ABI 6",
+        "rule": "LANDLOCK_SCOPE_SIGNAL at ABI 6; no PID namespace",
+        "verdict": "partial"
+      },
+      "id": "signal.host",
+      "implied_by": "(deny default)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 671,
+        "note": "a host pid cannot be named inside the new PID namespace",
+        "rule": "unshare(CLONE_NEWPID)",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "no signal-outbound grant",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "match": false,
+      "mismatches": [
+        {
+          "kind": "coverage",
+          "left": "macos",
+          "right": "fail-closed-linux",
+          "why": "deny on macOS, partial on Linux #307"
+        },
+        {
+          "kind": "linux-split",
+          "left": "linux-confine",
+          "right": "fail-closed-linux",
+          "why": "deny on #296, partial on #307"
+        }
+      ],
+      "title": "signal a host process"
+    },
+    {
+      "declared": null,
+      "fail_closed_linux": {
+        "file": "lab/fail-closed-linux/src/lib.rs",
+        "line": 109,
+        "note": "FILE_PROFILE_NEEDED_RIGHTS keeps the start refused when the ABI cannot deny ioctl",
+        "rule": "ioctl_dev is a needed deny-right (ABI 5), not a storage grant",
+        "verdict": "deny"
+      },
+      "id": "device.ioctl",
+      "implied_by": "(deny default)",
+      "kind": "implied_deny",
+      "linux_confine": {
+        "file": "lab/linux-confine/helper/setup.c",
+        "line": 102,
+        "note": "ABI below 5 refuses the start so the deny cannot be dropped",
+        "rule": "IOCTL_DEV is handled and not in LC_STORAGE_RIGHTS",
+        "verdict": "deny"
+      },
+      "macos": {
+        "file": "capsules/model-provider/confine.sb",
+        "line": 12,
+        "note": "no file-ioctl grant",
+        "rule": "(deny default)",
+        "verdict": "deny"
+      },
+      "match": true,
+      "mismatches": [],
+      "title": "device ioctl"
+    }
+  ],
+  "status": {
+    "jetson_aarch64_execution": "NOT RUN",
+    "kind": "static source comparison",
+    "linux_x86_64_execution": "NOT RUN",
+    "macos_execution": "NOT RUN"
+  }
+}

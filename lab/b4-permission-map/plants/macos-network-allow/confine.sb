@@ -1,0 +1,24 @@
+;; Copied from capsules/did-provider/confine.sb for F-B4-MACOS-NETWORK-ALLOW.
+;; The one planted change is the appended network allow. The checker must
+;; CATCH that as a polarity mismatch against both Linux labs.
+;; Seatbelt profile for did-provider; this file is the test oracle the
+;; Runtime-generated profile must match.
+;; PROVIDER_EXECUTABLE is the canonical binary path.
+;; STORAGE_ROOT is Init.base_path/did; STORAGE_PARENT is Init.base_path.
+(version 1)
+(deny default)
+;; The provider speaks stdin/stdout only; no socket or listener is granted.
+(deny network*)
+
+;; Startup: execute only the provider binary the launch named.
+(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
+;; Startup: resolve the absolute program path through the root directory.
+(allow file-read* (literal "/"))
+;; Startup: the loader and allocator read kernel facts.
+(allow sysctl-read)
+;; Shared contract: the generated profile binds STORAGE_PARENT for both
+;; file-profile providers.
+(allow file-read* (literal (param "STORAGE_PARENT")))
+;; Identity: one grant covers encrypted nickname and persona state.
+(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
+(allow network*)
