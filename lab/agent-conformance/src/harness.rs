@@ -1,6 +1,6 @@
 //! The lane's one owner of throwaway Homes and bounded Runtime launches.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
@@ -74,6 +74,7 @@ pub struct ThrowawayHome {
     temp: PathBuf,
     removed: bool,
     keep: Cell<bool>,
+    captures: RefCell<Vec<u64>>,
 }
 
 impl ThrowawayHome {
@@ -120,6 +121,7 @@ impl ThrowawayHome {
             temp: root.join("tmp"),
             removed: false,
             keep: Cell::new(false),
+            captures: RefCell::new(Vec::new()),
         };
         match include_str!("../fixtures/home-source.txt").trim() {
             "throwaway" => {}
@@ -208,6 +210,7 @@ impl ThrowawayHome {
             .map_err(|_| "could not create child stdout capture")?;
         let stderr = File::create_new(self.root.join(format!("stderr-{serial}")))
             .map_err(|_| "could not create child stderr capture")?;
+        self.captures.borrow_mut().push(serial);
         let mut command = Command::new(program);
         command
             .args(args)
@@ -230,8 +233,7 @@ impl ThrowawayHome {
                     .map_err(|_| "could not attach child stderr")?,
             );
         if let Some(operator) = operator {
-            // Runtime alone reads its fixture coordinates. The harness only
-            // supplies a path derived from another guarded, borrowed Home.
+            // The client reads fixture coordinates from a guarded, borrowed Home.
             command.env(
                 "ELASTOS_RUNTIME_COORDS_FILE",
                 operator.data().join("runtime-coords.json"),
@@ -314,6 +316,26 @@ impl ThrowawayHome {
         }
     }
 
+    /// Exact harness-owned pairs, including helper commands. Runtime files are
+    /// outside this inventory. Callers inspect these only after group drain.
+    pub fn capture_paths(&self) -> Result<Vec<[PathBuf; 2]>> {
+        self.guard(self.home(), self.data())?;
+        if self.captures.borrow().is_empty() {
+            return Err("capture inventory is empty");
+        }
+        Ok(self
+            .captures
+            .borrow()
+            .iter()
+            .map(|serial| {
+                [
+                    self.root.join(format!("stdout-{serial}")),
+                    self.root.join(format!("stderr-{serial}")),
+                ]
+            })
+            .collect())
+    }
+
     pub fn finish(mut self) -> Result<()> {
         if self.keep.get() {
             return Err("keep the root after an unstopped child or failed stop");
@@ -332,7 +354,7 @@ struct CapturedChild {
 }
 
 /// Borrows the Home so its root cannot be removed while the child is owned.
-/// Captures stay in the root; operator output and attach data remain unread.
+/// Captures stay in the guarded root for fixture acceptance checks.
 pub struct RunningChild<'a> {
     home: &'a ThrowawayHome,
     spawned: CapturedChild,
@@ -470,9 +492,20 @@ impl<'a> RunningInstances<'a> {
 
     /// One deadline from before the first spawn. Poll all children so a slow
     /// member cannot hide a sibling's result. Drop kills any unfinished groups.
-    pub fn collect(mut self, bound: Duration) -> Result<Vec<Completion>> {
+    pub fn collect(self, bound: Duration) -> Result<Vec<Completion>> {
+        self.collect_with(bound, || Ok(()))
+    }
+
+    /// Service fixture approvals while the existing children wait. A controller
+    /// error uses the same group cleanup as any other collection failure.
+    pub fn collect_with(
+        mut self,
+        bound: Duration,
+        mut service: impl FnMut() -> Result<()>,
+    ) -> Result<Vec<Completion>> {
         let mut results: Vec<_> = self.children.iter().map(|_| None).collect();
         while results.iter().any(Option::is_none) {
+            service()?;
             for (child, result) in self.children.iter_mut().zip(&mut results) {
                 if result.is_none() {
                     if let Some(output) = child.try_output()? {
