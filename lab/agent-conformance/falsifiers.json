@@ -856,8 +856,8 @@
       "edits": [
         {
           "file": "tests/effects.rs",
-          "old": "    let cleanup_state = if outcome == ReadOutcome::NoPolicy {",
-          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = if outcome == ReadOutcome::NoPolicy {"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
         }
       ],
       "tests": [
@@ -872,8 +872,8 @@
       "edits": [
         {
           "file": "tests/effects.rs",
-          "old": "    let cleanup_state = if outcome == ReadOutcome::NoPolicy {",
-          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = if outcome == ReadOutcome::NoPolicy {"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
+          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
         },
         {
           "file": "tests/effects.rs",
@@ -973,7 +973,7 @@
       "edits": [
         {
           "file": "src/report.rs",
-          "old": "                text.push_str(\" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included\");",
+          "old": "                text.push_str(\" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows\");",
           "new": "                text.push_str(\"\");"
         }
       ],
@@ -1061,8 +1061,8 @@
       "edits": [
         {
           "file": "src/report.rs",
-          "old": "| \"instance_grant_does_not_authorise_sibling\"\n        | \"cancelled_instance_settles_with_reason_sibling_completes\" => {\n            &[\"instance-1\", \"instance-2\"]\n        }",
-          "new": "| \"instance_grant_does_not_authorise_sibling\"\n        | \"cancelled_instance_settles_with_reason_sibling_completes\" => {\n            &[\"instance-1\"]\n        }"
+          "old": "| \"killed_worker_settlement_recorded_without_retry\" => &[\"instance-1\", \"instance-2\"],",
+          "new": "| \"killed_worker_settlement_recorded_without_retry\" => &[\"instance-1\"],"
         }
       ],
       "tests": [
@@ -1205,8 +1205,105 @@
       "edits": [
         {
           "file": "src/report.rs",
-          "old": "\n        | \"cancelled_instance_settles_with_reason_sibling_completes\" => {",
-          "new": " => {"
+          "old": "\n        | \"cancelled_instance_settles_with_reason_sibling_completes\"",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "instance_receipt_requires_both_launches_and_scope"
+      ]
+    },
+    {
+      "id": "F-kill-retry",
+      "title": "start the killed worker once more through the existing spawn path",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/effects.rs",
+          "old": "            controller.poll(running)?;",
+          "new": "            controller.poll(running)?;\n            if outcome == ReadOutcome::Kill && running.kill_recorded(0) && launch_homes[0].run_starts() == 1 {\n                let _retry = RunningInstances::start(&launches[..1], Some(&home))?;\n            }"
+        }
+      ],
+      "tests": [
+        "killed_worker_settlement_recorded_without_retry"
+      ]
+    },
+    {
+      "id": "F-kill-sibling",
+      "title": "kill instance-2 along with instance-1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "                running.kill_worker(0)?;",
+          "new": "                running.kill_worker(0)?;\n                running.kill_worker(1)?;"
+        }
+      ],
+      "tests": [
+        "killed_worker_settlement_recorded_without_retry"
+      ]
+    },
+    {
+      "id": "F-kill-record",
+      "title": "lose the harness record of the requested kill",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "        self.kills[index] = Some(self.started.elapsed());",
+          "new": "        self.kills[index] = None;"
+        }
+      ],
+      "tests": [
+        "killed_worker_settlement_recorded_without_retry"
+      ]
+    },
+    {
+      "id": "F-kill-monitor",
+      "title": "accept a request from any session after the worker kill",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {",
+          "new": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {\n        if self.kill { return Ok(!pending.is_empty()); }"
+        }
+      ],
+      "tests": [
+        "grants::tests::kill_refuses_requests_from_any_session"
+      ]
+    },
+    {
+      "id": "F-orphan-settlement",
+      "title": "omit the shared orphan denial after client exit",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "        for request in pending {\n            self.deny(request, reason)?;\n        }\n        let after = self.pending()?;",
+          "new": "        let _ = (pending, reason);\n        let after = self.pending()?;"
+        }
+      ],
+      "tests": [
+        "killed_worker_settlement_recorded_without_retry",
+        "no_policy_file_does_not_mean_allow"
+      ]
+    },
+    {
+      "id": "F-kill-receipt",
+      "title": "omit the killed worker journey from launched identity requirements",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "\n        | \"killed_worker_settlement_recorded_without_retry\"",
+          "new": ""
         }
       ],
       "tests": [

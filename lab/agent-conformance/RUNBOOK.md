@@ -575,3 +575,52 @@ request validation. F-cleanup-live-wiring replaces the actual cleanup call
 with a fixed success while a control is pending. F-cancel-receipt drops the
 cancel row's launched identities. Each uses `command: lab` and its named test
 must pass before planting, fail with the edit and pass after restoration.
+
+## Worker kill and orphan settlement
+
+`killed_worker_settlement_recorded_without_retry` covers **kill-worker
+settlement, lab half of A11 (A12 census)**. Use the VERSIONS.json from the same
+`run.sh` invocation. The receipt requires both existing instance builds, each
+with its component hash and complete bundle lab CID.
+
+The first overlap barrier observes both clients alive with distinct pending
+requests. The shared controller grants instance-2's first read and leaves
+instance-1 pending. The harness sends SIGKILL through instance-1's owned child
+handle, reaps it, and records the signal request time. Collection requires an
+exit on signal 9. Instance-2 must check its own bytes and receive the same
+sibling denial as in 023.
+
+The controller polls through both exits. It accepts only the original orphan
+and instance-2's expected sibling request; every retry, including one from a
+new session, fails. The spawn path counts each Home's `run` starts. After both
+exits the controller measures the orphan, denies it with
+`fixture settlement: worker killed`, and checks that the pending list is
+empty. A further two-second quiet window polls the same list; five seconds is
+the maximum permitted window. The existing cleanup path then checks the
+operator and both client roots through its lsof implementation, checks the
+closed API port and empty `tmp/` directories, and checks captures for fixture
+credentials. Live grants remain `BLOCKED(AC-021-GRANTS)`.
+
+Read the single checked `kill settlement:` line for both child statuses,
+signal, kill time, first barrier time, overlap, elapsed times, quiet duration,
+and orphan counts before and after settlement. This candidate's orphan is
+**settled by the fixture**. AC-027-ORPHAN in GAPS.md describes the Runtime work
+needed for automatic settlement. Resident lifecycle support remains RT4.
+
+`no_policy_file_does_not_mean_allow` observes the pending request while the
+client waits without approval. After its 30-second refusal it uses the same
+orphan-settlement function, with `fixture settlement: client wait ended`, then
+runs the normal pending census. Its checked `absent-policy settlement:` line
+prints the measured count and settlement owner. The shared settlement formatter
+also supplies 026's cancellation line. The existing credential checker covers
+all three journeys' captures, printed lines, report, receipt and lane sources;
+missing evidence fails with a fixed reason.
+
+Run F-kill-retry and F-kill-sibling from `falsifiers.json` in baseline, planted
+and restored steps. The first starts instance-1 again through the existing
+spawn path and must fail the launch-count check. The second also kills the
+sibling and must fail the sibling outcome check. F-kill-record drops the kill
+record, F-kill-monitor accepts requests from other sessions,
+F-orphan-settlement omits the shared denial, and F-kill-receipt drops the new
+row's identities. Every test named by an entry must fail while planted.
+LOG.md records the measured results.

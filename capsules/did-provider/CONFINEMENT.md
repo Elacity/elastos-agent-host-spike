@@ -224,6 +224,12 @@ no process.
 requires a registered removal falsifier for every top-level allow rule of did's
 profile.
 
+`every_falsifier_id_is_named_in_its_confinement_document` in the same file
+reads this document, `../wallet-provider/CONFINEMENT.md` and both falsifier
+lists, and fails when a registered id is not named in its own document's
+`## Falsifiers` section or the section names an id that neither list
+registers. It reads files and starts no process.
+
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
 itself without starting a process: a missing `sandbox-exec` on `macos` is an
 error that names the OS and the path, a missing one on `linux` is a skip, and
@@ -246,14 +252,14 @@ The one runner applies and restores each registered falsifier with
 from the repository root; the list's edit paths are relative to
 `examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
 
-A run of the list is evidence only where the sandbox tests run: on macOS
-without `/usr/bin/sandbox-exec` each sandbox test fails at the gate whatever
-the edit, and the runner runs no unmutated baseline, so a `CAUGHT` there proves
-nothing, while where the sandbox tests skip an entry that names one reads
-`SURVIVED`. A call site that passes a fixed `"linux"` for the OS is not caught
-by a run on a Mac where `/usr/bin/sandbox-exec` exists, because a present tool
-runs the test before the OS is read, so that run is no evidence for the OS
-argument.
+A run of the list is evidence only where the sandbox tests run: the runner runs
+every chosen named test once on the unmutated tree before its first edit, so on
+macOS without `/usr/bin/sandbox-exec` each sandbox test fails at the gate and
+its entry reads `NOT RUN` instead of `CAUGHT`, while where the sandbox tests
+skip an entry that names one reads `SURVIVED`. A call site that passes a fixed
+`"linux"` for the OS is not caught by a run on a Mac where
+`/usr/bin/sandbox-exec` exists, because a present tool runs the test before the
+OS is read, so that run is no evidence for the OS argument.
 
 ## Falsifiers
 
@@ -319,6 +325,11 @@ argument.
 - Widen the write grant from `STORAGE_ROOT` to `STORAGE_PARENT` (DID18):
   `outside_write_denied` fails on its sibling target because that write
   succeeds.
+- Resolve the honesty test's edit paths from the repository root again (DID19):
+  `tests::falsifiers_list_is_honest` and
+  `tests::falsifiers_list_rejects_a_repository_relative_path` fail.
+- Return `Ok(false)` from the sandbox gate's declared-OS branch (DID20):
+  `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails.
 - Start the provider binary directly when the profile file does not exist
   (DID21): `startup_is_refused_when_the_profile_cannot_be_applied` fails on
   its missing-profile case because the provider starts and stays alive instead

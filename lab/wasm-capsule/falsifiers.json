@@ -1,5 +1,5 @@
 {
-  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. wc-008 (no runtime ABI for a bare capsule, tests/runtime_abi.rs): the manifest gains an invented lab_imports field, the near-fit runtime_abi elastos.component/v1, or execution=component (so each ABI is refused for the manifest's fault, which only the exact-reason check catches); or the tools crate names a bundle without the Runtime's manifest check. Task 017: the retired name label (written with a JSON escape, so neither retirement grep matches this file) is appended to LOG.md, a doc that the name-rule test now checks for that label like every other git-listed lane file. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands. wc-005a (task 014): F-WC5c and F-WC5d add a folder or env flag to the engine's argv; F-WC5-DISK-REREAD writes the module read again from disk; F-WC5-RELATIVE-ENGINE and F-WC5-WORK-ROOT-LINK drop the absolute-engine and canonical-root checks; the rest make the run folder shared or reused, erase a refusal's path or cause, read an environment variable, write with a writer of its own, pass the environment on, or accept a failed engine. F-WC4-ENTRYPOINT-ACCESSOR and F-WC4-ENTRYPOINT-REPARSE return another entry or read the manifest again.",
+  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. wc-008 (no runtime ABI for a bare capsule, tests/runtime_abi.rs): the manifest gains an invented lab_imports field, the near-fit runtime_abi elastos.component/v1, or execution=component (so each ABI is refused for the manifest's fault, which only the exact-reason check catches); or the tools crate names a bundle without the Runtime's manifest check. Task 017: the retired name label (written with a JSON escape, so neither retirement grep matches this file) is appended to LOG.md, a doc that the name-rule test now checks for that label like every other git-listed lane file. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands. wc-005a (task 014): F-WC5c and F-WC5d add a folder or env flag to the engine's argv; F-WC5-DISK-REREAD writes the module read again from disk; F-WC5-RELATIVE-ENGINE and F-WC5-WORK-ROOT-LINK drop the absolute-engine and canonical-root checks; the rest make the run folder shared or reused, erase a refusal's path or cause, read an environment variable, write with a writer of its own, pass the environment on, or accept a failed engine. F-WC4-ENTRYPOINT-ACCESSOR and F-WC4-ENTRYPOINT-REPARSE return another entry or read the manifest again. wc-005b (task 015, the two-engine run in tools/src/run.rs): F-WC5a skips verify_bundle and runs the module from disk; F-WC5b compares only exit statuses; F-WC5-EQUAL-FAILURES takes a failed exit as empty stdout, so equal failures pass; F-WC5-BOTH-ARGS changes the fixed argument for both engines (equal but wrong output, caught only by the real-engine test; NOT RUN when an engine is missing, since that test then prints SKIPPED and passes); F-WC5-VERIFY-TWICE verifies twice; F-WC5-WASMTIME-REFUSAL-DROPPED and -WASMER-REFUSAL-DROPPED discard an engine refusal; F-WC5-ENGINES-REVERSED, -ENGINES-OVERLAP and -BYPASS-RUN-ENGINE run wasmer first, both at once, or wasmer without run_engine; F-WC5-OTHER-CID names the folder again after the run. wc-005c (task 016, the version queries in tools/src/run.rs and the receipt in tools/src/receipt.rs): F-WC5-HARDCODED-VERSIONS prints this Mac's installed versions, not the observed ones; F-WC5-VERSION-CAUSE, -VERSION-START-CAUSE and -VERSION-STDERR lose a failed query's reason, OS cause or stderr; F-WC5-VERSION-EMPTY-ACCEPTED and -VERSION-WHOLE-STDOUT accept an empty first line or keep the whole stdout; F-WC5-QUERY-BEFORE-VERIFY and -VERSION-AFTER-RUN move the queries before verification or after the module runs; F-WC5-VERSION-RELATIVE, -VERSION-ENV and -VERSION-STDIN start the query by a relative path, with the environment, or with a piped stdin; F-WC5-RECEIPT-OVERWRITE writes the receipt with create + truncate and F-WC5-RECEIPT-CAUSE replaces the writer's refusal; F-WC5-RECEIPT-SCHEMA, -CID, -FUNCTION, -ARGUMENT, -VERSION-SWAP, -STATUS and -STDOUT tamper with one receipt field. Task 016 also re-anchored F-WC5-ENGINE-ENV and F-WC5-STDIN-PIPED (the no-ambient rules moved into engine_command, shared by the module run and the version query), F-WC5a (the queries now sit between verification and the runs) and F-WC5-EQUAL-FAILURES (run_engine returns an EngineRun), each the same bug as before. Task 019 (R1 is done: the canonical runner's lab command runs these): F-WC5-START-TWICE makes run_engine start the engine twice and return the second result, so one call is two module runs; F-WC-README-COUNT changes the README's stated falsifier total by one.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -1340,8 +1340,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "        .env_clear()\n",
-          "new": ""
+          "old": "    command.env_clear().stdin(Stdio::null());\n",
+          "new": "    command.stdin(Stdio::null());\n"
         }
       ],
       "tests": [
@@ -1436,12 +1436,558 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "        .stdin(Stdio::null())\n",
-          "new": "        .stdin(Stdio::piped())\n"
+          "old": "    command.env_clear().stdin(Stdio::null());\n",
+          "new": "    command.env_clear().stdin(Stdio::piped());\n"
         }
       ],
       "tests": [
         "engine_stdin_is_null"
+      ]
+    },
+    {
+      "id": "F-WC5a",
+      "title": "the two-engine runner skips verify_bundle and runs the bundle's module from disk on both engines",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])\n        .map_err(TwoEngineRefusal::Verify)?;\n",
+          "new": "    let module = input.bundle.join(\"capsule.wasm\");\n"
+        },
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmtime = start_engine(Engine::Wasmtime, input.wasmtime, &module)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = start_engine(Engine::Wasmer, input.wasmer, &module)\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+        },
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        cid: bundle.cid(),\n",
+          "new": "        cid: crate::bundle_identity(input.bundle)\n            .map_err(|error| TwoEngineRefusal::Verify(VerifyRefusal::Identity(error)))?,\n"
+        }
+      ],
+      "tests": [
+        "runner_refuses_an_unverified_bundle",
+        "runner_uses_only_explicit_inputs"
+      ]
+    },
+    {
+      "id": "F-WC5b",
+      "title": "the two-engine runner compares only exit statuses, not stdout",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    if wasmtime != wasmer {\n        return Err(TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer });\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "differing_engine_outputs_are_reported_as_a_failure"
+      ]
+    },
+    {
+      "id": "F-WC5-EQUAL-FAILURES",
+      "title": "a nonzero engine exit is taken as an empty stdout, so two equal failures compare equal and pass",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .or_else(|refusal| match refusal.reason {\n            Reason::EngineFailed { .. } => Ok(EngineRun::default()),\n            _ => Err(refusal),\n        })\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+        },
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .or_else(|refusal| match refusal.reason {\n            Reason::EngineFailed { .. } => Ok(EngineRun::default()),\n            _ => Err(refusal),\n        })\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+        }
+      ],
+      "tests": [
+        "matching_engine_failures_are_refused"
+      ]
+    },
+    {
+      "id": "F-WC5-BOTH-ARGS",
+      "title": "the fixed argument is changed for both engines, so both print the same wrong output",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        .arg(DIGEST_ARGUMENT)\n",
+          "new": "        .arg(\"1\")\n"
+        }
+      ],
+      "tests": [
+        "same_name_same_output_on_wasmtime_and_wasmer"
+      ]
+    },
+    {
+      "id": "F-WC5-VERIFY-TWICE",
+      "title": "the two-engine runner calls verify_bundle a second time",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])\n        .map_err(TwoEngineRefusal::Verify)?;\n",
+          "new": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])\n        .map_err(TwoEngineRefusal::Verify)?;\n    let _again = verify_bundle(input.bundle, input.signature, input.accepted, &[])\n        .map_err(TwoEngineRefusal::Verify)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_uses_only_explicit_inputs"
+      ]
+    },
+    {
+      "id": "F-WC5-WASMTIME-REFUSAL-DROPPED",
+      "title": "wasmtime's refusal is discarded and its stdout taken as empty",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .unwrap_or_default();\n"
+        }
+      ],
+      "tests": [
+        "runner_preserves_engine_refusals"
+      ]
+    },
+    {
+      "id": "F-WC5-WASMER-REFUSAL-DROPPED",
+      "title": "wasmer's refusal is discarded and its stdout taken as empty",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .unwrap_or_default();\n"
+        }
+      ],
+      "tests": [
+        "runner_preserves_engine_refusals"
+      ]
+    },
+    {
+      "id": "F-WC5-ENGINES-REVERSED",
+      "title": "the two-engine runner starts wasmer before wasmtime",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_calls_engines_in_order"
+      ]
+    },
+    {
+      "id": "F-WC5-ENGINES-OVERLAP",
+      "title": "the two engines run at the same time, on two threads",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let (wasmtime, wasmer) = std::thread::scope(|scope| {\n        let first = scope.spawn(|| run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root));\n        let second = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root);\n        (first.join().expect(\"join wasmtime\"), second)\n    });\n    let wasmtime = wasmtime.map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = wasmer.map_err(TwoEngineRefusal::Engine)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_calls_engines_in_order"
+      ]
+    },
+    {
+      "id": "F-WC5-BYPASS-RUN-ENGINE",
+      "title": "wasmer is started directly on the bundle's module path, bypassing run_engine",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmer = start_engine(Engine::Wasmer, input.wasmer, &input.bundle.join(&bundle.entrypoint().path))\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_calls_engines_in_order"
+      ]
+    },
+    {
+      "id": "F-WC5-OTHER-CID",
+      "title": "the run names the bundle folder again after the engines ran, not the verified value",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        cid: bundle.cid(),\n",
+          "new": "        cid: crate::bundle_identity(input.bundle).unwrap_or(bundle.cid()),\n"
+        }
+      ],
+      "tests": [
+        "run_returns_the_verified_name_and_both_outputs"
+      ]
+    },
+    {
+      "id": "F-WC5-HARDCODED-VERSIONS",
+      "title": "the receipt prints fixed version strings (this Mac's installed engines), not what the engines printed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "            run.version(engine).escape_ascii(),\n",
+          "new": "            match engine {\n                Engine::Wasmtime => \"wasmtime 45.0.1 (83166ba31 2026-06-05)\",\n                Engine::Wasmer => \"wasmer 7.5.0\",\n            },\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-CAUSE",
+      "title": "a version query that exits nonzero collapses into the generic empty-version reason, losing its status and stderr",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        let stderr = String::from_utf8_lossy(&answer.stderr).into_owned();\n        return Err(Refusal::new(\n            program,\n            Reason::VersionFailed {\n                engine,\n                status: answer.status,\n                stderr,\n            },\n        ));\n",
+          "new": "        return Err(Refusal::new(program, Reason::VersionEmpty { engine }));\n"
+        }
+      ],
+      "tests": [
+        "version_query_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-OVERWRITE",
+      "title": "the receipt is written with create + truncate (fs::write), so an existing file or a link at its path is written over or through",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "    write_new_file(path, render(run).as_bytes())\n",
+          "new": "    std::fs::write(path, render(run)).map_err(|error| RunRefusal {\n        path: path.to_path_buf(),\n        reason: crate::bundle::Reason::ManifestNotCreated(error),\n    })\n"
+        }
+      ],
+      "tests": [
+        "receipt_write_refuses_an_existing_path"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-CAUSE",
+      "title": "the receipt writer's refusal is replaced by another reason, losing write_new_file's own reason and cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "    write_new_file(path, render(run).as_bytes())\n",
+          "new": "    write_new_file(path, render(run).as_bytes()).map_err(|refusal| RunRefusal {\n        path: refusal.path,\n        reason: crate::bundle::Reason::OutDirExists,\n    })\n"
+        }
+      ],
+      "tests": [
+        "receipt_write_refuses_an_existing_path"
+      ]
+    },
+    {
+      "id": "F-WC5-QUERY-BEFORE-VERIFY",
+      "title": "the engines are asked their version before verify_bundle, so an unverified bundle starts engine processes",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])\n        .map_err(TwoEngineRefusal::Verify)?;\n    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n",
+          "new": "    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])\n        .map_err(TwoEngineRefusal::Verify)?;\n"
+        }
+      ],
+      "tests": [
+        "runner_refuses_an_unverified_bundle"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-AFTER-RUN",
+      "title": "the engines are asked their version only after both module runs, so a failed query comes after a run started",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
+          "new": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n"
+        }
+      ],
+      "tests": [
+        "version_query_failures_keep_their_cause",
+        "runner_calls_engines_in_order"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-RELATIVE",
+      "title": "the version query skips the absolute-path check, so a relative program is started against the working folder",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    check_program(program)?;\n    let answer = engine_command(program)\n",
+          "new": "    let answer = engine_command(program)\n"
+        }
+      ],
+      "tests": [
+        "version_queries_use_explicit_inputs"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-ENV",
+      "title": "the version query is started without engine_command and inherits the test process's environment",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let answer = engine_command(program)\n        .arg(\"--version\")\n",
+          "new": "    let answer = Command::new(program)\n        .stdin(Stdio::null())\n        .arg(\"--version\")\n"
+        }
+      ],
+      "tests": [
+        "version_queries_use_explicit_inputs"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-STDIN",
+      "title": "the version query's stdin is a pipe, not /dev/null",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let answer = engine_command(program)\n        .arg(\"--version\")\n",
+          "new": "    let answer = engine_command(program)\n        .stdin(Stdio::piped())\n        .arg(\"--version\")\n"
+        }
+      ],
+      "tests": [
+        "version_queries_use_explicit_inputs"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-START-CAUSE",
+      "title": "a version query that does not start loses its OS cause",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        .map_err(|error| Refusal::new(program, Reason::VersionDidNotStart { engine, error }))?;\n",
+          "new": "        .map_err(|_| Refusal::new(program, Reason::VersionDidNotStart { engine, error: io::Error::other(\"did not start\") }))?;\n"
+        }
+      ],
+      "tests": [
+        "version_query_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-STDERR",
+      "title": "a failed version query's stderr is dropped",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        let stderr = String::from_utf8_lossy(&answer.stderr).into_owned();\n",
+          "new": "        let stderr = String::new();\n"
+        }
+      ],
+      "tests": [
+        "version_query_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-EMPTY-ACCEPTED",
+      "title": "an empty first version line is accepted as the version",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        Some(line) if !line.is_empty() => Ok(line.to_vec()),\n",
+          "new": "        Some(line) => Ok(line.to_vec()),\n"
+        }
+      ],
+      "tests": [
+        "version_query_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-VERSION-WHOLE-STDOUT",
+      "title": "the whole --version stdout is kept, not its first line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let first_line = answer.stdout.split(|&byte| byte == b'\\n').next();\n",
+          "new": "    let first_line = Some(answer.stdout.as_slice());\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions",
+        "version_query_failures_keep_their_cause"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-SCHEMA",
+      "title": "the receipt prints wc-001's build schema line",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "        \"schema: {RECEIPT_SCHEMA}\\nbundle: {}\\nfunction: {DIGEST_EXPORT}\\nargument: {DIGEST_ARGUMENT}\\n\",\n",
+          "new": "        \"schema: wc-001.receipt/v1\\nbundle: {}\\nfunction: {DIGEST_EXPORT}\\nargument: {DIGEST_ARGUMENT}\\n\",\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-CID",
+      "title": "the receipt prints a made-up lab CID, not the verified one",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "        run.cid()\n",
+          "new": "        format!(\"lab-cid:sha256:{}\", \"0\".repeat(64))\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-FUNCTION",
+      "title": "the receipt prints another function name",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "        \"schema: {RECEIPT_SCHEMA}\\nbundle: {}\\nfunction: {DIGEST_EXPORT}\\nargument: {DIGEST_ARGUMENT}\\n\",\n",
+          "new": "        \"schema: {RECEIPT_SCHEMA}\\nbundle: {}\\nfunction: main\\nargument: {DIGEST_ARGUMENT}\\n\",\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-ARGUMENT",
+      "title": "the receipt prints another argument",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "        \"schema: {RECEIPT_SCHEMA}\\nbundle: {}\\nfunction: {DIGEST_EXPORT}\\nargument: {DIGEST_ARGUMENT}\\n\",\n",
+          "new": "        \"schema: {RECEIPT_SCHEMA}\\nbundle: {}\\nfunction: {DIGEST_EXPORT}\\nargument: 1\\n\",\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-VERSION-SWAP",
+      "title": "the receipt prints each engine's version under the other engine",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "            run.version(engine).escape_ascii(),\n",
+          "new": "            run.version(match engine {\n                Engine::Wasmtime => Engine::Wasmer,\n                Engine::Wasmer => Engine::Wasmtime,\n            })\n            .escape_ascii(),\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-STATUS",
+      "title": "the receipt prints an exit status the run did not have",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "            run.status(engine),\n",
+          "new": "            \"exit status: 1\",\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-RECEIPT-STDOUT",
+      "title": "the receipt prints each stdout trimmed and lossy, not its exact bytes",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "            run.stdout(engine).escape_ascii()\n",
+          "new": "            String::from_utf8_lossy(run.stdout(engine)).trim_end()\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_observed_engine_versions"
+      ]
+    },
+    {
+      "id": "F-WC5-START-TWICE",
+      "title": "run_engine starts the engine twice, drops the first result and returns the second",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    start_engine(engine, program, &module)\n}\n",
+          "new": "    let _first = start_engine(engine, program, &module);\n    start_engine(engine, program, &module)\n}\n"
+        }
+      ],
+      "tests": [
+        "run_engine_starts_its_engine_exactly_once"
+      ]
+    },
+    {
+      "id": "F-WC-README-COUNT",
+      "title": "the README's falsifier total is one less than falsifiers.json holds",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "`falsifiers.json` holds 122 planted bugs",
+          "new": "`falsifiers.json` holds 121 planted bugs"
+        }
+      ],
+      "tests": [
+        "readme_falsifier_total_matches_falsifiers_json"
       ]
     }
   ]

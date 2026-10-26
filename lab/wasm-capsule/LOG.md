@@ -173,3 +173,52 @@
   checks `/dev/stdin -ef /dev/null`). New falsifiers F-WC5-IO-ROOT-METADATA, -IO-ROOT-IS-DIR, -STDIN-PIPED. Canonical
   runner, `... --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`: "summary: 44 CAUGHT of 44", exit 0, no backup
   left (runner-caught; each named test passed unmutated first). `run.rs` is still not a recovery target (R2).
+- wc-005b (task 015): `run::run(&RunInput)` in `tools/src/run.rs` calls `verify_bundle(..., &[])` once (a refusal is
+  returned unchanged, nothing written, no engine started), then 014's `run_engine` for `wasmtime` and then `wasmer`
+  (one after the other; `wasmer` is not started after `wasmtime` is refused, so equal failures get the first failure's
+  own reason), and requires byte-identical stdout. Returns `TwoEngineRun` (private fields: `cid()`, `wasmtime()`,
+  `wasmer()`); no receipt (016). Real engines on this Mac (`wasmtime` 45.0.1, `wasmer` 7.5.0): both printed
+  `230101071268130872` for `1592590337`. Seven new tests in `tests/run.rs`; `runner_uses_only_explicit_inputs` now
+  permits exactly one `verify_bundle(input.bundle, input.signature, input.accepted, &[])`. 11 new falsifiers. Canonical
+  runner, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`:
+  "summary: 55 CAUGHT of 55", exit 0, no backup left (runner-caught; baseline: 34 named tests pass without an edit).
+  Both retired-label merge-gate greps: empty, exit 1. `run.rs` is still not a recovery target (R2).
+- wc-005c (task 016): `run` now asks each engine `--version` after `verify_bundle` and before any module run (one
+  process each, by the same absolute path, through the new `engine_command`: empty environment, stdin null), keeps
+  the first stdout line as printed, and refuses a query that does not start, exits nonzero or prints an empty first
+  line, each with its own reason (`TwoEngineRefusal::Version`). `run_engine` returns an `EngineRun` (status and
+  stdout); `TwoEngineRun` adds `version()`, `status()`, `stdout()`. New `tools/src/receipt.rs`: `render` (schema
+  `wc-005.run-receipt/v1`) and `write_receipt` (through `bundle::write_new_file`, refusal unchanged). Real receipt on
+  this Mac: `bundle: lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930`, `function:
+  digest`, `argument: 1592590337`, `wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"`, `wasmer_version:
+  "wasmer 7.5.0"`, both `exit status: 0`, both stdouts `"230101071268130872\n"`. Claim scope unchanged from 015 (one
+  core module, this Mac, both engines test-only, neither endorsed, not the Component ABI). Five new tests in
+  `tests/run.rs`; 015's stand-ins answer `--version` apart from the module run, and the missing-program case moved
+  to `version_query_failures_keep_their_cause`. 20 new falsifiers, four re-anchored. Canonical runner,
+  `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5`: "summary: 52 CAUGHT of
+  52", exit 0, no backup left (runner-caught; baseline: 22 named tests pass without an edit). Both retired-label
+  merge-gate greps: empty, exit 1. `run.rs` and `receipt.rs` are not recovery targets (R2).
+- Task 018: new test `lane_files_reads_names_git_would_quote` in `tests/lab_cid.rs` (017's PASS FOLLOWUP). It runs
+  `git init -q` in a `TempDir`, writes untracked `plain.md` and `review"note.md`, and asserts the existing
+  `lane_files` returns both under their real names with their text; `lane_files` and the guard test are unchanged.
+  `cargo test --locked --test lab_cid`: 4 passed. Hand falsifier (hand-proven, pending R2; not in runner-caught
+  totals): drop `"-z",` and read with `.lines()` → the new test alone fails, 3 passed 1 failed, panic "assertion
+  `left == right` failed: lane_files did not list every file under its real name / left: [("plain.md", "plain
+  text\n")] / right: [("plain.md", "plain text\n"), ("review\"note.md", "quoted text\n")]"; reverted → passes.
+  `git hash-object tests/lab_cid.rs` before the break and after the revert: `846d89a8f2ae8a2f5dfd7698df46370ceec903fa`
+  both times. No `falsifiers.json` entry: `tests/lab_cid.rs` is not a runner recovery target (R2).
+- Task 019: new test `run_engine_starts_its_engine_exactly_once` (`tests/run.rs`, 014's PASS FOLLOWUP): counting
+  stand-ins append one line per start to `"$0.starts"` (no environment); one `run_engine` call per engine records
+  exactly one module run and no `--version`, and one `run` call exactly one module run per engine (two in all) plus,
+  counted apart, one `--version` each. New `tests/docs.rs`, `readme_falsifier_total_matches_falsifiers_json`: the
+  README's "`falsifiers.json` holds N planted bugs" sentence, found exactly once, must equal the file's entry count.
+  README "## Falsifiers" summary rewritten: 122 entries (120 at base `e8d1642b4` plus this task's two), per-task counts
+  (wc-005a is 23, not 20; a wc-001 section added), runner-caught 58 apart from hand-proven 64, R1 done, and only
+  `tools/src/run.rs` and `tools/src/receipt.rs` named as unrecovered (R2); no falsifier relabelled. No change to
+  `tools/`, `Cargo.toml` or `Cargo.lock`. Falsifiers F-WC5-START-TWICE and F-WC-README-COUNT, canonical runner,
+  `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5-START-TWICE
+  F-WC-README-COUNT`: "baseline: 2 named tests pass without an edit, 0 do not", "summary: 2 CAUGHT of 2"
+  (runner-caught). By hand: "wasmtime: one run_engine call started the engine 2 times" (left 2, right 1) and "README
+  says falsifiers.json holds 121 planted bugs, but it holds 122"; reverted, `git hash-object` unchanged. Both
+  retired-label merge-gate greps (`git grep -n` on the lane, `grep -rn --exclude-dir=target` on the lane): empty,
+  exit 1.

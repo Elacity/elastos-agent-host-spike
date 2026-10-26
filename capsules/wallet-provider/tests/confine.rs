@@ -176,6 +176,118 @@ fn sandbox_available_fails_for_macos_when_sandbox_exec_is_missing() {
     );
 }
 
+/// The test launch refuses a second binding of a canonical parameter.
+///
+/// `start_with_profile` takes the three canonical bindings from
+/// `canonical_bindings`, which derives them from one base, and then appends
+/// the caller's parameters. A caller that binds `STORAGE_ROOT`,
+/// `STORAGE_PARENT` or `PROVIDER_EXECUTABLE` again could point the launch at a
+/// folder the test did not create, so the call panics with a message that
+/// names the parameter and says the canonical bindings come only from
+/// `canonical_bindings`. The refusal comes before the shared ancestors are
+/// created and before any spawn, so the test needs no `sandbox_available` gate
+/// and no directory appears under the base.
+///
+/// Falsifier: drop the refusal from `start_with_profile` (WP54); on a Mac this
+/// returns a running provider instead of the panic, and without
+/// `sandbox-exec` the spawn panics with a different message, so the test fails
+/// on every host.
+#[test]
+fn start_with_profile_refuses_a_canonical_parameter() {
+    for name in CANONICAL_PARAMS {
+        let base = tempfile::tempdir().expect("temporary wallet base");
+        let base = resolved(base.path());
+        let rebinding = wallet_dir(&base).join("rebound");
+        let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ConfinedProvider::start_with_profile(
+                &base,
+                Path::new(PROFILE_PATH),
+                &[(name, rebinding.as_path())],
+            )
+        }));
+        let failure = match settled {
+            Err(payload) => payload,
+            Ok(_provider) => panic!(
+                "binding the canonical parameter {name} again must be refused, \
+                 but start_with_profile returned a provider"
+            ),
+        };
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("the refusal must arrive as a String payload");
+        assert!(
+            message.contains(name),
+            "the refusal must name {name}: {message}"
+        );
+        assert!(
+            message.contains("canonical_bindings"),
+            "the refusal must say the canonical bindings come only from canonical_bindings: {message}"
+        );
+        assert!(
+            fs::read_dir(&base)
+                .expect("the temporary base must be readable")
+                .next()
+                .is_none(),
+            "the refusal must come before the shared ancestors are created: {}",
+            base.display()
+        );
+    }
+}
+
+/// The same launch check owns canonical names encoded before `=`.
+///
+/// `sandbox-exec -D` reads the name before the first `=`, so a caller's
+/// `STORAGE_ROOT=/outside` would replace the canonical storage binding.
+/// Check every canonical name with an empty value, a path, and another `=`.
+/// Each refusal names the caller's parameter and precedes directory creation.
+///
+/// Falsifier: WP55 checks the caller's whole name again, so an encoded
+/// canonical name reaches the launch instead of this refusal.
+#[test]
+fn start_with_profile_refuses_an_encoded_canonical_parameter() {
+    for canonical_name in CANONICAL_PARAMS {
+        for suffix in ["", "/outside", "/outside=/fixture"] {
+            let name = format!("{canonical_name}={suffix}");
+            let base = tempfile::tempdir().expect("temporary wallet base");
+            let base = resolved(base.path());
+            let rebinding = wallet_dir(&base).join("rebound");
+            let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ConfinedProvider::start_with_profile(
+                    &base,
+                    Path::new(PROFILE_PATH),
+                    &[(name.as_str(), rebinding.as_path())],
+                )
+            }));
+            let failure = match settled {
+                Err(payload) => payload,
+                Ok(_provider) => panic!(
+                    "binding the encoded canonical parameter {name} must be refused, \
+                     but start_with_profile returned a provider"
+                ),
+            };
+            let message = failure
+                .downcast_ref::<String>()
+                .expect("the refusal must arrive as a String payload");
+            assert_eq!(
+                message,
+                &format!(
+                    "the launch must not bind the canonical parameter {name} again: \
+                     canonical bindings come only from canonical_bindings"
+                ),
+                "the encoded canonical parameter must receive the canonical-binding refusal"
+            );
+            assert!(
+                fs::read_dir(&base)
+                    .expect("the temporary base must be readable")
+                    .next()
+                    .is_none(),
+                "the refusal must come before the shared ancestors are created: {}",
+                base.display()
+            );
+        }
+    }
+}
+
 fn now_ts() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -207,7 +319,11 @@ fn canonical_bindings(base: &Path) -> [(&'static str, PathBuf); 3] {
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
 /// and the provider creates `Wallet`. The binding the launch receives names
 /// that directory, so the folder created and the folder bound cannot drift
-/// apart (P10).
+/// apart (P10). `start_with_profile` refuses a second binding of a canonical
+/// parameter, so this derivation stays the only source of those three paths;
+/// `start_with_profile_refuses_a_canonical_parameter` and WP54 hold that rule.
+/// `start_with_profile_refuses_an_encoded_canonical_parameter` and WP55 cover
+/// names encoded before `=` through the same check.
 fn create_shared_ancestors(bindings: &[(&'static str, PathBuf)]) {
     let (_, parent) = bindings
         .iter()
@@ -341,6 +457,15 @@ impl ConfinedProvider {
     }
 
     fn start_with_profile(base: &Path, profile: &Path, parameters: &[(&str, &Path)]) -> Self {
+        for (name, _) in parameters {
+            // Match the name sandbox-exec reads from the serialized -D binding.
+            let binding_name = name.split_once('=').map_or(*name, |(binding, _)| binding);
+            assert!(
+                !CANONICAL_PARAMS.contains(&binding_name),
+                "the launch must not bind the canonical parameter {name} again: \
+                 canonical bindings come only from canonical_bindings"
+            );
+        }
         let canonical = canonical_bindings(base);
         create_shared_ancestors(&canonical);
         let mut bindings: Vec<(&str, &Path)> = canonical
@@ -348,19 +473,20 @@ impl ConfinedProvider {
             .map(|(name, path)| (*name, path.as_path()))
             .collect();
         bindings.extend_from_slice(parameters);
-        Self::start_under(profile, &bindings)
+        Self::start_under(profile, &bindings, Path::new(PROVIDER_BINARY))
     }
 
-    /// The one launch builder: the provider binary under `profile`, with
-    /// exactly the `bindings` it is given. A caller can leave a parameter
-    /// unbound, as a Runtime bug would.
-    fn start_under(profile: &Path, bindings: &[(&str, &Path)]) -> Self {
+    /// The one launch builder: `program` under `profile`, with exactly the
+    /// `bindings` it is given. The tests start the provider binary; a test
+    /// that needs another program passes it through the same builder. A
+    /// caller can leave a parameter unbound, as a Runtime bug would.
+    fn start_under(profile: &Path, bindings: &[(&str, &Path)], program: &Path) -> Self {
         let mut command = Command::new(SANDBOX_EXEC);
         command.arg("-f").arg(profile);
         for (name, path) in bindings {
             command.arg("-D").arg(format!("{name}={}", path.display()));
         }
-        command.arg(PROVIDER_BINARY);
+        command.arg(program);
         Self::spawn(command)
     }
 
@@ -585,6 +711,12 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
+/// The last case is the write beneath `STORAGE_PARENT`: `Init` for
+/// `<STORAGE_PARENT>/Fresh` with no precreated parent walks up to the granted
+/// parent, so its first ungranted step is the `mkdir` of `Fresh`. A write
+/// grant on the parent (WP65) creates it, so this test fails on the absence
+/// check.
+///
 /// Falsifier: replace `(deny default)` with `(allow default)`; the outside
 /// `Init` then succeeds and this test fails.
 #[test]
@@ -624,6 +756,33 @@ fn confined_outside_write_is_denied() {
             "the provider must answer after a denied write instead of exiting: {status}"
         );
     }
+
+    // `<STORAGE_PARENT>/Fresh` has no precreated parent, so the walk reaches
+    // the granted parent and the first ungranted step is the `mkdir`.
+    let fresh_base = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Fresh");
+    let denied = provider.init(&fresh_base);
+    assert_storage_error(&denied);
+    assert!(
+        !fresh_base.exists(),
+        "a denied write beneath STORAGE_PARENT must create nothing: {}",
+        fresh_base.display()
+    );
+    let message = denied["message"]
+        .as_str()
+        .expect("storage refusal must carry a reason");
+    assert!(
+        message.starts_with("failed to create wallet storage directory"),
+        "the refused step must be the write beneath STORAGE_PARENT, not an inspect: {message}"
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the provider must answer after a denied write instead of exiting: {status}"
+    );
 
     let recovered = provider.init(&root);
     assert_eq!(
@@ -685,6 +844,77 @@ fn confined_outside_read_is_denied() {
     assert_eq!(
         status["status"], "ok",
         "the provider must answer after a denied read: {status}"
+    );
+
+    provider.shutdown();
+}
+
+/// A key planted beneath `STORAGE_PARENT` stays unread.
+///
+/// The parent read grants the directory itself only, not a directory beneath
+/// it, and the storage-root write grant stops at `STORAGE_ROOT`. The test
+/// plants a complete key at
+/// `<STORAGE_PARENT>/Sibling/ElastOS/SystemServices/Wallet`, beneath
+/// `STORAGE_PARENT` and outside `STORAGE_ROOT`, and records its bytes. With
+/// the real profile `init` for that sibling base refuses with `storage_error`,
+/// the planted bytes stay unchanged and no `wallet-state.json` appears beside
+/// them. The provider then serves its own root, and the key it writes there
+/// differs from the planted one, so it never adopted the planted key. The
+/// write half beneath the parent is the `<STORAGE_PARENT>/Fresh` case of
+/// `confined_outside_write_is_denied`, which is refused at its first write
+/// (the `mkdir`).
+///
+/// Falsifier: widen the parent read from `literal` to `subpath` (WP57); the
+/// planted key then loads, `init` answers ok and this test fails on its
+/// refusal.
+#[test]
+fn planted_key_beneath_storage_parent_is_not_read() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
+    // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
+    let planted = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Sibling");
+    let planted_wallet = wallet_dir(&planted);
+    plant_storage_key(&planted_wallet);
+    let planted_key = planted_wallet.join(WALLET_KEY_FILE);
+    let planted_bytes = fs::read(&planted_key).expect("planted key file");
+
+    let mut provider = ConfinedProvider::start(&root);
+
+    let denied = provider.init(&planted);
+    assert_storage_error(&denied);
+    assert_eq!(
+        fs::read(&planted_key).expect("planted key stays readable to the test"),
+        planted_bytes,
+        "the planted key must stay unchanged after the refused read"
+    );
+    assert!(
+        !planted_wallet.join("wallet-state.json").exists(),
+        "a refused read must write no store beside the planted key: {}",
+        planted_wallet.display()
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the provider must answer after a denied read: {status}"
+    );
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "the granted root must serve: {init}");
+    let own_key = wallet_dir(&root).join(WALLET_KEY_FILE);
+    let own_bytes = fs::read(&own_key).expect("the provider writes its own key");
+    assert_ne!(
+        own_bytes,
+        planted_bytes,
+        "the provider must not adopt the planted key: {}",
+        own_key.display()
     );
 
     provider.shutdown();
@@ -776,7 +1006,8 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
             .iter()
             .map(|(name, path)| (*name, path.as_path()))
             .collect();
-        let mut provider = ConfinedProvider::start_under(&profile, &bindings);
+        let mut provider =
+            ConfinedProvider::start_under(&profile, &bindings, Path::new(PROVIDER_BINARY));
         let exit = provider.wait_for_exit();
         assert!(
             exit.code().is_some(),
@@ -815,6 +1046,160 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     }
 }
 
+/// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
+/// and its control. It keeps the temporary base alive, resolves it, creates
+/// `STORAGE_ROOT` first, and copies the provider binary there byte for byte,
+/// so the copy and the binary differ only by path.
+struct StoredCopy {
+    _fixture: tempfile::TempDir,
+    base: PathBuf,
+    storage: PathBuf,
+    copy: PathBuf,
+}
+
+impl StoredCopy {
+    fn prepare() -> Self {
+        let fixture = tempfile::tempdir().expect("temporary wallet base");
+        let base = resolved(fixture.path());
+        let binary = resolved(Path::new(PROVIDER_BINARY));
+        let bindings = canonical_bindings(&base);
+        create_shared_ancestors(&bindings);
+        let storage = wallet_dir(&base);
+        fs::create_dir(&storage).expect("STORAGE_ROOT must be created first");
+        let copy = storage.join(binary.file_name().expect("the provider binary's file name"));
+        fs::copy(&binary, &copy).expect("copy the provider binary under STORAGE_ROOT");
+        let copy = resolved(&copy);
+        assert_eq!(
+            fs::read(&copy).expect("the copy must be readable"),
+            fs::read(&binary).expect("the binary must be readable"),
+            "the copy must be byte-identical to the bound binary"
+        );
+        Self {
+            _fixture: fixture,
+            base,
+            storage,
+            copy,
+        }
+    }
+}
+
+/// Under the real profile, only the path bound as `PROVIDER_EXECUTABLE` can be
+/// started. The test runs `confine.sb` itself, with no fixture rule. It binds
+/// the real provider binary as `PROVIDER_EXECUTABLE` and the storage
+/// parameters as usual, and starts the byte-identical copy under
+/// `STORAGE_ROOT`. `sandbox-exec` applies the profile before it executes its
+/// program, so the refused step is that exec of the copy, checked by the same
+/// `process-exec` rule as any exec by the confined provider. `sandbox-exec`
+/// exits 71 and logs `execvp() of '<copy>' failed: Operation not permitted`,
+/// and `STORAGE_ROOT` keeps only the copy. A missing program also exits 71,
+/// but with `No such file or directory`, so the test checks the EPERM line.
+/// `bound_copy_serves_under_profile` is the control: the same copy from the
+/// same fixture, bound and started, serves.
+///
+/// Falsifier: append one `(allow process-exec)` after the exec rule (WP56);
+/// the copy starts and stays alive to the deadline, so this test fails on its
+/// deadline assertion.
+#[test]
+fn unbound_copy_is_refused_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare();
+    let before = fs::read(&stored.copy).expect("the copy must be readable");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": stored.base.display().to_string() }
+    });
+    let canonical = canonical_bindings(&stored.base);
+    let bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut refused =
+        ConfinedProvider::start_under(Path::new(PROFILE_PATH), &bindings, &stored.copy);
+
+    let exit = refused.wait_for_exit();
+    assert!(
+        !matches!(exit, ChildExit::TimedOut),
+        "the profile must refuse the exec, so sandbox-exec must exit: {exit}"
+    );
+    assert_eq!(
+        exit.code(),
+        Some(71),
+        "sandbox-exec must exit 71 when the profile refuses the exec: {exit}"
+    );
+    refused
+        .try_send(&request)
+        .expect_err("the refused copy must not answer init");
+
+    // Quote only `sandbox-exec`'s exec lines, never the whole stream.
+    let copy = stored.copy.display().to_string();
+    let stderr = refused.stderr();
+    let execs: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    assert!(
+        execs
+            .iter()
+            .any(|line| line.contains(&copy) && line.contains("Operation not permitted")),
+        "sandbox-exec must log the refused exec of {copy} with EPERM: {execs:?}"
+    );
+
+    let entries: Vec<PathBuf> = fs::read_dir(&stored.storage)
+        .expect("STORAGE_ROOT must stay readable")
+        .map(|entry| entry.expect("STORAGE_ROOT entry").path())
+        .collect();
+    assert_eq!(
+        entries,
+        [stored.copy.clone()],
+        "STORAGE_ROOT must hold only the copy"
+    );
+    assert_eq!(
+        fs::read(&stored.copy).expect("the copy must stay readable"),
+        before,
+        "the refused run must leave the copy's bytes unchanged"
+    );
+}
+
+/// The control for `unbound_copy_is_refused_under_profile`: the same fixture,
+/// with the copy at the same place under `STORAGE_ROOT` bound as
+/// `PROVIDER_EXECUTABLE` and started under the same `confine.sb`. `init` with
+/// `base_path` as the fixture base answers `ok`, a following `status` answers
+/// `ok`, and `shutdown` exits 0. The binding is the only difference between
+/// the two runs.
+#[test]
+fn bound_copy_serves_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare();
+    let bound: Vec<(&str, PathBuf)> = canonical_bindings(&stored.base)
+        .into_iter()
+        .map(|(name, path)| match name {
+            "PROVIDER_EXECUTABLE" => (name, stored.copy.clone()),
+            _ => (name, path),
+        })
+        .collect();
+    let bindings: Vec<(&str, &Path)> = bound
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut provider =
+        ConfinedProvider::start_under(Path::new(PROFILE_PATH), &bindings, &stored.copy);
+    let init = provider.init(&stored.base);
+    assert_eq!(
+        init["status"], "ok",
+        "the bound copy must answer init: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the bound copy must answer status: {status}"
+    );
+    provider.shutdown();
+}
+
 /// A confined start that fails before it answers shows its reason.
 ///
 /// The fixture profile keeps `(version 1)` first and `(deny default)` second,
@@ -823,10 +1208,6 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// request, the exit status and `sandbox-exec`'s own denial on standard error.
 /// A fixture child that reads one request and exits without answering reaches
 /// the response-stream branch of the same harness with the same three facts.
-///
-/// Falsifier: drop the child's standard error from `unanswered` (WP29); the
-/// denied start loses `Operation not permitted`, so this test fails on that
-/// assertion at the first case.
 ///
 /// Falsifier: use a fixed `Operation not permitted` instead of the child's
 /// standard error in `unanswered` (WP42); the denied start's failure names no
@@ -854,7 +1235,7 @@ fn startup_denial_reports_its_reason() {
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
         .collect();
-    let mut denied = ConfinedProvider::start_under(&profile, &bindings);
+    let mut denied = ConfinedProvider::start_under(&profile, &bindings, Path::new(PROVIDER_BINARY));
     let exit = denied.wait_for_exit();
     assert_ne!(
         exit.code(),
@@ -1154,20 +1535,23 @@ struct AllowRuleSources {
     entries: Vec<Value>,
 }
 
-/// Reads `capsules/<name>/confine.sb` and `capsules/<name>/falsifiers.json`
-/// for the profiles selected by `allow_rule_profiles`.
+/// One provider's falsifier list and its registered ids, in list order.
+#[derive(Debug)]
+struct FalsifierList {
+    name: &'static str,
+    ids: Vec<String>,
+    entries: Vec<Value>,
+}
+
+/// Reads every `capsules/<name>/falsifiers.json` list selected by
+/// `allow_rule_profiles` and returns each list's entries and ids.
 ///
-/// A missing or unreadable profile, a profile that does not parse, a missing
-/// or unreadable list, a list that is not JSON and a document without a
-/// `falsifiers` list are refusals with distinct reasons that name the path.
-/// There is no skip path.
-fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
-    let mut profiles = Vec::new();
-    for name in allow_rule_profiles() {
-        let path = capsules.join(name).join("confine.sb");
-        profiles.push((name, read_allow_rule_profile(name, &path)?));
-    }
-    let mut entries = Vec::new();
+/// A missing or unreadable list, a list that is not JSON and a document
+/// without a `falsifiers` list are refusals with distinct reasons that name
+/// the path. There is no skip path. Both checks read the lists through this
+/// one function (P10).
+fn read_falsifier_lists(capsules: &Path) -> Result<Vec<FalsifierList>, String> {
+    let mut lists = Vec::new();
     for name in allow_rule_profiles() {
         let path = capsules.join(name).join("falsifiers.json");
         let text = match fs::read_to_string(&path) {
@@ -1194,8 +1578,33 @@ fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> 
                 path.display()
             ));
         };
-        entries.extend(list.iter().cloned());
+        let entries: Vec<Value> = list.iter().cloned().collect();
+        let ids = entries
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+            .collect();
+        lists.push(FalsifierList { name, ids, entries });
     }
+    Ok(lists)
+}
+
+/// Reads `capsules/<name>/confine.sb` and `capsules/<name>/falsifiers.json`
+/// for the profiles selected by `allow_rule_profiles`.
+///
+/// A missing or unreadable profile, a profile that does not parse, a missing
+/// or unreadable list, a list that is not JSON and a document without a
+/// `falsifiers` list are refusals with distinct reasons that name the path.
+/// There is no skip path.
+fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
+    let mut profiles = Vec::new();
+    for name in allow_rule_profiles() {
+        let path = capsules.join(name).join("confine.sb");
+        profiles.push((name, read_allow_rule_profile(name, &path)?));
+    }
+    let entries = read_falsifier_lists(capsules)?
+        .into_iter()
+        .flat_map(|list| list.entries)
+        .collect();
     Ok(AllowRuleSources { profiles, entries })
 }
 
@@ -1221,6 +1630,139 @@ fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
             )
         })
         .map(|_forms| profile)
+}
+
+/// The one heading line every confinement document uses for its falsifier
+/// section.
+const FALSIFIER_HEADING: &str = "## Falsifiers";
+
+/// Whether `character` can sit directly beside a falsifier id token.
+fn falsifier_id_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+/// Every `DID` or `WP` id token in `text`, in the order it appears.
+///
+/// An id is a whole token: `DID` or `WP` followed by one or more digits, with
+/// no letter, digit or `_` directly before or after it. So `DID10` does not
+/// name `DID1`, and `WP45 to WP48` names only `WP45` and `WP48`.
+fn falsifier_id_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    for (index, _) in text.char_indices() {
+        if text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(falsifier_id_character)
+        {
+            continue;
+        }
+        let rest = &text[index..];
+        let prefix = if rest.starts_with("DID") {
+            "DID"
+        } else if rest.starts_with("WP") {
+            "WP"
+        } else {
+            continue;
+        };
+        let digits_start = index + prefix.len();
+        let digits = text[digits_start..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        let end = digits_start + digits;
+        if text[end..]
+            .chars()
+            .next()
+            .is_some_and(falsifier_id_character)
+        {
+            continue;
+        }
+        tokens.push(&text[index..end]);
+    }
+    tokens
+}
+
+/// Whether `section` names `id` as a whole token.
+fn names_falsifier_id(section: &str, id: &str) -> bool {
+    falsifier_id_tokens(section)
+        .iter()
+        .any(|token| *token == id)
+}
+
+/// Every problem with one document's falsifier section, each naming the
+/// document.
+///
+/// The document must hold exactly one line `## Falsifiers`. Its section runs
+/// from that line to the next line that starts with `## `, or to the end of
+/// the file. Every id of `own_ids` must be named in the section as a whole
+/// token, and every id-shaped token there must appear in `registered_ids`,
+/// which holds both lists' ids. An id may be named more than once.
+fn falsifier_section_problems(
+    document_name: &str,
+    document: &str,
+    own_ids: &[String],
+    registered_ids: &[String],
+) -> Vec<String> {
+    let lines: Vec<&str> = document.lines().collect();
+    let headings: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == FALSIFIER_HEADING)
+        .map(|(index, _)| index)
+        .collect();
+    let Some(heading) = headings.first().copied() else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md must hold one line {FALSIFIER_HEADING}; found none"
+        )];
+    };
+    if headings.len() > 1 {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md must hold one line {FALSIFIER_HEADING}; found {}",
+            headings.len()
+        )];
+    }
+    let start = heading + 1;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.starts_with("## "))
+        .map_or(lines.len(), |offset| start + offset);
+    let section = lines[start..end].join("\n");
+    let mut problems = Vec::new();
+    for id in own_ids {
+        if !names_falsifier_id(&section, id) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: own falsifier id {id} is not named in \
+                 {FALSIFIER_HEADING}"
+            ));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for token in falsifier_id_tokens(&section) {
+        if registered_ids.iter().any(|id| id == token) || seen.contains(&token) {
+            continue;
+        }
+        seen.push(token);
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {FALSIFIER_HEADING} names {token}, which neither \
+             falsifier list registers"
+        ));
+    }
+    problems
+}
+
+/// Reads `capsules/<name>/CONFINEMENT.md`, or refuses with a reason that names
+/// its path. There is no skip path.
+fn read_confinement_document(capsules: &Path, name: &str) -> Result<String, String> {
+    let path = capsules.join(name).join("CONFINEMENT.md");
+    fs::read_to_string(&path).map_err(|err| {
+        format!(
+            "{name} confinement document {} must be readable: {err}",
+            path.display()
+        )
+    })
 }
 
 /// The top-level allow forms of `profile` that no `entries` item removes.
@@ -1355,7 +1897,7 @@ fn both_file_profiles_bind_one_storage_parameter_contract() {
 /// test reads files and starts no process, so it runs on every platform.
 ///
 /// Falsifier: WP44 appends `(allow file-read* (literal "/etc"))` to the did
-/// profile; this test fails on that form. WP49 to WP52 make each source
+/// profile; this test fails on that form. WP49 to WP53 make each source
 /// refusal a skip, so `allow_rule_removal_check_rejects_bad_inputs` fails.
 #[test]
 fn every_did_and_wallet_allow_rule_has_a_registered_removal() {
@@ -1371,6 +1913,46 @@ fn every_did_and_wallet_allow_rule_has_a_registered_removal() {
              falsifier or be deleted; no entry removes: {unremoved:?}"
         );
     }
+}
+
+/// Every falsifier id registered for did or wallet is named in its own
+/// document's `## Falsifiers` section, and neither section names an id that
+/// neither list registers.
+///
+/// The check reads `capsules/did-provider/CONFINEMENT.md`,
+/// `capsules/wallet-provider/CONFINEMENT.md` and both `falsifiers.json` lists
+/// through the removal check's one list reader. A missing document or list is
+/// a refusal that names its path, and there is no skip path. The test reads
+/// files and starts no process, so it runs on every platform.
+///
+/// Before the document edits of task 061 this test failed with DID19, DID20
+/// and every missing wallet id.
+///
+/// Falsifier: WP58 drops the own-id rule, WP59 the unregistered-id rule, WP60
+/// matches an id as a substring, WP61 runs a section to the end of the file,
+/// and WP62 to WP64 bypass each refusal; the fixture tests catch each one.
+#[test]
+fn every_falsifier_id_is_named_in_its_confinement_document() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let lists = read_falsifier_lists(capsules).unwrap_or_else(|err| panic!("{err}"));
+    let registered: Vec<String> = lists
+        .iter()
+        .flat_map(|list| list.ids.iter().cloned())
+        .collect();
+    let mut problems = Vec::new();
+    for list in &lists {
+        let document =
+            read_confinement_document(capsules, list.name).unwrap_or_else(|err| panic!("{err}"));
+        problems.extend(falsifier_section_problems(
+            list.name,
+            &document,
+            &list.ids,
+            &registered,
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// The removal check reports an allow form that no entry removes, and only a
@@ -1681,6 +2263,137 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
         refusal.contains(&did_list.display().to_string())
             && refusal.contains("must hold a falsifiers list"),
         "the refusal must name the list path: {refusal}"
+    );
+}
+
+/// The section check reports an own id that the section does not name and an
+/// id-shaped token that neither list registers. It reports no problem when a
+/// section names every id as a whole token.
+///
+/// The list holds `DID1`, `DID2` and `DID10`, and the section names `DID2`,
+/// `DID10` and the unregistered `WP9`. `DID1` is missing even though `DID10`
+/// appears, because an id counts only as a whole token. The check returns
+/// exactly those two problems. The fixtures are built in memory; no file is
+/// read and no process starts.
+///
+/// Falsifier: WP58 drops the own-id rule, WP59 the unregistered-id rule and
+/// WP60 matches an id as a substring; this test fails on each because the
+/// corresponding problem does not come.
+#[test]
+fn falsifier_section_check_reports_missing_and_stale_ids() {
+    let own = vec!["DID1".to_string(), "DID2".to_string()];
+    let registered = vec!["DID1".to_string(), "DID2".to_string(), "DID10".to_string()];
+    let incomplete = "## Falsifiers\n\n- DID2 is named\n- DID10 is named\n- WP9 is named\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", incomplete, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID1 is not named in ## Falsifiers"
+                .to_string(),
+            "fixture-provider CONFINEMENT.md: ## Falsifiers names WP9, which neither falsifier list registers"
+                .to_string(),
+        ],
+        "the check must report the missing own id and the unregistered id"
+    );
+
+    let complete = "## Tests\n\n- DID2 is named\n\n## Falsifiers\n\n- DID1\n- DID2\n- DID10\n";
+    assert!(
+        falsifier_section_problems("fixture-provider", complete, &own, &registered).is_empty(),
+        "a section that names every id whole must report no problem"
+    );
+}
+
+/// The section check refuses a document without its section, one with two
+/// sections, and one whose id appears only after the section's next heading.
+///
+/// A document with no `## Falsifiers` line and one with two such lines each
+/// return one problem that names the document and says how many headings were
+/// found. A document whose section names `DID1` and whose `## Other` section
+/// names `DID2` reports `DID2` as missing, because the section ends at the next
+/// line that starts with `## `. The fixtures are built in memory; no file is
+/// read and no process starts.
+///
+/// Falsifier: WP61 runs the section to the end of the file, WP62 bypasses the
+/// missing-heading refusal and WP63 the duplicate-heading refusal; this test
+/// fails on each because the expected problem does not come.
+#[test]
+fn falsifier_section_check_rejects_a_document_without_its_section() {
+    let own = vec!["DID1".to_string(), "DID2".to_string()];
+    let registered = own.clone();
+
+    let missing = "## Tests\n\n- DID1 and DID2 are named\n";
+    let problems = falsifier_section_problems("fixture-provider", missing, &own, &registered);
+    assert_eq!(
+        problems.len(),
+        1,
+        "no heading must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider") && problems[0].contains("found none"),
+        "the reason must name the document and the missing heading: {}",
+        problems[0]
+    );
+
+    let doubled = "## Falsifiers\n\n- DID1\n\n## Falsifiers\n\n- DID2\n";
+    let problems = falsifier_section_problems("fixture-provider", doubled, &own, &registered);
+    assert_eq!(
+        problems.len(),
+        1,
+        "two headings must be one problem: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("fixture-provider") && problems[0].contains("found 2"),
+        "the reason must name the document and the heading count: {}",
+        problems[0]
+    );
+
+    let later = "## Falsifiers\n\n- DID1\n\n## Other\n\n- DID2\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", later, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID2 is not named in ## Falsifiers"
+                .to_string()
+        ],
+        "an id after the next ## heading is outside the section"
+    );
+}
+
+/// The document reader refuses a missing document and a document it cannot
+/// read, each with a reason that names its path, and reads a present one.
+///
+/// The real-document test reads through this same function, so no unreadable
+/// document can become an empty one there. The fixtures are a temporary
+/// directory; no process starts.
+///
+/// Falsifier: WP64 skips an unreadable `CONFINEMENT.md` and returns an empty
+/// document; this test fails because the refusal does not come.
+#[test]
+fn falsifier_document_read_rejects_unreadable_source() {
+    let capsules = tempfile::tempdir().expect("temporary capsules directory");
+    let provider = capsules.path().join("did-provider");
+    let path = provider.join("CONFINEMENT.md");
+    let refusal = read_confinement_document(capsules.path(), "did-provider")
+        .expect_err("a missing document must be refused");
+    assert!(
+        refusal.contains(&path.display().to_string()) && refusal.contains("must be readable"),
+        "the refusal must name the document path: {refusal}"
+    );
+
+    fs::create_dir_all(&provider).expect("fixture provider directory");
+    fs::write(&path, "## Falsifiers\n").expect("fixture document");
+    assert_eq!(
+        read_confinement_document(capsules.path(), "did-provider")
+            .expect("a readable document must load"),
+        "## Falsifiers\n",
+        "the reader must return the document's text"
+    );
+
+    fs::remove_file(&path).expect("remove the fixture document");
+    fs::create_dir(&path).expect("make the document path a directory");
+    let refusal = read_confinement_document(capsules.path(), "did-provider")
+        .expect_err("an unreadable document must be refused");
+    assert!(
+        refusal.contains(&path.display().to_string()) && refusal.contains("must be readable"),
+        "the refusal must name the unreadable path: {refusal}"
     );
 }
 

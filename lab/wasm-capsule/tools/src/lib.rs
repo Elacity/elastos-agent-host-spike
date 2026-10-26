@@ -19,9 +19,17 @@
 //!
 //! [`run`] is wc-005a's runner: one test-only host engine on a verified
 //! bundle's entrypoint bytes, written from memory into a new private folder,
-//! with no folder, env or network flag.
+//! with no folder, env or network flag; and wc-005b's two-engine `run`, which
+//! verifies once with [`verify`] and then runs `wasmtime` and then `wasmer`
+//! through that one engine runner, requiring identical stdout. Before the
+//! module runs it asks each engine `--version` and keeps what it printed.
+//!
+//! [`receipt`] is wc-005c's receipt of that two-engine run: the lab CID, both
+//! observed engine versions, the function, the argument, both exit statuses
+//! and both stdouts, written only through the shared new-file writer.
 
 pub mod bundle;
+pub mod receipt;
 pub mod run;
 pub mod verify;
 

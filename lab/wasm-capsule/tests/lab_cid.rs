@@ -118,6 +118,42 @@ fn lane_files(lane: &Path) -> Vec<(String, String)> {
 }
 
 #[test]
+fn lane_files_reads_names_git_would_quote() {
+    // Git quotes a name holding `"` unless the listing is NUL-separated, and a
+    // quoted name is not a file, so the guard below would skip it silently.
+    let tmp = TempDir::new("lane-files-quoted");
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run git init in the temp folder");
+    assert!(
+        init.status.success(),
+        "git init failed ({}): {}",
+        init.status,
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let written = [
+        ("plain.md", "plain text\n"),
+        ("review\"note.md", "quoted text\n"),
+    ];
+    for (name, text) in written {
+        fs::write(tmp.path().join(name), text).expect("write a listed file");
+    }
+
+    let mut listed = lane_files(tmp.path());
+    listed.sort();
+    let expected: Vec<(String, String)> = written
+        .iter()
+        .map(|(name, text)| (name.to_string(), text.to_string()))
+        .collect();
+    assert_eq!(
+        listed, expected,
+        "lane_files did not list every file under its real name"
+    );
+}
+
+#[test]
 fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
     // Built at run time, so this file does not match itself. The retired label
     // is checked in every listed file, docs included; the code names only
