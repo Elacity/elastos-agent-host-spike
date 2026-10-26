@@ -38,6 +38,15 @@ under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
 `startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
 refused when the profile cannot be applied.
 
+`every_did_and_wallet_allow_rule_traces_to_one_declared_right` reads
+`capsules/did-provider/tests/fixtures/confine/declared-rights.json`. That file
+is a lab stand-in for the Runtime generator's input and not a manifest field.
+Every top-level allow rule of the did profile traces to exactly one right the
+shared contract names, or to one observed startup need. The profile rules are
+evidence for Anders to review and not accepted rights. The startup label says
+"observed startup needs, not approved rights; Anders decides". The generator
+stays the Runtime's.
+
 ## Profile parameters
 
 The generated profile binds three parameters, which the tests pass with
