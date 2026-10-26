@@ -212,9 +212,10 @@ programs", means the profile applied and refused the exec.
 
 The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
-For the Runtime's refusal of such a start, see "The Runtime half". That
-bridge change is not built: the Runtime half that generates and enforces the
-profile is future work in `elastos/`, outside this lane.
+For the Runtime's refusal of such a start, see "The Runtime bridge change"
+in `../did-provider/CONFINEMENT.md`. That bridge change is not built: the
+Runtime half that generates and enforces the profile is future work in
+`elastos/`, outside this lane.
 
 ## What the profile does not grant
 
