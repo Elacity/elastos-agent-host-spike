@@ -88,8 +88,12 @@
 //! signs [`domain_separated_digest`] of [`VARIANT_BINDING_DOMAIN`] and that
 //! payload; it writes nothing. [`verify_checked_variant_binding`] checks, in
 //! order, the signer's `did:key`, the explicit accepted list, the shape of
-//! both variant lists, the platforms, each variant's CID, the recipe's CID,
-//! then the Ed25519 signature. [`verify_variant_binding`] is [`checked_bundle`]
+//! both variant lists, the platforms, each variant's CID, that a WASM app is
+//! bound only under the portable label [`PORTABLE_PLATFORM`] (`*`), the
+//! recipe's CID, then the Ed25519 signature. The portable label stands alone
+//! in a binding, so a WASM app has one variant and one CID. Whether a bundle
+//! is a WASM app comes from the one manifest check, never a second parse.
+//! [`verify_variant_binding`] is [`checked_bundle`]
 //! for each variant and then that check. It shares the record's digest, DID
 //! encoder and decoder, accepted-list check and Ed25519 verification. Each
 //! variant is still its own closure with its own [`PackageRecord`]. The
@@ -125,7 +129,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use elastos_common::CapsuleManifest;
+use elastos_common::{CapsuleManifest, CapsuleType};
 use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -158,10 +162,20 @@ pub const VARIANT_BINDING_SCHEMA: &str = "lab.capsule-identity.variant-binding/v
 /// [`domain_separated_digest`]. It is a lab proposal.
 pub const VARIANT_BINDING_DOMAIN: &str = "lab.capsule-identity.variant-binding/v1";
 
-/// The platform labels a variant binding may hold, in byte order: the three
-/// the Runtime's release script uses. A label is not identity: it lives only
-/// in the binding, never in a bundle.
-pub const VARIANT_PLATFORMS: [&str; 3] = ["aarch64-darwin", "aarch64-linux", "x86_64-linux"];
+/// The portable label: one variant that is not per platform, as the Runtime's
+/// own record writes `"platform": "*"`. A binding that holds it holds no other
+/// label, and a bundle whose manifest `type` is `wasm` is bound only under it.
+pub const PORTABLE_PLATFORM: &str = "*";
+
+/// The labels a variant binding may hold, in byte order: the portable label
+/// and the three platforms the Runtime's release script uses. A label is not
+/// identity: it lives only in the binding, never in a bundle.
+pub const VARIANT_PLATFORMS: [&str; 4] = [
+    PORTABLE_PLATFORM,
+    "aarch64-darwin",
+    "aarch64-linux",
+    "x86_64-linux",
+];
 
 /// The path of the one entry a variant recipe is named under: its lab CID is
 /// [`encode_entries`] of one entry with this path and the recipe's bytes.
@@ -218,12 +232,15 @@ pub struct BundleEntry {
 ///
 /// Only [`checked_bundle`] and [`checked_bundle_observed`] make one, from the
 /// one walk and the one manifest check. Its fields are private and nothing
-/// changes them, so its lab CID always names its entries. It holds a name and
+/// changes them, so its lab CID always names its entries. It also keeps
+/// whether that manifest check found `type` to be `wasm`, for the variant
+/// binding's check (e2) alone; no accessor hands it out. It holds a name and
 /// bytes, never a decision: it is no trust, admission or launch value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedBundle {
     cid: LabCid,
     entries: Vec<BundleEntry>,
+    wasm: bool,
 }
 
 /// A test-key signature over a printed lab CID.
@@ -385,6 +402,15 @@ pub enum Refusal {
     /// A binding names a recipe CID that is not the lab CID of the recipe
     /// bytes given. `binding` is the binding's CID; `recipe` is the bytes'.
     RecipeNamesAnotherCid { binding: String, recipe: LabCid },
+    /// A variant list holds the portable label [`PORTABLE_PLATFORM`] and
+    /// another label. `labels` is the whole list, sorted in byte order.
+    PortableNotAlone {
+        list: &'static str,
+        labels: Vec<String>,
+    },
+    /// A bundle whose manifest `type` is `wasm` is bound under `platform`, a
+    /// label that is not [`PORTABLE_PLATFORM`]. `bundle` is its lab CID.
+    WasmNotPortable { platform: String, bundle: LabCid },
 }
 
 impl fmt::Display for Refusal {
@@ -462,6 +488,14 @@ impl fmt::Display for Refusal {
                 f,
                 "the binding names the recipe {binding}; the recipe bytes name {recipe}"
             ),
+            Refusal::PortableNotAlone { list, labels } => write!(
+                f,
+                "the {list} variant list holds the labels {labels:?}: the portable label {PORTABLE_PLATFORM} stands alone"
+            ),
+            Refusal::WasmNotPortable { platform, bundle } => write!(
+                f,
+                "the bundle {bundle} is a WASM app bound under {platform}: a WASM app has one portable variant, bound under {PORTABLE_PLATFORM}"
+            ),
         }
     }
 }
@@ -504,8 +538,9 @@ pub fn checked_bundle(bundle: &Path) -> Result<CheckedBundle, Refusal> {
 /// handle's type before it reads or lists it; it never follows a link and
 /// never waits on a FIFO. It reads every regular file once, from its checked
 /// handle. Then the root `capsule.json` it read gets the Runtime's own two
-/// checks, and exactly the bytes that were checked are named and kept. This
-/// is the one walk and the one manifest check. A refusal returns no value.
+/// checks, and exactly the bytes that were checked are named and kept, with
+/// whether that check found `type` to be `wasm`. This is the one walk and the
+/// one manifest check. A refusal returns no value.
 pub fn checked_bundle_observed(
     bundle: &Path,
     mut observe: impl FnMut(Moment, &str),
@@ -515,10 +550,10 @@ pub fn checked_bundle_observed(
         .iter()
         .find(|entry| entry.path == MANIFEST_FILE)
         .ok_or(Refusal::NoManifest)?;
-    check_manifest(&manifest.content)?;
+    let wasm = check_manifest(&manifest.content)?;
     encode_entries(&entries)
         // The value keeps the very entries its lab CID names: no second read.
-        .map(|cid| CheckedBundle { cid, entries })
+        .map(|cid| CheckedBundle { cid, entries, wasm })
 }
 
 /// Check the name `claimed` against the bundle at `bundle`.
@@ -799,10 +834,14 @@ fn read_file(handle: OwnedFd, path: &str) -> Result<Vec<u8>, Refusal> {
 /// The Runtime's own two checks on `capsule.json`, the same two calls it
 /// makes on a fetched bundle's manifest: parse it as `CapsuleManifest`
 /// (which refuses an unknown field), then `validate()`. The lab adds no rule.
-fn check_manifest(bytes: &[u8]) -> Result<(), Refusal> {
+/// It returns whether the parsed manifest's `type` is `wasm`, read from that
+/// one parse: nothing else parses `capsule.json`.
+fn check_manifest(bytes: &[u8]) -> Result<bool, Refusal> {
     let manifest: CapsuleManifest = serde_json::from_slice(bytes)
         .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;
-    manifest.validate().map_err(Refusal::ManifestInvalid)
+    let wasm = manifest.capsule_type == CapsuleType::Wasm;
+    manifest.validate().map_err(Refusal::ManifestInvalid)?;
+    Ok(wasm)
 }
 
 fn special_name(file_type: FileType) -> &'static str {
@@ -1132,10 +1171,14 @@ fn recipe_cid(recipe: &[u8]) -> Result<LabCid, Refusal> {
 /// given with its platform label, and the recipe bytes `recipe`.
 ///
 /// It first refuses the shapes verification refuses (check (c), for the
-/// `given` list): no variant, a label not in [`VARIANT_PLATFORMS`], or one
-/// label twice. Then it names each bundle with [`lab_cid`]; a bundle
-/// [`lab_cid`] refuses gets no binding, and the refusal is [`lab_cid`]'s own.
-/// The recipe is named with [`encode_entries`] of one entry. `signer_did` is
+/// `given` list): no variant, a label not in [`VARIANT_PLATFORMS`], one label
+/// twice, or [`PORTABLE_PLATFORM`] with another label. Then it checks each
+/// bundle with [`checked_bundle`], the one walk, which gives both its lab CID
+/// and its manifest type; a bundle the walk refuses gets no binding, and the
+/// refusal is the walk's own. Then it refuses what check (e2) refuses, with
+/// the same function: a `wasm` bundle under a label but
+/// [`PORTABLE_PLATFORM`]. The recipe is named with [`encode_entries`] of one
+/// entry. `signer_did` is
 /// `elastos_identity::encode_signing_key_did` of `key`. The signature is
 /// Ed25519 over [`domain_separated_digest`] of [`VARIANT_BINDING_DOMAIN`] and
 /// the binding's payload. It writes no file and changes no bundle byte.
@@ -1146,11 +1189,20 @@ pub fn sign_variant_binding(
 ) -> Result<VariantBinding, Refusal> {
     let labels = variants.iter().map(|(platform, _)| *platform);
     require_variant_shape("given", labels)?;
-    let mut binding = VariantBinding {
-        variants: variants
+    let mut walked = Vec::new();
+    for (platform, bundle) in variants {
+        walked.push((*platform, checked_bundle(bundle)?));
+    }
+    require_portable_wasm(
+        walked
             .iter()
-            .map(|(platform, bundle)| Ok(((*platform).to_owned(), lab_cid(bundle)?.to_string())))
-            .collect::<Result<_, Refusal>>()?,
+            .map(|(platform, checked)| (*platform, checked)),
+    )?;
+    let mut binding = VariantBinding {
+        variants: walked
+            .iter()
+            .map(|(platform, checked)| ((*platform).to_owned(), checked.cid().to_string()))
+            .collect(),
         recipe: recipe_cid(recipe)?.to_string(),
         signer_did: signer_did_of(key),
         signature: [0; 64],
@@ -1170,18 +1222,22 @@ pub fn sign_variant_binding(
 /// 2. (b) `binding.signer_did` is an exact member of `accepted`, with the name
 ///    signature's reason. An empty list refuses every signer.
 /// 3. (c) The shape of the binding's pairs, then of the given pairs: at least
-///    one variant, every label one of [`VARIANT_PLATFORMS`], no label twice.
+///    one variant, every label one of [`VARIANT_PLATFORMS`], no label twice,
+///    and [`PORTABLE_PLATFORM`] with no other label.
 /// 4. (d) The given platforms are the binding's platforms; otherwise both
 ///    sorted lists are named.
 /// 5. (e) Each given bundle's printed lab CID is the binding's CID for its
 ///    label; otherwise the label and both CIDs are named.
-/// 6. (f) The lab CID of `recipe` is the binding's recipe CID; otherwise
+/// 6. (e2) A given bundle whose manifest `type` is `wasm` is bound only under
+///    [`PORTABLE_PLATFORM`]; otherwise its label and CID are named. So a WASM
+///    app has one variant and one CID.
+/// 7. (f) The lab CID of `recipe` is the binding's recipe CID; otherwise
 ///    both are named.
-/// 7. (g) Ed25519 verification of `binding.signature` over the binding's
+/// 8. (g) Ed25519 verification of `binding.signature` over the binding's
 ///    digest, with the key from step 1 and the name signature's reason. The
 ///    signed name in that reason is the payload, as text.
 ///
-/// It reads nothing from disk. `Ok(())` means all seven passed. It is not a
+/// It reads nothing from disk. `Ok(())` means all eight passed. It is not a
 /// trust, admission or launch value, and it grants nothing.
 pub fn verify_checked_variant_binding(
     binding: &VariantBinding,
@@ -1201,6 +1257,7 @@ pub fn verify_checked_variant_binding(
     require_variant_shape("given", variants.iter().map(|(platform, _)| *platform))?;
     require_same_platforms(binding, variants)?;
     require_variant_cids(binding, variants)?;
+    require_portable_wasm(variants.iter().copied())?;
     require_recipe_cid(binding, recipe)?;
     let payload = binding.variant_binding_payload();
     let message = variant_binding_message(&payload);
@@ -1239,7 +1296,9 @@ pub fn verify_variant_binding(
 
 /// Check (c) on one list of platform labels; `list` says whose, `binding` or
 /// `given`. The first label not in [`VARIANT_PLATFORMS`], or the first label
-/// seen twice, is refused; a list with no label is refused.
+/// seen twice, is refused; then a list that holds [`PORTABLE_PLATFORM`] and
+/// another label is refused naming all its labels; a list with no label is
+/// refused.
 fn require_variant_shape<'a>(
     list: &'static str,
     labels: impl IntoIterator<Item = &'a str>,
@@ -1259,6 +1318,11 @@ fn require_variant_shape<'a>(
             });
         }
         seen.push(label);
+    }
+    if seen.len() > 1 && seen.contains(&PORTABLE_PLATFORM) {
+        let mut labels: Vec<String> = seen.iter().map(|label| (*label).to_owned()).collect();
+        labels.sort();
+        return Err(Refusal::PortableNotAlone { list, labels });
     }
     if seen.is_empty() {
         return Err(Refusal::NoVariants { list });
@@ -1316,6 +1380,26 @@ fn require_variant_cids(
         }
     }
     Ok(())
+}
+
+/// Check (e2), which signing runs too: a bundle whose manifest `type` is
+/// `wasm`, as the one manifest check found it, is bound only under
+/// [`PORTABLE_PLATFORM`]. Of the bundles under another label, the first in
+/// label byte order is refused, naming its label and its lab CID.
+fn require_portable_wasm<'a>(
+    variants: impl IntoIterator<Item = (&'a str, &'a CheckedBundle)>,
+) -> Result<(), Refusal> {
+    let refused = variants
+        .into_iter()
+        .filter(|(platform, checked)| checked.wasm && *platform != PORTABLE_PLATFORM)
+        .min_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    match refused {
+        Some((platform, checked)) => Err(Refusal::WasmNotPortable {
+            platform: platform.to_owned(),
+            bundle: checked.cid(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Check (f): the recipe bytes' lab CID is the binding's recipe CID.
