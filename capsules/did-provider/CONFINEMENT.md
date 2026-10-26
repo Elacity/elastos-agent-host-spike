@@ -152,13 +152,13 @@ absent on a host OS other than macOS.
 never loads. It launches the provider through the one builder three ways: a
 profile path that does not exist, a copy of `confine.sb` with its last `)`
 removed, and the real profile with every parameter bound except
-`STORAGE_ROOT`. In each case `sandbox-exec` exits 65 before it can exec the
-provider, the child exits within the deadline with a status other than 0, the
-one harness failure names the request, that exit status and the profile's
-reason from standard error, and nothing lands under the storage root. The
-failure never names `execvp`, so the exec was never attempted. The case skips
-with its printed reason when `sandbox-exec` is absent on a host OS other than
-macOS.
+`STORAGE_ROOT`. In each case `sandbox-exec` exits with a status other than 0
+before it reaches the exec, the child exits within the deadline with a status
+other than 0, the one harness failure names the request, that exit status and
+the profile's reason from standard error, and nothing lands under the storage
+root. The failure never names `execvp`, so the exec was never attempted. The
+case skips with its printed reason when `sandbox-exec` is absent on a host OS
+other than macOS.
 
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
@@ -248,8 +248,9 @@ nothing, while where the sandbox tests skip an entry that names one reads
   `startup_denial_reports_its_reason` fails because the failure no longer
   carries `sandbox-exec`'s `Operation not permitted`.
 - Drop the stderr pipe instead of draining it (DID13):
-  `stderr_is_drained_before_wait` fails because the child dies on a closed
-  pipe, so the collected text is empty and the exit status is not its own.
+  `stderr_is_drained_before_wait` fails because only `dd` dies on the closed
+  pipe; the shell still exits 7, and the collected text is empty, so the test
+  fails on its byte count, `left: 0, right: 131072`.
 - Omit the request from the harness failure (DID14):
   `startup_denial_reports_its_reason` fails because the failure does not name
   the `init` request.
