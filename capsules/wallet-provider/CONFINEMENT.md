@@ -49,7 +49,11 @@ bridge work, parameterized by the profile path and the storage root, starts
 path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
 the signed provider bundle, checks its hash, refuses any profile with
 `(allow default)` or a network allow, and fails closed with a reason; the
-provider proposes, the Runtime checks (P4, P11).
+provider proposes, the Runtime checks (P4, P11). If the profile cannot be
+applied, because the file is missing, does not parse or names a parameter the
+launch does not bind, `sandbox-exec` exits before the provider starts and gives
+its reason on standard error; the Runtime then refuses the start with that
+reason and never starts the provider another way (P11).
 
 `../did-provider/` presents the same contract: one profile file, the same three
 parameter tokens, literal startup access, one state subtree grant, and a real
@@ -100,6 +104,14 @@ exists (P10, P11). The status change lands when the Runtime side does.
   neither file-content reads nor writes outside the wallet grant.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
+- `startup_is_refused_when_the_profile_cannot_be_applied` starts the provider
+  under a profile that cannot be applied: a path that does not exist, a copy of
+  `confine.sb` with its last `)` removed, and the real profile with every
+  parameter bound except `STORAGE_ROOT`. `sandbox-exec` exits with a status
+  other than 0 in each case, no wallet directory is created, and the harness
+  failure names the request, the exit status and `sandbox-exec`'s own line on
+  standard error. That failure also shows that `sandbox-exec` refused the
+  profile before any exec.
 - `both_file_profiles_bind_one_storage_parameter_contract` lives in
   `../wallet-provider/tests/confine.rs`. One check function holds the
   contract: `(version 1)` first, `(deny default)` second, an explicit
@@ -139,6 +151,9 @@ exists (P10, P11). The status change lands when the Runtime side does.
   that is a directory fails as a read error naming its path; and a missing did
   profile fails, naming did-provider.
 
+When a request goes unanswered, the harness failure names the request, the
+child's exit status and all the child wrote to standard error.
+
 The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent on
 a host OS other than macOS.
 
@@ -163,11 +178,11 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - `(allow network*)` (WP05) makes `profile_denies_network` and
   `both_file_profiles_bind_one_storage_parameter_contract` fail.
 - Append `(allow default)` after `(deny network*)` (WP20):
-  `profile_denies_network`,
-  `both_file_profiles_bind_one_storage_parameter_contract`,
-  `confined_outside_read_is_denied` and `confined_outside_write_is_denied`
-  fail, because the profile allows every operation and the shared check
-  refuses the rule.
+  `profile_denies_network` fails because `is_default_allow` matches the
+  appended rule, `both_file_profiles_bind_one_storage_parameter_contract` fails
+  because the one check refuses the rule, and
+  `confined_outside_read_is_denied` and `confined_outside_write_is_denied` fail
+  because the outside reads and writes then succeed.
 - Removing the storage-root write rule (WP18) makes `Init` fail inside the
   root, so the operations and outside-write tests fail, and the shared contract
   check fails.
@@ -181,6 +196,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Remove `(allow file-read* (literal (param "STORAGE_PARENT")))` (WP17): `Init`
   cannot inspect the parent, so the operations and outside-write tests fail,
   and the shared contract check fails.
+- Start the provider directly when its profile file is missing (WP28):
+  `startup_is_refused_when_the_profile_cannot_be_applied` fails on case (a) at
+  the bounded wait, because the provider is still running when the deadline
+  kills it.
+- Drop the child's standard error from the one harness failure (WP29):
+  `startup_is_refused_when_the_profile_cannot_be_applied` fails because every
+  failure lacks `sandbox-exec`'s line.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

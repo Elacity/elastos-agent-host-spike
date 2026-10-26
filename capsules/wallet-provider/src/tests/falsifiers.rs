@@ -13,10 +13,12 @@ use std::process::Command;
 /// WP25, which resolves edit paths from the repository root again, task
 /// 018's re-anchored WP07 on the one required list with WP26's missing
 /// model profile skip, task 018's retirement of WP08 and WP10, whose
-/// model-only branch is gone, and task 027's WP27, which returns `Ok(false)`
+/// model-only branch is gone, task 027's WP27, which returns `Ok(false)`
 /// from the sandbox gate's declared-OS branch, so a missing
-/// `/usr/bin/sandbox-exec` on macOS skips and passes.
-const EXPECTED_FALSIFIERS: usize = 25;
+/// `/usr/bin/sandbox-exec` on macOS skips and passes, and task 029's WP28,
+/// which starts the provider directly when its profile file is missing, and
+/// WP29, which drops the child's standard error from the one failure message.
+const EXPECTED_FALSIFIERS: usize = 27;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
