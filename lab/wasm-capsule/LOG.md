@@ -440,3 +440,41 @@
   evidence labels`; `"## Falsifiers"` dropped → `tests/docs.rs:75:5` `falsifiers.json "about" does not name the README
   section "## Falsifiers"`. Gates: `cargo test --locked` (82 passed, 1 ignored, 0 failed) and both fmt checks green;
   retired-label greps: both empty, exit 1.
+- Task 026 (Rong's two rulings, 26 Oct), at base `33cbed8c5c385ae7e94f603527757eb896166b42`. One exact engine
+  sentence ("Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.") once
+  in README's "## Layout" (the first section that names both engines) and once in ADOPTION; README's three other
+  wordings, ADOPTION's two and both `tools/src/run.rs` doc comments now say "not endorsed" (run.rs: comments only,
+  "test-only, not endorsed"). One exact discovery-only sentence (Discovery only: no engine-specific host-function
+  route ... (P10, P18).) in README's 022 section before its first per-engine answer line, and once on one line in
+  ADOPTION (new paragraph "Hosting discovery (wc-009b0, task 022)"). New tests in `tests/docs.rs`, through
+  `lane_file`: `engines_are_labelled_test_only_not_endorsed` and `hosting_discovery_is_not_the_import_path`. 022's
+  two FOLLOWUPs: both run tables now give each complete command as run (`env -i`, the absolute engine path, every
+  argument in order, `< /dev/null`, `<D>` kept). 022 recorded flags only, not their place in argv, so each flag sits
+  after `run` and before `--invoke` (wasmtime reads anything after the module path as guest arguments). Each of the
+  eight rows was re-run once with exactly its written command (WAT re-made from README's text under git-ignored
+  `target/wc009b0/`): exits and stdouts equal to 022's (wasmtime (i) 0 `1592590338`, (ii) 1, (iii) 1, (iv) 0
+  `1592590338`, (iv-c) 1; wasmer (ii) 1, `--use` 1, `--enable-module-linking` 1; all failing stdouts empty), and a
+  `diff` of full stderr confirmed (iii) = (ii) and `--use` = (ii) word for word. No STOP; no finding changed.
+  README:938's conclusion narrowed to "this capsule's output for `1592590337` was unchanged; this one comparison says
+  nothing about any other effect of a preloaded module" (the old phrase's grep: empty, exit 1). Seven new runner
+  entries, all anchored in `README.md`, plus F-WC-README-COUNT re-anchored to 146: canonical runner, from the repo
+  root, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC-ENGINE-ENDORSED
+  F-WC-ENGINE-MOVED F-WC-ENGINE-TWICE F-WC-ENDORSE-LINE F-WC9B0-IMPORT-PATH F-WC9B0-AFTER-ANSWERS F-WC9B0-TWICE
+  F-WC-README-COUNT`: "baseline: 3 named tests pass without an edit, 0 do not", "summary: 8 CAUGHT of 8", exit 0
+  (runner-caught; all 146 entries' anchors found exactly once). Each assertion, quoted by running the named test
+  inside the runner's own `falsify.Mutation`: ENGINE-ENDORSED `tests/docs.rs:152:9` "README.md holds the engine
+  ruling 0 times, not once"; ENGINE-MOVED `:166:5` "README.md's engine ruling is not in "## Layout", the first
+  section that names wasmtime and wasmer"; ENGINE-TWICE `:152:9` "... 2 times, not once"; ENDORSE-LINE `:189:5` "a
+  line mentions endorsement without "not endorsed": [README.md:555: ...]"; F-WC9B0-IMPORT-PATH `:199:5` "README.md
+  holds the discovery ruling 0 times, not once"; AFTER-ANSWERS `:222:5` "README.md's discovery ruling comes after
+  the first per-engine answer line of ...: "### wasmtime 45.0.1: FOUND, ..."" ; F-WC9B0-TWICE `:199:5` "... 2 times,
+  not once". Five more, each hand-proven, pending R1 (`ADOPTION.md` and `tools/src/run.rs` are not recovery
+  targets: no `falsifiers.json` entry, outside README's counts), planted with the same `falsify.Mutation` and one
+  exact replace, named test FAILED, then restored (`shasum -a 256` before = after: ADOPTION `f3728967...cd13d3f`,
+  run.rs `4ba2fbb8...cd46c8`): F-WC-ENGINE-ADOPTION (ruling removed) `:152:9` "ADOPTION.md holds the engine ruling 0
+  times, not once"; F-WC-ENDORSE-ADOPTION (base claim-scope wording back) `:189:5` "[ADOPTION.md:134: ...]";
+  F-WC-ENGINE-RUN-MODULE-DOC `:173:5` "tools/src/run.rs's module doc has no line saying "test-only, not endorsed"";
+  F-WC-ENGINE-RUN-ENUM-DOC `:178:5` "... doc comment on `pub enum Engine` does not say ..."; F-WC9B0-ADOPTION
+  (ruling removed) `:229:5` "ADOPTION.md holds the discovery ruling on one line 0 times, not once". No change to
+  `tools/Cargo.toml`, `Cargo.toml` or `Cargo.lock`. Gates: `cargo test --locked` (84 passed, 1 ignored, 0 failed)
+  and both fmt checks green; retired-label greps: both empty, exit 1.

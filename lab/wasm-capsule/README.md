@@ -59,6 +59,9 @@ from this directory with `cargo test -p wasm-capsule-audit --locked`. `tools/`
 is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name
 the verifier and the runner, below).
 
+The runner (`tools/src/run.rs`) starts two host engines. Rong's ruling (26 Oct):
+Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
+
 `capsule` itself has **no dependencies**: it has no `[dependencies]` (P18). Its
 tests' dev-dependencies are built only for tests: `wasm-capsule-tools`, the
 Runtime's `elastos-common` (a read-only path dependency, for its
@@ -477,7 +480,7 @@ covers. The runner reads no environment variable and no file, parses no
 manifest or module, and writes nothing outside the new folder. The engine gets
 no folder, env or network flag, and an empty environment. This is a behaviour
 proof on one core module, not the Component ABI. `wasmtime` and `wasmer` are
-test-only host engines; neither is endorsed.
+test-only host engines, not endorsed.
 
 **Scope of the isolation claim.** It covers the argv, the empty environment
 and what the guest is given: with no folder, env or network flag, the guest
@@ -549,7 +552,7 @@ with a fresh test key and verified, printed `230101071268130872`
 (`FIXED_OUTPUT`) for `1592590337` (`FIXED_INPUT`) on both `wasmtime` 45.0.1 and
 `wasmer` 7.5.0, byte for byte (`same_name_same_output_on_wasmtime_and_wasmer`).
 This is a behaviour proof on one **core module** on this one Mac, not the
-Component ABI. Both engines are test-only host engines; neither is endorsed.
+Component ABI. Both engines are test-only host engines, not endorsed.
 This is separate from Wasmer's role inside a capsule as the POSIX RTOS PoC. The
 run makes no admission or launch decision, and its lab CID is not the Runtime's
 CID. The known limit of `run_engine` above holds for both runs.
@@ -616,7 +619,7 @@ writer's text names `capsule.json`, its first use (`<path>: capsule.json cannot
 be created: File exists (os error 17)`); the path before it is the receipt's.
 
 **The claim, unchanged from task 015.** One core module, on this one Mac,
-with both engines test-only and neither endorsed; not the Component ABI. The
+with both engines test-only and not endorsed; not the Component ABI. The
 receipt is lab text: it is not signed, it is no admission or launch value,
 and its lab CID is not the Runtime's CID.
 
@@ -865,6 +868,9 @@ no Docker), in the runner's shape: `env -i` (an empty environment), stdin from
 `/dev/null`, and `run --invoke digest <absolute module path> 1592590337` plus
 only the flag under test.
 
+Rong's ruling (26 Oct), which every answer below is read under:
+Discovery only: no engine-specific host-function route (a preload module or a CLI flag) becomes the lab's import path; granted imports stay a stand-in for the Runtime/provider contract (P10, P18).
+
 **The probe modules** (WAT text under the git-ignored `target/wc009b0/`, never
 committed; both engines took the `.wat` files directly, so no `wat` crate step
 was needed). `main.wat` uses the import name of `IMPORTING_MODULE`, `env.f`:
@@ -892,7 +898,9 @@ was needed). `main.wat` uses the import name of `IMPORTING_MODULE`, `env.f`:
 called. `host-unknown.wat` is `host.wat` plus
 `(import "nope" "g" (func (param i32)))`, never called: a contrast for (iv). In
 the commands, `<D>` is the absolute path of
-`lab/wasm-capsule/target/wc009b0` and each module path is absolute.
+`lab/wasm-capsule/target/wc009b0` and each module path is absolute. Each
+table row gives its complete command as run, from a shell; each was run again
+once by task 026 with exactly that command and gave the same exit and stdout.
 
 ### wasmtime 45.0.1: FOUND, `--preload env=<path>`
 
@@ -908,13 +916,13 @@ The flag, from `/opt/homebrew/bin/wasmtime run --help`:
 run's stderr is the CLI's own two `--invoke` warnings, the first being
 ``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future``):
 
-| Run | Flag added to the runner's argv | Exit | stdout | stderr (first line, then the cause) |
+| Run | Complete command as run | Exit | stdout | stderr (first line, then the cause) |
 |---|---|---|---|---|
-| (i) `host` as `env` | `--preload env=<D>/host.wat` | 0 | `1592590338` | the warnings |
-| (ii) nothing supplied | (none) | 1 | (none) | ``Error: failed to run main module `<D>/main.wat` ``; last: ``1: unknown import: `env::f` has not been defined`` |
-| (iii) `host` as `other` | `--preload other=<D>/host.wat` | 1 | (none) | the same as (ii), word for word |
-| (iv) `host-wasi` as `env` | `--preload env=<D>/host-wasi.wat` | 0 | `1592590338` | the warnings |
-| (iv-c) `host-unknown` as `env` | `--preload env=<D>/host-unknown.wat` | 1 | (none) | ``Error: failed to process preload `env` at `<D>/host-unknown.wat` ``; last: ``unknown import: `nope::g` has not been defined`` |
+| (i) `host` as `env` | `env -i /opt/homebrew/bin/wasmtime run --preload env=<D>/host.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 0 | `1592590338` | the warnings |
+| (ii) nothing supplied | `env -i /opt/homebrew/bin/wasmtime run --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | ``Error: failed to run main module `<D>/main.wat` ``; last: ``1: unknown import: `env::f` has not been defined`` |
+| (iii) `host` as `other` | `env -i /opt/homebrew/bin/wasmtime run --preload other=<D>/host.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | the same as (ii), word for word |
+| (iv) `host-wasi` as `env` | `env -i /opt/homebrew/bin/wasmtime run --preload env=<D>/host-wasi.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 0 | `1592590338` | the warnings |
+| (iv-c) `host-unknown` as `env` | `env -i /opt/homebrew/bin/wasmtime run --preload env=<D>/host-unknown.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | ``Error: failed to process preload `env` at `<D>/host-unknown.wat` ``; last: ``unknown import: `nope::g` has not been defined`` |
 
 (ii) is the contrast: the same `main.wat` and argument, without the flag, is
 refused at start, and the message names both `env` and `f`. (iii) shows the
@@ -935,7 +943,7 @@ into `<D>/build/`, sha256
 value): without the flag, exit 0, stdout `230101071268130872`; with
 `--preload env=<D>/host.wat`, exit 0, stdout `230101071268130872`, the same
 two warnings on stderr each time. Both equal `FIXED_OUTPUT` for `1592590337`,
-so the preload changes nothing a zero-import module sees.
+so with the preload, this capsule's output for `1592590337` was unchanged; this one comparison says nothing about any other effect of a preloaded module.
 
 ### wasmer 7.5.0: SKIPPED
 
@@ -964,11 +972,11 @@ look close, and each was tried once:
 name, and `--enable-module-linking` is a Wasm feature switch that takes no
 module. Neither supplies `env.f`:
 
-| Run | Flag added to the runner's argv | Exit | stdout | stderr |
+| Run | Complete command as run | Exit | stdout | stderr |
 |---|---|---|---|---|
-| (ii) nothing supplied | (none) | 1 | (none) | `error: Unable to instantiate the WebAssembly module`, then `╰─▶ 1: Error while importing "env"."f": unknown import. Expected Function(FunctionType { params: [I32], results: [I32] })` |
-| `--use` | `--use <D>/host.wat --offline` | 1 | (none) | the same two lines as (ii) |
-| `--enable-module-linking` | `--enable-module-linking` | 1 | (none) | `error: No backends support the required features for the Wasm module. Feel free to open an issue at https://github.com/wasmerio/wasmer/issues` |
+| (ii) nothing supplied | `env -i /opt/homebrew/bin/wasmer run --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | `error: Unable to instantiate the WebAssembly module`, then `╰─▶ 1: Error while importing "env"."f": unknown import. Expected Function(FunctionType { params: [I32], results: [I32] })` |
+| `--use` | `env -i /opt/homebrew/bin/wasmer run --use <D>/host.wat --offline --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | the same two lines as (ii) |
+| `--enable-module-linking` | `env -i /opt/homebrew/bin/wasmer run --enable-module-linking --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | `error: No backends support the required features for the Wasm module. Feel free to open an issue at https://github.com/wasmerio/wasmer/issues` |
 
 (`--offline` keeps `--use` from asking a registry: "Resolve only from local
 sources ... never the registry".) The (ii) refusal names both `env` and `f`.
@@ -1281,22 +1289,38 @@ is zero of both:
   `[env.f]`: it passes verification, `linked()` is exactly `[env.f]`, each
   engine once, and both run folders hold the verified module.
 
+Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
+(26 Oct) as one exact sentence, read through `lane_file`:
+
+- `engines_are_labelled_test_only_not_endorsed` — the label "not endorsed":
+  README and ADOPTION each hold the engine ruling exactly once; README's copy
+  sits in the first section that names wasmtime and wasmer ("Layout"); both
+  engine doc comments in `tools/src/run.rs` (the module doc and the one on
+  `pub enum Engine`) say "test-only, not endorsed"; and each line of README,
+  ADOPTION or `run.rs` that mentions endorsement also says "not endorsed". It
+  fails naming the file, and for the last check each `file:line` with its text.
+- `hosting_discovery_is_not_the_import_path` — README holds the discovery-only
+  ruling exactly once, inside "Granted import hosting discovery (wc-009b0)" and
+  before its first per-engine answer line (a line starting `### wasmtime`,
+  `### wasmer`, `- wasmtime:` or `- wasmer:`), and ADOPTION holds it exactly
+  once on one line. It fails naming what is missing or out of place.
+
 ## Falsifiers
 
-`falsifiers.json` holds 139 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 146 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016), two task 019 and 17 wc-009a (task 020). Each requires all
-its named tests to fail at an assertion.
+wc-005c (task 016), two task 019, 17 wc-009a (task 020) and seven task 026.
+Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 75, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019 and 020: 1 + 1 + 23 +
-11 + 20 + 2 + 17), each run by the canonical runner with its summary line
-quoted.
+Two kinds of evidence, kept apart. Runner-caught: 82, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020 and 026: 1 + 1 +
+23 + 11 + 20 + 2 + 17 + 7), each run by the canonical runner with its summary
+line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1625,3 +1649,42 @@ above; LOG.md, task 023). Each makes
 `falsifiers_about_states_no_evidence_status` fail at its assertion: the base's
 evidence sentence put back, each of the five evidence words planted alone, and
 the pointer losing `README.md` or `## Falsifiers`.
+
+Task 026's seven, runner-caught (the canonical runner's summary line is in
+LOG.md, task 026). Every anchor is in `README.md`, a recovery target, and each
+entry's one named test fails at its assertion:
+
+- F-WC-ENGINE-ENDORSED — the engine ruling's "not endorsed" loses its "not"
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its count assertion).
+- F-WC-ENGINE-MOVED — the engine ruling moves from "Layout" to the two-engine
+  section (that test, at its placement assertion).
+- F-WC-ENGINE-TWICE — a second copy of the engine ruling (that test, at its
+  count assertion).
+- F-WC-ENDORSE-LINE — the two-engine section's "not endorsed" line goes back to
+  the base's wording (that test, at its line assertion).
+- F-WC9B0-IMPORT-PATH — the discovery-only ruling is removed from the 022
+  section (`hosting_discovery_is_not_the_import_path`, at its count assertion).
+- F-WC9B0-AFTER-ANSWERS — the discovery-only ruling moves after the
+  per-engine answers (that test, at its placement assertion).
+- F-WC9B0-TWICE — a second copy of the discovery-only ruling (that test, at its
+  count assertion).
+
+Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as
+before.
+
+Task 026's five planted bugs outside `README.md`, each hand-proven, pending R1
+(`ADOPTION.md` and `tools/src/run.rs` are not recovery targets, so they have no
+`falsifiers.json` entry and are outside every count above; LOG.md, task 026):
+
+- F-WC-ENGINE-ADOPTION — ADOPTION loses the engine ruling
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its count assertion).
+- F-WC-ENDORSE-ADOPTION — ADOPTION's "not endorsed" claim-scope line goes back
+  to the base's wording (that test, at its line assertion).
+- F-WC-ENGINE-RUN-MODULE-DOC and F-WC-ENGINE-RUN-ENUM-DOC — the module doc, or
+  the doc on `pub enum Engine`, in `tools/src/run.rs` goes back to the base's
+  wording, so it no longer says "test-only, not endorsed" (that test, at its
+  module-doc or enum-doc assertion).
+- F-WC9B0-ADOPTION — ADOPTION loses the discovery-only ruling
+  (`hosting_discovery_is_not_the_import_path`, at its ADOPTION assertion).
