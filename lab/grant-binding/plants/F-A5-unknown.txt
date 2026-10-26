@@ -1,0 +1,20 @@
+id: F-A5-unknown
+file: src/lib.rs
+test: model_unknown_handle_is_refused
+--- old
+        let grant = self
+            .grants
+            .get(&handle)
+            .cloned()
+            .ok_or(Refuse::UnknownHandle)?;
+--- new
+        let grant = match self.grants.get(&handle).cloned() {
+            Some(grant) => grant,
+            None => self
+                .grants
+                .values()
+                .next()
+                .cloned()
+                .ok_or(Refuse::UnknownHandle)?,
+        };
+--- end
