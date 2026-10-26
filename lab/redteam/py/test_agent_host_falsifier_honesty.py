@@ -9,7 +9,8 @@ run cargo and it does not apply a mutation to the repository. It checks:
 - every ``caught`` entry names at least one test;
 - every edit's old text is found exactly once, each file's edits applied in
   order on the updated text, the way falsify.py's Mutation applies them;
-- asks.json has its schema, and every ask a known kind and a resource.
+- asks.json has its closed schema, and every ask a known kind and an allowed
+  resource pattern.
 
 Whether a named test exists is task 004's check. This probe does not lex
 Rust and does not walk falsify.py's AST.
@@ -38,6 +39,7 @@ import copy
 import functools
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -58,6 +60,7 @@ FIELDS = (("id", str), ("title", str), ("command", str), ("expect", str),
 # The declaration's schema, and the kinds proposal_kind in src/lib.rs accepts.
 ASKS_SCHEMA = "elastos.agent-host.asks/v1"
 ASK_KINDS = ("read", "edit", "restore", "run", "child", "init", "hosted", "journal-append")
+PRINCIPAL_MARKER = "<principal>"
 
 Problem = collections.namedtuple("Problem", "rule entry file reason")
 
@@ -76,6 +79,7 @@ PROBES = (
     "test_source_pin_matches_snapshot",
     "test_clean_report_pins_commit_and_merge",
     "test_probe_refusal_reasons",
+    "test_asks_schema_refusal_reasons",
     "test_edit_sequence_matches_runner",
     "test_new_finding_fails_gate",
     "test_discovery_contains_all_probes",
@@ -218,8 +222,8 @@ def anchor_problems(entries, read):
 
 
 def asks_problems(read):
-    """Problems for asks.json: its schema, and a known kind and a non-empty
-    resource in every ask."""
+    """Problems for asks.json's closed shape and allowed resource patterns,
+    as enforced by agent-host's parse_asks and ask_resource_refusal."""
     def problem(entry, reason):
         return Problem("asks", entry, "asks.json", reason)
 
@@ -228,6 +232,8 @@ def asks_problems(read):
         return [problem("", reason)]
     if not isinstance(document, dict):
         return [problem("", "the document is not an object")]
+    if any(key not in ("schema", "asks") for key in document):
+        return [problem("", "asks unknown field")]
     if "schema" not in document:
         return [problem("", "schema is missing")]
     if document["schema"] != ASKS_SCHEMA:
@@ -247,6 +253,8 @@ def ask_reason(ask):
     """Why one ask is malformed, or None."""
     if not isinstance(ask, dict):
         return "the ask is not an object"
+    if any(key not in ("kind", "resource") for key in ask):
+        return "asks entry field"
     if "kind" not in ask:
         return "kind is missing"
     if ask["kind"] not in ASK_KINDS:
@@ -255,6 +263,47 @@ def ask_reason(ask):
         return "resource is missing"
     if not isinstance(ask["resource"], str) or not ask["resource"]:
         return f"resource {ask['resource']!r} is not a non-empty string"
+    resource = ask["resource"]
+    # Rust char::is_whitespace uses Unicode White_Space. Python also treats
+    # these four ASCII separators as whitespace; the host accepts them.
+    if any(char.isspace() and char not in "\x1c\x1d\x1e\x1f" for char in resource):
+        return "asks whitespace"
+    lower = resource.translate(str.maketrans(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+    if "://" in resource:
+        return "asks url"
+    if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", resource):
+        return "asks url scheme"
+    if ":" in resource:
+        return "asks host route"
+    if "users/" in lower:
+        return "asks users path"
+    if resource.startswith("/"):
+        return "asks absolute host path"
+    if resource.startswith("~"):
+        return "asks home host path"
+    if "\\" in resource:
+        return "asks backslash host path"
+    if "." in resource.split("/"):
+        return "asks current directory"
+    if ".." in resource.split("/"):
+        return "asks parent directory"
+    if any(word in lower for word in (
+            "secret", "password", "passwd", "token", "api_key", "api-key",
+            "apikey", "bearer ", "sk-", "ghp_", "xox", "-----begin")):
+        return "asks secret"
+    if resource.count(PRINCIPAL_MARKER) > 1:
+        return "asks repeated marker"
+    if PRINCIPAL_MARKER in resource and not resource.startswith(PRINCIPAL_MARKER):
+        return "asks misplaced marker"
+    if resource.startswith(PRINCIPAL_MARKER):
+        tail = resource[len(PRINCIPAL_MARKER):]
+        if tail and not tail.startswith("/"):
+            return "asks marker tail"
+        if not tail.endswith("/"):
+            return "asks marker directory"
+    elif not resource.endswith("/"):
+        return "asks literal directory"
     return None
 
 
@@ -551,24 +600,101 @@ def problems_in(files, rule=None):
     return found[rule] if rule else [problem for problems in found.values() for problem in problems]
 
 
-def document_with(extra):
-    """A JSON object that is a valid falsifier list and a valid asks list,
-    with ``extra`` source inserted after the opening brace.
+def document_with(extra, document):
+    """A JSON object with ``extra`` source inserted after the opening brace.
 
     ``extra`` is raw JSON, so a caller can plant ``NaN`` or a repeated key,
     which ``json.dumps`` would not emit.
     """
-    payload = {
-        "schema": ASKS_SCHEMA,
-        "asks": GOOD_ASKS["asks"],
-        "falsifiers": [GOOD_HOST],
-    }
-    body = json.dumps(payload)
+    body = json.dumps(document)
     return ("{" + extra + ", " + body[1:]).encode()
 
 
 class ProbeControls(unittest.TestCase):
     """The rules on planted inputs, through the same functions the probes use."""
+
+    def test_asks_schema_refusal_reasons(self):
+        """Closed objects and every resource restriction use the probe path.
+        Each invalid declaration reports its exact cause and ask index."""
+        for field in ("extra", "", "resource", "Schema"):
+            with self.subTest(root_field=field):
+                document = dict(GOOD_ASKS, **{field: 1})
+                self.assertEqual(problems_in(tree(asks=json.dumps(document).encode()), "asks"),
+                                 [Problem("asks", "", "asks.json", "asks unknown field")])
+        for field in ("extra", "", "schema", "Kind"):
+            for at in (0, 1):
+                with self.subTest(ask_field=field, at=at):
+                    document = copy.deepcopy(GOOD_ASKS)
+                    document["asks"] *= 2
+                    document["asks"][at] = dict(document["asks"][at], **{field: 1})
+                    self.assertEqual(
+                        problems_in(tree(asks=json.dumps(document).encode()), "asks"),
+                        [Problem("asks", f"ask {at}", "asks.json", "asks entry field")])
+
+        for value in (None, 1, True, [], {}):
+            with self.subTest(schema_type=value):
+                document = dict(GOOD_ASKS, schema=value)
+                self.assertEqual(problems_in(tree(asks=json.dumps(document).encode()), "asks"),
+                                 [Problem("asks", "", "asks.json",
+                                          f"schema is {value!r}, not {ASKS_SCHEMA!r}")])
+            with self.subTest(kind_type=value):
+                document = dict(GOOD_ASKS, asks=[{"kind": value, "resource": "Models/"}])
+                self.assertEqual(problems_in(tree(asks=json.dumps(document).encode()), "asks"),
+                                 [Problem("asks", "ask 0", "asks.json",
+                                          f"kind {value!r} is not a known kind")])
+
+        resources = [
+            ("https://api.example.com/", "asks url"),
+            ("Models/https://api.example.com/", "asks url"),
+            ("file:/tmp/", "asks url scheme"),
+            ("data:text/plain,x/", "asks url scheme"),
+            ("Git+SSH.v1-local:repo/", "asks url scheme"),
+            ("127.0.0.1:8080/v1/", "asks host route"),
+            ("[::1]:8080/", "asks host route"),
+            ("é:repo/", "asks host route"),
+            ("Users/self/", "asks users path"),
+            ("Models/uSeRs/self/", "asks users path"),
+            ("/tmp/", "asks absolute host path"),
+            ("~/tmp/", "asks home host path"),
+            ("tmp\\projects/", "asks backslash host path"),
+            ("./Models/", "asks current directory"),
+            ("Models/./", "asks current directory"),
+            ("../Models/", "asks parent directory"),
+            ("Models/../", "asks parent directory"),
+            ("<principal>/<principal>/", "asks repeated marker"),
+            ("Models/<principal>/", "asks misplaced marker"),
+            ("<principal>Models/", "asks marker tail"),
+            ("<principal>/Projects", "asks marker directory"),
+            ("<principal>", "asks marker directory"),
+            ("Models", "asks literal directory"),
+        ]
+        for word in ("secret", "password", "passwd", "token", "api_key", "api-key",
+                     "apikey", "sk-", "ghp_", "xox", "-----begin"):
+            resources.append((f"Models/{word.upper()}/", "asks secret"))
+        # This credential spelling reaches the earlier whitespace refusal.
+        resources.append(("Models/bearer value/", "asks whitespace"))
+        whitespace = ("\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004"
+                      "\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
+        for char in whitespace:
+            for resource in (char, char + "Models/", "Models" + char + "/", "Models/" + char):
+                resources.append((resource, "asks whitespace"))
+        for resource, reason in resources:
+            for at in (0, 1):
+                with self.subTest(resource=resource, at=at):
+                    document = copy.deepcopy(GOOD_ASKS)
+                    document["asks"] *= 2
+                    document["asks"][at] = {"kind": "read", "resource": resource}
+                    self.assertEqual(
+                        problems_in(tree(asks=json.dumps(document).encode()), "asks"),
+                        [Problem("asks", f"ask {at}", "asks.json", reason)])
+        for kind in ASK_KINDS:
+            for resource in ("<principal>/", "<principal>/Projects/", "Models/",
+                             "<principal>/.AppData/Agents/agent-host/", "Models/.cache/",
+                             "Models/a..b/", "Models/é/", "Models/sK-/",
+                             "Models/\x1c\x1d\x1e\x1f/"):
+                with self.subTest(kind=kind, resource=resource):
+                    document = dict(GOOD_ASKS, asks=[{"kind": kind, "resource": resource}])
+                    self.assertEqual(problems_in(tree(asks=json.dumps(document).encode())), [])
 
     def test_probe_refusal_reasons(self):
         """Each rule refuses each planted input with its own reason, and the
@@ -715,34 +841,36 @@ class ProbeControls(unittest.TestCase):
 
         Codex's two round-3 repros are here: ``"about": NaN`` on a valid
         falsifier document, and ``"extra": NaN`` on a valid asks document.
-        ``json.loads`` accepts both, and both probes would then report no
-        problem. A duplicate key is the same shape: the default reader keeps
-        the last value and the probes accept the document.
+        ``json.loads`` accepts both. The strict reader must report the JSON
+        error before schema validation, including when a field is unknown.
+        A duplicate key is the same shape: the default reader keeps the last
+        value instead of reporting the JSON error.
         """
-        valid = document_with('"about": "plain"')
+        valid = document_with('"about": "plain"', {"falsifiers": [GOOD_HOST]})
         files = tree()
         files["falsifiers.json"] = valid
-        files["asks.json"] = valid
         self.assertEqual(problems_in(files), [], "the valid document was refused")
 
-        nested = document_with('"note": 1').replace(
-            b'"kind": "read"', b'"kind": "read", "kind": "read"', 1)
+        def documents(extra):
+            return tuple(document_with(extra, document)
+                         for document in ({"falsifiers": [GOOD_HOST]}, GOOD_ASKS))
+
+        nested = documents('"note": {"kind": "read", "kind": "read"}')
         cases = (
-            ("about NaN", document_with('"about": NaN'), "NaN is not strict JSON"),
-            ("extra NaN", document_with('"extra": NaN'), "NaN is not strict JSON"),
-            ("Infinity", document_with('"about": Infinity'), "Infinity is not strict JSON"),
-            ("-Infinity", document_with('"about": -Infinity'), "-Infinity is not strict JSON"),
-            ("duplicate about", document_with('"about": 1, "about": 2'),
+            ("about NaN", documents('"about": NaN'), "NaN is not strict JSON"),
+            ("extra NaN", documents('"extra": NaN'), "NaN is not strict JSON"),
+            ("Infinity", documents('"about": Infinity'), "Infinity is not strict JSON"),
+            ("-Infinity", documents('"about": -Infinity'), "-Infinity is not strict JSON"),
+            ("duplicate about", documents('"about": 1, "about": 2'),
              "duplicate key 'about'"),
             ("duplicate kind", nested, "duplicate key 'kind'"),
-            ("not UTF-8", b"\xff", "the file is not UTF-8"),
-            ("broken syntax", b"{", "the file is not JSON"),
+            ("not UTF-8", (b"\xff", b"\xff"), "the file is not UTF-8"),
+            ("broken syntax", (b"{", b"{"), "the file is not JSON"),
         )
         for label, raw, reason in cases:
             with self.subTest(label):
                 planted_files = tree()
-                planted_files["falsifiers.json"] = raw
-                planted_files["asks.json"] = raw
+                planted_files["falsifiers.json"], planted_files["asks.json"] = raw
                 self.assertEqual(problems_in(planted_files, "parse"), [Problem(
                     "parse", "", "falsifiers.json", reason)])
                 self.assertEqual(problems_in(planted_files, "asks"), [Problem(
