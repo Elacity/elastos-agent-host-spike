@@ -1,0 +1,14 @@
+{
+  "schema": "elastos.agent-host.asks/v1",
+  "asks": [
+    {"kind": "read", "resource": "<principal>/"},
+    {"kind": "edit", "resource": "<principal>/"},
+    {"kind": "restore", "resource": "<principal>/"},
+    {"kind": "run", "resource": "<principal>/Projects/"},
+    {"kind": "child", "resource": "<principal>/Projects/"},
+    {"kind": "init", "resource": "<principal>/Projects/"},
+    {"kind": "hosted", "resource": "Models/"},
+    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
+  ]
+}

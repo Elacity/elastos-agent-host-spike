@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001 and 005). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, or the wc-001 test driver, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner falsify.py has no \"capsule-identity\" command yet (provider BACKLOG item 8c; Flint routes it), so each is proved by hand until it lands: break, run the named tests with `cargo test --locked` in this lane, see each fail, revert byte for byte.",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005 and 003). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, or the wc-001 test driver, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -179,7 +179,8 @@
         }
       ],
       "tests": [
-        "lab_cid_matches_the_pinned_value_for_each_fixture"
+        "lab_cid_matches_the_pinned_value_for_each_fixture",
+        "one_byte_change_in_the_manifest_changes_the_lab_cid"
       ]
     },
     {
@@ -195,7 +196,10 @@
         }
       ],
       "tests": [
-        "lab_cid_matches_the_pinned_value_for_each_fixture"
+        "lab_cid_matches_the_pinned_value_for_each_fixture",
+        "one_byte_change_in_any_payload_file_changes_the_lab_cid",
+        "adding_or_removing_a_payload_file_changes_the_lab_cid",
+        "one_byte_change_in_asks_json_changes_the_lab_cid"
       ]
     },
     {
@@ -525,6 +529,236 @@
       ],
       "tests": [
         "root_path_through_a_link_loop_keeps_the_system_reason"
+      ]
+    },
+    {
+      "id": "F-CI3a",
+      "title": "prefix each path with the bundle folder's own name",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    check_manifest(&manifest.content)?;\n    let folder = bundle.file_name().unwrap_or_default().to_string_lossy();\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: format!(\"{folder}/{}\", entry.path),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+        }
+      ],
+      "tests": [
+        "renaming_the_bundle_folder_keeps_the_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI3b",
+      "title": "hash absolute paths: each file's bundle path joined under the bundle's own path",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle.join(&entry.path).to_string_lossy().into_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+        }
+      ],
+      "tests": [
+        "moving_the_bundle_to_another_parent_keeps_the_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI3c",
+      "title": "walk from the bundle's parent folder as well, so neighbours such as source.url and the Store rows enter the stream",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let entries = collect_entries(bundle, &mut observe)?;\n",
+          "new": "    let mut entries = collect_entries(bundle, &mut observe)?;\n    entries.extend(collect_entries(bundle.parent().unwrap_or(bundle), &mut observe)?);\n"
+        }
+      ],
+      "tests": [
+        "changing_the_url_or_store_row_keeps_the_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI3d",
+      "title": "fold each file's mtime into the stream, as one more framed record beside the file",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n",
+          "new": "            let mtime = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mtime;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mtime\"),\n                content: mtime.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n"
+        }
+      ],
+      "tests": [
+        "file_times_and_modes_do_not_change_the_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI3g",
+      "title": "check_name accepts any labelled claim without comparing",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if hex::encode(actual.0) != claimed_digits {\n        return Err(Refusal::NameMismatch {\n            actual,\n            claimed: claimed.to_owned(),\n        });\n    }\n",
+          "new": "    let _ = (actual, claimed_digits);\n"
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted",
+        "one_byte_change_in_the_manifest_changes_the_lab_cid",
+        "one_byte_change_in_any_payload_file_changes_the_lab_cid",
+        "adding_or_removing_a_payload_file_changes_the_lab_cid",
+        "one_byte_change_in_asks_json_changes_the_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI3h",
+      "title": "check_name accepts a claim without the label when its hex matches",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .ok_or_else(not_a_lab_cid)?;\n",
+          "new": "        .unwrap_or(claimed);\n"
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted"
+      ]
+    },
+    {
+      "id": "F-CI3i",
+      "title": "leave asks.json out of the stream (it is still read)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
+        }
+      ],
+      "tests": [
+        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "lab_cid_matches_the_pinned_value_for_each_fixture"
+      ]
+    },
+    {
+      "id": "F-CI3j",
+      "title": "fold each file's mode into the stream, as one more framed record beside the file",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n",
+          "new": "            let mode = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mode;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mode\"),\n                content: mode.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n"
+        }
+      ],
+      "tests": [
+        "file_times_and_modes_do_not_change_the_lab_cid"
+      ]
+    },
+    {
+      "id": "F-CI3k",
+      "title": "check_name accepts a labelled claim with any number of hex digits",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if digits.len() != 64 {\n        return Err(not_a_lab_cid());\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted"
+      ]
+    },
+    {
+      "id": "F-CI3l",
+      "title": "check_name takes any lowercase letter for a hex digit",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "b'0'..=b'9' | b'a'..=b'f'",
+          "new": "b'0'..=b'9' | b'a'..=b'z'"
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted"
+      ]
+    },
+    {
+      "id": "F-CI3m",
+      "title": "check_name accepts uppercase hex digits",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": ".all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))",
+          "new": ".all(|byte| byte.is_ascii_hexdigit())"
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted"
+      ]
+    },
+    {
+      "id": "F-CI3n",
+      "title": "check_name turns each lab_cid refusal into a name mismatch",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let actual = lab_cid(bundle)?;\n",
+          "new": "    let actual = lab_cid(bundle).map_err(|_| Refusal::NameMismatch {\n        actual: LabCid([0; 32]),\n        claimed: claimed.to_owned(),\n    })?;\n"
+        }
+      ],
+      "tests": [
+        "check_name_preserves_lab_cid_refusals"
+      ]
+    },
+    {
+      "id": "F-CI3o",
+      "title": "check_name names the bundle by a walk of its own instead of calling lab_cid",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let actual = lab_cid(bundle)?;\n",
+          "new": "    let entries = collect_entries(bundle, &mut |_, _| {})?;\n    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    let actual = encode_entries(&entries)?;\n"
+        }
+      ],
+      "tests": [
+        "check_name_uses_the_single_naming_path",
+        "lab_cid_and_the_seam_run_one_walk"
+      ]
+    },
+    {
+      "id": "F-CI3p",
+      "title": "check_name reads the bundle before it checks that the claim is a lab CID",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let claimed_digits = lab_cid_digits(claimed)?;\n    let actual = lab_cid(bundle)?;\n",
+          "new": "    let actual = lab_cid(bundle)?;\n    let claimed_digits = lab_cid_digits(claimed)?;\n"
+        }
+      ],
+      "tests": [
+        "claimed_name_is_checked_never_trusted"
       ]
     }
   ]
