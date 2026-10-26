@@ -41,8 +41,11 @@ use std::process::Command;
 /// refusal in `start_with_profile`, so
 /// `start_with_profile_refuses_a_canonical_parameter` fails, and WP55, which
 /// checks the caller's whole name instead of the name before the first `=`, so
-/// `start_with_profile_refuses_an_encoded_canonical_parameter` fails.
-const EXPECTED_FALSIFIERS: usize = 53;
+/// `start_with_profile_refuses_an_encoded_canonical_parameter` fails, and
+/// task 059's WP56, which appends an unpinned `(allow process-exec)` after the
+/// exec rule, so `unbound_copy_is_refused_under_profile` fails on its deadline
+/// assertion.
+const EXPECTED_FALSIFIERS: usize = 54;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
