@@ -1,0 +1,20 @@
+r4 mutants at 19becdd74c3f96d5900487051d2e175fd5c06747
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-GUARD-NO-ISOLATION SURVIVED against tests::a12_slash_tmp_root_is_refused
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-GUARD-NO-ISOLATION-HOME SURVIVED against tests::a12_home_and_live_home_tmp_root_are_refused
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-GUARD-NO-ISOLATION-DOTDOT SURVIVED against tests::a12_isolation_parent_tmp_root_is_refused
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=101
+MUTANT M-R4-GUARD-SKIP-CHECK CAUGHT by tests::a12_slash_tmp_root_is_refused
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-GUARD-LEAF-SYMLINK SURVIVED against tests::a12_symlink_to_live_home_tmp_root_is_refused
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-CENSUS-NO-HASH SURVIVED against tests::a12_inode_reuse_same_path_is_found
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-CENSUS-NO-CTIME SURVIVED against tests::a12_inode_reuse_same_path_is_found
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=101
+MUTANT M-R4-CENSUS-INO-ONLY CAUGHT by tests::a12_inode_reuse_same_path_is_found
+restored /tmp/pr343-r4/lab/a6-a12-evidence-fix/src/a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6 cargo_exit=0
+MUTANT M-R4-SNAP-IGNORE-LIVE SURVIVED against tests::a12_snapshot_before_runtime_fails_if_already_wrote
+mutants finished; a12.rs sha256=de32d180768c9168cb46239f9aae978bd9ad017255bed78c20a8d4652a8b43a6
