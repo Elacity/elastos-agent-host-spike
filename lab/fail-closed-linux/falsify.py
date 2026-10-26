@@ -29,6 +29,9 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 DESIGN_DOC = pathlib.Path("capsules/wallet-provider/CONFINEMENT-LINUX.md")
+# A scratch copy sits outside the repo, so rustup would not see the repo's pin
+# and would build the mutants with its default toolchain.
+TOOLCHAIN_PIN = pathlib.Path("rust-toolchain.toml")
 COPY_ITEMS = ("Cargo.toml", "Cargo.lock", "src", "tests")
 
 
@@ -49,6 +52,7 @@ def make_copy(root):
     doc = root / DESIGN_DOC
     doc.parent.mkdir(parents=True)
     shutil.copy2(REPO / DESIGN_DOC, doc)
+    shutil.copy2(REPO / TOOLCHAIN_PIN, root / TOOLCHAIN_PIN)
     return crate
 
 
