@@ -465,6 +465,43 @@ fn model_child_journal_returns_its_own_handle() {
 }
 
 #[test]
+fn model_forged_rights_do_not_widen_the_child_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        forged_overwrite: true,
+        ..guest(parent)
+    };
+    assert!(request.forged_append);
+    assert!(request.forged_overwrite);
+    let child = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(
+        child_decision.rights,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        }
+    );
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
