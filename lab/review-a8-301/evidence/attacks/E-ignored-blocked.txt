@@ -1,0 +1,19 @@
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)
+
+running 1 test
+
+thread 'shipped_agent_host_bytes_read_host_key' (25000) panicked at tests/a8_agent_host_host_key.rs:162:5:
+blocked: elastos:bus@v1 has no launch-argument channel (AC-002-ARGS), and the shipped agent-host asks only for localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal and refuses '..' itself, so its unmodified bytes cannot ask for a host key
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test shipped_agent_host_bytes_read_host_key ... FAILED
+
+failures:
+
+failures:
+    shipped_agent_host_bytes_read_host_key
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test a8_agent_host_host_key`
