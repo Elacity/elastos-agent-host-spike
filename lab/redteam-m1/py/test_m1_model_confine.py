@@ -22,7 +22,7 @@ SHARED_TRACE = "model_declared_rights_read_on_the_did_and_wallet_template"
 # sandbox-exec reads forms, so this is `(allow file-read* (subpath "/"))`. A
 # reader that keeps only lines starting with "(allow " does not see it.
 MULTI_LINE_WIDE_READ = '(allow\n    file-read* (subpath "/"))\n'
-SKIP = "SKIP model-provider confinement test"
+SKIP = "SKIP model-provider"
 
 
 def model(root, *names, **kw):
@@ -51,10 +51,8 @@ class ModelConfineChecks(unittest.TestCase):
         cls.runs["renamed_trace_test"] = model(root, MODEL_CITES)[2]
         rt.reset(root, TESTS)
 
-        code, output, results = model(root, exact=False, nocapture=True)
-        if code != 0:
-            raise rt.SetupError("model confine suite failed:\n" + output[-3000:])
-        cls.skipped = output.count(SKIP)
+        names, results = rt.skipped_tests(root, MODEL, "model", SKIP, args=["--test", "confine"])
+        cls.skipped = [n for n in names if results.get(n) == "ok"]
         cls.passed = sum(1 for r in results.values() if r == "ok")
 
     def test_baseline_passes(self):
@@ -82,9 +80,9 @@ class ModelConfineChecks(unittest.TestCase):
     @unittest.expectedFailure
     def test_fm_c5_no_skipped_model_sandbox_test_counts_as_passed(self):
         """FM-C5, model provider. REPORT.md row FM-C5."""
-        print("model: %d sandbox tests printed a skip line; libtest reports %d passed"
-              % (self.skipped, self.passed))
-        self.assertEqual(self.skipped, 0)
+        print("model: %d of %d passed tests printed a skip line: %s"
+              % (len(self.skipped), self.passed, ", ".join(self.skipped)))
+        self.assertEqual(self.skipped, [])
 
 
 if __name__ == "__main__":

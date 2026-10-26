@@ -102,14 +102,21 @@ def append(root, rel, extra):
     path.write_text(text + extra, encoding="utf-8")
 
 
-def run(cmd, cwd, env=None, timeout=7200):
-    """Run CMD. An ENV value of None removes that variable."""
+def run(cmd, cwd, env=None, timeout=7200, merge=False):
+    """Run CMD. An ENV value of None removes that variable. MERGE gives one
+    stream in write order (libtest's `test NAME ... ` from stdout, then the
+    test's own stderr on the same line); otherwise stdout then stderr, which
+    keeps each `test NAME ... ok` line whole."""
     full = dict(os.environ)
     for key, value in (env or {}).items():
         if value is None:
             full.pop(key, None)
         else:
             full[key] = value
+    if merge:
+        out = subprocess.run(cmd, cwd=cwd, env=full, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        return out.returncode, out.stdout
     out = subprocess.run(cmd, cwd=cwd, env=full, capture_output=True, text=True, timeout=timeout)
     return out.returncode, out.stdout + out.stderr
 
@@ -122,8 +129,28 @@ def libtest_results(output):
     return results
 
 
+def skipped_tests(root, manifest, target_key, marker, args=()):
+    """Names of the tests that print MARKER and the libtest results of the
+    same suite: (skipped names, results). One single-threaded --nocapture run
+    with merged streams attributes each skip line to its test; a second run
+    with separate streams reads the whole `test NAME ... ok` lines."""
+    full_env = {
+        "CARGO_TARGET_DIR": str(TARGET / target_key),
+        "CARGO_BUILD_BUILD_DIR": str(TARGET / target_key / "build"),
+    }
+    cmd = ["cargo", "test", "--locked", "--manifest-path", str(Path(root) / manifest), *args,
+           "--", "--nocapture", "--test-threads=1"]
+    code, merged = run(cmd, cwd=root, env=full_env, merge=True)
+    code2, plain = run(cmd, cwd=root, env=full_env)
+    if code != 0 or code2 != 0:
+        raise SetupError("%s suite failed:\n%s" % (manifest, plain[-3000:]))
+    names = sorted(m.group(1) for m in re.finditer(
+        r"^test (\S+) \.\.\. .*" + re.escape(marker), merged, re.M))
+    return names, libtest_results(plain)
+
+
 def cargo_test(root, manifest, target_key, args=(), filters=(), exact=True, nocapture=False,
-               env=None, timeout=7200):
+               env=None, timeout=7200, threads=None):
     """Run `cargo test` in a scratch clone and return (code, output, results).
 
     A compile error, a missing test line or a crash is a SetupError, so a broken
@@ -135,6 +162,8 @@ def cargo_test(root, manifest, target_key, args=(), filters=(), exact=True, noca
         harness.append("--exact")
     if nocapture:
         harness.append("--nocapture")
+    if threads:
+        harness.append("--test-threads=%d" % threads)
     cmd += ["--", *harness, *filters]
     # The repo's .cargo/config.toml puts intermediates in <clone>/target-build;
     # pin them beside the target so a fresh scratch clone reuses its deps.

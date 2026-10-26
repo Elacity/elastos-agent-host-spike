@@ -183,22 +183,20 @@ class ConfineLinuxSkips(unittest.TestCase):
         root = rt.scratch_clone("confine-skips")
         cls.counts = {}
         for key, manifest, marker in (
-            ("wallet", WALLET, "SKIP wallet-provider confinement test"),
-            ("did", DID, "SKIP did-provider confinement test"),
+            ("wallet", WALLET, "SKIP wallet-provider"),
+            ("did", DID, "SKIP did-provider"),
         ):
-            code, output, results = rt.cargo_test(
-                root, manifest, key, args=["--test", "confine"], exact=False, nocapture=True)
-            if code != 0:
-                raise rt.SetupError("%s confine suite failed:\n%s" % (key, output[-3000:]))
-            cls.counts[key] = (output.count(marker), sum(1 for r in results.values() if r == "ok"))
+            names, results = rt.skipped_tests(root, manifest, key, marker, args=["--test", "confine"])
+            skipped = [n for n in names if results.get(n) == "ok"]
+            cls.counts[key] = (skipped, sum(1 for r in results.values() if r == "ok"))
 
     @unittest.expectedFailure
     def test_fm_c5_no_skipped_sandbox_test_counts_as_passed(self):
         """REPORT.md row FM-C5."""
         for key, (skipped, passed) in self.counts.items():
-            print("%s: %d sandbox tests printed a skip line; libtest reports %d passed"
-                  % (key, skipped, passed))
-        self.assertEqual(sum(skipped for skipped, _ in self.counts.values()), 0)
+            print("%s: %d of %d passed tests printed a skip line: %s"
+                  % (key, len(skipped), passed, ", ".join(skipped)))
+        self.assertEqual(sum(len(skipped) for skipped, _ in self.counts.values()), 0)
 
 
 if __name__ == "__main__":
