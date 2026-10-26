@@ -432,6 +432,8 @@ class HostScriptNonceIsolation(unittest.TestCase):
         self.assertIn("emit_suite_marks", text)
         self.assertIn("tester_nonce_readable=", text)
         self.assertIn("probe_nonce_isolation", text)
+        self.assertIn("guest_exit=$guest_rc", text)
+        self.assertNotIn("echo \"guest_exit=$status\"", text)
         self.assertNotIn("${LC_GUEST_NONCE", text)
         self.assertNotIn("LC_GUEST_NONCE=", text)
 

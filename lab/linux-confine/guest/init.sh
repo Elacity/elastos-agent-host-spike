@@ -222,7 +222,7 @@ emit_suite_marks() {
     guest_rc=$1
     nonce=$(cat /etc/lc-nonce 2>/dev/null || echo missing-nonce)
     for name in elf aarch64 confine providers; do
-        status=$(cat /evidence/${name}.status 2>/dev/null || true)
+        suite_status=$(cat /evidence/${name}.status 2>/dev/null || true)
         rc=$(cat /evidence/${name}.exit 2>/dev/null || echo -1)
         passed=0
         failed=0
@@ -233,8 +233,8 @@ emit_suite_marks() {
             failed=$2
             ignored=$3
         fi
-        [ -n "$status" ] || status=MISSING
-        echo "LC_MARK nonce=$nonce suite=$name exit=$rc passed=$passed failed=$failed ignored=$ignored status=$status"
+        [ -n "$suite_status" ] || suite_status=MISSING
+        echo "LC_MARK nonce=$nonce suite=$name exit=$rc passed=$passed failed=$failed ignored=$ignored status=$suite_status"
     done
     for id in F-LC-CAPBND F-LC-BLOCK F-LC-STORAGE F-LC-PROVIDER-SOCKET \
         F-LC-SOCKET F-LC-ANY-ERRNO F-LC-SKIP-NETNS F-LC-DROP-SECCOMP \
@@ -263,13 +263,14 @@ if [ "$isol_rc" -ne 0 ]; then
     status=1
 fi
 
-echo "--- guest finished status=$status ---"
-sync
-emit_suite_marks "$status"
+guest_rc=$status
+echo "--- guest finished status=$guest_rc ---"
 if [ -d /evidence ] && [ -w /evidence ]; then
-    echo "guest_exit=$status" >> /evidence/guest-exit.txt
+    echo "guest_exit=$guest_rc" > /evidence/guest-exit.txt
     sync
 fi
+emit_suite_marks "$guest_rc"
+sync
 # Prefer an orderly halt. sysrq-o stops qemu -nographic.
 if [ -w /proc/sysrq-trigger ]; then
     echo o > /proc/sysrq-trigger
