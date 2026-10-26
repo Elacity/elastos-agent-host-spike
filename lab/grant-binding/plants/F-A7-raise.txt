@@ -1,0 +1,8 @@
+id: F-A7-raise
+file: src/ledger.rs
+test: ledger::model_forged_ceiling_does_not_raise_the_ceiling
+--- old
+            Some(total) if total <= ledger.ceiling => total,
+--- new
+            Some(total) if total <= ledger.ceiling.max(request.forged_ceiling) => total,
+--- end

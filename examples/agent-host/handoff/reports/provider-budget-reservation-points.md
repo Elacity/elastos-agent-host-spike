@@ -122,14 +122,15 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 | `conflicting_retry_reuses_run_id_and_fails_by_stable_request_fingerprint` | `capsules/model-provider/src/state.rs:4898` | Three retries with changed input, operation or offer hit the same run id and fail `invalid_request` (`:4973`). No dispatch happens. | None. No run terminal is produced. |
 | `create_retry_after_session_and_grant_rotation_returns_same_run_without_redispatch` | `capsules/model-provider/src/state.rs:4978` | The rotated retry returns the same run id (`:5025`), dispatch ran once (`:5026`), and the stored binding keeps the original session and grant (`:5031-5032`). | The offer from `offer("local-text")` is hosted (`state.rs:1861`, `:1877`), so the completed terminal stores `BackendReport::unknown()` (`state.rs:1354`, `contract.rs:212-218`). The test does not assert that field. |
 | `responses_terminal_failures_are_generic_and_not_retried` | `capsules/model-provider/src/execution.rs:4731` | Each of three terminal stream failures gives `backend_failed` with a generic message (`:4763-4770`), records an unknown backend report (`:4772-4775`), and makes exactly one request per run (`:4777`). | Hosted report with `usage` = unknown (`contract.rs:204-209`; `state.rs:1354`), asserted at `execution.rs:4772-4775`. |
+| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1157` | On macOS, the first `runs_create` returns the contract run id and stays open; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
 
-A same-fingerprint retry of a still-open run is **not pinned**. The retry
-returns at `state.rs:530` after `refresh_run_if_needed` (`state.rs:526-528`),
-which can settle a prepared run to `settlement_unknown` before the replay.
-None of the three tests above retries a still-open run with the same
-fingerprint. The test that would pin it is
-`a_same_fingerprint_retry_of_an_open_run_returns_after_refresh` in
-`capsules/model-provider/src/state.rs`.
+A same-fingerprint retry of a still-open run is pinned by
+`hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect`
+(`capsules/model-provider/tests/process.rs:1157`) on the hosted path. The
+retry returns at `state.rs:530` after `refresh_run_if_needed` (`state.rs:526-528`),
+which can settle a prepared run to `settlement_unknown` before the replay; the
+test holds the hosted answer back, so the replay is observed while the run is
+still open, and the held stand-in proves the retry made no second send.
 
 ```
 test state::tests::conflicting_retry_reuses_run_id_and_fails_by_stable_request_fingerprint ... ok
@@ -138,6 +139,8 @@ test state::tests::create_retry_after_session_and_grant_rotation_returns_same_ru
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 0.02s
 test execution::tests::responses_terminal_failures_are_generic_and_not_retried ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 0.11s
+test hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.87s
 ```
 
 ### Case 3: a cancelled run
@@ -178,8 +181,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 ```
 
 Cases 1, 3 and 4 are pinned for today's behaviour. In case 2 the conflicting
-retries and the completed-run retry are pinned; the same-fingerprint retry of a
-still-open run is **not pinned**.
+retries, the completed-run retry and the same-fingerprint retry of a still-open
+hosted run are pinned.
 
 ## Gaps for a Runtime reservation
 
@@ -290,9 +293,8 @@ absence, and the lane's rule keeps provider behaviour unchanged.
 5. **Fails closed (P11):** Yes. No new refusal. Existing refusals keep their
    named reason, for example `model_busy` (`state.rs:609-620`).
 6. **Self-contained (Rong):** Yes. No capsule or provider logic change.
-7. **Tests prove it:** Yes for the 13 named behaviours. The same-fingerprint
-   retry of an open run is named **not pinned** in case 2, with the test that
-   would pin it. The missing reservation rules have named tests above; they
-   wait on the Runtime side.
+7. **Tests prove it:** Yes for the 14 named behaviours. The same-fingerprint
+   retry of a still-open hosted run is pinned in case 2. The missing
+   reservation rules have named tests above; they wait on the Runtime side.
 8. **Separate decisions:** Yes. Identity (`bridge.rs:926-1018`), admission
    (`state.rs:608-623`) and allowance (missing, gaps 1-5) stay distinct.
