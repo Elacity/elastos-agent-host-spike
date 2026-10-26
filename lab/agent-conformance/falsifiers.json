@@ -1,6 +1,9 @@
 {
   "about": "Agent conformance falsifiers. Paths are relative to lab/agent-conformance. Replace each old text exactly once; every named test must run and fail, then pass after restoring the original bytes. command: lab is reserved for the provider-owned shared runner; run these by hand until that arm exists. Run F-ac1d with a synthetic parent environment so the planted bug only captures fixture values. F-probe-a through F-probe-f were F-ac2a through F-ac2f in task 002.",
-  "retired": {},
+  "retired": {
+    "F-ac2a": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_cannot_read_other_agent_memory is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
+    "F-ac2b": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_memory_under_own_principal is live. Mutation remains described in GAPS.md and RUNBOOK.md."
+  },
   "falsifiers": [
     {
       "id": "F-ac1c",
@@ -728,38 +731,6 @@
       ]
     },
     {
-      "id": "F-ac2a",
-      "title": "BLOCKED (UsersAI binding; AC-002-ARGS): grant agent-b the exact agent-a memory path",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "fixtures/agent-principals.json",
-          "old": "\"cross_agent_grants\": []",
-          "new": "\"cross_agent_grants\": [{\"principal\":\"agent-b\",\"resource\":\"localhost://UsersAI/agent-a/.AppData/ElastOS/AgentHost/tasks/conformance/memory\",\"action\":\"read\",\"duration\":\"once\"}]"
-        }
-      ],
-      "tests": [
-        "agent_cannot_read_other_agent_memory"
-      ]
-    },
-    {
-      "id": "F-ac2b",
-      "title": "BLOCKED (UsersAI binding; AC-002-ARGS): launch both agents as the same principal",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "fixtures/agent-principals.json",
-          "old": "\"principal\": \"agent-b\"",
-          "new": "\"principal\": \"agent-a\""
-        }
-      ],
-      "tests": [
-        "agent_memory_under_own_principal"
-      ]
-    },
-    {
       "id": "F-ac2c",
       "title": "add the absent policy file and allow every attempted effect (one fixture read)",
       "command": "lab",
@@ -992,6 +963,22 @@
       ],
       "tests": [
         "cleanup_report_keeps_scope_and_grant_blocker"
+      ]
+    },
+    {
+      "id": "F-report-blocker-list",
+      "title": "keep only the first whitespace word of a blocker reason",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "        let parts: Vec<_> = reason.split(';').map(str::trim).collect();",
+          "new": "        let parts: Vec<_> = reason.split_whitespace().take(1).collect();"
+        }
+      ],
+      "tests": [
+        "run_table_grades_blocker_lists_by_one_rule"
       ]
     }
   ]

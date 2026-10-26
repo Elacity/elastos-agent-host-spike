@@ -13,12 +13,9 @@ fn grade(result: &str) -> String {
         return "PASS".into();
     }
     if let Some(reason) = result.strip_prefix("ignored, blocked: ") {
-        // This blocker has a two-word name; preserve its joint selector gate.
-        if reason == "UsersAI binding; AC-002-ARGS" {
-            return format!("BLOCKED ({reason})");
-        }
-        if let Some(id) = reason.split_whitespace().next() {
-            return format!("BLOCKED ({id})");
+        let parts: Vec<_> = reason.split(';').map(str::trim).collect();
+        if parts.iter().all(|part| !part.is_empty()) {
+            return format!("BLOCKED ({})", parts.join("; "));
         }
     }
     "FAIL".into()

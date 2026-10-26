@@ -528,8 +528,13 @@ They remain BLOCKED until the verified launch and typed selector/result seam
 can be wired into the existing helpers. AC-002-ARGS requires the WIT,
 ComponentProvider and CLI forwarding change described above, including the
 resolved ownership result. Merely removing an ignore or changing a fixture
-cannot establish acceptance. F-ac2a and F-ac2b are specified fixture mutations
-for that future live path; neither is counted as caught today.
+cannot establish acceptance. F-ac2a and F-ac2b are retired in `falsifiers.json`
+under `UsersAI binding; AC-002-ARGS` until their named tests become live.
+F-ac2a grants agent-b agent-a's exact memory path for
+`agent_cannot_read_other_agent_memory`. F-ac2b changes agent-b's principal to
+agent-a for `agent_memory_under_own_principal`. Return each mutation to the
+active list when its named journey is live; both supply zero caught evidence
+while retired.
 
 `agent_cannot_read_human_space_without_grant` is the live refusal half. It
 requires the Runtime's principal-context refusal for `Users/self` through the

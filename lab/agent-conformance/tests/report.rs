@@ -7,7 +7,7 @@ fn run_table_requires_cargo_results() {
     assert_eq!(
         table(listed, output, true),
         (
-            "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\nblocked | BLOCKED (RT3)\nworks | PASS\n".into(),
+            "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\nblocked | BLOCKED (RT3 model grant)\nworks | PASS\n".into(),
             true
         )
     );
@@ -88,6 +88,40 @@ fn run_table_requires_cargo_results() {
         .table
         .contains("versions_receipt (A14) | FAIL\n"));
     home.finish().unwrap();
+}
+
+#[test]
+fn run_table_grades_blocker_lists_by_one_rule() {
+    for (reason, expected) in [
+        ("RT4", "BLOCKED (RT4)"),
+        ("UsersAI binding", "BLOCKED (UsersAI binding)"),
+        (
+            "UsersAI binding; AC-002-ARGS",
+            "BLOCKED (UsersAI binding; AC-002-ARGS)",
+        ),
+        (
+            "\t RT4 ; UsersAI binding; AC-002-ARGS \t",
+            "BLOCKED (RT4; UsersAI binding; AC-002-ARGS)",
+        ),
+        ("", "FAIL"),
+        (" \t", "FAIL"),
+        ("RT4;", "FAIL"),
+        (";RT4", "FAIL"),
+        ("RT4; \t; AC-002-ARGS", "FAIL"),
+    ] {
+        assert_eq!(
+            table(
+                "case: test\n",
+                &format!("test case ... ignored, blocked: {reason}\n"),
+                true,
+            ),
+            (
+                format!("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncase | {expected}\n"),
+                expected != "FAIL",
+            ),
+            "blocker reason: {reason:?}",
+        );
+    }
 }
 
 use agent_conformance::harness::ThrowawayHome;

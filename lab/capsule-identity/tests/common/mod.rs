@@ -32,6 +32,10 @@ pub const WEB_APP_LAB_CID: &str =
     "lab-cid:sha256:5559e5e3fe8f8e31006c035af0367d87810e214d987d1e8548d1bac03ca82066";
 pub const AGENT_HOST_LAB_CID: &str =
     "lab-cid:sha256:43a918a50818e6f6ec81543a6dd423c796b03db028d0c7a4222f354c2afdc054";
+pub const PROVIDER_LAB_CID: &str =
+    "lab-cid:sha256:274c6cf5685ec5dd638e91d8ac5e2634ebbeb523e756684587b61c1cb52fd6b8";
+pub const MODEL_LAB_CID: &str =
+    "lab-cid:sha256:c28893c87d43643092656fd4382bb8611659f12365a4533050639b909cc6a26f";
 
 /// A committed fixture: its folder under `fixtures/` and the files of its
 /// bundle.
@@ -66,7 +70,36 @@ pub const AGENT_HOST: Fixture = Fixture {
     files: &["capsule.json", "asks.json"],
 };
 
-pub const FIXTURES: [&Fixture; 4] = [&CONTENT_SAMPLE, &WEB_APP, &WC001_CORE, &AGENT_HOST];
+/// A provider manifest with the fields of the Runtime's own
+/// `test_parse_v1_manifest`, and a one-line stand-in for its entrypoint. The
+/// stand-in is not a provider binary and is never launched.
+pub const PROVIDER: Fixture = Fixture {
+    name: "provider",
+    files: &["capsule.json", "ipfs-provider"],
+};
+
+/// A model manifest with the fields of the Runtime's own synthetic
+/// `model_content_fixture`, and one-line stand-ins for the files it names.
+/// `weights.gguf` is not a model and is never loaded.
+pub const MODEL: Fixture = Fixture {
+    name: "model",
+    files: &[
+        "capsule.json",
+        "weights.gguf",
+        "LICENSE",
+        "LICENSE.base",
+        "PROVENANCE.md",
+    ],
+};
+
+pub const FIXTURES: [&Fixture; 6] = [
+    &CONTENT_SAMPLE,
+    &WEB_APP,
+    &WC001_CORE,
+    &AGENT_HOST,
+    &PROVIDER,
+    &MODEL,
+];
 
 /// This lane's root: the folder holding `Cargo.toml` and `fixtures/`.
 pub fn lane_dir() -> PathBuf {

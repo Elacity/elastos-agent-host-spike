@@ -275,9 +275,12 @@ def load(path=DATA):
 # - lab/capsule-identity/falsifiers.json: capsule-identity's src/lib.rs,
 #   tests/common/mod.rs and fixtures/wc001-core/capsule.json.
 # - lab/wasm-capsule/falsifiers.json and lab/wasm-capsule/audit/falsifiers.json:
-#   the lab capsule's capsule/src/lib.rs, tools/build and
-#   tools/src/lab_name.rs, and the audit crate's Cargo.toml, INTERFACE.md and
-#   src/lib.rs.
+#   the lab capsule's .gitignore, README.md, capsule/capsule.json,
+#   capsule/src/lib.rs, tests/common/build.rs, tests/verify.rs, tools/build,
+#   tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs and
+#   tools/src/verify.rs, the lab's run log LOG.md, and the audit crate's
+#   Cargo.toml, INTERFACE.md and src/lib.rs. tools/src/lab_name.rs stays here
+#   and guards no current entry.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -302,6 +305,16 @@ PROVIDER_TARGETS = (
     "lab/wasm-capsule/audit/Cargo.toml",
     "lab/wasm-capsule/audit/INTERFACE.md",
     "lab/wasm-capsule/audit/src/lib.rs",
+    "lab/wasm-capsule/.gitignore",
+    "lab/wasm-capsule/README.md",
+    "lab/wasm-capsule/capsule/capsule.json",
+    "lab/wasm-capsule/tests/common/build.rs",
+    "lab/wasm-capsule/tests/verify.rs",
+    "lab/wasm-capsule/tools/src/bin/bundle.rs",
+    "lab/wasm-capsule/tools/src/bundle.rs",
+    "lab/wasm-capsule/tools/src/lib.rs",
+    "lab/wasm-capsule/tools/src/verify.rs",
+    "lab/wasm-capsule/LOG.md",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -1436,11 +1449,15 @@ def a_killed_provider_edit_is_recovered():
     did/wallet targets plus its did confinement test harness and wallet's
     falsifier honesty test, capsule-identity's src/lib.rs,
     tests/common/mod.rs and fixtures/wc001-core/capsule.json, and the wasm
-    lab's capsule/src/lib.rs, tools/build, tools/src/lab_name.rs and audit
-    Cargo.toml, INTERFACE.md and src/lib.rs all come back in either startup
-    mode (PV51-PV53, PV69-PV74). Foreign backups, including both providers'
-    confinement documents, each harness's support neighbour, wallet's test
-    support neighbour and the labs' README and web-app fixture, stay with
+    lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
+    capsule/src/lib.rs, tests/common/build.rs, tests/verify.rs, tools/build,
+    tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs,
+    tools/src/verify.rs, tools/src/lab_name.rs and audit Cargo.toml,
+    INTERFACE.md and src/lib.rs all come back in either startup mode
+    (PV51-PV53, PV69-PV74, PV75-PV84). Foreign backups, including both
+    providers' confinement documents, each harness's support neighbour,
+    wallet's test support neighbour, the labs' adoption note and web-app
+    fixture, the lab's tools manifest and a tools/src neighbour, stay with
     their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
@@ -1449,10 +1466,10 @@ def a_killed_provider_edit_is_recovered():
     # The did and wallet targets, both confinement test harnesses, wallet's
     # falsifier honesty test, capsule-identity's src/lib.rs,
     # tests/common/mod.rs and fixtures/wc001-core/capsule.json, and the wasm
-    # lab's six edit files are named here, not read from the table, so a
-    # target dropped from PROVIDER_TARGETS is caught (PV44, PV45, PV47-PV49,
-    # PV51-PV53, PV69-PV74). Their original bytes are written in the isolated
-    # tree, never read from the real lab or crates.
+    # lab's sixteen edit and run-log files are named here, not read from the
+    # table, so a target dropped from PROVIDER_TARGETS is caught (PV44, PV45,
+    # PV47-PV49, PV51-PV53, PV69-PV74, PV75-PV84). Their original bytes are
+    # written in the isolated tree, never read from the real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/did-provider/src/main.rs",
                  "../../capsules/did-provider/confine.sb",
@@ -1469,7 +1486,17 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/wasm-capsule/tools/src/lab_name.rs",
                  "../../lab/wasm-capsule/audit/Cargo.toml",
                  "../../lab/wasm-capsule/audit/INTERFACE.md",
-                 "../../lab/wasm-capsule/audit/src/lib.rs")
+                 "../../lab/wasm-capsule/audit/src/lib.rs",
+                 "../../lab/wasm-capsule/.gitignore",
+                 "../../lab/wasm-capsule/README.md",
+                 "../../lab/wasm-capsule/capsule/capsule.json",
+                 "../../lab/wasm-capsule/tests/common/build.rs",
+                 "../../lab/wasm-capsule/tests/verify.rs",
+                 "../../lab/wasm-capsule/tools/src/bin/bundle.rs",
+                 "../../lab/wasm-capsule/tools/src/bundle.rs",
+                 "../../lab/wasm-capsule/tools/src/lib.rs",
+                 "../../lab/wasm-capsule/tools/src/verify.rs",
+                 "../../lab/wasm-capsule/LOG.md")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -1514,8 +1541,9 @@ os.kill(os.getpid(), signal.SIGKILL)
                                repo / "capsules/wallet-provider/src/tests/support.rs",
                                repo / "lab/capsule-identity/README.md",
                                repo / "lab/capsule-identity/fixtures/web-app/capsule.json",
-                               repo / "lab/wasm-capsule/README.md",
-                               repo / "lab/wasm-capsule/tools/Cargo.toml"]
+                               repo / "lab/wasm-capsule/ADOPTION.md",
+                               repo / "lab/wasm-capsule/tools/Cargo.toml",
+                               repo / "lab/wasm-capsule/tools/src/other.rs"]
             for target in foreign_targets:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"foreign mutation\n")
