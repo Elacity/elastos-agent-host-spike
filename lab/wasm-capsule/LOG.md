@@ -198,3 +198,12 @@
   `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5`: "summary: 52 CAUGHT of
   52", exit 0, no backup left (runner-caught; baseline: 22 named tests pass without an edit). Both retired-label
   merge-gate greps: empty, exit 1. `run.rs` and `receipt.rs` are not recovery targets (R2).
+- Task 018: new test `lane_files_reads_names_git_would_quote` in `tests/lab_cid.rs` (017's PASS FOLLOWUP). It runs
+  `git init -q` in a `TempDir`, writes untracked `plain.md` and `review"note.md`, and asserts the existing
+  `lane_files` returns both under their real names with their text; `lane_files` and the guard test are unchanged.
+  `cargo test --locked --test lab_cid`: 4 passed. Hand falsifier (hand-proven, pending R2; not in runner-caught
+  totals): drop `"-z",` and read with `.lines()` → the new test alone fails, 3 passed 1 failed, panic "assertion
+  `left == right` failed: lane_files did not list every file under its real name / left: [("plain.md", "plain
+  text\n")] / right: [("plain.md", "plain text\n"), ("review\"note.md", "quoted text\n")]"; reverted → passes.
+  `git hash-object tests/lab_cid.rs` before the break and after the revert: `846d89a8f2ae8a2f5dfd7698df46370ceec903fa`
+  both times. No `falsifiers.json` entry: `tests/lab_cid.rs` is not a runner recovery target (R2).
