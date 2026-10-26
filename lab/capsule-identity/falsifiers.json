@@ -3779,6 +3779,71 @@
         "readme_python_matches_the_name_signature_digest",
         "readme_python_matches_the_package_record_bytes"
       ]
+    },
+    {
+      "id": "F-CI27a",
+      "title": "cargo metadata with no packages list reads as no dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let packages = metadata[\"packages\"]\n        .as_array()\n        .ok_or_else(|| format!(\"cargo metadata for {shown} holds no packages list\"))?;\n",
+          "new": "    let Some(packages) = metadata[\"packages\"].as_array() else {\n        return Ok(false);\n    };\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_bad_metadata"
+      ]
+    },
+    {
+      "id": "F-CI27b",
+      "title": "a package with no manifest_path reads as no dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let path = candidate[\"manifest_path\"].as_str().ok_or_else(|| {\n            format!(\"cargo metadata for {shown} has a package with no manifest_path\")\n        })?;\n",
+          "new": "        let Some(path) = candidate[\"manifest_path\"].as_str() else {\n            return Ok(false);\n        };\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_bad_metadata"
+      ]
+    },
+    {
+      "id": "F-CI27c",
+      "title": "a package with no dependencies list reads as no dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let dependencies = package[\"dependencies\"]\n        .as_array()\n        .ok_or_else(|| format!(\"cargo metadata for {shown} holds no dependencies list\"))?;\n",
+          "new": "    let Some(dependencies) = package[\"dependencies\"].as_array() else {\n        return Ok(false);\n    };\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_bad_metadata"
+      ]
+    },
+    {
+      "id": "F-CI27d",
+      "title": "dev-dependencies are dropped, so a consumer that uses this crate only in its tests (lab/wasm-capsule) is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if dependency[\"name\"] != CRATE_NAME {\n",
+          "new": "        if dependency[\"name\"] != CRATE_NAME || dependency[\"kind\"] == \"dev\" {\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_uses_cargos_reader",
+        "every_lab_cid_consumer_is_in_the_adoption_note"
+      ]
     }
   ]
 }
