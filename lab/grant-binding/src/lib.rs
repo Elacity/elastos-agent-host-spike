@@ -665,6 +665,24 @@ fn model_symlink_shaped_use_path_is_refused() {
 }
 
 #[test]
+fn model_symlink_shaped_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "UsersAI/agent-1/link->out", rights())
+        .expect_err("symlink-shaped owned root");
+    assert_eq!(refusal, Refuse::SymlinkShaped);
+    assert_eq!(refusal.to_string(), "use path has a symlink-shaped segment");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("a plain root still binds");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("grant");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_use_path_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
