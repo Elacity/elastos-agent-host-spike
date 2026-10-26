@@ -4074,7 +4074,7 @@ fn operations_table_check_reports_each_missing_citation() {
 
     fs::write(
         capsule.path().join("tests/confine.rs"),
-        "/* /* */ fn present_case() {} */\n",
+        "/* /* */ #[test] fn present_case() {} */\n",
     )
     .expect("nested-comment citation fixture");
     let problems =

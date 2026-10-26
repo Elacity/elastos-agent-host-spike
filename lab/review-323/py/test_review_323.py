@@ -298,7 +298,7 @@ class FalsifiedCitationJunk(unittest.TestCase):
     def test_falsified_nested_block_comment_is_not_a_function(self) -> None:
         # The stripper does not nest /* */, so the inner */ ends the comment
         # and `fn present_case(` remains. Real Rust keeps the fn in comment.
-        problems = cite("/* /* */ fn present_case() {} */\n")
+        problems = cite("/* /* */ #[test] fn present_case() {} */\n")
         self.assertTrue(
             problems,
             "a nested block comment must not satisfy a citation; "
