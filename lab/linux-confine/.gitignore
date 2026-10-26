@@ -1,0 +1,11 @@
+# Rebuildable guest images and cross artifacts. Evidence logs stay tracked.
+/guest-work/
+/guest-bins/
+/guest-plants/
+*.cpio
+*.cpio.gz
+*.img
+*.apk
+vmlinuz-virt
+initramfs-virt
+alpine-minirootfs-*.tar.gz

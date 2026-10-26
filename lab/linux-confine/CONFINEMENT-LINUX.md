@@ -5,8 +5,11 @@ This file is the lab map for `lab/linux-confine/`. It does not change
 oracle. Native aarch64 and Jetson stay NOT RUN. An aarch64 **build** plus
 qemu-user on an x86_64 host is labelled `aarch64 build + qemu-user (host
 kernel)` and is not that missing ARM run. qemu-user 8.2.2 returns `ENOSYS`
-for `landlock_*`. A separate qemu-system TCG boot of Alpine 6.18.58-0-virt
-saw Landlock ABI 7; that guest kernel is still not Jetson.
+for `landlock_*`. `lab/linux-confine/run-aarch64-guest.sh` boots
+`qemu-system-aarch64` TCG with Alpine virt `6.18.58-0-virt` (Landlock ABI 7)
+and runs the C9 suites inside that guest. Label:
+`aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)`.
+That guest is still not Jetson and not native aarch64.
 
 C9 asks for namespaces, capabilities, seccomp and Landlock, with permitted and
 denied rows. The Linux map also says the filter refuses a new process and every

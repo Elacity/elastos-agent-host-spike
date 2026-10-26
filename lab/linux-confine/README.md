@@ -97,7 +97,14 @@ python3 lab/linux-confine/falsify.py
 
 Running the aarch64-built `confine` / `providers` **test binaries** under qemu-user is the same mode. qemu-user does not wrap child `execve` of those aarch64 helpers as a host `qemu-aarch64` (binfmt was not registered here), and Landlock is `ENOSYS`, so those suites do not prove C9 rows. Label: `aarch64 build + qemu-user (host kernel)`.
 
-`qemu-system-aarch64` TCG with Alpine `vmlinuz-virt` (`Linux 6.18.58-0-virt`) is a real aarch64 guest kernel, not qemu-user. A static `landlock_create_ruleset` init saw **ABI 7**. That is still not Jetson and not this lab's confine suite. IOCTL_DEV needs ABI >= 5 (kernel >= 6.7); ABI 7 meets that number on that guest kernel only. Full C9 rows on ARM still need real hardware.
+`qemu-system-aarch64` TCG with Alpine `vmlinuz-virt` (`Linux 6.18.58-0-virt`) is a real aarch64 guest kernel, not qemu-user. A static `landlock_create_ruleset` under that kernel reports **ABI 7** (`IOCTL_DEV` needs ABI >= 5). Label every such run `aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)`. Never native. Never Jetson.
+
+```bash
+lab/linux-confine/run-aarch64-guest.sh          # full C9 + in-guest plants
+lab/linux-confine/run-aarch64-guest.sh smoke    # ABI probe only
+```
+
+The script cross-builds the confine, elf, aarch64 and providers test binaries plus the three shipping provider binaries for `aarch64-unknown-linux-gnu`, packs them into an Alpine 3.23 minirootfs initramfs with the glibc loader, and boots `qemu-system-aarch64 -accel tcg`. Evidence lands in `lab/linux-confine/evidence/aarch64-qemu-system-6.18/`. That guest is still not Jetson and not a real ARM board.
 
 The second command plants six confinement bugs, one at a time, and restores each file. It also sets `TARGET_CC=cc` for the aarch64 check (after dropping leftover `CC_*` so a real cross `CC_<target>` cannot hide the plant) and plants a skip of the ELF `e_machine` test. It plants an errno-0 expectation on the qemu-user Landlock probe. It prints `F-LC-SOCKET CAUGHT`, `F-LC-CAPBND CAUGHT`, `F-LC-BLOCK CAUGHT`, `F-LC-STORAGE CAUGHT`, `F-LC-PROVIDER-SOCKET CAUGHT`, `F-LC-ANY-ERRNO CAUGHT`, `F-LC-WRONG-ARCH-CC CAUGHT`, and `F-LC-QEMU-USER-LANDLOCK CAUGHT`.
 
