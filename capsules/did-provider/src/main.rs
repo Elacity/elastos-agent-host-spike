@@ -748,13 +748,15 @@ mod tests {
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
     /// The committed list records these falsifiers, including DID20, which
-    /// makes a missing `sandbox-exec` on macOS skip instead of failing, and
-    /// DID21, which starts the provider directly when its profile file is
-    /// missing.
-    const EXPECTED_FALSIFIER_IDS: [&str; 21] = [
+    /// makes a missing `sandbox-exec` on macOS skip instead of failing, DID21,
+    /// which starts the provider directly when its profile file is missing,
+    /// and DID22, which returns `false` from the error arm of
+    /// `sandbox_available`, so a missing `sandbox-exec` on macOS returns
+    /// instead of failing the test.
+    const EXPECTED_FALSIFIER_IDS: [&str; 22] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
         "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
-        "DID21",
+        "DID21", "DID22",
     ];
 
     /// The repository root; this crate, its test targets and the one runner's
