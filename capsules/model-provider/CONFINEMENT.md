@@ -1,22 +1,27 @@
 # model-provider confinement
 
-`confine.sb` is the one source of the model provider's confinement profile
-(P10). It starts with `(version 1)`, then `(deny default)`, then
-`(deny network*)`. The provider reads line-delimited JSON on stdin and writes
-one JSON answer per line on stdout. The profile grants it no socket and no
-listener. Every operation that no rule grants is refused (P3, P11).
+`confine.sb` is the one oracle for the model provider's confinement profile
+(one file, P10): the profile the Runtime generates for this provider must match
+it. That Runtime half is not built. It starts with `(version 1)`, then
+`(deny default)`, then `(deny network*)`. The provider reads line-delimited
+JSON on stdin and writes one JSON answer per line on stdout. The profile
+grants it no socket and no listener. Every operation that no rule grants is
+refused (P3, P11).
 
 ## Parameters
 
-The profile uses only the three parameter tokens every file profile binds:
+This file uses only the three parameter tokens every file profile binds. The
+generated profile binds the same three, and the tests pass them with
+`sandbox-exec -D`. The Runtime half that binds them is not built.
 
 - `PROVIDER_EXECUTABLE`: the canonical path of the provider binary.
 - `STORAGE_ROOT`: the model journal root. That is
   `Init.base_path/providers/model-provider`, or the configured absolute
   `journal_dir`.
-- `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. Under the shared contract the
-  Runtime creates it before launch. The provider creates `STORAGE_ROOT` itself
-  at its first `init`.
+- `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. The tests create it before
+  launch. `model_provider_ops_under_profile` shows the provider then creates
+  `STORAGE_ROOT` itself at its first `init`. The Runtime half does the same
+  before launch and is not built.
 
 All three are resolved paths. The sandbox matches the resolved path, so a
 path through a link (macOS `/var` is `/private/var`) would match nothing.
@@ -24,12 +29,18 @@ path through a link (macOS `/var` is `/private/var`) would match nothing.
 ## The Runtime half
 
 The model provider presents the same file-profile contract as `did-provider`
-and `wallet-provider`: one profile file, the same head forms, the same three
-parameter tokens and the same three shared rules. The Runtime half of that
-contract is "The Runtime bridge change" in `../did-provider/CONFINEMENT.md` and
-`../wallet-provider/CONFINEMENT.md`. The model provider needs nothing from the
-Runtime beyond that one parameterized launch and that one profile check. There
-is no separate Runtime proposal for the model provider (P10).
+and `wallet-provider`, as an oracle: one profile file, the same head forms,
+the same three parameter tokens and the same three shared rules. Its Runtime
+half is "The Runtime bridge change" in `../did-provider/CONFINEMENT.md` and
+`../wallet-provider/CONFINEMENT.md`: the Runtime generates each provider's
+profile from its approved declared rights, one generator covers
+`model-provider` too, and the profile it generates for this provider must
+match this file, with the same three parameters bound to the same paths. The
+test that compares them is the Runtime's half. That half is not built. The
+model provider needs nothing from the Runtime beyond that one generator and
+that comparing test, and there is no separate Runtime proposal for the model
+provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
+(see "Tests"), not the Runtime's.
 
 ## What the profile allows
 
@@ -179,6 +190,31 @@ rule, but it does not refuse a second, wider exec rule. Under each, the copy
 starts and answers `init`, and of the `confine` tests only
 `model_unbound_program_refused_under_profile` fails. So this test is the check
 that holds the limit. F-cc14a, `(allow default)`, fails it the same way.
+
+## When the profile cannot be applied
+
+`startup_is_refused_when_the_profile_cannot_be_applied` starts the provider
+through the one launcher in three cases: a profile path that does not exist,
+a copy of `confine.sb` with its last `)` removed, and `confine.sb` itself
+with every parameter bound except `STORAGE_ROOT`. In each case
+`sandbox-exec` exits 65 before it executes the provider and gives its reason
+in one stderr line:
+
+- `sandbox-exec: <path>: No such file or directory`
+- `sandbox-exec: syntax error: expecting ')'`
+- `sandbox-exec: invalid data type of path filter; expected pattern, got boolean`
+
+`init` gets no answer, and nothing is written. `STORAGE_PARENT` stays empty,
+because the provider never creates `STORAGE_ROOT`.
+
+Exit 65 means the profile never applied. Exit 71, in "Starting other
+programs", means the profile applied and refused the exec.
+
+The launcher starts the provider no other way, as F-cc19a shows. The reason
+reaches the test through the launcher's stderr channel, as F-cc19b shows.
+For the Runtime's refusal of such a start, see "The Runtime half". That
+bridge change is not built: the Runtime half that generates and enforces the
+profile is future work in `elastos/`, outside this lane.
 
 ## What the profile does not grant
 
@@ -416,6 +452,11 @@ profile does not grant".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
   answers `init`, creates `runs/` and exits cleanly after `shutdown`.
+- `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
+  a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
+  `STORAGE_ROOT` unbound each refuse the start. It runs under
+  `sandbox-exec`, as the other confined tests do. See "When the profile
+  cannot be applied".
 - `sandbox_gate_fails_instead_of_skipping_on_a_declared_os`: a missing
   `sandbox-exec` on `macos` is a refusal that names the OS and the path, a
   missing one on `linux` is a skip, and a present one on `macos` runs. It
@@ -474,14 +515,16 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the ten
+uses command `provider`. Each mutates `confine.sb` only, except the twelve
 entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
 part of how the hosted run's wait loop holds its deadline, F-cc17a returns
-`Ok(false)` from the declared-OS branch of `sandbox_gate`, and F-cc17b
-returns `false` from the error arm of `sandbox_available`.
+`Ok(false)` from the declared-OS branch of `sandbox_gate`, F-cc17b
+returns `false` from the error arm of `sandbox_available`, F-cc19a starts
+the program directly when the profile file does not exist, and F-cc19b
+keeps none of the stderr lines `Provider::ended` reads.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -514,12 +557,14 @@ returns `false` from the error arm of `sandbox_available`.
 | F-cc16c | In the test, the request path's one receive waits `FIXTURE_EVENT_TIMEOUT` instead of the wait it is given | `hosted_run_wait_times_out_without_a_reply` | The `runs_get` that gets no answer waits all of `FIXTURE_EVENT_TIMEOUT`, not the time left, before the loop fails. |
 | F-cc17a | In the test, the declared-OS branch of `sandbox_gate` returns `Ok(false)` | `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` | The `macos` case with the missing path is no longer `Err`. |
 | F-cc17b | In the test, the error arm of `sandbox_available` returns `false` instead of failing the test | `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` | A missing `sandbox-exec` on macos returns, and a confined test would pass; this test fails because the call returned `false`. |
+| F-cc19a | When the profile file does not exist, `sandboxed` starts the program directly, without `sandbox-exec` | `startup_is_refused_when_the_profile_cannot_be_applied` | Case (a)'s launch starts the provider unconfined, it answers `init`, and the test fails at its first check. |
+| F-cc19b | `Provider::ended` keeps none of the stderr lines it reads | `startup_is_refused_when_the_profile_cannot_be_applied` | Case (a) still exits 65, but no line gives `sandbox-exec`'s reason. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
-for the F-cc15, F-cc16 and F-cc17 entries. Its startup recovery restores
+for the F-cc15, F-cc16, F-cc17 and F-cc19 entries. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`.
 
