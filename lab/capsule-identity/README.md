@@ -37,6 +37,9 @@ leaves, chunker `size-262144`, trickle off (balanced layout), `max-file-links`
 174, `max-directory-links` 0, HAMT fanout 256 and size threshold 256KiB, no
 inline (inline limit 32 unused), no preserved mode or mtime, no empty
 directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
+So the lab CID follows the Kubo v0.40.1 profile, computed by the lab: no Kubo has
+computed any pin, and [Claim scope](#claim-scope) states the gate before the
+lab CID may be called more than that.
 The tests pin only the single-block, non-sharded subset of that profile: one
 raw leaf per file and one block per directory. Anything bigger is refused, not
 named another way.
@@ -1310,6 +1313,18 @@ README's Python block, written from the byte rules: the committed test
 value for the same files. The tests pin the single-block, non-sharded subset
 of the profile only.
 
+The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
+No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
+flags, hash-only import, no network). Until one prints the same value as a
+committed pin, the lab CID is not called equal to the Runtime's CID or to
+Kubo's output. The Runtime's CID names a release archive, not the bundle's
+files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
+`the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
+and the module doc of `src/lib.rs` say the claim word for word, this section
+states the gate, and no `*.md` file of the lane outside `tests/` and no file
+under `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
+`tests/common/mod.rs`), in any case and across line breaks.
+
 ## Run
 
 ```bash
@@ -1352,12 +1367,14 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          the library's code for tests that read it, fresh test keys,
                          the refusal asserts both signature checks share, the
                          key-material scan, the python3 -I run of README's blocks,
-                         the cargo metadata scan for lab crates that use this one
+                         the cargo metadata scan for lab crates that use this one,
+                         the claim scan of the lane's docs and src/
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
+tests/claims.rs          the claim stays "Kubo v0.40.1 profile, computed by the lab"
 tests/cross_implementation.rs
                          README's Python rule, the pins and the encoder agree;
                          README's two digest blocks and the signed bytes agree
@@ -1378,7 +1395,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 210 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 222 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1401,14 +1418,16 @@ F-CI16i, and task 017's F-CI17a (all three: see
 019's F-CI19a to F-CI19j, and task 020's F-CI20a to F-CI20f (both: see
 [the cross-implementation check](#the-cross-implementation-check)), and task
 025's F-CI25a to F-CI25m (see
-[for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)).
+[for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
+023's F-CI23a to F-CI23l (see [claim scope](#claim-scope)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
-error. Every entry except F-CI4h and F-CI4i edits a file the runner
-restores after a killed run: `src/lib.rs`, `tests/common/mod.rs` or
-`fixtures/wc001-core/capsule.json`. F-CI4h edits this lane's `.gitignore`,
-and F-CI4i edits this file. Those two are not in the runner's recovery list.
-The runner still runs them. Task 014 moved the key-material scan, byte for
+error. Every entry edits a file the runner restores after a killed run. Its
+recovery list (`PROVIDER_TARGETS` in `examples/agent-host/falsify.py`) names
+five files of this lane: `src/lib.rs`, `tests/common/mod.rs`,
+`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`. F-CI4h
+edits this lane's `.gitignore`, F-CI4i edits this file, and every other entry
+edits one of the first three. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged. Task 019's entries edit only `src/lib.rs`
@@ -1427,6 +1446,13 @@ with `python`, with the same refusal text), so the note's ```text list has no
 second reader, and every older edit's text is still found exactly once.
 F-CI25k leaves its `target/` only beside a manifest outside the repository, so
 it never writes in a consumer.
+Task 023's entries edit `src/lib.rs` (F-CI23a plants a doc comment that makes
+the equality claim over a line break; F-CI23b drops `, computed by the lab`
+from the module doc) and `tests/common/mod.rs` (F-CI23c to F-CI23l weaken the
+claim scan or the wording check). Task 023 moved `one_line` from
+`tests/adoption.rs` into `tests/common/mod.rs`, unchanged, so the adoption
+note and the claim share one white-space rule, and every older edit's text is
+still found exactly once.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1503,8 +1529,10 @@ task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 `summary: 197 CAUGHT of 197` (`baseline: 115 named tests pass without an edit,
 0 do not`; F-CI20a to F-CI20f and the widened F-CI19d each CAUGHT). At task
 025 it reported `summary: 210 CAUGHT of 210` (`baseline: 121 named tests pass
-without an edit, 0 do not`; F-CI25a to F-CI25m each CAUGHT).
+without an edit, 0 do not`; F-CI25a to F-CI25m each CAUGHT). At task 023,
+it reported `summary: 222 CAUGHT of 222` (`baseline: 124 named tests pass
+without an edit, 0 do not`; with the id prefix `F-CI23`: 12 of 12).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020 and 025 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025 and 023 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

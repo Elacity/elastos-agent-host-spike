@@ -3,8 +3,9 @@
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
 //! signature checks share, the one key-material scan, the run of README's
-//! Python rule, and the scan for lab crates that use this one, read through
-//! `cargo metadata` (all three kept here, a file the falsifier runner
+//! Python rule, the scan for lab crates that use this one, read through
+//! `cargo metadata`, and the scan of the lane's docs and code for what they
+//! claim about the lab CID (all four kept here, a file the falsifier runner
 //! restores after a killed run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
@@ -1001,4 +1002,182 @@ pub fn folder_state(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     }
     state.sort();
     state
+}
+
+/// `text` with every run of white space one space, so a sentence is found
+/// however README wraps it.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The lane's one claim about the lab CID, word for word: README's "The
+/// encoding" and "Claim scope" and the module doc of `src/lib.rs` each say it.
+pub const COMPUTED_BY_THE_LAB: &str = "Kubo v0.40.1 profile, computed by the lab";
+
+/// The heading of README's section that states what the lab's results cover.
+pub const CLAIM_SCOPE_HEADING: &str = "## Claim scope\n";
+
+/// The gate README's "Claim scope" states, as written (white space aside):
+/// what must happen before the lab CID may be called anything more.
+pub const KUBO_GATE: &str = "No offline Kubo cross-check has been run (Kubo v0.40.1, the same \
+     profile flags, hash-only import, no network). Until one prints the same value as a \
+     committed pin, the lab CID is not called equal to the Runtime's CID or to Kubo's output.";
+
+/// Words that would claim the lab CID equals the Runtime's CID or Kubo's
+/// output, in lowercase. No lane doc and no file under `src/` holds one, in
+/// any case and across line breaks. `tests/` and `falsifiers.json` hold this
+/// list and its plant, so they are not scanned.
+pub const EQUALITY_CLAIMS: [&str; 6] = [
+    "equals the runtime's cid",
+    "same as the runtime's cid",
+    "is the runtime's cid",
+    "matches kubo",
+    "same cid as kubo",
+    "kubo-compatible",
+];
+
+/// Whether the claim scan reads the lane-relative `path`: every `*.md` file
+/// outside `tests/`, and every file under `src/`.
+fn claim_scanned(path: &str) -> bool {
+    (path.ends_with(".md") || path.starts_with("src/")) && !path.starts_with("tests/")
+}
+
+/// The files the claim scan reads: lane-relative paths that git tracks or
+/// would track (ignored files such as `target/` left out), sorted. A git that
+/// cannot run or fails, or a path that is not UTF-8, is refused with its
+/// cause.
+pub fn claim_scan_paths() -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(lane_dir())
+        .output()
+        .map_err(|error| format!("git cannot run: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut paths = Vec::new();
+    for name in output.stdout.split(|byte| *byte == 0) {
+        let path = String::from_utf8(name.to_vec())
+            .map_err(|_| format!("a lane path is not UTF-8: {name:?}"))?;
+        if claim_scanned(&path) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// The claim scan: each file of [`claim_scan_paths`] with its raw bytes,
+/// read through [`lane_dir`]. It is the one reader of the files the claim
+/// test checks.
+pub fn claim_scan() -> Result<Vec<(String, Vec<u8>)>, String> {
+    read_lane_files(&claim_scan_paths()?)
+}
+
+/// Each lane-relative path in `paths` with its bytes. It never skips: the
+/// first file that cannot be read is refused with its path and cause.
+pub fn read_lane_files(paths: &[String]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut files = Vec::new();
+    for path in paths {
+        match fs::read(lane_dir().join(path)) {
+            Ok(bytes) => files.push((path.clone(), bytes)),
+            Err(error) => return Err(format!("the claim scan cannot read {path}: {error}")),
+        }
+    }
+    Ok(files)
+}
+
+/// The text of a line without a leading `//!`, `///` or `//`, so a claim
+/// that runs over two comment lines is read as one sentence.
+fn comment_body(line: &str) -> &str {
+    let line = line.trim_start();
+    ["//!", "///", "//"]
+        .iter()
+        .find_map(|marker| line.strip_prefix(marker))
+        .unwrap_or(line)
+}
+
+/// One word as the claim scan compares it: lowercase, with a typographic
+/// apostrophe read as `'`.
+fn claim_word(word: &str) -> String {
+    word.to_lowercase().replace('\u{2019}', "'")
+}
+
+/// Each [`EQUALITY_CLAIMS`] phrase in the file `path` with `bytes`, as
+/// `path:line: "phrase"` at the line where it starts. Case, comment markers
+/// and line breaks do not hide one. Bytes that are not UTF-8 are refused with
+/// the path and cause.
+pub fn equality_claims_in(path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|error| format!("{path} is not UTF-8: {error}"))?;
+    let mut words = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        for word in comment_body(line).split_whitespace() {
+            words.push((claim_word(word), index + 1));
+        }
+    }
+    let mut joined = String::new();
+    let mut starts = Vec::new();
+    for (word, _) in &words {
+        starts.push(joined.len());
+        joined.push_str(word);
+        joined.push(' ');
+    }
+    let mut found = Vec::new();
+    for phrase in EQUALITY_CLAIMS {
+        for (at, _) in joined.match_indices(phrase) {
+            let word = starts.partition_point(|start| *start <= at) - 1;
+            found.push(format!("{path}:{}: {phrase:?}", words[word].1));
+        }
+    }
+    Ok(found)
+}
+
+/// The module doc of `code`: its leading `//!` lines, without the marker.
+pub fn module_doc(code: &str) -> String {
+    code.lines()
+        .map_while(|line| line.strip_prefix("//!"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What README's two sections and `library`'s module doc fail to say: each
+/// of README's "The encoding" and "Claim scope" and the module doc must hold
+/// [`COMPUTED_BY_THE_LAB`], and "Claim scope" must hold [`KUBO_GATE`], white
+/// space aside. Each finding names the place and what it lacks; a missing
+/// section is one, with its reason.
+pub fn claim_wording_findings(readme: &str, library: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let sections = [
+        (ENCODING_HEADING, COMPUTED_BY_THE_LAB),
+        (CLAIM_SCOPE_HEADING, COMPUTED_BY_THE_LAB),
+        (CLAIM_SCOPE_HEADING, KUBO_GATE),
+    ];
+    for (heading, needed) in sections {
+        let place = format!("README.md's {:?}", heading.trim_end());
+        match section_under(readme, heading) {
+            Ok(section) => found.extend(lacks(&place, section, needed)),
+            Err(reason) => found.push(reason),
+        }
+    }
+    let doc = module_doc(library);
+    found.extend(lacks("src/lib.rs's module doc", &doc, COMPUTED_BY_THE_LAB));
+    found
+}
+
+/// A finding if `text` does not hold `needed`, white space aside.
+fn lacks(place: &str, text: &str, needed: &str) -> Option<String> {
+    let holds = one_line(text).contains(&one_line(needed));
+    (!holds).then(|| format!("{place} does not say {needed:?}"))
 }
