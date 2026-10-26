@@ -471,7 +471,24 @@ is returned) and its stdout. In order, the first refusal is the answer:
    (`1592590337` is `FIXED_INPUT`, `0x5EED_0001`), with stdin null and an
    empty environment (`engine_command`, the one place these two rules are
    set, which task 016's version query uses too). The module argument is absolute, so it is never read as
-   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag.
+   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag;
+6. task 039: once the engine has exited (its outcome is read first), the run
+   folder and its module file are removed, on every outcome after step 3: a
+   refused module write, an engine that did not start, failed or succeeded
+   (`finish_run`, then `remove_run_dir`). The module file is removed only if
+   this run made it (not after a refused create), then the folder with
+   `fs::remove_dir`, never `remove_dir_all`, so an entry someone else put in
+   the folder is never deleted: the folder then stays and the removal fails.
+
+**Which answer wins (task 039).** After a success, a failed removal refuses the
+run with `the run folder cannot be removed after the engine exited: <OS error>`
+and the path it stopped at (the module file or the run folder). After a
+refusal, the first refusal stays the answer (the runner's rule), and a failed
+removal is not reported: a known limit. A runner process that is itself killed
+leaves its folder: a known limit (task 040's census covers a killed engine, not
+a killed runner). A run folder name is still never reused while it exists
+(`RunDirExists`); a second run in the same work root finds no folder and makes
+a new one.
 
 That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
 `wasmer` 7.5.0 (task 006's LOG); both engines take it unchanged.
@@ -493,7 +510,9 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
 - `<engine> did not start: <OS error>` (for example a missing program);
 - `<engine> rejected the memory cap argument -W <argument> (exit status: <n>): <its stderr>; the module is not run without its cap`
   (task 038, below);
-- `<engine> failed (exit status: <n>): <its stderr>`.
+- `<engine> failed (exit status: <n>): <its stderr>`;
+- `the run folder cannot be removed after the engine exited: <OS error>`
+  (task 039, after a success only).
 
 **A rejected cap argument (task 038).** A module run that was given a memory
 cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
@@ -515,7 +534,8 @@ sections), so `run_engine`'s one start per call holds.
 `entrypoint()`, never from a second read of the bundle on disk: the verified
 `cid()` is the name, and the bytes written are exactly the bytes that name
 covers. The runner reads no environment variable and no file, parses no
-manifest or module, and writes nothing outside the new folder. The engine gets
+manifest or module, writes nothing outside the new folder, and (task 039)
+leaves nothing it made in the work root once `run_engine` returns. The engine gets
 no folder, env or network flag, and an empty environment. This is a behaviour
 proof on one core module, not the Component ABI. `wasmtime` and `wasmer` are
 test-only host engines, not endorsed.
@@ -1510,17 +1530,22 @@ puts it under the `/var` link):
 
 - `run_writes_only_the_verified_entrypoint_bytes` — the bundle's
   `capsule.wasm` is changed on disk after verification; a stand-in that prints
-  the file it was given prints the verified bytes, the run folder holds exactly
-  `module.wasm`, and the work root holds only the bundle and the run folder.
+  the file it was given prints the verified bytes. Task 039: the stand-in
+  records its run folder during its run (`RECORD_RUN_FOLDER`, one shared shell
+  snippet beside `MODULE_ARGUMENT`, writing beside the stand-in's own `$0`,
+  outside the work root): the folder held exactly `module.wasm`, with the
+  verified bytes; after the run the work root holds only the bundle.
 - `engine_path_must_be_absolute` — `./wasmtime`, `wasmtime` and
   `engines/wasmtime` are refused with their own reason; nothing is written.
 - `work_root_must_be_absolute_and_canonical` — `work`, `--env=X` and `./work`
   (relative), and a root through a folder link, a link plus `.`, a `..` and a
   trailing `/` (not canonical) are each refused with their own reason; nothing
   is written and no engine starts.
-- `run_directory_is_private_and_new` — the run folder's mode is `0o700`; a
-  second run in the same root and a planted folder at a run folder's name are
-  each refused, the folder is unchanged, and no engine starts.
+- `run_directory_is_private_and_new` — the run folder's mode, recorded by the
+  stand-in during its run, is `0o700`; task 039: a second run in the same root
+  finds no folder, makes a new one (`0o700` too) and runs, and each run leaves
+  the root empty; a planted folder at a run folder's name is refused, stays
+  unchanged and is not removed, and no engine starts.
 - `runner_io_refusals_keep_path_and_cause` — a missing root (`NotFound`), a
   root that is a file, and a root the user may not write (`PermissionDenied`
   on the run folder) each keep their path and cause; the shared writer's
@@ -1533,12 +1558,27 @@ puts it under the `/var` link):
   027 `wasmtime`'s argv also has `-W` and
   `max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y` (this capsule's declared 64
   MB) before the module path; `wasmer`'s is unchanged. Stand-ins that read the
-  module path take their second-to-last argument.
+  module path take their second-to-last argument. Task 039: after each run the
+  work root is empty.
 - `engine_starts_with_an_empty_environment` — a stand-in sees no `HOME`,
   which the test process has.
 - `engine_failures_keep_their_cause` — a stand-in that exits 3 with a stderr
   line gives the engine, the status and that line; a missing program gives the
   OS error. Two different reasons, for each engine, through `run_engine`.
+- `run_engine_removes_its_run_folder_after_every_outcome` (task 039) — for
+  each engine, a success (`CAT_MODULE`, which ran in its run folder), an engine
+  that fails (`FAILING`, the shell `FAILING_BODY`) and an absolute engine path
+  that does not exist (`EngineDidNotStart`; the folder is made before the
+  start): after each the work root is empty, and each outcome's own result or
+  reason is unchanged.
+- `run_folder_that_cannot_be_removed_is_refused` (task 039) — for each engine,
+  a stand-in that writes an extra file into its own run folder during a
+  successful run: the run is refused with `RunDirNotRemoved` (`Directory not
+  empty (os error 66)`, exact text) at the run folder's path, the module file
+  is gone and the extra file stays. A stand-in that puts a folder at the module
+  file's path: refused at that path (`os error 1`), and its folder stays. A
+  stand-in that writes the extra file and then fails: the failure stays the
+  answer, and the folder with the extra file stays (the known limit).
 - `each_engine_prints_the_fixed_output` — the capsule `tools/build` makes,
   bundled, signed and verified, run on the real `wasmtime` and `wasmer` found
   on PATH: each prints `230101071268130872` (`FIXED_OUTPUT`) for `1592590337`.
@@ -1563,8 +1603,9 @@ query and another for a module run):
   makes, bundled, signed and run through `run` on the real `wasmtime` and
   `wasmer` found on PATH: both stdouts are exactly `230101071268130872\n`
   (`FIXED_OUTPUT` for `FIXED_INPUT`), the returned `cid()` is the bundle's lab
-  CID, and the work root holds the two run folders. If either engine is not
-  found it prints `SKIPPED` and gives no result, never a PASS.
+  CID, and (task 039) the work root is empty: both run folders were removed.
+  If either engine is not found it prints `SKIPPED` and gives no result, never
+  a PASS.
 - `runner_refuses_an_unverified_bundle` — an unsigned bundle and a bundle
   signed by a key not on the accepted list: each is refused with exactly the
   verifier's own refusal and text, the work root stays empty, and marking
@@ -1578,14 +1619,19 @@ query and another for a module run):
 - `runner_preserves_engine_refusals` — `wasmtime`'s module run fails,
   `wasmer`'s fails, and a folder planted at `wasmer`'s run folder name: each
   comes back as `run_engine`'s refusal, unchanged, and nothing starts after it.
+  Task 039: each leaves no run folder; the planted one stays, unused.
   A missing program is now refused at its version query, before any module
   run (`version_query_failures_keep_their_cause`, task 016).
 - `runner_calls_engines_in_order` — recording stand-ins log their version
   query, and their start (with the module path they were given), wait, and log
   their end: the log is both version queries, `wasmtime` then `wasmer`, then
   `wasmtime` start and end, then `wasmer` start and end, each with its own
-  `<work root>/<engine>/module.wasm`, and both run folders hold the verified
-  bytes.
+  `<work root>/<engine>/module.wasm`; each run folder held the verified bytes
+  (recorded by the stand-in during its run), and (task 039) the work root is
+  empty after the run.
+- `run_leaves_an_empty_work_root` (task 039) — a two-engine `run` on marking
+  stand-ins that passes, and one refused because `wasmer` fails after
+  `wasmtime` ran: both engines ran, and each run leaves the work root empty.
 - `run_returns_the_verified_name_and_both_outputs` — the `wasmtime` stand-in
   changes the bundle's `capsule.wasm` while it runs; `run` still returns the
   lab CID it verified, not the changed folder's, and both raw outputs.
@@ -1662,7 +1708,9 @@ is zero of both:
   `unused_grants()` is exactly `[env.f]`.
 - `granted_import_is_linked` — the module that imports `env.f`, grants
   `[env.f]` (right `call`): it passes verification, `linked()` is exactly
-  `[env.f]`, each engine once, and both run folders hold the verified module.
+  `[env.f]`, each engine once, each run folder held the verified module
+  (recorded by the stand-in during its run), and (task 039) the work root is
+  empty after the run.
 - `module_import_with_no_typed_operation_is_refused` (task 031) — the module
   that imports `env.g` (no typed lab operation), granted `env.g`: refused as
   `TwoEngineRefusal::Verify(VerifyRefusal::UntypedImport { module: "env", name:
@@ -1784,23 +1832,24 @@ pinned engines with no change to their assertions.
 
 ## Falsifiers
 
-`falsifiers.json` holds 170 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 173 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032, one task 035, three task 036 and five task 038.
+031, two task 032, one task 035, three task 036, five task 038 and three task
+039.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 106, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 109, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036 and 038: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 +
-2 + 2 + 1 + 3 + 5), each run by the canonical runner with its summary line
-quoted.
+029, 031, 032, 035, 036, 038 and 039: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2
++ 2 + 2 + 2 + 1 + 3 + 5 + 3), each run by the canonical runner with its summary
+line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -2360,3 +2409,28 @@ Task 038 also re-runs F-WC5-HARDCODED-VERSIONS (still caught: the stand-ins'
 ` (stand-in)` tail and the receipt test's made-up tails keep each line apart
 from this Mac's real lines) and re-anchors F-WC-README-COUNT to the new total,
 the same bug as before.
+
+Task 039's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 039). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC5-RUN-DIR-KEPT — `remove_run_dir` returns at its first line, so every
+  run leaves its run folder and module file
+  (`run_engine_removes_its_run_folder_after_every_outcome`, at its success
+  case; `run_leaves_an_empty_work_root`, at its empty-root assertion).
+- F-WC5-RUN-DIR-KEPT-ON-FAILURE — `finish_run` calls the removal only after a
+  success, so a failed engine or one that did not start leaves its folder
+  (`run_engine_removes_its_run_folder_after_every_outcome`, at its
+  failed-engine case).
+- F-WC5-REMOVAL-ERROR-DROPPED — a failed removal after a success is ignored,
+  so the run passes and its folder stays
+  (`run_folder_that_cannot_be_removed_is_refused`, at its refusal).
+
+Task 039 also re-runs, in one canonical runner run with its three (LOG.md,
+task 039, has the summary line), the 60 existing entries that edit
+`tools/src/run.rs` or name a test whose body or stand-in helper (`CAT_MODULE`,
+`counting`, `recording`) it changed; each is still caught. It changes F-WC5-DISK-REREAD's planted line to find the bundle beside the run
+folder (`run_dir.with_file_name("bundle")`, since the write now sits in
+`write_and_start`, which has no work root), the same bug as before with its
+anchor unchanged, and re-anchors F-WC-README-COUNT to the new total, the same
+bug as before. Each keeps its own evidence label above.
