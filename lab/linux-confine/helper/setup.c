@@ -410,7 +410,8 @@ static void install_provider_filter(int deny_network) {
     struct sock_filter filt[320];
     int n = 0;
     int i;
-    int provider_deny_socket = deny_network;
+    /* F-LC-PROVIDER-SOCKET */
+    int provider_deny_socket = deny_network && 1;
     int denied[] = {
         SYS_socket,   SYS_connect, SYS_bind,      SYS_listen,    SYS_accept,   SYS_accept4,
         SYS_sendto,   SYS_recvfrom, SYS_sendmsg,  SYS_recvmsg,   SYS_sendmmsg, SYS_recvmmsg,
@@ -520,7 +521,6 @@ static void install_provider_filter(int deny_network) {
 #ifdef SYS_close_range
     push_nr(allow, &nallow, SYS_close_range);
 #endif
-    /* F-LC-PROVIDER-SOCKET */
     if (!provider_deny_socket) {
         push_nr(allow, &nallow, SYS_socket);
         push_nr(allow, &nallow, SYS_socketpair);

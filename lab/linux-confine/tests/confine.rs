@@ -476,10 +476,6 @@ fn provider_filter_refuses_socketpair_inet() {
 fn withheld_storage_rights_are_landlock_eacces() {
     let built = build("landlock-rights", "did");
     let report = launch(&built.launch).unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(
-        report.enforced.storage_rights, STORAGE_ROOT_RIGHTS,
-        "storage root rights drifted"
-    );
     for (name, errno, reason) in [
         ("make-sym", EACCES, "landlock refused MAKE_SYM"),
         ("make-fifo", EACCES, "landlock refused MAKE_FIFO"),

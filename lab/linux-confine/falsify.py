@@ -54,8 +54,8 @@ CHECKS = [
     {
         "id": "F-LC-PROVIDER-SOCKET",
         "file": HERE / "helper" / "setup.c",
-        "old": "    int provider_deny_socket = deny_network;",
-        "new": "    int provider_deny_socket = 0;",
+        "old": "    int provider_deny_socket = deny_network && 1;",
+        "new": "    int provider_deny_socket = deny_network && 0;",
         "test": "provider_filter_refuses_socket",
         "caught": "provider filter socket denial did not hold",
     },
