@@ -10,7 +10,10 @@ Three rules live here and nowhere else (P10):
   UTF-8, broken syntax, a duplicate key in any object, and the constants
   ``NaN``, ``Infinity`` and ``-Infinity``.
 - ``Snapshot`` resolves HEAD once, to one full SHA, and every later byte,
-  pin and history query for that snapshot uses that SHA.
+  pin and history query for that snapshot uses that SHA. A file is recorded
+  under the path the caller named. When the checkout redirects that path,
+  the bytes are the named file at that commit, not the target; if the
+  commit has no such file, the redirect is refused.
 - ``apply_edits`` applies one file's edits in order. Each ``old`` text is
   counted in the text the earlier edits left, and must occur exactly once,
   the way ``falsify.py`` counts it in ``Mutation.__enter__``.
@@ -151,11 +154,30 @@ def _bind(root):
     return run
 
 
+def _requested_key(root: Path, requested: Path) -> str | None:
+    """Repo-relative path of ``requested``, without following symlinks.
+
+    ``.`` and ``..`` are collapsed. None when the path is ``root`` itself
+    or leaves ``root``.
+    """
+    root_text = root.as_posix().rstrip("/")
+    named_text = os.path.normpath(requested.as_posix())
+    prefix = root_text + "/"
+    if not named_text.startswith(prefix):
+        return None
+    relative = named_text[len(prefix):]
+    if not relative or relative == ".":
+        return None
+    return relative
+
+
 class Snapshot:
     """One commit and the bytes judged against it.
 
     HEAD is resolved in ``__init__`` and stored on ``commit``. Pins, history
-    and the report take that SHA. They do not resolve HEAD again.
+    and the report take that SHA. They do not resolve HEAD again. Each file
+    is recorded under the path the caller named. A checkout that redirects
+    that path is not read as the target: the named file at ``commit`` is.
     """
 
     def __init__(self, root, run=None):
@@ -166,18 +188,30 @@ class Snapshot:
         self.commit = resolve_head(self.run)
 
     def read_relative(self, base, name: str) -> bytes:
-        """Bytes of ``base/name``, recorded under the repo-relative path.
+        """Bytes of the repository path ``base/name``.
 
-        ``LookupError`` when the path leaves the repository or is not a file.
-        The path is resolved before the check, so a name that climbs out of
-        the repository is refused before any further read.
+        The path the caller named is the path recorded and verified. A name
+        that leaves the repository is refused before any read. When the
+        checkout redirects that name onto another file, the bytes are the
+        named file at the snapshot commit (``git``'s blob), not the target.
+        The target is not read. A redirect the commit cannot name is refused
+        with the two paths.
         """
-        path = (Path(base) / name).resolve()
-        if not path.is_relative_to(self.root):
+        requested = Path(base) / name
+        key = _requested_key(self.root, requested)
+        resolved = requested.resolve()
+        if key is None or not resolved.is_relative_to(self.root):
             raise LookupError("the file is outside the repository")
-        key = path.relative_to(self.root).as_posix()
+        resolved_key = resolved.relative_to(self.root).as_posix()
         if key not in self.files:
-            self.files[key] = path.read_bytes() if path.is_file() else None
+            if resolved_key != key:
+                data = blob_at(self.run, self.commit, key)
+                if data is None:
+                    raise LookupError(
+                        f"the path is redirected from {key} to {resolved_key}")
+                self.files[key] = data
+            else:
+                self.files[key] = requested.read_bytes() if requested.is_file() else None
         if self.files[key] is None:
             raise LookupError("the file does not exist")
         return self.files[key]

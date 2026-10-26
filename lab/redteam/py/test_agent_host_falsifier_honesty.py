@@ -16,8 +16,11 @@ Rust and does not walk falsify.py's AST.
 
 Every file is read into one snapshot. The snapshot resolves HEAD once, to a
 full SHA, and the pin, the history queries and the report all use that SHA.
-Each file's pin is ``git log -1 --format='%H %s' <sha> -- <path>`` for that
-same SHA. After the tests the run prints the record: the problems each rule
+The path recorded for a file is the path the falsifier named. A checkout that
+redirects that path does not supply the bytes: the named file at that commit
+does, and a redirect the commit cannot name is refused. The target is not
+read. Each file's pin is ``git log -1 --format='%H %s' <sha> -- <path>`` for
+that same SHA. After the tests the run prints the record: the problems each rule
 found, that commit, and for every file read its sha256, its last change, and
 the commit that brought that change onto the first-parent line. A merge's
 subject names the PR (guard a).
@@ -36,6 +39,7 @@ import functools
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -78,6 +82,7 @@ PROBES = (
     "test_expected_failures_are_recorded_findings",
     "test_strict_json_refusals",
     "test_report_names_the_commit_it_read",
+    "test_redirected_checkout_checks_the_named_file",
     "test_suite_report_keeps_verified_snapshot",
 )
 
@@ -798,6 +803,165 @@ class ProbeControls(unittest.TestCase):
         self.assertNotIn(commit_b, text)
         self.assertIn(commit_a + " pinned", text)
         self.assertFalse("0 of" in text and f"read at HEAD {commit_b}" in text, text)
+
+    def test_redirected_checkout_checks_the_named_file(self):
+        """Commit A holds ``src/lib.rs`` without the anchor and
+        ``src/alternate.rs`` with it. The checkout points ``src/lib.rs`` at
+        ``alternate.rs``. Following that redirect reports zero problems and
+        says every anchor holds, with zero differences.
+
+        The named file at A contains the anchor zero times. The probe reports
+        that, and it verifies ``src/lib.rs`` at A. It does not read or verify
+        the target. A redirect the commit cannot name is refused with both
+        paths. A symlink that leaves the repository is the outside refusal.
+        A regular file is still read under its own name.
+        """
+        commit = "a" * 40
+        prefix = "examples/agent-host/"
+        named = prefix + "src/lib.rs"
+        target = prefix + "src/alternate.rs"
+        missing = b"fn helper() { missing }\n"
+        valid = GOOD_SOURCE
+        named_too = b"fn helper() {}\n// named\n"
+        other = b"fn helper() {}\n// target\n"
+        redirect = f"the path is redirected from {named} to {target}"
+        held = (f"every merged agent-host falsifier anchor and the asks schema "
+                f"hold on {commit}")
+        self.assertEqual(missing.decode().count("fn helper() {}"), 0)
+        self.assertEqual(valid.decode().count("fn helper() {}"), 1)
+        self.assertEqual(named_too.decode().count("fn helper() {}"), 1)
+        self.assertEqual(other.decode().count("fn helper() {}"), 1)
+        self.assertNotEqual(named_too, other)
+
+        def run_case(lib_blob, kind, target_bytes=None):
+            target_bytes = valid if target_bytes is None else target_bytes
+            blobs = {prefix + name: data for name, data in tree().items()}
+            if lib_blob is None:
+                blobs.pop(named, None)
+            else:
+                blobs[named] = lib_blob
+            blobs[target] = target_bytes
+            lookups, specs = [], []
+
+            def run(*args):
+                if args[0] == "rev-parse":
+                    lookups.append(args)
+                    return (commit + "\n").encode()
+                if args[0] == "cat-file":
+                    specs.append(args[-1])
+                    _commit, _, path = args[-1].partition(":")
+                    return blobs.get(path)
+                if args[0] == "log":
+                    return (commit + " pinned\n").encode()
+                if args[0] == "rev-list":
+                    return (commit + "\n").encode()
+                return None
+
+            with tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp).resolve()
+                root = work / "repo"
+                base = root / "examples" / "agent-host"
+                for name, data in tree().items():
+                    if name == "src/lib.rs":
+                        continue
+                    path = base / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                src = base / "src"
+                src.mkdir(parents=True, exist_ok=True)
+                lib = src / "lib.rs"
+                if kind == "regular":
+                    lib.write_bytes(lib_blob)
+                elif kind == "symlink":
+                    (src / "alternate.rs").write_bytes(target_bytes)
+                    lib.symlink_to("alternate.rs")
+                elif kind == "outside":
+                    outside = work / "outside.rs"
+                    outside.write_bytes(target_bytes)
+                    lib.symlink_to(outside)
+                else:
+                    raise AssertionError(kind)
+                current = Path.read_bytes
+
+                def guard(path):
+                    if path.name in ("alternate.rs", "outside.rs") or path.is_symlink():
+                        raise AssertionError("followed a redirected path: " + path.as_posix())
+                    return current(path)
+
+                snapshot = falsifier_data.Snapshot(root, run=run)
+                with patch.object(Path, "read_bytes", guard):
+                    _entries, problems = probe(
+                        lambda name: snapshot.read_relative(base, name))
+                text = report_text(snapshot, problems)
+            self.assertEqual(len(lookups), 1, lookups)
+            for spec in specs:
+                self.assertTrue(spec.startswith(commit + ":"), spec)
+                self.assertNotIn("HEAD", spec)
+            self.assertNotIn(f"{commit}:{target}", specs)
+            return snapshot, problems, text, specs
+
+        with self.subTest("the named file lacks the anchor"):
+            snapshot, problems, text, specs = run_case(missing, "symlink")
+            self.assertEqual(problems, {
+                "parse": [],
+                "caught": [],
+                "anchor": [Problem(
+                    "anchor", "ST1", "src/lib.rs",
+                    "edits[0]: old is found 0 times, not once")],
+                "asks": [],
+            })
+            self.assertEqual(snapshot.files.get(named), missing)
+            self.assertNotIn(target, snapshot.files)
+            self.assertIn(f"{commit}:{named}", specs)
+            self.assertNotIn(held, text)
+            self.assertIn("anchor 1", text)
+            self.assertIn(f"{named} {digest(missing)}", text)
+            self.assertNotIn("alternate.rs", text)
+            self.assertFalse(held in text and "0 of 4" in text, text)
+
+        with self.subTest("both files contain the anchor"):
+            snapshot, problems, text, _specs = run_case(
+                named_too, "symlink", target_bytes=other)
+            self.assertEqual(problems, {"parse": [], "caught": [], "anchor": [], "asks": []})
+            self.assertEqual(snapshot.files.get(named), named_too)
+            self.assertNotIn(target, snapshot.files)
+            self.assertIn(held, text)
+            self.assertIn(f"{named} {digest(named_too)}", text)
+            self.assertNotIn("alternate.rs", text)
+
+        with self.subTest("the commit has no blob for the redirected path"):
+            snapshot, problems, text, specs = run_case(None, "symlink")
+            self.assertEqual(problems, {
+                "parse": [],
+                "caught": [],
+                "anchor": [Problem("anchor", "ST1", "src/lib.rs", redirect)],
+                "asks": [],
+            })
+            self.assertIsNone(snapshot.files.get(named))
+            self.assertNotIn(target, snapshot.files)
+            self.assertNotIn(f"{commit}:{target}", specs)
+            self.assertNotIn(held, text)
+            self.assertNotIn("alternate.rs", text)
+
+        with self.subTest("a symlink leaves the repository"):
+            snapshot, problems, text, _specs = run_case(missing, "outside")
+            self.assertEqual(problems, {
+                "parse": [],
+                "caught": [],
+                "anchor": [Problem(
+                    "anchor", "ST1", "src/lib.rs", "the file is outside the repository")],
+                "asks": [],
+            })
+            self.assertNotIn(valid, snapshot.files.values())
+            self.assertNotIn(held, text)
+
+        with self.subTest("a regular file keeps its own name"):
+            snapshot, problems, text, specs = run_case(valid, "regular")
+            self.assertEqual(problems, {"parse": [], "caught": [], "anchor": [], "asks": []})
+            self.assertEqual(snapshot.files.get(named), valid)
+            self.assertIn(held, text)
+            self.assertIn("files read that differ from HEAD: 0 of 4", text)
+            self.assertIn(f"{commit}:{named}", specs)
 
     def test_suite_report_keeps_verified_snapshot(self):
         """The suite verifies A, then HEAD and the checkout move to broken B
