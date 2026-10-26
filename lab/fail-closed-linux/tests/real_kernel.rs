@@ -832,7 +832,7 @@ fn real_init_reaps_orphaned_grandchild() {
         require_line(&lines, "orphan-forked", provider);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut saw_zombie = false;
+        let mut saw_zombie;
         loop {
             let kids = children_of(pid);
             saw_zombie = kids.iter().any(|child_pid| {
