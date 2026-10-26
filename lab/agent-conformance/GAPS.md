@@ -10,7 +10,7 @@ external queue was outside the permitted read scope.
 Tasks 010 and 013 settle the operator prerequisite in [Operator in a throwaway
 home](#operator-in-a-throwaway-home). Its verdict gates the earlier 006 launch
 and grant examples. Tasks 008/009 now own the guard and data-directory proof;
-the later grant-controller task owns positive-grant acceptance.
+task 015 owns positive-grant acceptance.
 
 ## Launch and data directory (006 discovery, 009 no-operator proof)
 
@@ -290,56 +290,43 @@ after this operator recipe is accepted. Open blockers retain their BLOCKED grade
 
 ## Positive-grant decision for 003
 
-**seam exists (operator Runtime's shell-authenticated HTTP approval) —
-fixture/command recipe 003 uses:** after the operator isolation gate passes, start the
-fixture operator as above, then run one build-time-fixed effect probe. The guest
-requests one action within its manifest's resource bound. A fixture-owned shell
-controller approves that exact pending request through the existing API while
-the guest's bridge waits. This is a live-test route in the source, not a measured
-grant or effect result. There is no missing-grant-seam blocker; current execution
-still depends on AC-006-STORAGE and the operator prerequisites in 010. Runtime-selected effects and a guest
-success payload remain BLOCKED under AC-002-ARGS.
+Task 015 uses the production shell-authenticated approval routes through the
+one controller in `tests/common/grants.rs`. The root is
+`localhost://Public/agent-conformance-grants`, and the one manifest bound is
+`localhost://Public/agent-conformance-grants/*`. Task 003's resources stay
+outside this bound. The bound permits a request; the operator supplies the grant.
 
-1. The fixture controller uses its own operator's `POST /api/auth/attach` with
-   scope `shell`; `attach_to_runtime` and `call_attach` show this non-interactive
-   path (`elastos/crates/elastos-server/src/runtime_control.rs:917-941,1001-1026`).
-   Only isolated fixture credentials belong in that controller's memory; the
-   guest receives the resource grant through the Bus. This discovery read no
-   credential files and made no HTTP calls.
-2. The guest calls `capabilities.request` with one action. The host maps it to
-   the bridge and returns the received grant ID
-   (`elastos/crates/elastos-compute/src/providers/component.rs:358-388`). The remote
-   bridge checks the manifest bound, posts `/api/capability/request`, then polls
-   `/api/capability/request/:id` for up to 30 seconds
-   (`elastos/crates/elastos-server/src/resource_bridge.rs:1379-1454`).
-3. The controller uses `GET /api/capability/pending` and matches the fixture's
-   resource, action and unique reason, requiring exactly one pending request.
-   It sends `POST /api/capability/grant` with
-   `{"request_id":"<that request>","duration":"once","rationale":"isolated conformance fixture"}`.
-   The shell-only routes are in `elastos/crates/elastos-server/src/api/server.rs:258-277`;
-   pending fields and grant handling are in
-   `elastos/crates/elastos-server/src/api/handlers/capability.rs:225-257,294-359`.
-   Approval uses the requesting session and updates that pending request. Grant
-   responses contain credentials, so the future harness must consume them
-   privately and report only the decision.
-4. The guest passes the returned grant to `providers.invoke`
-   (`elastos/crates/elastos-compute/src/providers/component.rs:392-429`). Task 003
-   needs a fixture provider and a measured effect result; granting alone does
-   not prove provider execution. The remote bridge still applies resource and
-   principal restrictions (`elastos/crates/elastos-server/src/resource_bridge.rs:1237-1259`).
-   A grant therefore does not settle 004's principal-storage tests.
+The controller reads only the fixture's `attach_secret` field into memory and
+attaches once with scope `shell` at the port owned by `Operator`. The secret,
+session token and returned grant tokens stay in memory. The controller uses
+`GET /api/capability/pending`, matches resource/action/reason exactly against
+`fixtures/grants.json`, and posts one `once` grant for the listed read. Every
+other pending request receives the fixture denial reason. Ambiguous matches
+are denied before any grant is selected. The Runtime mints the grant for the
+requesting session (`api/handlers/capability.rs:339-346`); the observed guest
+invocation checks that the requesting client can use it.
 
-Other candidates checked: `configure_capsule_admission` sets signature and
-unsigned-admission policy only (`runtime.rs:188-227`); manifest capabilities
-bound requests (`run_cmd.rs:240,252`, `resource_bridge.rs:1379-1383`). Neither is
-an automatic positive grant. A home-file pre-seeded grant seam: **none found**.
-Startup creates a pending store (`elastos/crates/elastos-server/src/server_infra.rs:659-667`);
-persisted capability state loads epochs and revocations
-(`elastos/crates/elastos-runtime/src/capability/store.rs:193-223`). The component
-gets its grant from the live request response (`component.rs:379-388`). Direct
-`CapabilityManager::grant` and `PendingRequestStore` manipulation in server test
-fixtures (`runtime.rs:508,1026-1043,1073-1085,1121-1127`) is test-internal access, not a
-black-box seam or a substitute for the HTTP recipe.
+Seed preparation uses Runtime writes through the existing production
+`/api/provider/localhost/write` route with the controller's shell session.
+Runtime owns the provider's stored representation. The fixture supplies ordinary
+bytes from `fixtures/granted-bytes.txt`; the guest independently compares the
+complete UTF-8 response and its byte count. The fixture reads no encryption key.
+The `Public` root requires no principal, so this does not claim UsersAI or
+principal-bound storage acceptance.
+
+Measured on this Mac, `granted_read_succeeds` observed one matched pending
+request and one grant, then exit 0 after the guest byte check.
+`ungranted_sibling_read_is_refused` observed one pending denial and exit 1 with
+the delivered fixture reason. Both passed their credential capture scans, saw
+two loopback sockets at each census, and stopped the operator group. The files'
+bytes stayed in the guest. Commands and results are recorded in `LOG.md`.
+F-ac1a expands the parent fixture directory's approval to its two exact child
+entries; F-ac1b changes only the host seed. They distinguish grant enforcement
+from file content checking without adding an alternate matcher or provider path.
+
+AC-006-STORAGE still describes the attached launcher's scratch path, and
+AC-002-ARGS still describes runtime selectors and success payloads. The new
+checks prove the build-time read effect, rather than those separate claims.
 
 ## AC-002-ARGS — selector and success payload
 
@@ -374,7 +361,7 @@ transcript: **to confirm in 003**. A successful lifecycle call returns unit;
 provider response data can reach the guest, but no success payload reaches the
 CLI through `lifecycle.run`.
 
-The current probe attempts no effect. Tasks 003/004/005 can select one fixed
+The initial probe attempted no effect. Tasks 003/004/005 select one fixed
 effect with a Cargo feature on the same probe source, check its response inside
 the guest and propagate a clear error on failure. AC-002-ARGS does not block
 that refusal experiment. A zero exit alone remains insufficient effect proof.
@@ -417,7 +404,7 @@ remain refused.
 
 The deny-only probe requests `read` on the synthetic resource in
 `fixtures/ungranted-read.txt`, or `execute` on `elastos://net/stream` from
-`fixtures/ungranted-network.txt`. These resources are outside the probe's empty
+`fixtures/ungranted-network.txt`. These resources are outside the probe's fixture-directory
 manifest bound and outside future granted fixture directories. The Runtime
 owns resource authority. Its manifest refusal returns through the guest's Bus
 call and lifecycle to `elastos run`. The live wrapper uses

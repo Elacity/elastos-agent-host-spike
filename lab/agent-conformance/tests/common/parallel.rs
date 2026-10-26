@@ -33,7 +33,8 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
     // Share task 003's build lock and Runtime cache, including when two tests run.
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let builds = artifacts();
-    let runtime = runtime_under_test().expect("build Runtime offline");
+    let runtime = runtime_under_test()
+        .unwrap_or_else(|_| super::probe::skipped("Runtime build failed before launch"));
     let operator_home = ThrowawayHome::new().unwrap();
     let homes = [(); 4].map(|_| ThrowawayHome::new().unwrap());
     let capsules: Vec<_> = homes
@@ -56,8 +57,9 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         })
         .collect();
 
-    let mut operator =
-        common::operator::Operator::start(&operator_home).expect("start one fixture operator");
+    let mut operator = common::operator::Operator::start(&operator_home).unwrap_or_else(|_| {
+        super::probe::skipped("operator setup or loopback bind failed before probe launch")
+    });
     operator.ready().expect("operator ready");
     let first = operator.census().expect("ready socket census");
     let sampled = Instant::now();

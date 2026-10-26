@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 read = []
 network = []
+granted-read = []
+sibling-read = []
 task = []
 runaway = []
 

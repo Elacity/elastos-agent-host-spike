@@ -166,7 +166,7 @@ scope line printed by `run.sh` mean **process isolation, not capsule isolation**
 - `parallel_collection_preserves_each_status_and_capture`: four shell fixtures all reach a barrier before collection, then return distinct statuses, stdout and stderr.
 - `parallel_timeout_is_failure_and_reaps_every_group`: a shared deadline fails with its exact safety-net reason, reaps every group, and retains failed Homes.
 - `parallel_collection_refuses_live_descendants`: a parent exit with a live child fails collection and triggers group cleanup.
-- `parallel_attach_uses_only_guarded_fixture_coordinates`: clients receive exactly five environment entries and a damaged operator Home is refused before launch. The extra entry is the fixture-derived `ELASTOS_RUNTIME_COORDS_FILE`; Runtime alone reads its contents.
+- `parallel_attach_uses_only_guarded_fixture_coordinates`: clients receive exactly five environment entries and a damaged operator Home is refused before launch. The extra entry is the fixture-derived `ELASTOS_RUNTIME_COORDS_FILE`; Runtime reads its contents for attach; task 015 adds the fixture controller as the only test reader of `attach_secret`.
 
 `RunningInstances::start` and `collect` extend the existing spawn site. Every
 child still gets a cleared environment, null stdin and in-root capture files.
@@ -192,3 +192,61 @@ F-parallel-bound, F-parallel-operator-guard, F-parallel-coordinates,
 F-parallel-start and F-parallel-drain plant errors in the harness rules and each must fail its named harness test. Apply the exact edits from
 `falsifiers.json` by hand and restore them before the normal gate. LOG.md holds
 the commands and measured outcomes; this adds no second runner.
+
+Task 015 adds the fixture's one grant controller (`tests/common/grants.rs`).
+It reads only `attach_secret` from the guarded operator coordinates, attaches
+once with scope `shell` at the operator's loopback port, then services pending
+requests during the existing process collection loop. Resource, action and
+reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
+`once` or `session`; this fixture selects `once`. Every other request receives
+`fixture denies unlisted read`. An ambiguous match denies the whole pending
+snapshot with a reason. A consumed entry also refuses a later matching request.
+
+- `granted_read_succeeds`: seeds `Public/agent-conformance-grants/granted.txt`,
+  observes exactly one matching request and grant, and requires exit 0 after
+  the guest checks the complete file response and byte count.
+- `ungranted_sibling_read_is_refused`: seeds `sibling.txt` inside the same manifest
+  bound, observes one pending denial, and requires exit 1 with the delivered
+  fixture reason inside the Runtime's component-failure message. Captures
+  exclude the seeded bytes.
+- `grants::tests::controller_matches_all_fields_exactly`: changing any match field
+  prevents approval, including a resource that merely shares a path prefix.
+- `grants::tests::controller_refuses_ambiguous_requests_before_deciding`: two
+  matches or reuse of an entry fail before a grant is selected.
+- `grants::tests::controller_requires_explicit_fixture_and_credentials`: missing
+  coordinates, missing or empty attach data, and incomplete fixture rules refuse.
+- `grants::tests::controller_refuses_failed_attach_and_http_responses`: failed
+  attach, refused HTTP status, redirects and malformed framing refuse with a
+  fixed reason. The controller connects only to IPv4 loopback.
+- `grants::tests::controller_detects_credentials_without_disclosing_them`: an
+  in-memory canary verifies capture detection. Both live rows scan every harness
+  capture for the actual attach secret, shell token and returned grant tokens
+  after the operator group stops. The check prints only its verdict.
+- `tests::guest_checks_all_granted_file_bytes`: every changed byte of the expected
+  provider response fails the guest comparison.
+- `run_table_grades_skipped_only_with_failed_test`: a setup failure marker and a
+  Cargo `FAILED` result produce `SKIPPED (<reason>)` and a failing command status.
+
+SKIPPED means an external setup failure prevented the probe from running, such
+as a refused loopback bind or failed probe build. The test prints
+`SKIPPED <test>: <reason>` and fails. Runtime refusals and failed assertions keep
+their FAIL grade. A SKIPPED marker paired with `ok`, an absent result, a repeated
+marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
+SKIPPED table row and exits non-zero. BLOCKED continues to mean a named open
+Runtime contract gap.
+
+The new selectors share the existing probe source, manifest, build staging,
+import checks and two-build SHA-256 checks. The manifest bound is
+`localhost://Public/agent-conformance-grants/*`; task 003's resources remain
+outside it. `Public` is the file-backed fixture root. The controller writes the seed
+through Runtime before the guest runs; Runtime owns the stored representation. The guest expects its bytes independently of the
+seed fixture and keeps them inside the capsule.
+
+F-ac1a widens approval to the parent fixture directory's two children by adding
+an exact entry for the sibling. This keeps the controller's exact-match rule;
+it introduces no wildcard approval path. The sibling then reads and checks its
+bytes, exits 0, and fails the denial test. F-ac1b changes only the host seed and
+fails the granted test on the guest content check after an observed grant.
+F-report-b changes SKIPPED to PASS and fails the report test. The controller,
+callback and guest comparison falsifiers are listed beside these in
+`falsifiers.json`. Restore each mutation before running the next one.

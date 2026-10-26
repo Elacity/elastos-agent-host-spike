@@ -331,7 +331,7 @@
       "edits": [
         {
           "file": "probe/src/lib.rs",
-          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
+          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        + cfg!(feature = \"granted-read\") as u8\n        + cfg!(feature = \"sibling-read\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
           "new": ""
         }
       ],
@@ -466,6 +466,167 @@
       ],
       "tests": [
         "parallel_collection_refuses_live_descendants"
+      ]
+    },
+    {
+      "id": "F-ac1a",
+      "title": "grant both fixture children of the parent through exact entries",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/grants.json",
+          "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n",
+          "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/sibling.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
+        }
+      ],
+      "tests": [
+        "ungranted_sibling_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-ac1b",
+      "title": "seed file bytes different from the guest expectation",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/granted-bytes.txt",
+          "old": "grant-fixture-bytes",
+          "new": "wrong-fixture-data!"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-report-b",
+      "title": "grade a SKIPPED row as PASS",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "format!(\"SKIPPED ({})\", reasons[0])",
+          "new": "\"PASS\".into()"
+        }
+      ],
+      "tests": [
+        "run_table_grades_skipped_only_with_failed_test"
+      ]
+    },
+    {
+      "id": "F-grant-match",
+      "title": "ignore the exact resource action and reason match",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "entry[\"resource\"] == resource && entry[\"action\"] == action && entry[\"reason\"] == reason",
+          "new": "{ let _ = (entry, resource, action, reason); true }"
+        }
+      ],
+      "tests": [
+        "grants::tests::controller_matches_all_fields_exactly"
+      ]
+    },
+    {
+      "id": "F-grant-ambiguous",
+      "title": "choose requests even when one fixture entry matches twice",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "if used.contains(index) || matched.iter().filter(|m| **m == Some(*index)).count() != 1 {",
+          "new": "if false && (used.contains(index) || matched.iter().filter(|m| **m == Some(*index)).count() != 1) {"
+        }
+      ],
+      "tests": [
+        "grants::tests::controller_refuses_ambiguous_requests_before_deciding"
+      ]
+    },
+    {
+      "id": "F-grant-credentials",
+      "title": "use an empty fallback for a missing attach secret",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    field(&value, \"attach_secret\")\n        .map(str::to_owned)\n        .map_err(|_| \"fixture coordinates require attach_secret\")",
+          "new": "    Ok(value[\"attach_secret\"].as_str().unwrap_or(\"\").to_owned())"
+        }
+      ],
+      "tests": [
+        "grants::tests::controller_requires_explicit_fixture_and_credentials"
+      ]
+    },
+    {
+      "id": "F-grant-capture",
+      "title": "accept a capture containing a fixture credential",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "        if self.credentials.iter().any(|value| {",
+          "new": "        if false && self.credentials.iter().any(|value| {"
+        }
+      ],
+      "tests": [
+        "grants::tests::controller_detects_credentials_without_disclosing_them"
+      ]
+    },
+    {
+      "id": "F-grant-http",
+      "title": "accept a refused HTTP status",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    if !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))",
+          "new": "    if false && !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))"
+        }
+      ],
+      "tests": [
+        "grants::tests::controller_refuses_failed_attach_and_http_responses"
+      ]
+    },
+    {
+      "id": "F-grant-service",
+      "title": "stop servicing approvals while the probe waits",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            service()?;",
+          "new": "            let _ = &mut service;"
+        }
+      ],
+      "tests": [
+        "granted_read_succeeds",
+        "ungranted_sibling_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-grant-content",
+      "title": "accept every provider result as the expected file bytes",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "    body == br#\"{\"data\":{\"content\":\"grant-fixture-bytes\",\"encoding\":\"utf8\",\"size\":19},\"status\":\"ok\"}\"#",
+          "new": "    let _ = body;\n    true"
+        }
+      ],
+      "tests": [
+        "tests::guest_checks_all_granted_file_bytes"
       ]
     }
   ]

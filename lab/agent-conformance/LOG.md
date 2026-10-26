@@ -2013,3 +2013,396 @@ At handoff the cached upstream was 0 ahead / 28 behind, with an empty lane
 diff against that upstream. Final `git diff --check` passed. Source changes
 are ready for independent review; the blocked claims and deferred cleanup
 remain explicit.
+
+## 015 — fixture grant controller and granted read (2026-10-26)
+
+Added one fixture shell controller, two hash-named read builds, guest byte checking,
+exact pending-request decisions, credential capture checks and SKIPPED grading.
+
+Plan followed: read the existing 003/005/006/013 paths and production Runtime
+routes; extend the existing collection loop; implement the shared controller;
+exercise grant and denial; plant and restore falsifiers; run the lane gates.
+The task and backlog supplied the queue context. The repository has no humanizer
+skill in the permitted read scope; this entry uses direct behavior and ownership
+statements. All candidate edits stay in `lab/agent-conformance/`. The supervisor
+owns commits, publication and PR evidence.
+
+The controller uses production attach, pending, grant and deny routes on the
+operator's IPv4 loopback port. It attaches once as a shell. Resource, action and
+reason match exactly; duration comes from the fixture. Ambiguity denies the
+snapshot before any selection. Credentials stay in memory, and both live rows
+scan their capture files after process-group stop. The ordinary test files live
+under `Public/agent-conformance-grants`; the controller seeds them through the
+production Runtime provider write route, as allowed by the task. Runtime owns
+the stored representation. The guest independently checks the full returned
+content and its 19-byte length. Earlier refusal paths remain outside the manifest
+bound. Source, provider and dependency files outside the lane stay unchanged.
+
+The initial disk check found 31.42 GiB available, above the 12 GiB build estimate
+plus 2 GiB reserve. Heavy checks take the existing repository lock through a
+read-only descriptor and `fcntl.flock`. A busy lease postponed live checks; light
+source and report work continued. The builder sandbox refuses loopback binds,
+so live evidence uses the same commands with local process/socket access. All
+builds use cached dependencies and these environment values:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+The first completed grant/denial acceptance run used:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects read_ -- --show-output
+```
+
+```text
+test granted_read_succeeds ... ok
+test ungranted_sibling_read_is_refused ... ok
+fixture controller: matched, granted
+operator census: 2 then 2 loopback sockets; fixture read; group stopped
+fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false
+fixture controller: denied
+operator census: 2 then 2 loopback sockets; fixture read; group stopped
+fixture read: exit:Some(1) matched:0 granted:0 denied:1 content_error:false
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 51.89s
+```
+
+F-ac1a expands approval from one file to the parent fixture directory's two
+known files using two exact entries. This preserves the one exact matcher.
+F-ac1b changes only the seed. F-report-b changes only the table grade.
+The additional controller and guest falsifiers cover matching, ambiguity,
+required credentials, capture exclusion, refused HTTP status, polling and byte
+comparison. F-probe-exclusive's anchor now includes the two new selectors.
+
+### Planted and restored checks
+Each edit came from `falsifiers.json` and was restored byte for byte before
+the restored run. These are actual command and libtest output excerpts. The
+full local transcripts stay under the ignored task proof directory until review.
+
+F-probe-exclusive — `probe_effects_are_exclusive`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_effects_are_exclusive -- --exact --show-output
+```
+
+```text
+planted:
+test probe_effects_are_exclusive ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.05s
+restored:
+test probe_effects_are_exclusive ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.73s
+```
+
+F-ac1a — `ungranted_sibling_read_is_refused`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_sibling_read_is_refused -- --exact --show-output
+```
+
+```text
+planted:
+test ungranted_sibling_read_is_refused ... FAILED
+fixture controller: matched, granted
+fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 26.16s
+restored:
+test ungranted_sibling_read_is_refused ... ok
+fixture controller: denied
+fixture read: exit:Some(1) matched:0 granted:0 denied:1 content_error:false
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 24.75s
+```
+
+F-ac1b — `granted_read_succeeds`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects granted_read_succeeds -- --exact --show-output
+```
+
+```text
+planted:
+test granted_read_succeeds ... FAILED
+fixture controller: matched, granted
+fixture read: exit:Some(1) matched:1 granted:1 denied:0 content_error:true
+guest content check failed after the observed grant
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 25.76s
+restored:
+test granted_read_succeeds ... ok
+fixture controller: matched, granted
+fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 27.87s
+```
+
+F-report-b — `run_table_grades_skipped_only_with_failed_test`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report run_table_grades_skipped_only_with_failed_test -- --exact --show-output
+```
+
+```text
+planted:
+test run_table_grades_skipped_only_with_failed_test ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+restored:
+test run_table_grades_skipped_only_with_failed_test ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+```
+
+F-grant-match — `grants::tests::controller_matches_all_fields_exactly`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_matches_all_fields_exactly -- --exact --show-output
+```
+
+```text
+planted:
+test grants::tests::controller_matches_all_fields_exactly ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+restored:
+test grants::tests::controller_matches_all_fields_exactly ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+```
+
+F-grant-ambiguous — `grants::tests::controller_refuses_ambiguous_requests_before_deciding`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_refuses_ambiguous_requests_before_deciding -- --exact --show-output
+```
+
+```text
+planted:
+test grants::tests::controller_refuses_ambiguous_requests_before_deciding ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+restored:
+test grants::tests::controller_refuses_ambiguous_requests_before_deciding ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+```
+
+F-grant-credentials — `grants::tests::controller_requires_explicit_fixture_and_credentials`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_requires_explicit_fixture_and_credentials -- --exact --show-output
+```
+
+```text
+planted:
+test grants::tests::controller_requires_explicit_fixture_and_credentials ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+restored:
+test grants::tests::controller_requires_explicit_fixture_and_credentials ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+```
+
+F-grant-capture — `grants::tests::controller_detects_credentials_without_disclosing_them`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_detects_credentials_without_disclosing_them -- --exact --show-output
+```
+
+```text
+planted:
+test grants::tests::controller_detects_credentials_without_disclosing_them ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+restored:
+test grants::tests::controller_detects_credentials_without_disclosing_them ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+```
+
+F-grant-http — `grants::tests::controller_refuses_failed_attach_and_http_responses`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_refuses_failed_attach_and_http_responses -- --exact --show-output
+```
+
+```text
+planted:
+test grants::tests::controller_refuses_failed_attach_and_http_responses ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+restored:
+test grants::tests::controller_refuses_failed_attach_and_http_responses ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+```
+
+F-grant-content — `tests::guest_checks_all_granted_file_bytes`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance-probe --lib tests::guest_checks_all_granted_file_bytes -- --exact --show-output
+```
+
+```text
+planted:
+test tests::guest_checks_all_granted_file_bytes ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+restored:
+test tests::guest_checks_all_granted_file_bytes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+```
+
+F-grant-service — `granted_read_succeeds`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects granted_read_succeeds -- --exact --show-output
+```
+
+```text
+planted:
+test granted_read_succeeds ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 33.74s
+restored:
+test granted_read_succeeds ... ok
+fixture controller: matched, granted
+fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 21.83s
+```
+
+F-grant-service — `ungranted_sibling_read_is_refused`
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_sibling_read_is_refused -- --exact --show-output
+```
+
+```text
+planted:
+test ungranted_sibling_read_is_refused ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 29.26s
+restored:
+test ungranted_sibling_read_is_refused ... ok
+fixture controller: denied
+fixture read: exit:Some(1) matched:0 granted:0 denied:1 content_error:false
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 22.39s
+```
+
+### Supporting checks and principles
+
+```text
+node scripts/check-product-data.mjs
+{"ok":true,"capsules":42,"profiles":2,"method_contracts":28}
+node --test scripts/check-product-data.test.mjs
+# tests 99
+# pass 99
+# fail 0
+(cd elastos && CARGO_NET_OFFLINE=true cargo fmt --all -- --check)
+exit 0
+CARGO_NET_OFFLINE=true cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check
+exit 0
+CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+exit 0
+CARGO_NET_OFFLINE=true cargo fmt --manifest-path lab/agent-conformance/Cargo.toml --all -- --check
+exit 0
+git diff --check
+exit 0
+```
+
+| Mission question | Answer and evidence |
+| --- | --- |
+| 1. Does new code or content use a name/URL where a hash belongs? | No. `tests/effects.rs:32` stages each component under its SHA-256; `tests/artifact.rs:130` checks two independent builds and distinct effects. Rooted fixture resources identify mutable test files; loopback HTTP carries operator control. |
+| 2. Does the capsule gain ambient access, or Home/UI gain authority? | No. `probe/src/lib.rs:75` requests a read grant and `:83` passes that grant to the typed Bus invocation. `tests/artifact.rs:80` checks the Bus-only import set for every build. |
+| 3. Is there a second operation path or copied rule? | No. `src/harness.rs:478` services approvals inside the existing collection loop and uses the existing spawn site. `tests/common/grants.rs:55` is the one fixture matcher. |
+| 4. Does the Runtime core grow? | No. `tests/common/grants.rs:97` and `:141` implement fixture control through production routes. Every changed path is inside the lane; Runtime and provider sources are read-only inputs. |
+| 5. Does each new refusal fail closed with a clear reason? | Yes. `tests/common/grants.rs:66` refuses ambiguity; `:141` denies other requests. `src/report.rs:54` keeps SKIPPED distinct from PASS and BLOCKED. |
+| 6. Does the capsule keep its logic inside and call down through granted Bus calls? | Yes. `probe/src/lib.rs:69` owns the request, invocation and guest byte check. It adds neither a host API import nor a Runtime-selected effect path. |
+| 7. Do named tests and caught falsifiers prove the rules? | Yes. `tests/effects.rs:253` and `:258` prove grant and denial; `tests/report.rs:45` proves SKIPPED grading. The 12 planted/restored pairs above cover all ten new falsifiers and the updated selector falsifier. |
+
+### Full lane gate
+
+```sh
+lab/agent-conformance/run.sh
+```
+
+The command ran `cargo test --locked --no-fail-fast --manifest-path lab/agent-conformance/Cargo.toml -- --format pretty --color never --show-output` under the environment and shared lease above. It returned 0 in 477.41 seconds.
+
+```text
+test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)
+default_activation_refuses_without_selector | PASS
+fixture_operator_sockets_are_loopback_only | PASS
+fixture_operator_starts_ready_and_stops_cleanly | PASS
+foreign_and_wrong_version_imports_are_refused | PASS
+granted_read_succeeds | PASS
+grants::tests::controller_detects_credentials_without_disclosing_them | PASS
+grants::tests::controller_matches_all_fields_exactly | PASS
+grants::tests::controller_refuses_ambiguous_requests_before_deciding | PASS
+grants::tests::controller_refuses_failed_attach_and_http_responses | PASS
+grants::tests::controller_requires_explicit_fixture_and_credentials | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+managed_child_drop_kills_its_group_and_keeps_root | PASS
+managed_child_stop_reaps_its_process_group | PASS
+non_component_and_invalid_component_are_refused | PASS
+operator_storage_is_under_throwaway_home | BLOCKED (AC-006-STORAGE)
+parallel_attach_uses_only_guarded_fixture_coordinates | PASS
+parallel_capsules_complete_independently | BLOCKED (RT4)
+parallel_collection_preserves_each_status_and_capture | PASS
+parallel_collection_refuses_live_descendants | PASS
+parallel_instances_return_success_payloads | BLOCKED (AC-002-ARGS)
+parallel_timeout_is_failure_and_reaps_every_group | PASS
+probe_effects_are_exclusive | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+process_isolation::parallel_instances_complete_independently | PASS
+process_isolation::runaway_is_stopped_with_reason | BLOCKED (AC-005-REASON)
+process_isolation::runaway_trap_is_bounded_while_siblings_finish | PASS
+run_table_grades_skipped_only_with_failed_test | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+serve_refuses_provider_whose_bytes_differ_from_its_hash | PASS
+socket_census_requires_parseable_loopback_endpoints_and_api_listener | PASS
+tests::guest_checks_all_granted_file_bytes | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+ungranted_effect_is_refused | PASS
+ungranted_model_call_is_refused | BLOCKED (RT3)
+ungranted_network_is_refused | PASS
+ungranted_sibling_read_is_refused | PASS
+```
+
+`elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd`
+
+`localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2`
+
+`probe component sha256:16a4b8b6f80b4f3f8375e05a00c7eb4ebc2dde3f8b43d02d3475686438e9b9c1 effect:granted-read`
+
+`probe component sha256:8426b487b3375ec47b2e0a7d704860a9ffea4b4fd221b083608bf843a77f70e0 effect:sibling-read`
+
+Result: 37 PASS, five existing BLOCKED rows, zero FAIL and zero SKIPPED. All ten effects passed two independent builds, distinct SHA-256 checks and Bus import checks. The normal gate created no retained Home and left Git status byte-identical to its pre-run status. The candidate edits remain uncommitted under the builder instruction; the run added no Git-visible artifacts.
+
+### Environmental SKIPPED proof and handoff
+
+The sandbox refused the loopback bind before the probe launch. With the
+same environment and shared lease, the narrow run used:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects granted_read_succeeds -- --exact --list
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects granted_read_succeeds -- --exact --show-output
+lab/agent-conformance/target/host/debug/report lab/agent-conformance/target/task-015/skip-list lab/agent-conformance/target/task-015/skipped.log 101
+```
+
+```text
+SKIPPED granted_read_succeeds: operator setup or loopback bind failed before probe launch
+test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)
+cargo | FAIL
+granted_read_succeeds | SKIPPED (operator setup or loopback bind failed before probe launch)
+cargo exit: 101
+report exit: 1
+```
+
+This expected environmental failure supplies SKIPPED evidence, separate
+from the successful full lane gate. The report failure is the condition that
+`run.sh` propagates as exit 1. The report unit test also rejects SKIPPED beside
+an `ok` result and preserves FAIL for Runtime refusals and assertions.
+
+Removed all 9 task-owned retained fixture roots after zero-process and
+zero-open-file checks. The normal full gate retained zero new Homes. The final
+process check found zero suite Runtime/provider processes and the probe folder
+contained zero generated WASM entrypoints. Earlier owners retain their existing
+fixtures. Build caches and small proof transcripts have task-owned cleanup
+conditions in the local ignored lifecycle inventory.
+
+The read-only branch/worktree inventory was refreshed. This task created no
+branch, worktree, commit or remote write. The last cached upstream check is 17 behind / 0 ahead; network
+refresh is outside builder scope. The supervisor owns integration and PR review.

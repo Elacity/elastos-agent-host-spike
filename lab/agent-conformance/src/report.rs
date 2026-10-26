@@ -18,11 +18,12 @@ fn grade(result: &str) -> String {
 /// visible even if compilation or a test binary failed before reporting a row.
 pub fn table(listed: &str, output: &str, cargo_ok: bool) -> (String, bool) {
     let mut rows: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut skipped: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for line in listed.lines() {
         if let Some(name) = line.strip_suffix(": test") {
             if rows.insert(name, Vec::new()).is_some() {
                 return (
-                    "test | PASS/FAIL/BLOCKED (id)\ncargo | FAIL\n".into(),
+                    "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncargo | FAIL\n".into(),
                     false,
                 );
             }
@@ -34,21 +35,34 @@ pub fn table(listed: &str, output: &str, cargo_ok: bool) -> (String, bool) {
             .and_then(|s| s.split_once(" ... "))
         {
             let values = rows.entry(name).or_insert_with(|| vec!["FAIL".into()]);
-            values.push(grade(result));
+            values.push(result.to_owned());
+        }
+        if let Some((name, reason)) = line
+            .strip_prefix("SKIPPED ")
+            .and_then(|s| s.split_once(": "))
+        {
+            rows.entry(name).or_insert_with(|| vec!["unlisted".into()]);
+            skipped.entry(name).or_default().push(reason);
         }
     }
-    let mut text = String::from("test | PASS/FAIL/BLOCKED (id)\n");
+    let mut text = String::from("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n");
     let mut passed = cargo_ok && !rows.is_empty();
     if !passed {
         text.push_str("cargo | FAIL\n");
     }
     for (name, values) in rows {
-        let result = if values.len() == 1 {
-            values[0].as_str()
+        let result = if let Some(reasons) = skipped.get(name) {
+            if values == ["FAILED"] && reasons.len() == 1 && !reasons[0].trim().is_empty() {
+                format!("SKIPPED ({})", reasons[0])
+            } else {
+                "FAIL".into()
+            }
+        } else if values.len() == 1 {
+            grade(&values[0])
         } else {
-            "FAIL"
+            "FAIL".into()
         };
-        passed &= result != "FAIL";
+        passed &= result == "PASS" || result.starts_with("BLOCKED (");
         text.push_str(&format!("{name} | {result}\n"));
     }
     (text, passed)

@@ -230,8 +230,7 @@ impl ThrowawayHome {
                     .map_err(|_| "could not attach child stderr")?,
             );
         if let Some(operator) = operator {
-            // Runtime alone reads its fixture coordinates. The harness only
-            // supplies a path derived from another guarded, borrowed Home.
+            // The client reads fixture coordinates from a guarded, borrowed Home.
             command.env(
                 "ELASTOS_RUNTIME_COORDS_FILE",
                 operator.data().join("runtime-coords.json"),
@@ -332,7 +331,7 @@ struct CapturedChild {
 }
 
 /// Borrows the Home so its root cannot be removed while the child is owned.
-/// Captures stay in the root; operator output and attach data remain unread.
+/// Captures stay in the guarded root for fixture acceptance checks.
 pub struct RunningChild<'a> {
     home: &'a ThrowawayHome,
     spawned: CapturedChild,
@@ -470,9 +469,20 @@ impl<'a> RunningInstances<'a> {
 
     /// One deadline from before the first spawn. Poll all children so a slow
     /// member cannot hide a sibling's result. Drop kills any unfinished groups.
-    pub fn collect(mut self, bound: Duration) -> Result<Vec<Completion>> {
+    pub fn collect(self, bound: Duration) -> Result<Vec<Completion>> {
+        self.collect_with(bound, || Ok(()))
+    }
+
+    /// Service fixture approvals while the existing children wait. A controller
+    /// error uses the same group cleanup as any other collection failure.
+    pub fn collect_with(
+        mut self,
+        bound: Duration,
+        mut service: impl FnMut() -> Result<()>,
+    ) -> Result<Vec<Completion>> {
         let mut results: Vec<_> = self.children.iter().map(|_| None).collect();
         while results.iter().any(Option::is_none) {
+            service()?;
             for (child, result) in self.children.iter_mut().zip(&mut results) {
                 if result.is_none() {
                     if let Some(output) = child.try_output()? {

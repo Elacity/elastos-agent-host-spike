@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 pub struct Operator<'a> {
     pub child: RunningChild<'a>,
     home: &'a ThrowawayHome,
-    port: u16,
+    pub port: u16,
 }
 
 impl<'a> Operator<'a> {
