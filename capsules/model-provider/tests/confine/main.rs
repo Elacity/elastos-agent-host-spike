@@ -2407,8 +2407,9 @@ fn allow_rules_trace_to_declared_rights() {
 /// `startup-sysctl` is `(allow sysctl-read)`. Each pin must occur once. The
 /// pins are not read from the declared-rights fixture, so a fixture and a
 /// profile that widen together still fail. A wider grant fails even when the
-/// pin remains. A file write is checked even when the line contains no
-/// `file-read`. The test reads `confine.sb` from `CARGO_MANIFEST_DIR`. It
+/// pin remains. Every file operation, including `file*`, is checked even
+/// when the line contains no `file-read` or `file-write`. The test reads
+/// `confine.sb` from `CARGO_MANIFEST_DIR`. It
 /// starts no process and needs no sandbox.
 ///
 /// Falsifier: F-cc35a replaces the root pin with
@@ -2418,6 +2419,8 @@ fn allow_rules_trace_to_declared_rights() {
 /// F-cc35f keeps both pins and appends
 /// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile and
 /// to `startup-root-directory` in the declared-rights fixture.
+/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to both files
+/// while keeping both pins.
 #[test]
 fn platform_baseline_rules_stay_narrow() {
     // One check classifies every baseline refusal. The file scan below and
@@ -2454,14 +2457,15 @@ fn platform_baseline_rules_stay_narrow() {
 
         let root_pin = "(allow file-read-data (literal \"/\"))";
         let sysctl_pin = "(allow sysctl-read)";
-        // A file write is a root candidate even when the line has no
-        // file-read. Only the exact storage grants are exempt, so a filename
-        // that contains a parameter name does not exempt a wider rule.
+        // All file operations are root candidates, including file* and
+        // operations outside file-read/file-write. Only the exact storage
+        // grants are exempt, so a filename that contains a parameter name
+        // does not exempt a wider rule.
         let root_candidates: Vec<&str> = allow_lines
             .iter()
             .copied()
             .filter(|line| {
-                (line.contains("file-read") || line.contains("file-write"))
+                line.contains("file")
                     && !matches!(
                         *line,
                         "(allow file-read* (literal (param \"STORAGE_PARENT\")))"
@@ -2539,6 +2543,32 @@ fn platform_baseline_rules_stay_narrow() {
         &["(allow file-read* (literal \"/\"))", sysctl],
         "startup-root-directory operation widened: (allow file-read* (literal \"/\"))",
     );
+    // Broader file operations reach the same check with both pins present,
+    // including when a fixture declares the same extra grant.
+    for (line, reason) in [
+        (
+            "(allow file* (literal \"/tmp/cc35-wildcard\"))",
+            "startup-root-directory operation widened: (allow file* (literal \"/tmp/cc35-wildcard\"))",
+        ),
+        (
+            "(allow file-map-executable (literal \"/tmp/cc35-executable\"))",
+            "startup-root-directory operation widened: (allow file-map-executable (literal \"/tmp/cc35-executable\"))",
+        ),
+        (
+            "(allow file-ioctl (literal \"/tmp/cc35-ioctl\"))",
+            "startup-root-directory operation widened: (allow file-ioctl (literal \"/tmp/cc35-ioctl\"))",
+        ),
+        (
+            "(allow file-test-existence (literal \"/tmp/cc35-exists\"))",
+            "startup-root-directory operation widened: (allow file-test-existence (literal \"/tmp/cc35-exists\"))",
+        ),
+        (
+            "(allow file* (subpath (param \"STORAGE_ROOT\")))",
+            "startup-root-directory operation widened: (allow file* (subpath (param \"STORAGE_ROOT\")))",
+        ),
+    ] {
+        must_refuse(&[exec, root, line, sysctl, parent, storage], reason);
+    }
     // A write of the root path is an operation widen. The literal is still "/".
     must_refuse(
         &[root, "(allow file-write* (literal \"/\"))", sysctl],

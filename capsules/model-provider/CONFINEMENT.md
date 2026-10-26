@@ -539,8 +539,9 @@ profile does not grant".
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
   operation on the root read, or a wider operation or sysctl name on the
   sysctl read, fails the test even when those two lines remain, so a fixture
-  and a profile that widen together still fail. An added file write fails
-  as an operation widen when the line contains no `file-read`. The test
+  and a profile that widen together still fail. Every file operation reaches
+  the check, including `file*`, `file-map-executable`, `file-ioctl` and
+  `file-test-existence`. Each added operation fails with its reason. The test
   exempts only the exact parameter-bound storage grants. Literal filenames
   that contain parameter names still fail. Each refusal reason is asserted.
   The test reads `confine.sb` from disk. It starts no process and needs no
@@ -613,9 +614,8 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
 uses command `provider`. Each mutates `confine.sb` only, except the eighteen
-entries that edit `tests/confine/main.rs` and except F-cc35f, which mutates
-`confine.sb` and also appends
-`(allow file-write* (literal "/tmp/cc35-write-only"))` to
+entries that edit `tests/confine/main.rs` and except F-cc35f and F-cc35g,
+which each mutate `confine.sb` and also append their added grant to
 `startup-root-directory` in `tests/fixtures/confine/declared-rights.json`.
 The eighteen are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
@@ -678,6 +678,7 @@ allow_rules_trace_to_declared_rights.
 | F-cc35d | One line, `(allow file-read-data (literal "/tmp/STORAGE_PARENT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_PARENT`. |
 | F-cc35e | One line, `(allow file-read-data (literal "/tmp/PROVIDER_EXECUTABLE-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `PROVIDER_EXECUTABLE`. |
 | F-cc35f | Both startup pins stay. One line, `(allow file-write* (literal "/tmp/cc35-write-only"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The added file write is a wider operation while both pins remain. |
+| F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain, even with a matching declaration. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -691,6 +692,7 @@ the test reads confine.sb at runtime. Its startup recovery restores
 F-cc35b needs no rebuild: the test reads confine.sb at runtime.
 F-cc35c, F-cc35d and F-cc35e also read confine.sb at runtime and need no rebuild.
 F-cc35f needs no rebuild: the test reads confine.sb at runtime.
+F-cc35g needs no rebuild: the test reads confine.sb at runtime.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -698,7 +700,7 @@ suite fails, so a list run there is no evidence. Off macOS, when
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
-F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e and F-cc35f) are
+F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f and F-cc35g) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
