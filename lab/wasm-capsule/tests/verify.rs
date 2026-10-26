@@ -393,6 +393,44 @@ fn verifier_uses_manifest_entrypoint() {
 }
 
 #[test]
+fn verified_entrypoint_is_the_audited_module() {
+    let tmp = TempDir::new("verify-entrypoint-accessor");
+    let bundle = bundle_with(
+        &tmp,
+        "bundle",
+        &manifest_with_entrypoint("main.wasm"),
+        &[("capsule.wasm", MODULE), ("main.wasm", IMPORTING_MODULE)],
+    );
+    let key = fresh_key();
+    let sig = sign(&key, &bundle);
+
+    let value = verified(verify_bundle(&bundle, Some(&sig), &[did(&key)], &[env_f()]));
+    let entrypoint = value.entrypoint();
+    assert_eq!(
+        entrypoint.path, "main.wasm",
+        "not the manifest's entrypoint"
+    );
+    assert_eq!(
+        entrypoint.content, IMPORTING_MODULE,
+        "not the audited bytes"
+    );
+    assert_eq!(
+        audit(&entrypoint.content, &[env_f()]).expect("the audit passes it"),
+        value.imports(),
+        "the entrypoint is not the module the audit read"
+    );
+    let held = value
+        .entries()
+        .iter()
+        .find(|entry| entry.path == "main.wasm")
+        .expect("the checked entries hold main.wasm");
+    assert!(
+        std::ptr::eq(entrypoint, held),
+        "the entrypoint is not one of the checked entries"
+    );
+}
+
+#[test]
 fn verifier_preserves_upstream_refusals() {
     let tmp = TempDir::new("verify-upstream");
     let key = fresh_key();
@@ -640,6 +678,18 @@ fn verifier_has_one_check_path() {
     for other in ["verify_name_signature", "audit_component"] {
         assert!(!all.contains(other), "the tools crate uses {other}");
     }
+    // One manifest read: one parse in the whole crate, and one call of the
+    // reader beside its definition.
+    assert_eq!(
+        calls(&all, "from_slice"),
+        1,
+        "the tools crate parses a manifest in more than one place"
+    );
+    assert_eq!(
+        calls(&all, "manifest_entrypoint"),
+        2,
+        "the tools crate reads the manifest's entrypoint in more than one place"
+    );
 
     let code = verifier_code();
     let check = item(&code, "pub fn verify_checked(");
@@ -648,8 +698,16 @@ fn verifier_has_one_check_path() {
     let wrapper = item(&code, "pub fn verify_bundle(");
     assert_eq!(calls(wrapper, "checked_bundle"), 1, "the walk");
     assert_eq!(calls(wrapper, "verify_checked"), 1, "the delegation");
-    for own in ["verify_checked_signature", "audit", "entrypoint_module"] {
+    for own in ["verify_checked_signature", "audit", "entrypoint_index"] {
         assert_eq!(calls(wrapper, own), 0, "verify_bundle calls {own} itself");
+    }
+    let accessor = item(&code, "pub fn entrypoint(");
+    for read in ["manifest_entrypoint", "from_slice", "entrypoint_index"] {
+        assert_eq!(
+            calls(accessor, read),
+            0,
+            "entrypoint() reads the manifest again: {read}"
+        );
     }
 }
 
@@ -677,6 +735,7 @@ fn verified_bundle_is_sealed() {
         [
             "cid",
             "entries",
+            "entrypoint",
             "imports",
             "verify_bundle",
             "verify_checked"
@@ -703,13 +762,16 @@ fn verified_bundle_is_sealed() {
     for signature in [
         "pub fn cid(&self) -> LabCid {",
         "pub fn entries(&self) -> &[BundleEntry] {",
+        "pub fn entrypoint(&self) -> &BundleEntry {",
         "pub fn imports(&self) -> &[DeclaredImport] {",
     ] {
         assert!(accessors.contains(signature), "missing {signature}");
     }
     let literal = item(&code, "pub fn verify_checked(");
     assert!(
-        literal.contains("Ok(VerifiedBundle { checked, imports })"),
+        literal.contains(
+            "Ok(VerifiedBundle {\n        checked,\n        entrypoint,\n        imports,\n    })"
+        ),
         "verify_checked does not make the value"
     );
 }

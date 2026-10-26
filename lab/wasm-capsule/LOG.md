@@ -149,3 +149,27 @@
   `["review\"note.md:1: <label>"]` (label elided here). By hand on the falsifier's plant: the base `edc31fb23` test
   passed, this test failed with `["LOG.md:139: <label>"]`, and with a `LOG.md.falsify-original` copy beside it and only
   the docs label check off it passed (no false catch). `git hash-object LOG.md` was `5bc57325` before and after.
+- wc-005a (task 014): `VerifiedBundle::entrypoint()` (the verifier keeps the index its one manifest read found;
+  `entrypoint_module` became `entrypoint_index`) and `wasm_capsule_tools::run::run_engine` (`tools/src/run.rs`), a
+  library function, no command. It refuses a relative engine path, then a work root that is not absolute, missing,
+  not its own canonical path or not a folder; makes `<root>/<engine>` with mode `0o700` (an existing name refused);
+  writes only `entrypoint()`'s in-memory bytes as `module.wasm` with `bundle::write_new_file`; starts the engine once
+  as `run --invoke digest <absolute module> 1592590337` (006's discovered syntax, unchanged) with stdin null and an
+  empty environment. No closure staging, no re-name, no seal. Spec-check FIX folded in: the isolation claim is scoped
+  to the guest and the argv, the race limit covers folder swaps, and the tests `run_directory_is_private_and_new`,
+  `runner_io_refusals_keep_path_and_cause`, `runner_uses_only_explicit_inputs`, `runner_reuses_shared_writer` and
+  the one-manifest-parse check in `verifier_has_one_check_path` were added; F-WC4-SEALED-NEW and -SECOND-AUDIT
+  re-anchored. 11 tests in `tests/run.rs` plus `verified_entrypoint_is_the_audited_module`. Real run:
+  `wasmtime` and `wasmer` (Homebrew, `/opt/homebrew/bin`) each printed `230101071268130872` for `1592590337`.
+  Falsifiers: 18 F-WC5 and F-WC4-ENTRYPOINT-ACCESSOR, -ENTRYPOINT-REPARSE; six wc-004 entries re-anchored. Canonical
+  runner, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`:
+  "summary: 41 CAUGHT of 41", exit 0 (runner-caught; each named test passed unmutated first). `tools/src/run.rs` is
+  not a runner recovery target (R2), so a killed run does not restore it.
+- wc-005a round 2 (task 014, Codex FAIL, fail-closed): the work root's folder check used `Path::is_dir`, which turns
+  every metadata error into "not a folder". Now `run::work_root_folder` takes `fs::metadata` of the canonical path,
+  and a failed read is its own reason, `the work root's metadata cannot be read: <OS error>`, path kept;
+  `runner_io_refusals_keep_path_and_cause` asserts it as an exact string and checks the runner calls that step on the
+  canonical path's metadata with no second `is_dir`. FOLLOWUP done: new test `engine_stdin_is_null` (a stand-in
+  checks `/dev/stdin -ef /dev/null`). New falsifiers F-WC5-IO-ROOT-METADATA, -IO-ROOT-IS-DIR, -STDIN-PIPED. Canonical
+  runner, `... --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`: "summary: 44 CAUGHT of 44", exit 0, no backup
+  left (runner-caught; each named test passed unmutated first). `run.rs` is still not a recovery target (R2).
