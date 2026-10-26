@@ -387,11 +387,27 @@ impl Home {
 
     /// `elastos run <capsule>` against this home's operator, within `bound`.
     pub fn run(&self, capsule: &Path, bound: Duration) -> Run {
+        self.run_until(capsule, bound, |_| false)
+    }
+
+    /// Same as [`Home::run`], but stop as soon as `stop` is true. Used so a
+    /// request that left the manifest bound (and went pending) fails on the
+    /// host record instead of waiting out the client bound.
+    pub fn run_until(
+        &self,
+        capsule: &Path,
+        bound: Duration,
+        mut stop: impl FnMut(&Self) -> bool,
+    ) -> Run {
         let mut spawned = self.spawn(&runtime().path, &["run", capsule.to_str().unwrap()]);
         let started = Instant::now();
         let status = loop {
             if let Some(status) = spawned.child.try_wait().expect("wait for elastos run") {
                 break Some(status);
+            }
+            if stop(self) {
+                stop_group(spawned.child.id());
+                break spawned.child.wait().ok();
             }
             if started.elapsed() >= bound {
                 break None;
@@ -407,6 +423,19 @@ impl Home {
             stdout: read_capture(&mut spawned.stdout),
             stderr: read_capture(&mut spawned.stderr),
         }
+    }
+
+    /// Host-side `request_capability` receipts the Runtime wrote under this
+    /// Home. The guest has no filesystem and cannot add a row.
+    pub fn capability_requests(&self) -> Vec<CapabilityRequestRecord> {
+        let path = self.data.join("auth-state.json");
+        for _ in 0..8 {
+            match read_capability_requests(&path) {
+                Some(records) => return records,
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        Vec::new()
     }
 
     pub fn finish(mut self) {
@@ -429,6 +458,37 @@ impl Drop for Home {
             }
         }
     }
+}
+
+/// One Runtime-authored `request_capability` receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityRequestRecord {
+    pub action: String,
+    pub resource: String,
+    pub code: String,
+}
+
+fn read_capability_requests(path: &Path) -> Option<Vec<CapabilityRequestRecord>> {
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let audit = value.get("audit")?.as_array()?;
+    Some(
+        audit
+            .iter()
+            .filter(|event| {
+                event.get("event_type").and_then(|v| v.as_str())
+                    == Some("component.capability.request")
+            })
+            .filter_map(|event| {
+                let reason = event.get("reason")?.as_str()?;
+                let (action, resource) = reason.split_once(' ')?;
+                Some(CapabilityRequestRecord {
+                    action: action.to_string(),
+                    resource: resource.to_string(),
+                    code: event.get("result")?.as_str()?.to_string(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn read_capture(file: &mut File) -> String {

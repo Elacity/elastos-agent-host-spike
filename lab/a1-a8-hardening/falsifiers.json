@@ -1,5 +1,5 @@
 {
-  "note": "Apply one entry at a time, run its named tests, then restore the exact bytes. 'lab' entries edit files under lab/a1-a8-hardening. 'runtime-local' entries edit Runtime source temporarily on the test machine only; restore them byte-identical (compare SHA-256) and never commit them. A build failure, harness error or timeout does not count as caught: the named test must run and fail at a listed fail_needle (default: the refusal assertion).",
+  "note": "Apply one entry at a time, run its named tests, then restore the exact bytes. 'lab' entries edit files under lab/a1-a8-hardening. 'runtime-local' entries edit Runtime source temporarily on the test machine only; restore them byte-identical (compare SHA-256) and never commit them. A build failure, harness error or timeout does not count as caught: the named test must run and fail at a listed fail_needle (default: the refusal assertion). exit:timeout and exit:None are NOT CAUGHT.",
   "falsifiers": [
     {
       "id": "F-A1a",
@@ -38,6 +38,9 @@
       "title": "declare the fake host key in the staged agent-host manifest, removing the manifest denial",
       "command": "lab",
       "expect": "caught",
+      "fail_needles": [
+        "Runtime must record manifest_capability_denied"
+      ],
       "edits": [
         {
           "file": "tests/a8_agent_host_host_key.rs",
@@ -54,6 +57,9 @@
       "title": "remove the Runtime's manifest-authority refusal for capability requests",
       "command": "runtime-local",
       "expect": "caught",
+      "fail_needles": [
+        "Runtime must record manifest_capability_denied"
+      ],
       "edits": [
         {
           "file": "elastos/crates/elastos-server/src/resource_bridge.rs",
@@ -76,7 +82,7 @@
       "edits": [
         {
           "file": "tests/a8_agent_host_host_key.rs",
-          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: SURFACE_OLD,\n                new: SURFACE_NEW,\n            },\n        ],\n    )\n}",
+          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n        ],\n    )\n}",
           "new": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    const ANCHOR: &str = \"        let _identity = elastos::bus::identity::context();\\n\";\n    let injected_source = format!(\n        \"{ANCHOR}{}\",\n        include_str!(\"../fixtures/forged-runtime-sentence.txt\").replace(\"@RESOURCE@\", resource)\n    );\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[Edit {\n            file: \"src/lib.rs\",\n            old: ANCHOR,\n            new: &injected_source,\n        }],\n    )\n}"
         }
       ],
@@ -95,8 +101,84 @@
       "edits": [
         {
           "file": "tests/a8_agent_host_host_key.rs",
-          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: SURFACE_OLD,\n                new: SURFACE_NEW,\n            },\n        ],\n    )\n}",
+          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n        ],\n    )\n}",
           "new": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    const ANCHOR: &str = \"        let _identity = elastos::bus::identity::context();\\n\";\n    let injected_source = format!(\n        \"{ANCHOR}{}\",\n        include_str!(\"../fixtures/agent-host-injection.txt\").replace(\"@RESOURCE@\", resource)\n    );\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[Edit {\n            file: \"src/lib.rs\",\n            old: ANCHOR,\n            new: &injected_source,\n        }],\n    )\n}"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-skip-guards",
+      "title": "A-skip-guards: drop the host_path special-case and the JOURNAL_ROOT guard deletion",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "Runtime must record manifest_capability_denied"
+      ],
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n",
+          "new": "            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-piece-forge",
+      "title": "B-piece-forge: guest builds the Internal sentence from split strings under black_box",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "Runtime must record manifest_capability_denied"
+      ],
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n        ],\n    )\n}",
+          "new": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    const ANCHOR: &str = \"        let _identity = elastos::bus::identity::context();\\n\";\n    let injected_source = format!(\n        \"{ANCHOR}{}\",\n        include_str!(\"../fixtures/piece-forge.txt\").replace(\"@RESOURCE@\", resource)\n    );\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[Edit {\n            file: \"src/lib.rs\",\n            old: ANCHOR,\n            new: &injected_source,\n        }],\n    )\n}"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-wasm-bus-only",
+      "title": "C-wasm-bus-only: claim the shipped WasmBus prints the Internal sentence",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "expected the Runtime Internal sentence on stderr"
+      ],
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "    assert_eq!(\n        actions,\n        [\"write\", \"read\"],\n        \"Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}\"\n    );",
+          "new": "    let internal = format!(\n        \"Error: Component capsule failed: Compute error: Component capsule denied: BusError::Internal(\\\"capsule manifest does not declare authority for {resource}\\\")\"\n    );\n    assert!(\n        run.has_line(&internal),\n        \"expected the Runtime Internal sentence on stderr; stderr:\\n{}\",\n        run.stderr\n    );\n    assert_eq!(\n        actions,\n        [\"write\", \"read\"],\n        \"Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}\"\n    );"
+        }
+      ],
+      "tests": [
+        "agent_host_host_key_read_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-direct-request",
+      "title": "D-direct-request: guest asks capabilities::request after identity, skipping request_journal_grants",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "Runtime must record manifest_capability_denied"
+      ],
+      "edits": [
+        {
+          "file": "tests/a8_agent_host_host_key.rs",
+          "old": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    let journal_new =\n        format!(\"    let _ = (agent_id, task_id);\\n    Ok(\\\"{resource}\\\".to_string())\");\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[\n            Edit {\n                file: \"src/lib.rs\",\n                old: HOST_PATH_OLD,\n                new: HOST_PATH_NEW,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: JOURNAL_OLD,\n                new: &journal_new,\n            },\n            Edit {\n                file: \"src/lib.rs\",\n                old: REQUEST_GUARD_OLD,\n                new: REQUEST_GUARD_NEW,\n            },\n        ],\n    )\n}",
+          "new": "fn build_injected(resource: &str) -> a1_a8_hardening::Built {\n    const ANCHOR: &str = \"        let _identity = elastos::bus::identity::context();\\n\";\n    let injected_source = format!(\n        \"{ANCHOR}{}\",\n        include_str!(\"../fixtures/direct-request.txt\").replace(\"@RESOURCE@\", resource)\n    );\n    build_component(\n        AGENT_HOST,\n        INPUTS,\n        \"agent-host\",\n        \"-Dwarnings\",\n        &[Edit {\n            file: \"src/lib.rs\",\n            old: ANCHOR,\n            new: &injected_source,\n        }],\n    )\n}"
         }
       ],
       "tests": [

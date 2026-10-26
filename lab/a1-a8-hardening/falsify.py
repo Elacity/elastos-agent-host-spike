@@ -61,9 +61,15 @@ def run_test(name, entry):
     output = result.stdout + result.stderr
     evidence = [line for line in output.splitlines() if line.startswith(("a1 ", "a8 "))]
     ran_and_failed = f"test {name} ... FAILED" in output
+    timed_out = (
+        "exit:timeout" in output
+        or "exit:None" in output
+        or "the client hit the" in output and "bound with no status" in output
+    )
     caught = (
         result.returncode != 0
         and ran_and_failed
+        and not timed_out
         and any(needle in output for needle in needles(entry))
     )
     return caught, result.returncode, evidence, output

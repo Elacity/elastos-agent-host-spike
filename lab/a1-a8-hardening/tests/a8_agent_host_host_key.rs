@@ -2,7 +2,7 @@
 //! and the Runtime refuses before any provider or operator decision.
 
 use a1_a8_hardening::{build_component, component_imports, contains_bytes, repository, sha256};
-use a1_a8_hardening::{runtime, Edit, Home, Operator, RUNTIME_ALLOWLIST};
+use a1_a8_hardening::{runtime, CapabilityRequestRecord, Edit, Home, Operator, RUNTIME_ALLOWLIST};
 use std::fs;
 use std::time::Duration;
 
@@ -14,14 +14,13 @@ const BOUND: Duration = Duration::from_secs(60);
 const RUNTIME_REFUSAL_PREFIX: &[u8] = b"capsule manifest does not declare authority";
 const EARLY_INJECTION_MARKER: &[u8] = b"agent-host read the host key";
 const HOST_KEY_MARKER: &[u8] = b".ssh/id_ed25519";
+const MANIFEST_DENIED: &str = "manifest_capability_denied";
 
 const HOST_PATH_OLD: &str = "fn host_path(text: &str) -> bool {\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').any(|part| part == \"..\")\n}";
 const HOST_PATH_NEW: &str = "fn host_path(text: &str) -> bool {\n    if text == \"localhost://Public/../../../../.ssh/id_ed25519\" {\n        return false;\n    }\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').any(|part| part == \"..\")\n}";
 const JOURNAL_OLD: &str = "    Ok(format!(\"{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal\"))";
 const REQUEST_GUARD_OLD: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {\n        return JournalGrants {\n            write: None,\n            read: None,\n        };\n    }\n";
 const REQUEST_GUARD_NEW: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n";
-const SURFACE_OLD: &str = "        let grants = request_journal_grants(&mut WasmBus, &cursor);\n";
-const SURFACE_NEW: &str = "        let grants = request_journal_grants(&mut WasmBus, &cursor);\n        {\n            use elastos::bus::capabilities;\n            use elastos::bus::types::CapabilityRequest;\n            capabilities::request(&CapabilityRequest {\n                resource: cursor.resource.clone(),\n                actions: vec![\"read\".into()],\n                reason: \"Agent Host task journal\".into(),\n            })?;\n        }\n";
 
 fn build_injected(resource: &str) -> a1_a8_hardening::Built {
     let journal_new =
@@ -47,13 +46,16 @@ fn build_injected(resource: &str) -> a1_a8_hardening::Built {
                 old: REQUEST_GUARD_OLD,
                 new: REQUEST_GUARD_NEW,
             },
-            Edit {
-                file: "src/lib.rs",
-                old: SURFACE_OLD,
-                new: SURFACE_NEW,
-            },
         ],
     )
+}
+
+fn denied_actions(records: &[CapabilityRequestRecord], resource: &str) -> Vec<&str> {
+    records
+        .iter()
+        .filter(|record| record.resource == resource && record.code == MANIFEST_DENIED)
+        .map(|record| record.action.as_str())
+        .collect()
 }
 
 #[test]
@@ -106,6 +108,19 @@ fn agent_host_host_key_read_is_refused() {
         !guest_has_early,
         "the injected guest must not be the early-return host-key injection"
     );
+    assert!(
+        HOST_PATH_NEW.contains("text.split('/').any(|part| part == \"..\")"),
+        "the injection must keep the .. check for every other path"
+    );
+    assert_eq!(
+        HOST_PATH_NEW.matches("return false").count(),
+        1,
+        "host_path may fail closed only for the fake key"
+    );
+    assert!(
+        HOST_PATH_NEW.contains(&format!("if text == \"{resource}\"")),
+        "host_path may fail closed only for the fake key path"
+    );
 
     let home = Home::new();
     // Lexical check only: from a file-backed Public root under the data dir,
@@ -125,35 +140,70 @@ fn agent_host_host_key_read_is_refused() {
     let manifest = injected.manifest.clone();
     let capsule = home.stage("agent-host", &injected.bytes, &manifest);
     let operator = Operator::start(&home);
-    let run = home.run(&capsule, BOUND);
+    let run = home.run_until(&capsule, BOUND, |home| {
+        home.capability_requests()
+            .iter()
+            .any(|record| record.resource == resource && record.code != MANIFEST_DENIED)
+    });
+    let records = home.capability_requests();
     operator.stop();
 
-    let refusal = format!(
-        "Error: Component capsule failed: Compute error: Component capsule denied: BusError::Internal(\"capsule manifest does not declare authority for {resource}\")"
-    );
     let marker = &FAKE[..FAKE.len() - 1];
     let marker_absent = home
         .captures()
         .iter()
         .all(|capture| !contains_bytes(capture, marker));
     let unchanged = fs::read(&key).unwrap() == FAKE;
+    let actions = denied_actions(&records, resource);
+    let exit = match run.status {
+        None => "timeout".to_string(),
+        Some(status) => match status.code() {
+            Some(code) => format!("Some({code})"),
+            None => "signaled".to_string(),
+        },
+    };
     println!(
-        "a8 host key read: exit:{:?} refusal_line:{:?} marker_absent:{marker_absent} unchanged:{unchanged}",
-        run.status.and_then(|status| status.code()),
-        run.line_with("Error:")
+        "a8 host key read: exit:{exit} host_records:{records:?} marker_absent:{marker_absent} unchanged:{unchanged}"
     );
     assert!(marker_absent, "the fake key marker reached a capture");
     assert!(unchanged, "the fake key bytes changed");
     assert!(
-        run.status.is_some() && !run.exited_ok() && run.has_line(&refusal),
-        "expected nonzero exit and the exact manifest-bound refusal; stderr:\n{}",
+        run.status.is_some(),
+        "the client hit the {BOUND:?} bound with no status (timeout is not a catch); stderr:\n{}",
         run.stderr
+    );
+    assert!(
+        !run.exited_ok(),
+        "the guest must not exit 0 after the host-key ask; stderr:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        actions,
+        ["write", "read"],
+        "Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| record.resource == resource || record.code != MANIFEST_DENIED),
+        "the injection must fail only the fake key; host records: {records:?}"
     );
     assert_eq!(
         manifest, real_manifest,
         "the staged manifest must be the shipped agent-host manifest"
     );
     home.finish();
+}
+
+#[test]
+#[ignore = "needs runtime: WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible"]
+fn shipped_wasm_bus_prints_internal_sentence() {
+    panic!(
+        "needs runtime: request_journal_grants uses WasmBus, which maps BusError::Internal to \
+         BusFailure::Other; the guest then fails closed as Invalid(\"the journal append did not \
+         follow its grants\"). The Runtime authorship proof is the host-side \
+         manifest_capability_denied record, not this sentence"
+    );
 }
 
 #[test]

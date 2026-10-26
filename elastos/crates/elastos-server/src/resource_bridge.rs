@@ -276,6 +276,63 @@ fn manifest_denied_response(resource: &str) -> serde_json::Value {
     )
 }
 
+/// Host-side receipt for one `request_capability` bus call. The guest has no
+/// filesystem and cannot write this record. `result` is the structured code
+/// the bridge decided (`manifest_capability_denied`, `pending`, …).
+fn record_capability_request_event(
+    data_dir: &Path,
+    capsule_id: &str,
+    principal_id: Option<&str>,
+    resource: &str,
+    action: &str,
+    code: &str,
+) -> Result<()> {
+    let occurred_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    crate::auth::append_audit_event(
+        data_dir,
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:{}", random_hex(16)),
+            event_type: "component.capability.request".to_string(),
+            principal_id: principal_id.map(ToString::to_string),
+            proof_binding_id: None,
+            session_id: Some(capsule_id.to_string()),
+            challenge_id: None,
+            capsule_id: Some(capsule_id.to_string()),
+            result: code.to_string(),
+            reason: format!("{action} {resource}"),
+            occurred_at,
+            signer_did: None,
+            signature: None,
+        },
+    )
+}
+
+fn record_capability_request(
+    data_dir: Option<&Path>,
+    capsule_id: &str,
+    principal_id: Option<&str>,
+    resource: &str,
+    action: &str,
+    code: &str,
+) -> Result<()> {
+    match data_dir {
+        Some(data_dir) => record_capability_request_event(
+            data_dir,
+            capsule_id,
+            principal_id,
+            resource,
+            action,
+            code,
+        ),
+        None => Ok(()),
+    }
+}
+
 fn emit_component_invoke_audit(
     bridge_ctx: &BridgeContext,
     audit_id: &str,
@@ -970,11 +1027,27 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     resource,
                     ctx.principal_id.as_deref(),
                 ) {
+                    record_capability_request(
+                        ctx.data_dir.as_deref(),
+                        &ctx.capsule_id,
+                        ctx.principal_id.as_deref(),
+                        resource,
+                        action_str,
+                        "manifest_capability_denied",
+                    )?;
                     return Ok(serde_json::json!({
                         "id": id,
                         "response": manifest_denied_response(resource),
                     }));
                 }
+                record_capability_request(
+                    ctx.data_dir.as_deref(),
+                    &ctx.capsule_id,
+                    ctx.principal_id.as_deref(),
+                    resource,
+                    action_str,
+                    "pending",
+                )?;
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
                 // Create a pending request — the shell decides whether to grant.
@@ -1377,11 +1450,27 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             }
             if !manifest_allows_resource(manifest_capabilities, resource, principal_id) {
+                record_capability_request(
+                    audit_data_dir,
+                    capsule_id,
+                    principal_id,
+                    resource,
+                    action_str,
+                    "manifest_capability_denied",
+                )?;
                 return Ok(serde_json::json!({
                     "id": id,
                     "response": manifest_denied_response(resource),
                 }));
             }
+            record_capability_request(
+                audit_data_dir,
+                capsule_id,
+                principal_id,
+                resource,
+                action_str,
+                "pending",
+            )?;
 
             let resp = client
                 .post(api_base.join("/api/capability/request")?)
@@ -3091,6 +3180,16 @@ mod tests {
             .collect()
     }
 
+    fn remote_capability_audit(data_dir: &Path) -> Vec<(String, String, String)> {
+        crate::auth::load_auth_state(data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.capability.request")
+            .map(|event| (event.event_type, event.result, event.reason))
+            .collect()
+    }
+
     fn remote_invoke_line(id: u64, operation: &str, uri: &str, token: &str) -> String {
         serde_json::json!({
             "id": id,
@@ -3167,6 +3266,46 @@ mod tests {
             assert_eq!(new[0].2, new[1].2);
             assert_eq!(response["response"]["audit"], new[1].2.as_str());
         }
+    }
+
+    /// A capability refusal is a host-side audit record the guest cannot mint.
+    /// The structured code is `manifest_capability_denied`, keyed to the
+    /// action and resource. Nothing listens on the API URL, so a request that
+    /// got past the bound would fail to connect.
+    #[tokio::test]
+    async fn attached_bridge_capability_requests_are_audited() {
+        let temp = tempfile::tempdir().unwrap();
+        let resource = "localhost://Public/../../../../.ssh/id_ed25519";
+        let response = handle_remote_request_with_audit_dir(
+            &serde_json::json!({
+                "id": 21,
+                "request": {
+                    "type": "request_capability",
+                    "resource": resource,
+                    "action": "read",
+                    "reason": "Agent Host task journal",
+                }
+            })
+            .to_string(),
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &["localhost://Users/self/.AppData/Agents/agent-host/*".to_string()],
+            None,
+            Some(temp.path()),
+        )
+        .await
+        .expect("manifest refusal must not reach HTTP");
+        assert_eq!(response["response"]["code"], "manifest_capability_denied");
+        let events = remote_capability_audit(temp.path());
+        assert_eq!(
+            events,
+            [(
+                "component.capability.request".to_string(),
+                "manifest_capability_denied".to_string(),
+                format!("read {resource}"),
+            )]
+        );
     }
 
     /// A bad API URL is found after the "requested" record and leaves a

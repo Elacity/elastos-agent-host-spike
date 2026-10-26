@@ -1,0 +1,9 @@
+        {
+            use elastos::bus::capabilities;
+            use elastos::bus::types::CapabilityRequest;
+            capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["read".into()],
+                reason: "Agent Host task journal".into(),
+            })?;
+        }

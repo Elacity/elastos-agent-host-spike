@@ -9,8 +9,10 @@ review cannot take them back for want of evidence:
   the agent-conformance probe. This lane repeats the refusal with the
   agent-host component itself.
 
-The Runtime owns admission and grants. These tests only build, stage and
-launch, then read what the Runtime prints. Nothing here changes Runtime code.
+The Runtime owns admission and grants. These tests build, stage and launch,
+then read the Runtime's host-side receipts. The guest cannot write those
+receipts. A small Runtime change records each `request_capability` in the
+Home's signed audit as `component.capability.request`.
 
 ## Rows
 
@@ -18,6 +20,7 @@ launch, then read what the Runtime prints. Nothing here changes Runtime code.
 | --- | --- | --- |
 | A1 | `wasi_import_is_refused_at_admission` | PASS |
 | A8 | `agent_host_host_key_read_is_refused` | PASS |
+| A8 | `shipped_wasm_bus_prints_internal_sentence` | NEEDS RUNTIME |
 | A8 | `shipped_agent_host_bytes_read_host_key` | BLOCKED (AC-002-ARGS) |
 
 [LOG.md](LOG.md) has the commands, hashes and output of each run.
@@ -74,11 +77,8 @@ The test builds the agent-host twice from a copy of `examples/agent-host`:
   one resource: `host_path` returns false only for the fake key (other
   `..` and `/` checks stay), `request_journal_grants` no longer returns empty
   when the resource is outside `JOURNAL_ROOT`, and `journal_resource` names
-  `localhost://Public/../../../../.ssh/id_ed25519`. After that function asks
-  through `WasmBus`, the copy also `?`s the same `capabilities::request` so
-  the Runtime sentence is visible. The shipped adapter maps `BusError::Internal`
-  to `BusFailure::Other` and would exit 0 with empty grants; that surface is
-  a Runtime change, not a lab one.
+  `localhost://Public/../../../../.ssh/id_ed25519`. The copy then asks
+  through the shipped `WasmBus` only. There is no extra `capabilities::request?`.
 
 The test requires the injected build to keep the shipped import list (all five
 `elastos:bus` interfaces) and to run with the shipped manifest bytes. The
@@ -88,24 +88,32 @@ The shipped guest bytes must omit the fake key path. It puts a fake key with
 an obvious marker at `<home>/.ssh/id_ed25519`. With `Public` at
 `<data dir>/Public` (the layout the agent-conformance lane records), four
 parent segments name that file on both Linux and macOS; the test checks this
-depth lexically and never resolves the path. The run must exit nonzero with
-this exact line:
+depth lexically and never resolves the path.
 
-```text
-Error: Component capsule failed: Compute error: Component capsule denied: BusError::Internal("capsule manifest does not declare authority for localhost://Public/../../../../.ssh/id_ed25519")
-```
+Authorship is a host-side receipt. The Runtime writes one signed
+`component.capability.request` audit row per bus call, with the structured
+code `manifest_capability_denied` and the action plus resource. The guest
+has no filesystem and cannot add a row. The test requires write and then
+read for that one fake key, which is what `request_journal_grants` asks.
+A guest that only prints the Internal sentence, or that asks once after
+`identity::context()`, fails that record. `host_path` still treats every
+other `..` or `/` path as a host path.
 
-The fake key bytes must be unchanged and the marker must be absent from every
-operator and client capture. The refusal is the manifest bound in
-`elastos/crates/elastos-server/src/resource_bridge.rs` (`request_capability`),
-the same reason the probe proof cites.
+The run must exit nonzero. The fake key bytes must be unchanged and the
+marker must be absent from every operator and client capture. A timeout
+(`exit:timeout` / `exit:None`) is not a catch.
 
-The guest bytes omit the refusal sentence, so the line in stderr is the
-Runtime's. `elastos:bus@v1` gives a component no launch arguments, so the
-unmodified bytes still cannot ask for a host key. The BLOCKED row records
-that case. [fixtures/agent-host-injection.txt](fixtures/agent-host-injection.txt)
-and [fixtures/forged-runtime-sentence.txt](fixtures/forged-runtime-sentence.txt)
-are the two #316 plants, used only by F-A8-early and F-A8-forge.
+`WasmBus` still maps `BusError::Internal` to `BusFailure::Other`, so the
+path-specific Internal sentence is not the pass criterion. That claim is
+the NEEDS RUNTIME row. `elastos:bus@v1` gives a component no launch
+arguments, so the unmodified bytes still cannot ask for a host key. The
+BLOCKED row records that case.
+
+[fixtures/agent-host-injection.txt](fixtures/agent-host-injection.txt) and
+[fixtures/forged-runtime-sentence.txt](fixtures/forged-runtime-sentence.txt)
+are the two #316 plants. [fixtures/piece-forge.txt](fixtures/piece-forge.txt)
+and [fixtures/direct-request.txt](fixtures/direct-request.txt) are the #356
+plants.
 
 ## Run it
 
@@ -148,14 +156,21 @@ when each test fails at its refusal assertion.
 | F-A8-runtime | removes the Runtime's manifest-authority refusal | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-forge | guest returns the Runtime sentence itself and only mentions the bus under `black_box` | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-early | restores the early-return injection at the start of `run()` | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-skip-guards | A-skip-guards: drop the host_path special-case and the JOURNAL_ROOT guard deletion | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-piece-forge | B-piece-forge: guest builds the Internal sentence from split strings | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-wasm-bus-only | C-wasm-bus-only: claim the shipped WasmBus prints the Internal sentence | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-direct-request | D-direct-request: guest asks `capabilities::request` after identity | `agent_host_host_key_read_is_refused` | CAUGHT |
 
 Under F-A1-runtime the Runtime still refused the WASI build, through its
 core-module import check, with a different reason; the exact-reason assertion
-caught the change. Under F-A8a and F-A8-runtime the request went on to the
-operator and stayed pending until the client gave up after 30 seconds.
+caught the change. Under F-A8a and F-A8-runtime the request leaves the
+manifest bound; the host record is `pending` and the test fails on that
+record, without waiting out the client bound. A timeout is NOT CAUGHT.
 F-A8-forge fails before the operator starts, because the guest bytes hold
 the Runtime sentence. F-A8-early fails the same way on the early-return
-marker. [LOG.md](LOG.md) has the exact lines.
+marker. The four #356 plants fail on the host-side write-then-read
+receipt, except F-A8-wasm-bus-only, which fails when it requires the
+Internal sentence on stderr. [LOG.md](LOG.md) has the exact lines.
 
 `runtime-local` entries edit Runtime source on the test machine for one run.
 They are restored byte-identical and never committed.
@@ -168,12 +183,13 @@ They are restored byte-identical and never committed.
 - A8 covers one route (a Bus read) to one fake file outside the Home roots,
   with the grant-path guards failed in a build copy. The unmodified
   agent-host bytes are BLOCKED.
-- The path-specific reason is visible because the copy `?`s
-  `capabilities::request`. The shipped `WasmBus` drops that text. That
-  surface is NEEDS RUNTIME.
-- A8 does not query the operator's pending list. The exact manifest-bound
-  reason shows the bridge refused before it sent the request on.
+- The shipped `WasmBus` still maps `BusError::Internal` to `BusFailure::Other`.
+  That visible-sentence claim is NEEDS RUNTIME and stays out of the pass
+  column.
+- A8 does not query the operator's pending list. The host-side
+  `manifest_capability_denied` record shows the bridge refused before it
+  sent the request on.
 - `elastos run` for a component also opens `/tmp/elastos/storage` (known as
   AC-006-STORAGE in the agent-conformance lane). This harness does not clean it.
-- Linux x86_64 only on this run. The macOS data-dir rule is written. macOS is
-  NOT RUN until Sash runs it.
+- Linux x86_64 only on this run. The macOS data-dir rule is written. macOS,
+  aarch64 and Jetson are NOT RUN.
