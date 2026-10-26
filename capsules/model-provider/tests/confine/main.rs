@@ -960,6 +960,43 @@ fn model_trace_refuses_a_root_wide_storage_read() {
         model_is_root_wide_read("(allow file-read* (subpath \"/.\"))"),
         "a / . subpath is the host root"
     );
+    assert!(
+        model_is_root_wide_read("(allow file-read* (prefix \"\"))"),
+        "an empty prefix reads the whole host"
+    );
+}
+
+/// The model allow walk matches `allow_head`: `(ALLOW file*)` is visible.
+///
+/// Falsifier: restore the lowercase `(allow ` prefix; this test fails.
+#[test]
+fn model_allow_forms_see_casefolded_allows() {
+    let forms = model_allow_forms("(ALLOW file*)\n(allow file*)\n");
+    assert!(
+        forms.iter().any(|form| form == "(ALLOW file*)"),
+        "an uppercase allow must be visible: {forms:?}"
+    );
+    assert!(
+        forms.iter().any(|form| form == "(allow file*)"),
+        "a lowercase allow must stay visible: {forms:?}"
+    );
+}
+
+/// Storage comparison keeps param string case, as the shared allowlist does.
+///
+/// Falsifier: lowercase the whole form including strings; this test fails.
+#[test]
+fn model_storage_keeps_param_string_case() {
+    assert!(
+        model_is_permitted_storage_form(r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#),
+        "the shared storage parent rule is permitted"
+    );
+    assert!(
+        !model_is_permitted_storage_form(
+            r#"(allow file-read* (literal (param "storage_parent")))"#
+        ),
+        "a lowercased param string is not the shared storage rule"
+    );
 }
 
 /// The confined provider serves `init`, `status` and `offers_list`, and
@@ -2400,8 +2437,16 @@ fn model_allow_forms(profile: &str) -> Vec<String> {
     forms
 }
 
+fn model_allow_head(form: &str) -> bool {
+    let folded = form.to_ascii_lowercase();
+    let Some(rest) = folded.strip_prefix("(allow") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with([' ', '(', ')'])
+}
+
 fn collect_model_allows(form: &str, out: &mut Vec<String>) {
-    if form.starts_with("(allow ") {
+    if model_allow_head(form) {
         out.push(form.to_string());
     }
     let Some(inner) = form.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
@@ -2418,7 +2463,47 @@ fn model_push_separator(current: &mut String) {
     }
 }
 
+fn model_profile_holds_scheme_comment(profile: &str) -> bool {
+    let chars: Vec<char> = profile.chars().collect();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if !in_string && ch == '#' && i + 1 < chars.len() && matches!(chars[i + 1], ';' | '|') {
+            return true;
+        }
+        if !in_string && ch == ';' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn model_profile_characters(profile: &str) -> Vec<(char, bool)> {
+    assert!(
+        !model_profile_holds_scheme_comment(profile),
+        "the profile must refuse Scheme comment form #; or #|: {profile}"
+    );
     let mut characters = Vec::new();
     let mut in_string = false;
     let mut in_comment = false;
@@ -2556,17 +2641,35 @@ fn model_is_root_wide_read(form: &str) -> bool {
             .and_then(|inner| inner.strip_suffix('"'))
             .unwrap_or(raw);
         match kind.as_str() {
-            "literal" | "subpath" | "prefix" => model_path_normalises_to_root(arg),
+            "literal" | "subpath" => model_path_normalises_to_root(arg),
+            "prefix" => arg.is_empty() || model_path_normalises_to_root(arg),
             "regex" => arg.starts_with("^/"),
             _ => false,
         }
     })
 }
 
+fn model_casefold_profile_form(form: &str) -> String {
+    model_profile_characters(form)
+        .into_iter()
+        .map(|(ch, in_string)| {
+            if in_string {
+                ch
+            } else {
+                ch.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
 fn model_is_permitted_storage_form(form: &str) -> bool {
-    let folded = form.to_ascii_lowercase();
-    folded == r#"(allow file-read* (literal (param "storage_parent")))"#
-        || folded == r#"(allow file-read* file-write* (subpath (param "storage_root")))"#
+    let folded = model_casefold_profile_form(form);
+    folded
+        == model_casefold_profile_form(r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#)
+        || folded
+            == model_casefold_profile_form(
+                r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
+            )
 }
 
 fn model_path_normalises_to_root(path: &str) -> bool {

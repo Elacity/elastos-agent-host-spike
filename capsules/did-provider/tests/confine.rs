@@ -1493,6 +1493,9 @@ fn did_collect_nested_lists(form: &str, lists: &mut Vec<String>) {
 /// The one allowlist check for a did-provider profile. Used by
 /// `profile_denies_network` and by the review probe.
 fn profile_network_denied(profile: &str) -> Result<(), String> {
+    if profile_holds_scheme_comment(profile) {
+        return Err("must reject Scheme comment form #; or #|".to_string());
+    }
     let forms = profile_forms(profile);
     if forms.first().map(String::as_str) != Some("(version 1)") {
         return Err("the profile must start with (version 1)".to_string());
@@ -1619,7 +1622,47 @@ fn push_separator(current: &mut String) {
     }
 }
 
+fn profile_holds_scheme_comment(profile: &str) -> bool {
+    let chars: Vec<char> = profile.chars().collect();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if !in_string && ch == '#' && i + 1 < chars.len() && matches!(chars[i + 1], ';' | '|') {
+            return true;
+        }
+        if !in_string && ch == ';' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
+    assert!(
+        !profile_holds_scheme_comment(profile),
+        "the profile must refuse Scheme comment form #; or #|: {profile}"
+    );
     let mut characters = Vec::new();
     let mut in_string = false;
     let mut in_comment = false;

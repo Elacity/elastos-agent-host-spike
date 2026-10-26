@@ -1711,7 +1711,8 @@ fn filter_is_root_wide(filter: &str) -> bool {
         return false;
     };
     match kind.as_str() {
-        "literal" | "subpath" | "prefix" => path_normalises_to_root(&arg),
+        "literal" | "subpath" => path_normalises_to_root(&arg),
+        "prefix" => arg.is_empty() || path_normalises_to_root(&arg),
         "regex" => arg.starts_with("^/"),
         _ => false,
     }
@@ -1887,9 +1888,74 @@ fn rust_source_without_comments(source: &str) -> String {
 }
 
 /// Whether `source` holds a `#[test] fn <function>(` item that `cargo test
-/// -- --list` would list. A match inside a string, a comment, a
-/// `#[cfg(any())]` item, or an unused `macro_rules` body is not a citation.
+/// -- --list` would list. A match inside a string, a comment, a host-false
+/// `#[cfg(...)]` item, or an unused `macro_rules` body is not a citation.
+/// The live cargo list is the claim when the snippet compiles alone.
 fn rust_holds_cited_test(source: &str, function: &str) -> bool {
+    match rust_cargo_lists_test(source, function) {
+        Some(listed) => listed,
+        None => rust_source_holds_listed_test(source, function),
+    }
+}
+
+/// `cargo test -- --list` on a tiny crate whose only test file is `source`.
+/// `None` when cargo cannot compile that snippet alone, so the source walk
+/// is the fallback.
+fn rust_cargo_lists_test(source: &str, function: &str) -> Option<bool> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "elastos-cite-list-{}-{}",
+        std::process::id(),
+        stamp
+    ));
+    let tests = dir.join("tests");
+    if fs::create_dir_all(&tests).is_err() {
+        return None;
+    }
+    let written = fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"cite-list\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n",
+    )
+    .and_then(|_| fs::write(dir.join("lib.rs"), ""))
+    .and_then(|_| fs::write(tests.join("cited.rs"), source));
+    if written.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+        return None;
+    }
+    let listed = std::process::Command::new("cargo")
+        .args(["test", "--", "--list"])
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .output();
+    let _ = fs::remove_dir_all(&dir);
+    let listed = listed.ok()?;
+    if !listed.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&listed.stdout);
+    Some(
+        text.lines()
+            .any(|line| rust_list_line_names_test(line, function)),
+    )
+}
+
+/// Whether one `cargo test -- --list` line names `function` as a listed test.
+fn rust_list_line_names_test(line: &str, function: &str) -> bool {
+    let Some((name, rest)) = line.split_once(':') else {
+        return false;
+    };
+    if !rest.trim_start().starts_with("test") {
+        return false;
+    }
+    name.split("::").next_back() == Some(function)
+}
+
+/// Source walk used when cargo cannot list the snippet. Comments, unused
+/// macros, and host-false `#[cfg]` items are blanked first.
+fn rust_source_holds_listed_test(source: &str, function: &str) -> bool {
     let cleaned = rust_source_without_unlisted_items(source);
     let needle: Vec<char> = format!("fn {function}(").chars().collect();
     if needle.is_empty() {
@@ -1929,8 +1995,8 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
 }
 
 /// Rust source with comments removed, then `macro_rules` bodies and
-/// `#[cfg(any())]` items blanked. What remains is the text `cargo test --
-/// --list` can see as a compiled `#[test]`.
+/// host-false `#[cfg(...)]` items blanked. What remains is the text
+/// `cargo test -- --list` can see as a compiled `#[test]`.
 fn rust_source_without_unlisted_items(source: &str) -> String {
     let cleaned = rust_source_without_comments(source);
     let without_macros = rust_source_without_macro_rules(&cleaned);
@@ -2007,15 +2073,15 @@ fn rust_skip_macro_rules(chars: &[char], start: usize) -> usize {
     rust_skip_balanced(chars, i, open, close)
 }
 
-/// Blank each `#[cfg(any())]` item. A `#[test]` under that cfg is never
-/// compiled, so `cargo test -- --list` does not list it.
+/// Blank each host-false or always-false `#[cfg(...)]` item. A `#[test]`
+/// under that cfg is never compiled, so `cargo test -- --list` does not
+/// list it. Whitespace inside the attribute does not change the predicate.
 fn rust_source_without_cfg_any_items(source: &str) -> String {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
     let mut i = 0;
     let mut in_string = false;
     let mut escaped = false;
-    let cfg: Vec<char> = "#[cfg(any())]".chars().collect();
     while i < chars.len() {
         let ch = chars[i];
         if in_string {
@@ -2036,18 +2102,84 @@ fn rust_source_without_cfg_any_items(source: &str) -> String {
             i += 1;
             continue;
         }
-        if chars[i..].starts_with(&cfg) {
-            i += cfg.len();
-            while i < chars.len() && chars[i].is_whitespace() {
-                i += 1;
+        if let Some((end, pred)) = rust_cfg_attr_at(&chars, i) {
+            if rust_cfg_predicate_is_unlistable(&pred) {
+                i = end;
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                i = rust_skip_next_item(&chars, i);
+                continue;
             }
-            i = rust_skip_next_item(&chars, i);
-            continue;
         }
         out.push(ch);
         i += 1;
     }
     out
+}
+
+/// `#[cfg( ... )]` at `i`, with optional spaces inside the attribute.
+/// Returns the index after `]` and the predicate text.
+fn rust_cfg_attr_at(chars: &[char], i: usize) -> Option<(usize, String)> {
+    if i + 1 >= chars.len() || chars[i] != '#' || chars[i + 1] != '[' {
+        return None;
+    }
+    let mut j = i + 2;
+    while j < chars.len() && chars[j].is_whitespace() {
+        j += 1;
+    }
+    if j + 3 > chars.len() || !chars[j..].starts_with(&['c', 'f', 'g']) {
+        return None;
+    }
+    j += 3;
+    while j < chars.len() && chars[j].is_whitespace() {
+        j += 1;
+    }
+    if j >= chars.len() || chars[j] != '(' {
+        return None;
+    }
+    let inner_start = j + 1;
+    let after_paren = rust_skip_balanced(chars, j, '(', ')');
+    if after_paren <= inner_start {
+        return None;
+    }
+    let mut k = after_paren;
+    while k < chars.len() && chars[k].is_whitespace() {
+        k += 1;
+    }
+    if k >= chars.len() || chars[k] != ']' {
+        return None;
+    }
+    let pred: String = chars[inner_start..after_paren - 1].iter().collect();
+    Some((k + 1, pred))
+}
+
+/// Whether `cargo test -- --list` on this host leaves out items under this
+/// `cfg` predicate. Empty `any()`, `any(false)`, and a host-false OS cfg
+/// are unlistable. `test` stays listable.
+fn rust_cfg_predicate_is_unlistable(pred: &str) -> bool {
+    let compact: String = pred.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let folded = compact.to_ascii_lowercase();
+    matches!(
+        folded.as_str(),
+        "any()"
+            | "any(false)"
+            | "all()"
+            | "all(false)"
+            | "windows"
+            | "target_os=\"windows\""
+            | "macos"
+            | "target_os=\"macos\""
+            | "unix"
+            | "linux"
+            | "target_os=\"linux\""
+    ) && match folded.as_str() {
+        "windows" | "target_os=\"windows\"" => !cfg!(windows),
+        "macos" | "target_os=\"macos\"" => !cfg!(target_os = "macos"),
+        "unix" => !cfg!(unix),
+        "linux" | "target_os=\"linux\"" => !cfg!(target_os = "linux"),
+        _ => true,
+    }
 }
 
 /// Advance past the next Rust item: attributes, then `mod`/`fn`/`struct` or a
@@ -2405,6 +2537,9 @@ const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-prov
 /// match it; that Runtime bridge change is not built. Every refusal names the
 /// profile and the rule.
 fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
+    if profile_holds_scheme_comment(profile) {
+        return Err(format!("{name} must reject Scheme comment form #; or #|"));
+    }
     let forms = profile_forms(profile);
     if forms.first().map(String::as_str) != Some("(version 1)") {
         return Err(format!("{name} must start with (version 1)"));
@@ -4501,6 +4636,53 @@ fn operations_table_check_reports_each_missing_citation() {
         "the citation checker must agree with cargo test -- --list"
     );
 
+    let mut unlistable = vec![
+        (
+            "#[cfg(any( ))]",
+            "#[cfg(any( ))]\nmod unused {\n    #[test]\n    fn present_case() {}\n}\n",
+        ),
+        (
+            "#[cfg( any() )]",
+            "#[cfg( any() )]\n#[test]\nfn present_case() {}\n",
+        ),
+        (
+            "#[cfg(any(false))]",
+            "#[cfg(any(false))]\nmod unused {\n    #[test]\n    fn present_case() {}\n}\n",
+        ),
+    ];
+    if !cfg!(windows) {
+        unlistable.push((
+            "#[cfg(windows)]",
+            "#[cfg(windows)]\nmod unused {\n    #[test]\n    fn present_case() {}\n}\n",
+        ));
+    }
+    for (label, source) in unlistable {
+        fs::write(capsule.path().join("tests/confine.rs"), source)
+            .expect("unlistable cfg citation fixture");
+        let problems =
+            operations_table_citation_problems("fixture-provider", commented, capsule.path());
+        assert_eq!(
+            problems.len(),
+            1,
+            "{label} must not count as a citation: {problems:?}"
+        );
+        assert!(
+            problems[0].contains("present_case") && problems[0].contains("does not hold"),
+            "{label} must be refused: {}",
+            problems[0]
+        );
+        assert!(
+            !rust_holds_cited_test(source, "present_case"),
+            "{label} must not be listed by cargo test -- --list"
+        );
+    }
+
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "#[test]\nfn present_case() {}\n",
+    )
+    .expect("restore fixture integration test file");
+
     let missing_function = "## Operations and the rights they need\n\n| `tests/confine.rs::absent_case` |\n\n## Host-OS status\n";
     let problems =
         operations_table_citation_problems("fixture-provider", missing_function, capsule.path());
@@ -4893,6 +5075,46 @@ fn file_profile_contract_refuses_nested_grants() {
     assert!(
         refusal.contains("unknown top-level form") && refusal.contains("(foo bar)"),
         "the allowlist must refuse an unknown head: {refusal}"
+    );
+}
+
+/// A Scheme `#;` datum comment or `#|` block comment is refused so a later
+/// `(allow …)` cannot hide behind a `;` line-comment reader.
+///
+/// Falsifier: skip `profile_holds_scheme_comment`; this test fails because
+/// `#;(version 0)(allow file*)` then passes the contract.
+#[test]
+fn file_profile_contract_refuses_scheme_comments() {
+    let complete = contract_fixture_profile(true);
+    for extra in [
+        "#;(version 0)(allow file*)",
+        "#;(allow file*)",
+        "#| hidden |#(allow file*)",
+    ] {
+        let profile = format!("{complete}{extra}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a Scheme #; or #| form must be refused");
+        assert!(
+            refusal.contains("fixture-provider")
+                && (refusal.contains("#;") || refusal.contains("#|")),
+            "the refusal must name the Scheme comment form {extra}: {refusal}"
+        );
+    }
+}
+
+/// The leftover denylist helper treats an empty prefix as a host-wide read.
+///
+/// Falsifier: drop the empty-prefix arm in `filter_is_root_wide`; this test
+/// fails because `(prefix "")` then reads as narrow.
+#[test]
+fn leftover_root_wide_read_catches_empty_prefix() {
+    assert!(
+        is_root_wide_read(r#"(allow file-read* (prefix ""))"#),
+        "an empty prefix reads the whole host"
+    );
+    assert!(
+        is_root_wide_read(r#"(allow file-read* (prefix "/"))"#),
+        "a slash prefix is the host root"
     );
 }
 
@@ -5603,15 +5825,59 @@ fn push_separator(current: &mut String) {
     }
 }
 
+/// Whether `profile` holds a Scheme `#;` datum comment or `#|...|#` block
+/// comment outside a string. `sandbox-exec` reads those forms; this checker
+/// refuses them so a later `(allow …)` cannot hide behind a `#;` line comment.
+fn profile_holds_scheme_comment(profile: &str) -> bool {
+    let chars: Vec<char> = profile.chars().collect();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if !in_string && ch == '#' && i + 1 < chars.len() && matches!(chars[i + 1], ';' | '|') {
+            return true;
+        }
+        if !in_string && ch == ';' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// The characters the profile reader consumes, each marked with whether it
 /// sits inside a double-quoted string. A `;` outside a string starts a comment
 /// that runs to the end of its line; the newline that ends the comment stays
 /// as a separator, so a comment inside a form keeps its two tokens apart.
 /// Inside a string a backslash escapes the next character, so a `;`, `(` and
-/// `)` there stay text and a quote does not end the string. The reader reads
-/// no block comment and no `#` literal, because no profile holds either. An
-/// unclosed string is a refusal with its own reason.
+/// `)` there stay text and a quote does not end the string. A Scheme `#;`
+/// datum comment or `#|` block comment is refused, because a `;` reader would
+/// hide the next form and a `#;` reader would keep it. An unclosed string is
+/// a refusal with its own reason.
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
+    assert!(
+        !profile_holds_scheme_comment(profile),
+        "the profile must refuse Scheme comment form #; or #|: {profile}"
+    );
     let mut characters = Vec::new();
     let mut in_string = false;
     let mut in_comment = false;

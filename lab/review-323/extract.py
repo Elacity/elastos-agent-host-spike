@@ -45,9 +45,14 @@ WALLET_FNS = [
     "rust_source_without_macro_rules",
     "rust_skip_macro_rules",
     "rust_source_without_cfg_any_items",
+    "rust_cfg_attr_at",
+    "rust_cfg_predicate_is_unlistable",
     "rust_skip_next_item",
     "rust_skip_balanced",
     "rust_holds_cited_test",
+    "rust_cargo_lists_test",
+    "rust_list_line_names_test",
+    "rust_source_holds_listed_test",
     "rust_ident_boundary_before",
     "preceding_attributes_include_test",
     "skip_fn_qualifiers",
@@ -70,6 +75,7 @@ WALLET_FNS = [
     "contract_fixture_profile",
     "profile_forms",
     "push_separator",
+    "profile_holds_scheme_comment",
     "profile_characters",
 ]
 
@@ -92,8 +98,10 @@ WALLET_CONSTS = [
 
 MODEL_FNS = [
     "model_allow_forms",
+    "model_allow_head",
     "collect_model_allows",
     "model_push_separator",
+    "model_profile_holds_scheme_comment",
     "model_profile_characters",
     "model_profile_forms",
     "model_is_root_wide_read",
