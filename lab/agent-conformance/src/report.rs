@@ -23,6 +23,7 @@ fn grade(result: &str) -> String {
 #[derive(Default)]
 struct Evidence {
     rows: BTreeMap<String, Vec<String>>,
+    skipped: BTreeMap<String, Vec<String>>,
     identities: Identities,
     failures: Vec<String>,
     duplicate_inventory: bool,
@@ -60,14 +61,31 @@ impl Evidence {
                     .rows
                     .entry(name.into())
                     .or_insert_with(|| vec!["FAIL".into()]);
-                values.push(grade(result));
+                values.push(result.to_owned());
+            } else if let Some((name, reason)) = line
+                .strip_prefix("SKIPPED ")
+                .and_then(|s| s.split_once(": "))
+            {
+                if !test_name(name) {
+                    evidence.duplicate_inventory = true;
+                    continue;
+                }
+                evidence
+                    .rows
+                    .entry(name.into())
+                    .or_insert_with(|| vec!["unlisted".into()]);
+                evidence
+                    .skipped
+                    .entry(name.into())
+                    .or_default()
+                    .push(reason.into());
             }
         }
         evidence
     }
 
     fn table(&self, cargo_ok: bool) -> (String, bool) {
-        let mut text = String::from("test | PASS/FAIL/BLOCKED (id)\n");
+        let mut text = String::from("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n");
         if self.duplicate_inventory {
             text.push_str("cargo | FAIL\n");
             return (text, false);
@@ -77,15 +95,25 @@ impl Evidence {
             text.push_str("cargo | FAIL\n");
         }
         for (name, values) in &self.rows {
-            let result = if values.len() == 1 {
-                &values[0]
-            } else {
-                "FAIL"
-            };
-            passed &= result != "FAIL";
+            let result = self.result(name, values);
+            passed &= result == "PASS" || result.starts_with("BLOCKED (");
             text.push_str(&format!("{name} | {result}\n"));
         }
         (text, passed)
+    }
+
+    fn result(&self, name: &str, values: &[String]) -> String {
+        if let Some(reasons) = self.skipped.get(name) {
+            if values == ["FAILED"] && reasons.len() == 1 && !reasons[0].trim().is_empty() {
+                format!("SKIPPED ({})", reasons[0])
+            } else {
+                "FAIL".into()
+            }
+        } else if values.len() == 1 {
+            grade(&values[0])
+        } else {
+            "FAIL".into()
+        }
     }
 
     fn require_identities(&mut self) {
@@ -103,9 +131,8 @@ impl Evidence {
             // These are identity requirements of existing journeys, not a test
             // inventory or grader. Cargo still supplies both of those. Failed
             // and missing results require identities too; blocked rows do not run.
-            if values.len() == 1
-                && (values[0].starts_with("BLOCKED") || values[0].starts_with("SKIPPED"))
-            {
+            let result = self.result(name, values);
+            if result.starts_with("BLOCKED") || result.starts_with("SKIPPED") {
                 continue;
             }
             for effect in required_effects(name) {
@@ -128,6 +155,9 @@ fn test_name(name: &str) -> bool {
 fn required_effects(test: &str) -> &'static [&'static str] {
     match test {
         "default_activation_refuses_without_selector" => &["default"],
+        "granted_read_succeeds" => &["granted-read"],
+        "ungranted_sibling_read_is_refused" => &["sibling-read"],
+        "attach_secret_stays_in_memory" => &["granted-read", "sibling-read"],
         "ungranted_effect_is_refused" => &["read"],
         "ungranted_network_is_refused" => &["network"],
         "process_isolation::parallel_instances_complete_independently" => {
@@ -262,6 +292,7 @@ pub fn table(listed: &str, output: &str, cargo_ok: bool) -> (String, bool) {
 
 pub struct RunReport {
     pub receipt_written: bool,
+    pub receipt_bytes: Vec<u8>,
     pub table: String,
     pub passed: bool,
     pub failures: Vec<String>,
@@ -275,6 +306,27 @@ pub fn write_run(
     cargo_ok: bool,
     git: Result<GitIdentity, &str>,
     receipt: &Path,
+) -> RunReport {
+    let mut report = render_run(listed, output, cargo_ok, git);
+    let written = write_exclusive(receipt, &report.receipt_bytes);
+    report.receipt_written = written.is_ok();
+    if let Err(reason) = written {
+        report.table = report.table.replace(
+            "versions_receipt (A14) | PASS",
+            "versions_receipt (A14) | FAIL",
+        );
+        report.failures.push(reason);
+        report.passed = false;
+    }
+    report
+}
+
+/// The writer and credential acceptance use these same in-memory bytes.
+pub fn render_run(
+    listed: &str,
+    output: &str,
+    cargo_ok: bool,
+    git: Result<GitIdentity, &str>,
 ) -> RunReport {
     let mut evidence = Evidence::parse(listed, output);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
@@ -319,32 +371,36 @@ pub fn write_run(
         "scope": "process isolation; diagnostic results; capsule isolation remains blocked",
         "report": { "table": table, "sha256": sha256(table.as_bytes()) },
     });
-    let written = write_exclusive(receipt, &document);
-    let receipt_written = written.is_ok();
-    if let Err(reason) = written {
-        table = table.replace(
-            "versions_receipt (A14) | PASS",
-            "versions_receipt (A14) | FAIL",
-        );
-        evidence.failures.push(reason);
-    }
+    let receipt_bytes = serde_json::to_vec_pretty(&document)
+        .map(|mut bytes| {
+            bytes.push(b'\n');
+            bytes
+        })
+        .unwrap_or_else(|_| {
+            evidence
+                .failures
+                .push("receipt serialization failed".into());
+            Vec::new()
+        });
     RunReport {
-        receipt_written,
+        receipt_written: false,
+        receipt_bytes,
         table,
         passed: suite_ok && evidence.failures.is_empty(),
         failures: evidence.failures,
     }
 }
 
-fn write_exclusive(path: &Path, document: &serde_json::Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(document).map_err(|_| "receipt serialization failed")?;
+fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("receipt serialization failed".into());
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(|error| format!("receipt write failed: {:?}", error.kind()))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.write_all(b"\n"))
+    file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|error| format!("receipt write failed: {:?}", error.kind()))
 }

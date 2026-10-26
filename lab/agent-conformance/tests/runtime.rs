@@ -8,7 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const REFUSAL: &str = "This command requires a running runtime.";
 
@@ -186,19 +186,12 @@ fn fixture_operator_sockets_are_loopback_only() {
     let home = ThrowawayHome::new().unwrap();
     let mut operator =
         common::operator::Operator::start(&home).expect("install and start operator");
-    operator.ready().expect("operator readiness");
-    let first = operator.census().expect("first operator socket census");
-    let sampled = Instant::now();
-    while sampled.elapsed() < Duration::from_secs(3) {
-        operator
-            .require_alive()
-            .expect("operator stays alive between samples");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let second = operator.census().expect("second operator socket census");
-    operator.child.stop().expect("clean operator stop");
-    println!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped");
-    drop(operator);
+    let sampled = operator
+        .begin_check()
+        .expect("operator ready and first census");
+    operator
+        .finish_check(sampled)
+        .expect("final census and operator group stop");
     home.finish().unwrap();
 }
 

@@ -7,7 +7,7 @@ fn run_table_requires_cargo_results() {
     assert_eq!(
         table(listed, output, true),
         (
-            "test | PASS/FAIL/BLOCKED (id)\nblocked | BLOCKED (RT3)\nworks | PASS\n".into(),
+            "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\nblocked | BLOCKED (RT3)\nworks | PASS\n".into(),
             true
         )
     );
@@ -19,7 +19,10 @@ fn run_table_requires_cargo_results() {
     for output in ["", "test case ... ok\ntest case ... ok\n"] {
         assert_eq!(
             table("case: test\n", output, true),
-            ("test | PASS/FAIL/BLOCKED (id)\ncase | FAIL\n".into(), false)
+            (
+                "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncase | FAIL\n".into(),
+                false
+            )
         );
     }
     assert!(!table(listed, output, false).1);
@@ -34,7 +37,7 @@ fn run_table_requires_cargo_results() {
             true
         )
         .0,
-        format!("test | PASS/FAIL/BLOCKED (id)\n{name} | PASS\n")
+        format!("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{name} | PASS\n")
     );
     let home = ThrowawayHome::new().unwrap();
     let (observations, git) = synthetic(1, true);
@@ -466,4 +469,75 @@ fn versions_receipt_uses_the_staged_bundle_identity() {
         receipts[0]["probes"][0]["component_sha256"],
         receipts[1]["probes"][0]["component_sha256"]
     );
+}
+
+#[test]
+fn run_table_grades_skipped_only_with_failed_test() {
+    let marker = "SKIPPED case: loopback bind refused\n";
+    for cargo_ok in [false, true] {
+        let (text, passed) = table(
+            "case: test\n",
+            &format!("{marker}test case ... FAILED\n"),
+            cargo_ok,
+        );
+        assert!(!passed);
+        assert!(text.contains("case | SKIPPED (loopback bind refused)\n"));
+    }
+    for result in ["ok", "ignored, blocked: RT3", "unknown", ""] {
+        let (text, passed) = table(
+            "case: test\n",
+            &format!("{marker}test case ... {result}\n"),
+            true,
+        );
+        assert!(!passed);
+        assert!(text.contains("case | FAIL\n"));
+    }
+    for output in [
+        marker.to_owned(),
+        format!("{marker}{marker}test case ... FAILED\n"),
+        "SKIPPED case: \ntest case ... FAILED\n".into(),
+        "test case ... FAILED\nRuntime refusal\n".into(),
+    ] {
+        let (text, passed) = table("case: test\n", &output, false);
+        assert!(!passed);
+        assert!(text.contains("case | FAIL\n"));
+    }
+    assert!(table("", &format!("{marker}test case ... FAILED\n"), false)
+        .0
+        .contains("case | FAIL\n"));
+}
+
+#[test]
+fn skipped_report_keeps_a_nonzero_exit() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, git) = synthetic(1, true);
+    let listed = format!("{LIVE}: test\n");
+    let output = format!(
+        "SKIPPED {LIVE}: loopback bind refused: PermissionDenied\n{}",
+        output(&observations).replace(" ... ok", " ... FAILED")
+    );
+    let memory = agent_conformance::report::render_run(&listed, &output, false, Ok(git));
+    assert!(!memory.passed);
+    assert!(memory.table.contains(&format!(
+        "{LIVE} | SKIPPED (loopback bind refused: PermissionDenied)\n"
+    )));
+    let document: Value = serde_json::from_slice(&memory.receipt_bytes).unwrap();
+    assert_eq!(document["command_success"], false);
+    assert_eq!(document["report"]["table"], memory.table);
+    let list_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    fs::write(&list_path, listed).unwrap();
+    fs::write(&results_path, output).unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+        .arg(list_path)
+        .arg(results_path)
+        .arg("101")
+        .arg(home.root().join("VERSIONS.json"))
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .starts_with(&memory.table));
+    home.finish().unwrap();
 }
