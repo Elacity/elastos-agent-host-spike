@@ -657,7 +657,7 @@
       "edits": [
         {
           "file": "src/harness.rs",
-          "old": "            service()?;",
+          "old": "            service(&mut self)?;",
           "new": "            let _ = &mut service;"
         }
       ],
@@ -979,6 +979,126 @@
       ],
       "tests": [
         "run_table_grades_blocker_lists_by_one_rule"
+      ]
+    },
+    {
+      "id": "F-ac3b",
+      "title": "grant instance 2 a read of instance 1 file",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/instance-grants.json",
+          "old": "  \"grants\": [\n",
+          "new": "  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-2 sibling\",\n      \"duration\": \"session\"\n    },\n"
+        }
+      ],
+      "tests": [
+        "instance_grant_does_not_authorise_sibling",
+        "attach_secret_stays_in_memory"
+      ]
+    },
+    {
+      "id": "F-ac3c",
+      "title": "move instance 2 own file into instance 1 directory",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/instance-grants.json",
+          "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-1 own\",\n      \"duration\": \"session\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-2/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-2 own\",\n      \"duration\": \"session\"\n    }\n  ],\n  \"files\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"content\": \"instance-one-bytes\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-2/own.txt\",\n      \"content\": \"instance-two-bytes\"\n    }\n  ]\n}\n",
+          "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-1 own\",\n      \"duration\": \"session\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/other.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-2 own\",\n      \"duration\": \"session\"\n    }\n  ],\n  \"files\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"content\": \"instance-one-bytes\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/other.txt\",\n      \"content\": \"instance-two-bytes\"\n    }\n  ]\n}\n"
+        },
+        {
+          "file": "probe/src/lib.rs",
+          "old": "    \"localhost://Public/agent-conformance-grants/instance-2/own.txt\",",
+          "new": "    \"localhost://Public/agent-conformance-grants/instance-1/other.txt\","
+        }
+      ],
+      "tests": [
+        "two_instances_overlap_with_separate_grants",
+        "attach_secret_stays_in_memory"
+      ]
+    },
+    {
+      "id": "F-ac3d",
+      "title": "start the second client only after the first exits",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "        for launch in launches {\n            group.children.push(RunningChild {",
+          "new": "        for launch in launches {\n            if launches.len() == 2 {\n                if let Some(first) = group.children.first_mut() {\n                    while first.is_alive()? {\n                        std::thread::sleep(Duration::from_millis(10));\n                    }\n                }\n            }\n            group.children.push(RunningChild {"
+        }
+      ],
+      "tests": [
+        "two_instances_overlap_with_separate_grants",
+        "attach_secret_stays_in_memory"
+      ]
+    },
+    {
+      "id": "F-instance-receipt",
+      "title": "accept an instance journey without its second launched identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "| \"instance_grant_does_not_authorise_sibling\" => &[\"instance-1\", \"instance-2\"],",
+          "new": "| \"instance_grant_does_not_authorise_sibling\" => &[\"instance-1\"],"
+        }
+      ],
+      "tests": [
+        "instance_receipt_requires_both_launches_and_scope"
+      ]
+    },
+    {
+      "id": "F-instance-bytes",
+      "title": "accept only an instance file response prefix",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "body == *expected",
+          "new": "body.starts_with(&expected[..12])"
+        }
+      ],
+      "tests": [
+        "tests::guest_checks_each_instance_file"
+      ]
+    },
+    {
+      "id": "F-instance-selector",
+      "title": "allow an instance selector without the granted-read effect",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "            || cfg!(feature = \"granted-read\"),",
+          "new": "            || true,"
+        }
+      ],
+      "tests": [
+        "instance_subselectors_require_one_granted_read"
+      ]
+    },
+    {
+      "id": "F-instance-evidence",
+      "title": "accept missing printed instance evidence",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "if !printed.lines().any(|line| line.starts_with(prefix)) {",
+          "new": "if false && !printed.lines().any(|line| line.starts_with(prefix)) {"
+        }
+      ],
+      "tests": [
+        "grants::tests::instance_journey_requires_all_printed_surfaces"
       ]
     }
   ]

@@ -3370,3 +3370,349 @@ falsifier commands released their lease; the blocked retry acquired none.
 
 At handoff, cached upstream divergence is 0 ahead and 0 behind.
 Network access stayed disabled; the supervisor owns fresh remote validation.
+
+## 023 — Two seeded instances (2026-10-26)
+
+023: Extended the existing probe read, fixture seed/controller and client collector for two concurrent instance builds, separate session grants and directories, two timed overlap barriers, checked journey evidence, and same-run version receipts.
+
+The scope is **process-isolation lab half of A3, A6 and A9**. The two clients
+use separate throwaway Homes and borrow one operator through the existing
+coordinate override. Each guest reads its own seeded file and checks the
+complete response, then requests its sibling file. The controller observes
+both sessions before each decision stage. The first baseline used one client
+Home and failed before the second barrier; separate client Homes reuse the
+landed parallel journey and give the passing baseline below. AC-006-STORAGE
+keeps the existing shared client-storage limit.
+
+The builder used the task 016 summary and round-1 quote supplied in task 023.
+The historical queue and builder note are outside this repository and stayed
+outside the file reads. The repository has no humanizer skill; this record uses
+plain statements of behavior and ownership. Every edit is in this lane.
+The builder preserved Git state and Cargo manifests/lockfiles.
+
+All builds hold the existing shared exclusive heavy-build lease through a
+read-only file descriptor and `fcntl.flock`. The initial volume had 52 GiB free;
+each batch checked a 12 GiB estimate plus the required 2 GiB reserve. The
+default sandbox refused loopback bind. The test commands use local process
+and socket permission, offline Cargo and only the fixture loopback operator.
+Local proof files under `target/task-023-current/` are untracked; the supervisor
+owns their review and removal. Runtime credentials stay in memory and
+Runtime-owned fixture state.
+
+Commands use these settings from the repository root:
+
+```sh
+export CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-023-current"
+```
+
+Each live filtered run first collects the same command's `--list`, then its
+`--exact --show-output` result. The existing report binary reads those two
+files and the Cargo exit code and writes that run's exclusive VERSIONS.json.
+Each mutation below uses the exact `old`/`new` bytes in `falsifiers.json` once;
+a `finally` block restores the original bytes before the restored run.
+
+### F-ac3b: baseline, planted, restored
+
+grant instance 2 a read of instance 1 file. All named tests failed with the fault and passed after exact restoration.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects instance_grant_does_not_authorise_sibling -- --exact --show-output
+```
+
+```text
+baseline:
+test instance_grant_does_not_authorise_sibling ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 11.38s
+planted:
+test instance_grant_does_not_authorise_sibling ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 11.93s
+restored:
+test instance_grant_does_not_authorise_sibling ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 11.74s
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects attach_secret_stays_in_memory -- --exact --show-output
+```
+
+```text
+baseline:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 36.65s
+planted:
+test attach_secret_stays_in_memory ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 42.24s
+restored:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 40.40s
+```
+
+Both planted runs failed with `each instance must receive its sibling denial with the fixture reason`. Instance 2 exited with code 0 after the extra grant. Every live run has a local, uncommitted receipt at
+`target/task-023-current/F-ac3b-<phase>-<test>/VERSIONS.json`.
+
+### F-ac3c: baseline, planted, restored
+
+move instance 2 own file into instance 1 directory. All named tests failed with the fault and passed after exact restoration.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects two_instances_overlap_with_separate_grants -- --exact --show-output
+```
+
+```text
+baseline:
+test two_instances_overlap_with_separate_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 11.25s
+planted:
+test two_instances_overlap_with_separate_grants ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 14.85s
+restored:
+test two_instances_overlap_with_separate_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 13.02s
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects attach_secret_stays_in_memory -- --exact --show-output
+```
+
+```text
+baseline:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 47.03s
+planted:
+test attach_secret_stays_in_memory ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 44.12s
+restored:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 43.25s
+```
+
+Both planted runs failed with `separate-directory check: instance files share a directory`. The instance controller made zero decisions before this failure. Every live run has a local, uncommitted receipt at
+`target/task-023-current/F-ac3c-<phase>-<test>/VERSIONS.json`.
+
+### F-ac3d: baseline, planted, restored
+
+start the second client only after the first exits. All named tests failed with the fault and passed after exact restoration.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects two_instances_overlap_with_separate_grants -- --exact --show-output
+```
+
+```text
+baseline:
+test two_instances_overlap_with_separate_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 11.95s
+planted:
+test two_instances_overlap_with_separate_grants ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 39.19s
+restored:
+test two_instances_overlap_with_separate_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 11.99s
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects attach_secret_stays_in_memory -- --exact --show-output
+```
+
+```text
+baseline:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 37.81s
+planted:
+test attach_secret_stays_in_memory ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 64.40s
+restored:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 37.90s
+```
+
+Both planted runs failed with `overlap: barrier exceeded 10 seconds`. The measured overlap was zero and the row remained FAIL. Every live run has a local, uncommitted receipt at
+`target/task-023-current/F-ac3d-<phase>-<test>/VERSIONS.json`.
+
+### F-instance-receipt: baseline, planted, restored
+
+accept an instance journey without its second launched identity. All named tests failed with the fault and passed after exact restoration.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test report instance_receipt_requires_both_launches_and_scope -- --exact --show-output
+```
+
+```text
+baseline:
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+planted:
+test instance_receipt_requires_both_launches_and_scope ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+restored:
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+### F-instance-bytes: baseline, planted, restored
+
+accept only an instance file response prefix. All named tests failed with the fault and passed after exact restoration.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance-probe --lib tests::guest_checks_each_instance_file -- --exact --show-output
+```
+
+```text
+baseline:
+test tests::guest_checks_each_instance_file ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+planted:
+test tests::guest_checks_each_instance_file ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+restored:
+test tests::guest_checks_each_instance_file ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+```
+
+### F-instance-selector: baseline, planted, restored
+
+allow an instance selector without the granted-read effect. All named tests failed with the fault and passed after exact restoration.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test artifact instance_subselectors_require_one_granted_read -- --exact --show-output
+```
+
+```text
+baseline:
+test instance_subselectors_require_one_granted_read ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.19s
+planted:
+test instance_subselectors_require_one_granted_read ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.07s
+restored:
+test instance_subselectors_require_one_granted_read ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.21s
+```
+
+### F-instance-evidence: baseline, planted, restored
+
+accept missing printed instance evidence. All named tests failed with the fault and passed after exact restoration.
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects grants::tests::instance_journey_requires_all_printed_surfaces -- --exact --show-output
+```
+
+```text
+baseline:
+test grants::tests::instance_journey_requires_all_printed_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+planted:
+test grants::tests::instance_journey_requires_all_printed_surfaces ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.07s
+restored:
+test grants::tests::instance_journey_requires_all_printed_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+```
+
+
+### Existing F-grant-capture: reused shared checker
+
+Both named tests pass, fail with the in-memory credential check disabled, and
+pass after restoration. The failure text contains fixed reasons.
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects grants::tests::controller_detects_credentials_without_disclosing_them -- --exact --show-output
+```
+
+```text
+baseline:
+test grants::tests::controller_detects_credentials_without_disclosing_them ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+planted:
+test grants::tests::controller_detects_credentials_without_disclosing_them ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+restored:
+test grants::tests::controller_detects_credentials_without_disclosing_them ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance --test effects attach_secret_stays_in_memory -- --exact --show-output
+```
+
+```text
+baseline:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 44.57s
+planted:
+test attach_secret_stays_in_memory ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.93s
+restored:
+test attach_secret_stays_in_memory ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 45.85s
+```
+
+The existing F-grant-service anchor now names `service(&mut self)?`, matching
+the collector callback that exposes child liveness to the same controller.
+Its mutation still removes that one service call. Existing F-ac2 entries and
+the report grading rule stay unchanged.
+
+### Final gate and same-run receipt
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` and
+its `--all` counterpart passed on the restored source. `bash
+lab/agent-conformance/run.sh` passed with exit 0 in 261.383 seconds. That script
+ran the complete `cargo test --locked --no-fail-fast --manifest-path
+lab/agent-conformance/Cargo.toml -- --format pretty --color never --show-output`
+gate. Its table records 60 passing tests, nine existing BLOCKED tests and a
+passing A14 receipt. All 15 probe variants have launched identities. The
+three instance journeys measured 0.228965, 0.238439 and 0.380878 seconds of
+overlap; both barriers completed each time.
+
+The same-run receipt is local and uncommitted:
+`target/run-table.rPN6Je/VERSIONS.json`, SHA-256
+`b094fdfd963b217f600d27f97dea5c073b2d2f57300b85b7c605c6c3c4daee62`.
+It records `identity_status: complete`, `cargo_success: true` and
+`suite_outcome: BLOCKED` because the nine existing blocker rows remain open.
+Its repository dirty flag is true: this is the builder's uncommitted candidate.
+The final full-run transcript is in `target/task-023-current/full-run.txt`.
+
+Additional checks passed: `git diff --check`, `bash -n
+lab/agent-conformance/run.sh`, `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 method contracts),
+`node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+The probe manifest, both Cargo manifests and the lane lockfile retain their
+original bytes. The artifact gate passes the existing manifest bound for both
+directories. Every new mutation anchor is restored; F-ac2 entries and grading
+remain unchanged. The generated probe entrypoint is absent after the gate.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name/URL where code or content needs a hash? | No | `src/identity.rs:50` stages each component by SHA-256 and obtains its complete bundle lab CID; `tests/artifact.rs:137` checks both builds and distinct hashes. |
+| 2. New ambient capsule or UI access? | No | `probe/src/lib.rs:117` requests each read grant before the one provider invocation; the artifact import gate passed. |
+| 3. Second operation path or copy of a rule? | No | `tests/common/grants.rs:309` extends the existing seed route; `poll` at line 358 remains the only fixture decision path. |
+| 4. Runtime core grows? | No | `tests/effects.rs:496` adds the lab journey; every changed path is inside this lane. |
+| 5. Refusals fail closed with a clear reason? | Yes | `tests/common/grants.rs:164` rejects missing overlap, early exits and expired barriers; `tests/effects.rs:461` requires each delivered denial reason. |
+| 6. Guest logic remains self-contained and uses granted Bus calls? | Yes | `probe/src/lib.rs:117` keeps both reads in the guest; `read_bytes_match` at line 199 checks complete bytes. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/effects.rs:496` and line 501 pass/fail/pass for F-ac3b/c/d; the four added unit-rule falsifiers and reused F-grant-capture have the sequences above. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:172` requires both launched identities as evidence; `tests/common/grants.rs:358` sends explicit session grant decisions for exact resources. |
+
+### Local lifecycle and handoff
+
+The collector drained the client groups and the existing operator stop and
+census completed in each live fault run. Before the full gate, a direct
+`lsof -nP +D <task-owned root> -Fpf` returned exit 1 with empty stdout and stderr
+for all 20 retained roots from this attempt. Those roots were removed after
+reviewing the failure evidence. Existing owners' roots were preserved. The
+full gate retained zero new roots. Afterwards the existing
+`target/host/debug/report --check-earlier-runs` returned exit 0 with empty
+output. The build lease is released; test processes have ended.
+
+The local machine-readable record is
+`target/task-023-current/lifecycle.json`. It records this worktree's role,
+commit/tree, dirty state, cached divergence, branch/worktree inventory, removed
+fixture roots, and review-bound retention for the local proof and build caches.
+The supervisor owns commit, current-base compatibility and review. The builder
+ran zero Git mutations and used zero remote network requests. At this check,
+the cached spike base was 21 commits ahead of this checkout (0 ahead, 21 behind);
+other workers advanced that fetched ref during the task.

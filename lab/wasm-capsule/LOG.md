@@ -97,7 +97,7 @@
     `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13` (the pinned-sha256 tests pass).
   - `cargo test --locked --manifest-path lab/capsule-identity/Cargo.toml`: 67 passed, 0 failed.
     `cargo test -p wasm-capsule-audit --locked` (from `lab/wasm-capsule/`): 20 passed, 0 failed.
-  - Both `lab-sha256` greps: empty output, exit 1.
+  - Both retirement greps (BACKLOG merge gate): empty output, exit 1.
   - Each wc-004 falsifier, planted alone, then the named tests run with `--exact`, then the files restored byte for
     byte (the `git diff` sha256 was the same before and after). Every named test failed at an assertion with no build
     error. The failing line is in `tests/verify.rs`:
@@ -136,3 +136,16 @@
   runner (`falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-CREATE-NEW`) said `summary: 1 CAUGHT of 1` and
   restored `tools/src/bundle.rs`. By hand, `bundle_io_refusals_keep_path_and_cause` panicked at
   `tests/bundle.rs:410:60` ("an entry is there: ()") with the bug in and passed after the revert.
+- Task 017 (carry of 013), base `edc31fb23`: line 100 above no longer holds the retired name label, so both
+  retirement greps give empty output, exit 1. `the_lane_keeps_no_bundle_name_rule_of_its_own` now checks that label in
+  every git-listed lane file (docs, `falsifiers.json` and `audit/` included); the code names keep the docs exemption,
+  and `lane_files` leaves out the runner's `*.falsify-original` backups. New falsifier F-WC3-RETIRED-LABEL-DOC.
+  Runner-caught: `falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-RETIRED-LABEL-DOC F-WC3-SECOND-RULE
+  F-WC3-SECOND-IMPORT` said CAUGHT for each and `summary: 3 CAUGHT of 3`, and restored `LOG.md` and
+  `tools/src/lib.rs` byte for byte.
+  Round 2: `lane_files` reads the listing with `git ls-files -z`, so git no longer quotes a name with a quote mark or
+  tab and such a file is scanned, not skipped as missing. Hand-proven, pending R1: with an untracked `review"note.md`
+  holding the label, the old line-split listing passed the test, and the `-z` listing failed it with
+  `["review\"note.md:1: <label>"]` (label elided here). By hand on the falsifier's plant: the base `edc31fb23` test
+  passed, this test failed with `["LOG.md:139: <label>"]`, and with a `LOG.md.falsify-original` copy beside it and only
+  the docs label check off it passed (no false catch). `git hash-object LOG.md` was `5bc57325` before and after.

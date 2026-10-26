@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011 and 012). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012 and 015). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -2018,6 +2018,525 @@
       ],
       "tests": [
         "a_wasm_app_has_one_closure"
+      ]
+    },
+    {
+      "id": "F-CI15a",
+      "title": "variant binding verification skips check (e), the per-platform CID compare",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_cids(binding, variants)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "variant_swapped_between_platforms_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15b",
+      "title": "variant binding verification skips check (d), the platform-set compare",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_same_platforms(binding, variants)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "variant_missing_or_extra_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15c",
+      "title": "variant binding verification skips check (f), the recipe CID compare",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_recipe_cid(binding, recipe)?;\n",
+          "new": "    let _ = recipe;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_recipe_is_pinned"
+      ]
+    },
+    {
+      "id": "F-CI15d",
+      "title": "the binding payload keeps the input order of the pairs (its sort is dropped)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        pairs.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "variant_binding_payload_ignores_input_order"
+      ]
+    },
+    {
+      "id": "F-CI15e",
+      "title": "the shape check allows one platform label twice",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        if seen.contains(&label) {\n",
+          "new": "        if false && seen.contains(&label) {\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_shape_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15f",
+      "title": "the shape check allows a label that is not one of the three platforms",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        if !VARIANT_PLATFORMS.contains(&label) {\n",
+          "new": "        if false {\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_shape_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15g",
+      "title": "variant binding verification hashes PACKAGE_RECORD_DOMAIN",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let message = variant_binding_message(&payload);\n",
+          "new": "    let message = domain_separated_digest(PACKAGE_RECORD_DOMAIN, &payload);\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_signed_under_another_domain_is_refused",
+        "variant_binding_binds_each_variant_cid_and_verifies"
+      ]
+    },
+    {
+      "id": "F-CI15h",
+      "title": "variant binding verification skips the accepted-list check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&binding.signer_did, accepted)?;\n",
+          "new": "    let _ = accepted;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_by_another_signer_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15i",
+      "title": "the binding payload gains a name field, \"name\":\"ipfs-provider\" (the variants' manifest name)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            \"{{\\\"recipe\\\":\\\"{}\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\",\\\"variants\\\":[{}]}}\",\n",
+          "new": "            \"{{\\\"name\\\":\\\"ipfs-provider\\\",\\\"recipe\\\":\\\"{}\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\",\\\"variants\\\":[{}]}}\",\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_has_no_group_name",
+        "variant_binding_binds_each_variant_cid_and_verifies"
+      ]
+    },
+    {
+      "id": "F-CI15j",
+      "title": "on success, sign_variant_binding writes <bundle>.binding next to the first bundle",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    binding.signature = key.sign(&variant_binding_message(&payload)).to_bytes();\n    Ok(binding)\n",
+          "new": "    binding.signature = key.sign(&variant_binding_message(&payload)).to_bytes();\n    std::fs::write(variants[0].1.with_extension(\"binding\"), &payload).expect(\"write the binding\");\n    Ok(binding)\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_stays_outside_the_bundles"
+      ]
+    },
+    {
+      "id": "F-CI15k",
+      "title": "variant binding verification skips the shape check of the binding's own list",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_shape(\n        \"binding\",\n        binding\n            .variants\n            .iter()\n            .map(|(platform, _)| platform.as_str()),\n    )?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "variant_binding_shape_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15l",
+      "title": "variant binding verification skips the shape check of the given list",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_shape(\"given\", variants.iter().map(|(platform, _)| *platform))?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "variant_binding_shape_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15m",
+      "title": "sign_variant_binding skips the shape check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_shape(\"given\", labels)?;\n",
+          "new": "    let _ = labels;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_shape_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15n",
+      "title": "variant binding verification gives a malformed DID the signature reason instead of the decoder's",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&binding.signer_did)?;\n",
+          "new": "    let key = decode_signer(&binding.signer_did).map_err(|_| Refusal::SignatureDoesNotVerify {\n        did: binding.signer_did.clone(),\n        name: String::from_utf8_lossy(&binding.variant_binding_payload()).into_owned(),\n    })?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_malformed_signer_did_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15o",
+      "title": "variant binding verification treats an empty accepted list as no restriction",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&binding.signer_did, accepted)?;\n",
+          "new": "    if !accepted.is_empty() {\n        require_accepted(&binding.signer_did, accepted)?;\n    }\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_by_another_signer_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI15p",
+      "title": "variant binding verification runs check (b) before check (a)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&binding.signer_did)?;\n    require_accepted(&binding.signer_did, accepted)?;\n",
+          "new": "    require_accepted(&binding.signer_did, accepted)?;\n    let key = decode_signer(&binding.signer_did)?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI15q",
+      "title": "variant binding verification runs check (c) before check (b)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_accepted(&binding.signer_did, accepted)?;\n    require_variant_shape(\n        \"binding\",\n        binding\n            .variants\n            .iter()\n            .map(|(platform, _)| platform.as_str()),\n    )?;\n    require_variant_shape(\"given\", variants.iter().map(|(platform, _)| *platform))?;\n",
+          "new": "    require_variant_shape(\n        \"binding\",\n        binding\n            .variants\n            .iter()\n            .map(|(platform, _)| platform.as_str()),\n    )?;\n    require_variant_shape(\"given\", variants.iter().map(|(platform, _)| *platform))?;\n    require_accepted(&binding.signer_did, accepted)?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI15r",
+      "title": "variant binding verification runs check (d) before check (c)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_shape(\n        \"binding\",\n        binding\n            .variants\n            .iter()\n            .map(|(platform, _)| platform.as_str()),\n    )?;\n    require_variant_shape(\"given\", variants.iter().map(|(platform, _)| *platform))?;\n    require_same_platforms(binding, variants)?;\n",
+          "new": "    require_same_platforms(binding, variants)?;\n    require_variant_shape(\n        \"binding\",\n        binding\n            .variants\n            .iter()\n            .map(|(platform, _)| platform.as_str()),\n    )?;\n    require_variant_shape(\"given\", variants.iter().map(|(platform, _)| *platform))?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI15s",
+      "title": "variant binding verification runs check (e) before check (d)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_same_platforms(binding, variants)?;\n    require_variant_cids(binding, variants)?;\n",
+          "new": "    require_variant_cids(binding, variants)?;\n    require_same_platforms(binding, variants)?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI15t",
+      "title": "variant binding verification runs check (f) before check (e)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_cids(binding, variants)?;\n    require_recipe_cid(binding, recipe)?;\n",
+          "new": "    require_recipe_cid(binding, recipe)?;\n    require_variant_cids(binding, variants)?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI15u",
+      "title": "variant binding verification runs check (g) before check (f)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_recipe_cid(binding, recipe)?;\n    let payload = binding.variant_binding_payload();\n    let message = variant_binding_message(&payload);\n    verify_ed25519(\n        &key,\n        &message,\n        &binding.signature,\n        &binding.signer_did,\n        &String::from_utf8_lossy(&payload),\n    )?;\n",
+          "new": "    let payload = binding.variant_binding_payload();\n    let message = variant_binding_message(&payload);\n    verify_ed25519(\n        &key,\n        &message,\n        &binding.signature,\n        &binding.signer_did,\n        &String::from_utf8_lossy(&payload),\n    )?;\n    require_recipe_cid(binding, recipe)?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI15v",
+      "title": "verify_variant_binding replaces the walk's refusal with NoManifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .map(|(platform, bundle)| Ok((*platform, checked_bundle(bundle)?)))\n",
+          "new": "        .map(|(platform, bundle)| Ok((*platform, checked_bundle(bundle).map_err(|_| Refusal::NoManifest)?)))\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI15w",
+      "title": "verify_variant_binding decodes the signer before the walk",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let walked = variants\n",
+          "new": "    decode_signer(&binding.signer_did)?;\n    let walked = variants\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI15x",
+      "title": "sign_variant_binding replaces lab_cid's refusal with NoManifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            .map(|(platform, bundle)| Ok(((*platform).to_owned(), lab_cid(bundle)?.to_string())))\n",
+          "new": "            .map(|(platform, bundle)| Ok(((*platform).to_owned(), lab_cid(bundle).map_err(|_| Refusal::NoManifest)?.to_string())))\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_preserve_walk_refusals"
+      ]
+    },
+    {
+      "id": "F-CI15y",
+      "title": "verify_checked_variant_binding builds a second copy of the payload (same bytes)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let payload = binding.variant_binding_payload();\n    let message = variant_binding_message(&payload);\n",
+          "new": "    let mut pairs: Vec<&(String, String)> = binding.variants.iter().collect();\n    pairs.sort();\n    let listed: Vec<String> = pairs\n        .iter()\n        .map(|(platform, cid)| format!(\"{{\\\"cid\\\":\\\"{cid}\\\",\\\"platform\\\":\\\"{platform}\\\"}}\"))\n        .collect();\n    let payload = format!(\n        \"{{\\\"recipe\\\":\\\"{}\\\",\\\"schema\\\":\\\"{}\\\",\\\"signer_did\\\":\\\"{}\\\",\\\"variants\\\":[{}]}}\",\n        binding.recipe, VARIANT_BINDING_SCHEMA, binding.signer_did, listed.join(\",\")\n    )\n    .into_bytes();\n    let message = variant_binding_message(&payload);\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation",
+        "record_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI15z",
+      "title": "verify_checked_variant_binding decodes the DID a second time with its own decode_did_key call",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let key = decode_signer(&binding.signer_did)?;\n",
+          "new": "    decode_signer(&binding.signer_did)?;\n    let key = elastos_identity::decode_did_key(&binding.signer_did).expect(\"decoded above\");\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation",
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI15aa",
+      "title": "verify_checked_variant_binding runs its own Ed25519 verification instead of the shared one",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    verify_ed25519(\n        &key,\n        &message,\n        &binding.signature,\n        &binding.signer_did,\n        &String::from_utf8_lossy(&payload),\n    )?;\n",
+          "new": "    key.verify(&message, &Signature::from_bytes(&binding.signature))\n        .map_err(|_| Refusal::SignatureDoesNotVerify {\n            did: binding.signer_did.clone(),\n            name: String::from_utf8_lossy(&payload).into_owned(),\n        })?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation",
+        "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI15ab",
+      "title": "check (f) names the recipe with its own encode_entries call instead of recipe_cid (same bytes)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let named = recipe_cid(recipe)?;\n",
+          "new": "    let named = encode_entries(&[BundleEntry {\n        path: VARIANT_RECIPE_ENTRY.to_owned(),\n        content: recipe.to_vec(),\n    }])?;\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation",
+        "check_name_uses_the_single_naming_path"
+      ]
+    },
+    {
+      "id": "F-CI15ac",
+      "title": "verify_checked_variant_binding checks the given labels with its own copy of the shape rule (same refusals)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_shape(\"given\", variants.iter().map(|(platform, _)| *platform))?;\n",
+          "new": "    let mut seen_given: Vec<&str> = Vec::new();\n    for (label, _) in variants {\n        if !VARIANT_PLATFORMS.contains(label) {\n            return Err(Refusal::UnknownPlatform { list: \"given\", label: (*label).to_owned() });\n        }\n        if seen_given.contains(label) {\n            return Err(Refusal::DuplicatePlatform { list: \"given\", label: (*label).to_owned() });\n        }\n        seen_given.push(*label);\n    }\n    if seen_given.is_empty() {\n        return Err(Refusal::NoVariants { list: \"given\" });\n    }\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI15ad",
+      "title": "the variant binding domain is changed, so signing and verifying agree on a wrong domain",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const VARIANT_BINDING_DOMAIN: &str = \"lab.capsule-identity.variant-binding/v1\";\n",
+          "new": "pub const VARIANT_BINDING_DOMAIN: &str = \"lab.capsule-identity.variant-binding/v2\";\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_signature_uses_its_domain"
+      ]
+    },
+    {
+      "id": "F-CI15ae",
+      "title": "the record check compares only the lab-cid label, so the second variant's record binds the first variant's bundle",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if record.cid != checked.cid().to_string() {\n",
+          "new": "    if !record.cid.starts_with(LAB_CID_PREFIX) {\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_binds_each_variant_cid_and_verifies"
+      ]
+    },
+    {
+      "id": "F-CI15af",
+      "title": "sign_variant_binding encodes the DID with its own encode_signing_key_did call",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        signer_did: signer_did_of(key),\n        signature: [0; 64],\n",
+          "new": "        signer_did: elastos_identity::encode_signing_key_did(key),\n        signature: [0; 64],\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation",
+        "signature_paths_share_one_implementation"
       ]
     }
   ]
