@@ -737,6 +737,38 @@
       "tests": [
         "declared_import_passes_and_only_that_one"
       ]
+    },
+    {
+      "id": "F-CWA16a",
+      "title": "Match the whole interface name ignoring ASCII case",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.eq_ignore_ascii_case(name)) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA16b",
+      "title": "Match after lowercasing only the declared interface",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.to_ascii_lowercase() == name.as_str()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
     }
   ]
 }
