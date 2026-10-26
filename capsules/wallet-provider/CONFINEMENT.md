@@ -62,8 +62,12 @@ to the same paths. The test that compares them is the Runtime's half, outside
 this lane. The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
-no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
-`STORAGE_PARENT` parameter tokens, and the three shared rules verbatim.
+no network allow, exactly one `process-exec` allow, the shared exec rule, only
+the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and `STORAGE_PARENT` parameter
+tokens, and the three shared rules verbatim. An exec added later, such as a
+model engine's, is its own named rule with its own falsifier and removal
+condition, agreed with Sasha and Rong like the network grant, and never widens
+what `PROVIDER_EXECUTABLE` binds.
 If the profile cannot be applied, because the file is missing, does not parse
 or names a parameter the launch does not bind, `sandbox-exec` exits before the
 provider starts and gives its reason on standard error; the Runtime then
@@ -192,7 +196,8 @@ binding is the only difference between the two runs.
 - `both_file_profiles_bind_one_storage_parameter_contract` lives in
   `../wallet-provider/tests/confine.rs`. One check function holds the
   contract: `(version 1)` first, `(deny default)` second, an explicit
-  `(deny network*)`, no network allow, the same `PROVIDER_EXECUTABLE` /
+  `(deny network*)`, no network allow, exactly one `process-exec` allow, the
+  shared exec rule, the same `PROVIDER_EXECUTABLE` /
   `STORAGE_ROOT` / `STORAGE_PARENT` parameter tokens, no `(allow default)`
   rule, and the three shared rules verbatim. One list function runs that check over
   `capsules/did-provider/confine.sb`, `capsules/wallet-provider/confine.sb`
@@ -249,6 +254,18 @@ binding is the only difference between the two runs.
   fixture and appends `(allow default)` after the default denial. The check
   refuses it with a reason that names `fixture-provider` and
   `must reject (allow default)`. The test reads no file.
+- `file_profile_contract_rejects_a_second_exec_allow` builds the same passing
+  fixture and appends `(allow process-exec (literal "/bin/sh"))`, the shared
+  exec rule a second time, `(allow process* (literal "/bin/sh"))`,
+  `(allow process-exec)`, `(allow process*)` and
+  `(allow file-read* process*)`. The check refuses each profile with a reason
+  that names `fixture-provider`, quotes the extra rule and holds
+  `more than one process-exec allow`. The unfiltered forms put the operation
+  name directly before the closing parenthesis, so the predicate reads `)`
+  as a token boundary. The narrower exec rule keeps its own removal for the
+  055 removal check, and the 056 and 059 copy tests still refuse a copy of the
+  provider binary, so neither sees this second exec path. The test reads no
+  file and starts no process.
 - `file_profile_contract_rejects_a_non_canonical_token` builds the same
   passing fixture and appends
   `(allow file-read* (literal (param "READ_FIXTURE_KEY")))`. The check refuses
@@ -511,6 +528,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the character-after check from the section check (WP68): the same test
   fails on its `DID1a` case because that token then names the missing own id
   and the missing-id problem does not come.
+- Remove the second-exec-allow refusal from the shared contract check (WP69):
+  `file_profile_contract_rejects_a_second_exec_allow` fails because the
+  `/bin/sh` fixture passes.
+- Take the exec predicate's operation list only up to the first `(` (WP70):
+  `file_profile_contract_rejects_a_second_exec_allow` fails on its
+  `(allow process*)` case because the token reads `process*)` and the profile
+  passes the check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

@@ -401,3 +401,42 @@
   `README.md` and `LOG.md` changed. `cargo test --locked` (81 passed, 1 ignored, 0 failed) and both fmt checks
   green. Retired-label greps (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target
   'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- Task 022 (wc-009b0, granted import hosting discovery, read-only): README "## Granted import hosting discovery
+  (wc-009b0)" records, at base `3a4d2812aa71fce5a92e6bf7b314aee9844c7293` with `wasmtime 45.0.1 (83166ba31
+  2026-06-05)` and `wasmer 7.5.0` (each engine's `--version`), whether each CLI supplies `env.f` from a second
+  module file. Probes in the runner's shape (`env -i`, stdin `/dev/null`, `run --invoke digest <abs module>
+  1592590337` plus the flag under test). wasmtime FOUND: `--preload <NAME=MODULE_PATH>` ("Load the given
+  WebAssembly module before the main module", `wasmtime run --help`); (i) `--preload env=host.wat` printed
+  `1592590338` (exit 0); (ii) no flag: exit 1, "unknown import: `env::f` has not been defined"; (iii) `other=`: the
+  same as (ii); (iv) `env=host-wasi.wat` printed `1592590338` (exit 0): wasmtime linked the supplied module's
+  `wasi_snapshot_preview1` import with no WASI flag, and a non-WASI unknown import in the supplied module was
+  refused ("failed to process preload `env`", "`nope::g` has not been defined"). The real capsule (sha256
+  `6dd9af1a...`) printed `230101071268130872` with and without `--preload env=host.wat`. wasmer SKIPPED: no such flag
+  in `wasmer run --help` or `wasmer --help` (words in README); `--use host.wat --offline` gave the (ii) refusal
+  ("Error while importing \"env\".\"f\": unknown import"), `--enable-module-linking` "No backends support the
+  required features". Answer for wc-009b: wasmtime hosts by flag `--preload env=<path>`, wasmer SKIPPED; the
+  engines differ, so "same results on both engines" cannot be tested for a hosted granted import (both only refuse
+  an unsupplied `env.f`, naming it). Probe `.wat` files only under git-ignored `target/wc009b0/`; both engines took
+  `.wat` directly. No rule, so no falsifier; the with/without-flag runs are the evidence. Only `README.md` and
+  `LOG.md` changed. Gates: `cargo test --locked` and both fmt checks green; both retired-label greps empty, exit 1.
+- Task 023 (falsifier list intro leaves evidence labels to README), at base `6333a87dde2326dcd80f2837f6228b497c96f959`:
+  `falsifiers.json`'s `"about"` loses its evidence sentence ("The canonical runner falsify.py now has ... until R1
+  lands.") and the aside "(R1 is done: the canonical runner's lab command runs these)"; in their place one sentence
+  says each entry's evidence label and the count of each kind are kept in README.md "## Falsifiers". Every entry is
+  unchanged (parsed `"falsifiers"` list equal to the base's; the diff touches only line 2). New test
+  `falsifiers_about_states_no_evidence_status` (`tests/docs.rs`, through `lane_file` and `serde_json`) fails naming
+  any whole word `pending`, `hand-proven`, `runner-caught`, `R1` or `R2` (case ignored) in `"about"`, and fails
+  with its own reason if `"about"` lacks `README.md` or `## Falsifiers`. README "## Falsifiers" gets one sentence
+  naming it the one place for evidence labels and counts. Eight falsifiers, each hand-proven (`falsifiers.json` is
+  the runner's own input and not a recovery target, so no entry and outside README's counts; the total stays 139):
+  each planted with a one-match `python3 -I` replace, then `cargo test --locked --test docs
+  falsifiers_about_states_no_evidence_status` FAILED, then reverted and `shasum -a 256 falsifiers.json` equal to the
+  fixed file's `96b62630a50c86868cafe0fea44027095b07b57e29ed0ff5d3d4b0d4a0bed68d`. Base sentence "(ask R1, pending),
+  so these are hand-proven, pending R1" put back → `tests/docs.rs:66:5` `falsifiers.json "about" states evidence
+  status, which README.md "## Falsifiers" alone holds: found ["pending", "hand-proven", "R1"]`; " These are
+  pending." → `found ["pending"]`; " These are hand-proven." → `found ["hand-proven"]`; " These are runner-caught." →
+  `found ["runner-caught"]`; " (ask R1)" → `found ["R1"]`; " (ask R2)" → `found ["R2"]` (all at `:66:5`);
+  `README.md` → `README` → `tests/docs.rs:71:5` `falsifiers.json "about" does not name README.md as the place for
+  evidence labels`; `"## Falsifiers"` dropped → `tests/docs.rs:75:5` `falsifiers.json "about" does not name the README
+  section "## Falsifiers"`. Gates: `cargo test --locked` (82 passed, 1 ignored, 0 failed) and both fmt checks green;
+  retired-label greps: both empty, exit 1.
