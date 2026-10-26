@@ -1,0 +1,8 @@
+id: F-A7-reuse
+file: src/ledger.rs
+test: ledger::model_settled_reservation_id_is_not_reused
+--- old
+        ledger.next_reservation += 1;
+--- new
+        ledger.next_reservation = ledger.open.len() as u64 + 1;
+--- end
