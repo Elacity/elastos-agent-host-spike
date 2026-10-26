@@ -38,6 +38,15 @@ under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
 `startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
 refused when the profile cannot be applied.
 
+`every_did_and_wallet_allow_rule_traces_to_one_declared_right` reads
+`capsules/did-provider/tests/fixtures/confine/declared-rights.json`. That file
+is a lab stand-in for the Runtime generator's input and not a manifest field.
+Every top-level allow rule of the did profile traces to exactly one right the
+shared contract names, or to one observed startup need. The profile rules are
+evidence for Anders to review and not accepted rights. The startup label says
+"observed startup needs, not approved rights; Anders decides". The generator
+stays the Runtime's.
+
 ## Profile parameters
 
 The generated profile binds three parameters, which the tests pass with
@@ -78,7 +87,12 @@ check `every_operations_table_cites_existing_tests` in
 `../wallet-provider/tests/confine.rs` finds `fn <fn>(` in that file and does
 not decide whether the function is a `#[test]`. A refusal under `(deny
 default)` is a denial, not a grant, and no row writes it as a right. The
-startup grants stay in "What the profile allows".
+startup grants stay in "What the profile allows". A `storage` row cites both
+sides of its right: `permitted:` names the test that shows the operation under
+`STORAGE_ROOT`, and `nearest outside refused:` names the test that shows the
+same file beneath `STORAGE_PARENT` refused, each with its falsifier ids. A row
+whose Right is "no named test shows this" names no granted resource, so it has
+no outside case, and its cell cites only the test that shows the answer.
 
 M1 check B4 stays open: this table records the macOS half of its permission
 model. Linux stays designed, not enforced, and this section claims no current
@@ -88,15 +102,15 @@ an operation and gets no row.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
-| init | `op`, `config` | ok: `status`, `data` (`protocol_version`, `provider`). error: `status`, `code`, `message`. | `storage` | reads `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_read_denied` shows the read refused with `storage_error` when that path resolves outside. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is DID10 and `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` fails. | designed, not enforced |
+| init | `op`, `config` | ok: `status`, `data` (`protocol_version`, `provider`). error: `status`, `code`, `message`. | `storage` | reads `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_read_denied` shows the read refused with `storage_error` when that path resolves outside. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows this call reading `did/nickname.enc` under `STORAGE_ROOT`, and its removal is DID10. nearest outside refused: the read half of `tests/confine.rs::planted_file_beneath_storage_parent_is_neither_read_nor_written` shows the same file beneath `STORAGE_PARENT` refused with `storage_error`, and the widened parent read is DID27. | designed, not enforced |
 | get_did | `op` | ok: `status`, `data` (`did`). error: `status`, `code`, `message`. | no named test shows this | derives the DID from the device key in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the answer; no named test shows a storage rule for this call. | designed, not enforced |
 | resolve | `op`, `did` | ok: `status`, `data` (`public_key`, `document`). error: `status`, `code`, `message`. | no named test shows this | builds the document from the DID in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the document id; no named test shows a storage rule for this call. | designed, not enforced |
 | sign_chat_message | `op`, `sender_id`, `ts`, `content` | ok: `status`, `data` (`payload`, `signature`). error: `status`, `code`, `message`. | no named test shows this | signs the rendered payload in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the payload and the signature; no named test shows a storage rule for this call. | designed, not enforced |
 | verify | `op`, `did`, `data`, `signature` | ok: `status`, `data` (`valid`). error: `status`, `code`, `message`. | no named test shows this | verifies the payload in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows `valid: true` and `valid: false` for a flipped signature; no named test shows a storage rule for this call. | designed, not enforced |
 | verify_did_recovery | `op`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `nonce`, `issued_at`, `expires_at`, `signature` | ok: `status`, `data` (`schema`, `valid`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `payload_sha256`, `verified_at`). error: `status`, `code`, `message`. | no named test shows this | refuses a non-hex signature with `invalid_signature` and stays in service; genuine-proof correctness is the in-process unit tests in `src/main.rs`. | `tests/confine.rs::verify_did_recovery_under_profile` shows the refusal and the later `get_did`; no named test shows a storage rule for this call. | designed, not enforced |
 | get_nickname | `op` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | no named test shows this | returns the cached nickname; the file read belongs to `init`, and no named test shows a read for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the nickname after a restart; the read is `init`'s. | designed, not enforced |
-| set_nickname | `op`, `nickname` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | `storage` | writes `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_write_denied` shows the write refused with `storage_error` outside the root. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is DID10 and `tests/confine.rs::outside_write_denied` fails. | designed, not enforced |
-| get_persona_did | `op`, `name` | ok: `status`, `data` (`did`, `owner_did`, `name`). error: `status`, `code`, `message`. | `storage` | reads or writes `did/personas/<name>.enc` under `STORAGE_ROOT`; `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the file after the call and the same persona after a restart. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is DID10 and `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` fails. | designed, not enforced |
+| set_nickname | `op`, `nickname` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | `storage` | writes `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_write_denied` shows the write refused with `storage_error` outside the root. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the nickname written under `STORAGE_ROOT` and read back after a restart, and its removal is DID10. nearest outside refused: the write half of `tests/confine.rs::planted_file_beneath_storage_parent_is_neither_read_nor_written` shows the same file beneath `STORAGE_PARENT` refused with `storage_error`, and the appended parent write is DID28. | designed, not enforced |
+| get_persona_did | `op`, `name` | ok: `status`, `data` (`did`, `owner_did`, `name`). error: `status`, `code`, `message`. | `storage` | reads or writes `did/personas/<name>.enc` under `STORAGE_ROOT`; `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the file after the call and the same persona after a restart. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows `did/personas/fixture.enc` under `STORAGE_ROOT` after the call and the same persona after a restart, and its removal is DID10. nearest outside refused: `tests/confine.rs::persona_key_beneath_storage_parent_is_not_adopted` shows a persona key beneath `STORAGE_PARENT` refused with `key_error`, and the appended parent read is DID30. | designed, not enforced |
 | shutdown | `op` | ok: `status`, `data` (`message`). error: `status`, `code`, `message`. | no named test shows this | answers and exits; no named test shows a file read or write for this call. | `tests/confine.rs::bound_copy_serves_under_profile` shows the answer and a clean exit; no named test shows a storage rule for this call. | designed, not enforced |
 
 ## Host-OS status
@@ -196,6 +210,18 @@ provider's own root. With the link made again, `set_nickname` refuses the write
 with `storage_error`, the nickname-save reason and unchanged planted bytes. The
 parent read grants the directory itself only, so widening it to `subpath`, or
 granting writes on the parent, makes this test fail.
+
+`persona_key_beneath_storage_parent_is_not_adopted` plants the provider's own
+persona state at `<base>/sibling/did/personas/fixture.enc` through a confined
+provider rooted at that sibling, so the planted key comes from the provider's
+one path and no forged key enters the test. It then points
+`<base>/did/personas/fixture.enc` at that file. Under the real profile the
+parent read denies the planted file's stat, so `get_persona_did` answers
+`key_error` with the failed-persist reason for the write through the link, and
+neither the planted DID nor a change to the planted bytes comes back. After
+the link is removed the same call creates the provider's own persona, a
+different DID, and a following `get_did` answers ok. Appending a read grant on
+`STORAGE_PARENT` makes this test fail because the planted key loads.
 
 `startup_denial_reports_its_reason` covers the failure path. It starts the
 provider under a fixture profile that holds `(version 1)` and `(deny default)`,
@@ -338,8 +364,11 @@ OS is read, so that run is no evidence for the OS argument.
 - Remove `(allow file-read* (literal "/"))` (DID08): the same four cases fail.
 - Remove `(allow sysctl-read)` (DID09): the same four cases fail.
 - Remove the `STORAGE_ROOT` grant (DID10):
-  `confined_provider_serves_did_operations_under_its_root` and
-  `outside_write_denied` fail because the identity write is denied.
+  `confined_provider_serves_did_operations_under_its_root`,
+  `outside_write_denied` and
+  `persona_key_beneath_storage_parent_is_not_adopted` fail because the
+  identity write is denied; the persona case fails when the first provider
+  cannot persist its own persona key.
 - Remove `(allow file-read* (literal (param "STORAGE_PARENT")))`: WP11 in
   `../wallet-provider/falsifiers.json` records it, and
   `both_file_profiles_bind_one_storage_parameter_contract` fails. No did
@@ -400,6 +429,10 @@ OS is read, so that run is no evidence for the OS argument.
   it lies beneath the storage root (DID29):
   `bound_copy_serves_under_profile` fails on its bytes assertion because the
   served run changes the copy under `STORAGE_ROOT`.
+- Append a read grant on `STORAGE_PARENT` after the storage-root rule (DID30):
+  `persona_key_beneath_storage_parent_is_not_adopted` fails on its refusal
+  assertion because the planted persona key loads and answers ok with the
+  planted DID.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

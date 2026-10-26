@@ -803,6 +803,81 @@ fn wait_for_terminal(
     panic!("the run must settle within {within:?}: no terminal reply came before the deadline")
 }
 
+/// Every cited `model_` test in "Operations and the rights they need" is a
+/// function in this file.
+///
+/// The section is `CONFINEMENT.md` from that heading through the next heading
+/// line. A cited test name is a backtick span of `model_` plus lowercase
+/// letters, digits and underscores. Each span must occur as `fn <name>(` in
+/// this file. The failure names the missing test. This test starts no process
+/// and needs no sandbox.
+///
+/// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
+/// test no longer finds that function.
+#[test]
+fn operations_section_cites_existing_tests() {
+    fn cited_model_test(span: &str) -> bool {
+        let Some(tail) = span.strip_prefix("model_") else {
+            return false;
+        };
+        !tail.is_empty()
+            && tail
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }
+    fn operations_section_text(doc: &str) -> &str {
+        const HEADING: &str = "## Operations and the rights they need";
+        let Some(start) = doc.find(HEADING) else {
+            panic!("missing heading: {HEADING}");
+        };
+        let after = start + HEADING.len();
+        let Some(next) = doc[after..].find("\n## ") else {
+            panic!("the operations section has no following heading");
+        };
+        let heading_at = after + next + 1;
+        let line_end = doc[heading_at..]
+            .find('\n')
+            .map(|index| heading_at + index)
+            .unwrap_or(doc.len());
+        &doc[start..line_end]
+    }
+
+    let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
+    let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
+        panic!(
+            "CONFINEMENT.md must be readable ({}): {err}",
+            doc_path.display()
+        )
+    });
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine/main.rs");
+    let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+        panic!(
+            "tests/confine/main.rs must be readable ({}): {err}",
+            source_path.display()
+        )
+    });
+    let section = operations_section_text(&doc);
+    let mut cited = Vec::new();
+    let mut rest = section;
+    while let Some(start) = rest.find('`') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('`') else {
+            break;
+        };
+        let span = &rest[..end];
+        rest = &rest[end + 1..];
+        if cited_model_test(span) && !cited.contains(&span) {
+            cited.push(span);
+        }
+    }
+    let missing: Vec<&str> = cited
+        .iter()
+        .copied()
+        .filter(|name| !source.contains(&format!("fn {name}(")))
+        .collect();
+    assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
+}
+
 /// The confined provider serves `init`, `status` and `offers_list`, and
 /// `init` creates the journal root with `runs/` under `STORAGE_ROOT`.
 ///
@@ -1913,13 +1988,14 @@ fn model_bound_copy_serves_under_profile() {
 /// binary's path and never in the directory that holds that binary. Its last
 /// byte is flipped, so its digest differs from the real binary. The launch
 /// binds the copy and starts it, with `bound_digest: None`, so the helper
-/// records the copy as it is. The profile's exec refusal is exit 71 and a
-/// stderr line that contains both `execvp()` and `Operation not permitted`.
-/// This test fails if that pair appears. Any other outcome, an exit that is
-/// not that pair or a process still running after 2 seconds, means the
-/// profile did not apply that refusal. The real binary's digest is unchanged
-/// at the end. The test kills and waits on the process `start` returned. It
-/// does not call `shutdown`.
+/// records the copy as it is. The show is not exit 65, because exit 65 means
+/// the profile did not apply, and it is not exit 71 with `execvp()` and
+/// `Operation not permitted`. A process still running after 2 seconds, or any
+/// other exit, including a signal exit whose `code()` is `None`, is the
+/// outcome the test allows. Before the checks, one line starting
+/// `byte-different outcome: ` prints the status and the stderr lines. The
+/// real binary's digest is unchanged at the end. The test kills and waits on
+/// the process `start` returned. It does not call `shutdown`.
 #[test]
 fn byte_different_file_at_bound_path_starts() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -1989,8 +2065,16 @@ fn byte_different_file_at_bound_path_starts() {
         bound_digest: None,
     });
     let (status, stderr) = provider.outcome_within(Duration::from_secs(2));
+    println!("byte-different outcome: {status:?} {stderr:?}");
     provider.kill_and_wait();
-    let refused = status.and_then(|status| status.code()) == Some(71)
+    let code = status.and_then(|status| status.code());
+    assert!(
+        code != Some(65),
+        "host OS {}: the profile did not apply: status {} is exit 65: {stderr:?}",
+        std::env::consts::OS,
+        describe(status)
+    );
+    let refused = code == Some(71)
         && stderr
             .iter()
             .any(|line| line.contains("execvp()") && line.contains("Operation not permitted"));

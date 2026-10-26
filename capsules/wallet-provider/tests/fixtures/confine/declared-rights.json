@@ -1,0 +1,32 @@
+{
+  "role": "lab stand-in for the Runtime generator's input, not a manifest field",
+  "provider": "wallet-provider",
+  "rights": [
+    {
+      "id": "storage",
+      "rules": [
+        "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+        "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))"
+      ]
+    },
+    {
+      "id": "bound-executable",
+      "rules": [
+        "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))"
+      ]
+    }
+  ],
+  "observed_startup_needs": {
+    "status": "observed startup needs, not approved rights; Anders decides",
+    "needs": [
+      {
+        "id": "startup-root-directory",
+        "rules": ["(allow file-read* (literal \"/\"))"]
+      },
+      {
+        "id": "startup-sysctl",
+        "rules": ["(allow sysctl-read)"]
+      }
+    ]
+  }
+}
