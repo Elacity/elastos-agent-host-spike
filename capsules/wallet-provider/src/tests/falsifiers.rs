@@ -64,10 +64,25 @@ use std::process::Command;
 /// and task 066's WP69, which disables the second-exec-allow refusal in
 /// `check_profile_contract`, so
 /// `file_profile_contract_rejects_a_second_exec_allow` fails because the
-/// `/bin/sh` fixture passes, and WP70, which stops the exec predicate's
-/// operation list only at the first `(`, so `process*)` escapes and the test
-/// fails on its `(allow process*)` case.
-const EXPECTED_FALSIFIERS: usize = 68;
+/// `/bin/sh` fixture passes, and WP70, which reads no `)` as a token boundary
+/// in the exec predicate, so `process*)` escapes and the test fails on its
+/// `(allow process*)` case, and task 067's WP71, which quotes every exec allow
+/// after the first, so the fixture with `/bin/sh` before the shared rule quotes
+/// the shared rule and the same test fails, WP72, which reads only the
+/// operation names before the first filter, so the after-filter `process-exec`
+/// form passes, WP73, which quotes only the first extra rule, so the
+/// two-extra-rules fixture loses the second quote, WP74, which counts a token
+/// inside a nested filter as an operation, so the passing
+/// `(process-exec "/x")` fixture is refused, and WP75, which counts text
+/// inside a string as an operation, so the passing `(allow "process-exec")`
+/// fixture is refused, and task 067's second round's WP76, which drops the
+/// escape flag in `profile_characters`, so the escaped-string fixture parses
+/// differently and `file_profile_contract_rejects_a_second_exec_allow` and
+/// `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+/// both fail, and WP77, which requires a space after `allow`, so the
+/// flush-head form passes and
+/// `file_profile_contract_rejects_a_second_exec_allow` fails.
+const EXPECTED_FALSIFIERS: usize = 75;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Task 054 registers WP31, which restores the plain cut at every `;` and the parenthesis count inside strings, and WP32 to WP37, which disable escaping, whitespace inside a string, whitespace collapse outside strings, a comment's end at its newline, and the two parser refusals; `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP31 to WP35, `profile_forms_rejects_unclosed_string` catches WP36, and `profile_forms_rejects_unclosed_form` catches WP37. WP38 drops the newline that ends a comment, so the tokens around it glue together and pass the check; `a_comment_inside_a_form_keeps_its_tokens_apart` catches it. WP39 drops the split outside every form, so a bare value such as `1` glues onto the next form and hides an `(allow default)` from the check; `a_bare_top_level_value_is_its_own_form` catches it. WP40 adds the separator space after an opening parenthesis, so `( allow default)` escapes both allow predicates and passes the check; `a_space_after_the_opening_parenthesis_still_names_its_rule` catches it. Task 053 adds WP41, which starts the stderr drainer only after the wait, so the fixture blocks on a full pipe and `stderr_is_drained_before_wait` fails on its exit assertion; WP42, which makes `unanswered` use a fixed `Operation not permitted` instead of the child's standard error, so `startup_denial_reports_its_reason` fails on its `execvp()` assertion; and WP43, which returns the shared unanswered message from the invalid-JSON branch, so `invalid_json_answer_names_the_request_and_the_parse_error` fails. Task 055 registers WP44, which appends `(allow file-read* (literal \"/etc\"))` to the did profile, WP45 to WP48, which drop the removal check's `expect`, profile-path, `old` and `new` conditions, and WP49 to WP53, which turn its profile-read, profile-parse, list-read, not-JSON and missing-list refusals into skips. Run the whole listfrom the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate. Task 058 appends WP54, which drops the canonical-parameter refusal in `start_with_profile`, so `start_with_profile_refuses_a_canonical_parameter` fails. Task 058's encoding repair adds WP55, which checks the caller's whole name instead of the name before the first `=`, so `start_with_profile_refuses_an_encoded_canonical_parameter` fails. Task 059 appends WP56, which appends an unpinned `(allow process-exec)` after the exec rule, so `unbound_copy_is_refused_under_profile` fails on its deadline assertion. Task 060 appends WP57, which widens the parent read from `literal` to `subpath`, so `planted_key_beneath_storage_parent_is_not_read` fails because the planted key loads and `init` answers ok. Task 061 appends WP58, which drops the section check's own-id rule; `falsifier_section_check_reports_missing_and_stale_ids` catches it. WP59 drops that check's unregistered-id rule, which the same test catches. WP60 matches an id as a substring instead of a whole token, which the same test catches. WP61 runs the section to the end of the file instead of the next `## ` heading, which `falsifier_section_check_rejects_a_document_without_its_section` catches. WP62 bypasses the missing-heading refusal, which the same test catches. WP63 bypasses the duplicate-heading refusal, which the same test catches. WP64 skips an unreadable `CONFINEMENT.md` instead of refusing it, and `falsifier_document_read_rejects_unreadable_source` catches it. The same task names every registered id in its own document's `## Falsifiers` section and checks both documents with `every_falsifier_id_is_named_in_its_confinement_document`. Task 062 appends WP65, which appends `(allow file-write* (subpath (param \"STORAGE_PARENT\")))` to this profile, so `confined_outside_write_is_denied` fails because the fresh base beneath the parent is created. Task 063 appends WP66, which restores the silent drop of an entry without a string id in the one list reader, so `allow_rule_removal_check_rejects_bad_inputs` fails because that entry is skipped instead of refused. Task 064 appends WP67, which drops the section check's character-before rule, so `XDID1` names `DID1`, and WP68, which drops its character-after rule, so `DID1a` names `DID1`; `falsifier_section_check_reports_missing_and_stale_ids` fails on the matching case because the missing-id problem does not come. Task 066 appends WP69, which disables the second-exec-allow refusal in `check_profile_contract`, so `file_profile_contract_rejects_a_second_exec_allow` fails because the `/bin/sh` fixture passes. WP70 stops the exec predicate's operation list only at the first `(`, so `process*)` is neither `process*` nor `process-exec`; the same test fails on its `(allow process*)` case because that profile passes.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Task 054 registers WP31, which restores the plain cut at every `;` and the parenthesis count inside strings, and WP32 to WP37, which disable escaping, whitespace inside a string, whitespace collapse outside strings, a comment's end at its newline, and the two parser refusals; `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP31 to WP35, `profile_forms_rejects_unclosed_string` catches WP36, and `profile_forms_rejects_unclosed_form` catches WP37. WP38 drops the newline that ends a comment, so the tokens around it glue together and pass the check; `a_comment_inside_a_form_keeps_its_tokens_apart` catches it. WP39 drops the split outside every form, so a bare value such as `1` glues onto the next form and hides an `(allow default)` from the check; `a_bare_top_level_value_is_its_own_form` catches it. WP40 adds the separator space after an opening parenthesis, so `( allow default)` escapes both allow predicates and passes the check; `a_space_after_the_opening_parenthesis_still_names_its_rule` catches it. Task 053 adds WP41, which starts the stderr drainer only after the wait, so the fixture blocks on a full pipe and `stderr_is_drained_before_wait` fails on its exit assertion; WP42, which makes `unanswered` use a fixed `Operation not permitted` instead of the child's standard error, so `startup_denial_reports_its_reason` fails on its `execvp()` assertion; and WP43, which returns the shared unanswered message from the invalid-JSON branch, so `invalid_json_answer_names_the_request_and_the_parse_error` fails. Task 055 registers WP44, which appends `(allow file-read* (literal \"/etc\"))` to the did profile, WP45 to WP48, which drop the removal check's `expect`, profile-path, `old` and `new` conditions, and WP49 to WP53, which turn its profile-read, profile-parse, list-read, not-JSON and missing-list refusals into skips. Run the whole listfrom the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate. Task 058 appends WP54, which drops the canonical-parameter refusal in `start_with_profile`, so `start_with_profile_refuses_a_canonical_parameter` fails. Task 058's encoding repair adds WP55, which checks the caller's whole name instead of the name before the first `=`, so `start_with_profile_refuses_an_encoded_canonical_parameter` fails. Task 059 appends WP56, which appends an unpinned `(allow process-exec)` after the exec rule, so `unbound_copy_is_refused_under_profile` fails on its deadline assertion. Task 060 appends WP57, which widens the parent read from `literal` to `subpath`, so `planted_key_beneath_storage_parent_is_not_read` fails because the planted key loads and `init` answers ok. Task 061 appends WP58, which drops the section check's own-id rule; `falsifier_section_check_reports_missing_and_stale_ids` catches it. WP59 drops that check's unregistered-id rule, which the same test catches. WP60 matches an id as a substring instead of a whole token, which the same test catches. WP61 runs the section to the end of the file instead of the next `## ` heading, which `falsifier_section_check_rejects_a_document_without_its_section` catches. WP62 bypasses the missing-heading refusal, which the same test catches. WP63 bypasses the duplicate-heading refusal, which the same test catches. WP64 skips an unreadable `CONFINEMENT.md` instead of refusing it, and `falsifier_document_read_rejects_unreadable_source` catches it. The same task names every registered id in its own document's `## Falsifiers` section and checks both documents with `every_falsifier_id_is_named_in_its_confinement_document`. Task 062 appends WP65, which appends `(allow file-write* (subpath (param \"STORAGE_PARENT\")))` to this profile, so `confined_outside_write_is_denied` fails because the fresh base beneath the parent is created. Task 063 appends WP66, which restores the silent drop of an entry without a string id in the one list reader, so `allow_rule_removal_check_rejects_bad_inputs` fails because that entry is skipped instead of refused. Task 064 appends WP67, which drops the section check's character-before rule, so `XDID1` names `DID1`, and WP68, which drops its character-after rule, so `DID1a` names `DID1`; `falsifier_section_check_reports_missing_and_stale_ids` fails on the matching case because the missing-id problem does not come. Task 066 appends WP69, which disables the second-exec-allow refusal in `check_profile_contract`, so `file_profile_contract_rejects_a_second_exec_allow` fails because the `/bin/sh` fixture passes. WP70 reads no `)` as a token boundary in the exec predicate, so `process*)` is neither `process*` nor `process-exec`; the same test fails on its `(allow process*)` case because that profile passes. Task 067 extends the exec predicate to every operation name of an allow form and narrows the refusal to every exec allow except the shared rule, and registers WP71, which quotes every exec allow after the first, WP72, which reads only the operation names before the first filter, WP73, which quotes only the first extra rule, WP74, which counts a token inside a nested filter, and WP75, which counts text inside a string; `file_profile_contract_rejects_a_second_exec_allow` catches each. Task 067's second round reuses `profile_characters` as the exec predicate's one string reader, accepts a filter directly after `allow`, and registers WP76, which drops the escape flag in `profile_characters`, and WP77, which requires a space after `allow`; `file_profile_contract_rejects_a_second_exec_allow` catches both, and `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP76.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -1104,7 +1104,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if exec_allows.len() > 1 {\n        let quoted = exec_allows[1..]\n            .iter()\n            .map(|form| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");\n        return Err(format!(\n            \"{name} holds more than one process-exec allow, so it has a second exec path (P10); \\\n             the extra rules are {quoted}\"\n        ));\n    }",
+          "old": "    if exec_allows.len() > 1 {\n        let shared = exec_allows.iter().position(|form| *form == SHARED_RULES[0]);\n        let quoted = exec_allows\n            .iter()\n            .enumerate()\n            .filter(|(index, _)| Some(*index) != shared)\n            .map(|(_, form)| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");\n        return Err(format!(\n            \"{name} holds more than one process-exec allow, so it has a second exec path (P10); \\\n             the extra rules are {quoted}\"\n        ));\n    }",
           "new": "    // WP69 drops the second-exec-allow refusal."
         }
       ],
@@ -1114,14 +1114,127 @@
     },
     {
       "id": "WP70",
-      "title": "the exec predicate stops only at the first filter",
+      "title": "the exec predicate stops reading `)` as a token boundary",
       "command": "wallet",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let operations = rest.split(['(', ')']).next().unwrap_or_default();",
-          "new": "    let operations = rest.split('(').next().unwrap_or_default();"
+          "old": "            '(' | ')' => {\n                flush_operation(&mut operation, depth, &mut operations);",
+          "new": "            '(' => {\n                flush_operation(&mut operation, depth, &mut operations);"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP71",
+      "title": "the refusal quotes every exec allow after the first",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let shared = exec_allows.iter().position(|form| *form == SHARED_RULES[0]);\n        let quoted = exec_allows\n            .iter()\n            .enumerate()\n            .filter(|(index, _)| Some(*index) != shared)\n            .map(|(_, form)| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");",
+          "new": "        let quoted = exec_allows[1..]\n            .iter()\n            .map(|form| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP72",
+      "title": "the exec predicate reads only the operations before the first filter",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for (ch, in_string) in profile_characters(rest) {",
+          "new": "    for (ch, in_string) in profile_characters(rest.split('(').next().unwrap_or_default()) {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP73",
+      "title": "the refusal quotes only the first extra exec rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            .filter(|(index, _)| Some(*index) != shared)",
+          "new": "            .filter(|(index, _)| Some(*index) != shared)\n            .take(1)"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP74",
+      "title": "the exec predicate counts a nested filter's token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if depth == 0 && !operation.is_empty() {",
+          "new": "    if !operation.is_empty() {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP75",
+      "title": "the exec predicate counts a string's text",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if in_string {\n            flush_operation(&mut operation, depth, &mut operations);\n            continue;\n        }",
+          "new": "        if in_string {\n            if ch != '\"' {\n                operation.push(ch);\n            }\n            continue;\n        }"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP76",
+      "title": "the one string reader drops the escape flag",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            escaped = true;",
+          "new": "            // WP76 drops the escape flag."
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow",
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP77",
+      "title": "the exec predicate requires a space after allow",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(rest) = form.strip_prefix(\"(allow\") else {\n        return false;\n    };\n    if !rest.starts_with([' ', '(']) {\n        return false;\n    }",
+          "new": "    let Some(rest) = form.strip_prefix(\"(allow \") else {\n        return false;\n    };"
         }
       ],
       "tests": [

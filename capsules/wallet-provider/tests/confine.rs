@@ -1394,18 +1394,58 @@ fn is_default_allow(form: &str) -> bool {
 }
 
 /// Whether `form` is a top-level allow rule that grants `process-exec`: one of
-/// its operation names, the tokens after `allow` before the first filter or
-/// closing parenthesis, is `process*` or starts with `process-exec`, and each
-/// of those grants it. This is the one copy of the rule, used by the shared
-/// file-profile contract check (P10).
+/// its operation names, the bare tokens directly inside the allow form before
+/// or after a nested filter or a string, is `process*` or starts with
+/// `process-exec`, and each of those grants it. An allow form may write its
+/// first filter directly after `allow`. A token inside a nested filter is that
+/// filter's argument and a token inside a string is text, so neither names an
+/// operation. `profile_characters` is the one string reader, so an escaped
+/// quote or parenthesis reads here as `profile_forms` reads it. This is the one
+/// copy of the rule, used by the shared file-profile contract check (P10).
 fn is_exec_allow(form: &str) -> bool {
-    let Some(rest) = form.strip_prefix("(allow ") else {
+    let Some(rest) = form.strip_prefix("(allow") else {
         return false;
     };
-    let operations = rest.split(['(', ')']).next().unwrap_or_default();
+    if !rest.starts_with([' ', '(']) {
+        return false;
+    }
+    let mut operations: Vec<String> = Vec::new();
+    let mut operation = String::new();
+    let mut depth = 0usize;
+    for (ch, in_string) in profile_characters(rest) {
+        if in_string {
+            flush_operation(&mut operation, depth, &mut operations);
+            continue;
+        }
+        match ch {
+            '(' | ')' => {
+                flush_operation(&mut operation, depth, &mut operations);
+                depth = if ch == '(' {
+                    depth + 1
+                } else {
+                    depth.saturating_sub(1)
+                };
+            }
+            _ if ch.is_whitespace() => {
+                flush_operation(&mut operation, depth, &mut operations);
+            }
+            _ => operation.push(ch),
+        }
+    }
+    flush_operation(&mut operation, depth, &mut operations);
     operations
-        .split_whitespace()
+        .iter()
         .any(|operation| operation == "process*" || operation.starts_with("process-exec"))
+}
+
+/// Records one finished operation token when it sits directly inside the allow
+/// form, and drops it when it sits inside a nested filter.
+fn flush_operation(operation: &mut String, depth: usize, operations: &mut Vec<String>) {
+    if depth == 0 && !operation.is_empty() {
+        operations.push(std::mem::take(operation));
+    } else {
+        operation.clear();
+    }
 }
 
 /// The profile denies every network operation: it starts from `(deny default)`
@@ -1506,9 +1546,12 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         }
     }
     if exec_allows.len() > 1 {
-        let quoted = exec_allows[1..]
+        let shared = exec_allows.iter().position(|form| *form == SHARED_RULES[0]);
+        let quoted = exec_allows
             .iter()
-            .map(|form| format!("`{form}`"))
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != shared)
+            .map(|(_, form)| format!("`{form}`"))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
@@ -2557,20 +2600,38 @@ fn file_profile_contract_rejects_an_allow_default() {
 }
 
 /// The one contract check refuses a profile that holds a second exec allow,
-/// whichever form grants it, and names the profile, the extra rule and the
-/// reason. A fixture profile that appends `(allow process-exec (literal
-/// "/bin/sh"))` keeps its own removal for the 055 removal check, and the 056
-/// and 059 copy tests still launch and refuse copies of the provider binary,
-/// because `PROVIDER_EXECUTABLE` stays the only bound binary, so neither test
-/// sees a second exec path. The unfiltered forms put the operation name
-/// directly before the closing parenthesis, which `profile_forms` keeps
-/// attached, so the predicate must read `)` as a token boundary too. The
+/// whichever form grants it, wherever it sits, and names the profile, every
+/// extra rule and the reason. A fixture profile that appends `(allow
+/// process-exec (literal "/bin/sh"))` keeps its own removal for the 055 removal
+/// check, and the 056 and 059 copy tests still launch and refuse copies of the
+/// provider binary, because `PROVIDER_EXECUTABLE` stays the only bound binary,
+/// so neither test sees a second exec path. The unfiltered forms put the
+/// operation name directly before the closing parenthesis, which `profile_forms`
+/// keeps attached, so the predicate must read `)` as a token boundary too.
+/// An allow form may put its first filter directly after `allow`, and an
+/// escaped quote or parenthesis inside a string must stay inside that string.
+/// `/usr/bin/sandbox-exec` loads `(version 1)(deny default)(allow file-read*
+/// (literal "/x") process-exec)` without a load error: it attempts to start
+/// `/usr/bin/true`, whose exec fails with `execvp() of '/usr/bin/true' failed:
+/// Operation not permitted` and exit 71. The check refuses that form either
+/// way, because it does not depend on what `sandbox-exec` accepts. The
 /// fixtures are built in the test; no file is read and no process starts.
 ///
 /// Falsifiers: WP69 disables the second-exec-allow refusal in
 /// `check_profile_contract`; this test fails because the `/bin/sh` fixture
-/// passes. WP70 takes the operation list only up to the first `(`, so the
-/// unfiltered `(allow process*)` form passes.
+/// passes. WP70 does not read `)` as a token boundary, so the unfiltered
+/// `(allow process*)` form passes. WP71 quotes every exec allow after the
+/// first, so the fixture with `/bin/sh` before the shared rule quotes the
+/// shared rule and misses the extra one. WP72 reads only the operation names
+/// before the first filter, so the after-filter `process-exec` form passes.
+/// WP73 quotes only the first extra rule, so the fixture with two extras and
+/// no shared rule loses the second quote. WP74 counts a token inside a nested
+/// filter as an operation, so the passing `(process-exec "/x")` fixture is
+/// refused. WP75 counts text inside a string as an operation, so the passing
+/// `(allow "process-exec")` fixture is refused. WP76 drops the escape flag in
+/// `profile_characters`, so the escaped-string fixture parses differently and
+/// this test and `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+/// fail. WP77 requires `(allow ` with a space, so the flush-head form passes.
 #[test]
 fn file_profile_contract_rejects_a_second_exec_allow() {
     let complete = contract_fixture_profile(true);
@@ -2597,7 +2658,132 @@ fn file_profile_contract_rejects_a_second_exec_allow() {
             refusal.contains("more than one process-exec allow"),
             "the refusal must say there is more than one process-exec allow: {refusal}"
         );
+        assert_generated_reason_has_no_failure(&refusal);
     }
+
+    // The extra exec rule sits before the shared one, so a refusal that quotes
+    // `exec_allows[1..]` names the shared rule and misses the extra one.
+    let extra_before_shared = r#"(allow process-exec (literal "/bin/sh"))"#;
+    let mut profile = String::from("(version 1)\n(deny default)\n(deny network*)\n");
+    profile.push_str(extra_before_shared);
+    profile.push('\n');
+    for rule in SHARED_RULES {
+        profile.push_str(rule);
+        profile.push('\n');
+    }
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("an extra exec rule before the shared one must fail");
+    assert!(
+        refusal.contains(&format!("the extra rules are `{extra_before_shared}`")),
+        "the refusal must quote the extra rule that sits before the shared one: {refusal}"
+    );
+    assert!(
+        !refusal.contains(SHARED_RULES[0]),
+        "the refusal must not quote the one shared exec rule: {refusal}"
+    );
+    assert!(
+        refusal.contains("more than one process-exec allow"),
+        "the refusal must say there is more than one process-exec allow: {refusal}"
+    );
+    assert_generated_reason_has_no_failure(&refusal);
+
+    // An operation name after a filter still names the allow form's operation.
+    let after_filter = r#"(allow file-read* (literal "/x") process-exec)"#;
+    let profile = format!("{complete}{after_filter}\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("an operation name after a filter must still be counted");
+    assert!(
+        refusal.contains(&format!("the extra rules are `{after_filter}`")),
+        "the refusal must quote the after-filter rule: {refusal}"
+    );
+    assert!(
+        refusal.contains("more than one process-exec allow"),
+        "the refusal must say there is more than one process-exec allow: {refusal}"
+    );
+    assert_generated_reason_has_no_failure(&refusal);
+
+    // The first filter may sit directly after `allow`, so the allow head is
+    // `(allow(` and the operation after the filter still counts.
+    let flush_head = r#"(allow(literal "/x") process-exec)"#;
+    let profile = format!("{complete}{flush_head}\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("an operation after a filter that follows allow directly must be counted");
+    assert!(
+        refusal.contains(&format!("the extra rules are `{flush_head}`")),
+        "the refusal must quote the flush-head rule: {refusal}"
+    );
+    assert!(
+        refusal.contains("more than one process-exec allow"),
+        "the refusal must say there is more than one process-exec allow: {refusal}"
+    );
+    assert_generated_reason_has_no_failure(&refusal);
+
+    // An escaped quote and a parenthesis inside a string leave the following
+    // operation outside the string, so the one string reader must keep them.
+    let escaped_string = r#"(allow file-read* (literal "a\"b)") process-exec)"#;
+    let profile = format!("{complete}{escaped_string}\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("an operation after an escaped string must still be counted");
+    assert!(
+        refusal.contains(&format!("the extra rules are `{escaped_string}`")),
+        "the refusal must quote the rule after the escaped string: {refusal}"
+    );
+    assert!(
+        refusal.contains("more than one process-exec allow"),
+        "the refusal must say there is more than one process-exec allow: {refusal}"
+    );
+    assert_generated_reason_has_no_failure(&refusal);
+
+    // With no shared exec rule, every exec allow is an extra rule.
+    let first_extra = r#"(allow process-exec (literal "/bin/sh"))"#;
+    let second_extra = r#"(allow process* (literal "/bin/ksh"))"#;
+    let mut profile = String::from("(version 1)\n(deny default)\n(deny network*)\n");
+    for rule in [first_extra, second_extra, SHARED_RULES[1], SHARED_RULES[2]] {
+        profile.push_str(rule);
+        profile.push('\n');
+    }
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a profile without the shared exec rule still holds two exec allows");
+    assert!(
+        refusal.contains(&format!(
+            "the extra rules are `{first_extra}`, `{second_extra}`"
+        )),
+        "the refusal must quote every exec allow when none is the shared one: {refusal}"
+    );
+    assert!(
+        refusal.contains("more than one process-exec allow"),
+        "the refusal must say there is more than one process-exec allow: {refusal}"
+    );
+    assert_generated_reason_has_no_failure(&refusal);
+
+    // A token inside a string or a nested filter names text or a filter
+    // argument, not an operation, so these profiles keep one exec allow. An
+    // escaped quote stays inside its string, so the text after it is text too.
+    for passing in [
+        r#"(allow file-read* (literal "/process-exec"))"#,
+        r#"(allow file-read* (process-exec "/x"))"#,
+        r#"(allow file-read* (require-all (process*)))"#,
+        r#"(allow "process-exec")"#,
+        r#"(allow file-read* (literal "a\" process-exec "))"#,
+    ] {
+        let profile = format!("{complete}{passing}\n");
+        check_profile_contract("fixture-provider", &profile)
+            .expect("a token inside a string or a nested filter must not count as an operation");
+    }
+}
+
+/// The part of the refusal the one check generates, before the rules it quotes.
+/// The `error: ` ban covers that generated text; a quoted rule may hold any
+/// path text of its own.
+fn assert_generated_reason_has_no_failure(refusal: &str) {
+    let generated = refusal
+        .split("; the extra rules are ")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        !generated.contains("error: "),
+        "the generated reason must hold no failure text: {refusal}"
+    );
 }
 
 /// The one contract check refuses a profile that binds a parameter token
