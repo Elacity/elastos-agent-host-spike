@@ -2,7 +2,7 @@ id: M-A12-NO-MARKER
 file: src/a12.rs
 test: tests::a12_leftover_without_marker_is_found
 --- old
-        if keep_created_path(before, path, ino) && allow_moved_away(path) {
+        if keep_created_path(before, path, &id) && allow_moved_away(path) {
             found.insert(path.to_path_buf());
         }
 --- new

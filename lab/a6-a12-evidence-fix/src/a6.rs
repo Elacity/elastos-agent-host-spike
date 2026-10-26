@@ -5,8 +5,12 @@
 //! It is not two resident capsule instances inside one running Home.
 //!
 //! Two resident instances in one Runtime is RA-6. The ready journey reports
-//! BLOCKED, never PASS, until the Runtime hosts that pair.
+//! BLOCKED while hosting is absent. PASS requires evidence a real Runtime
+//! host produced: two distinct live instance ids/pids, each holding its own
+//! grant, sibling refused by the Runtime. An `Ok` from a stub with an empty
+//! [`ResidentPair`] is FAIL.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use elastos_runtime::capability::manager::{CapabilityManager, ValidationError};
@@ -302,9 +306,21 @@ pub enum JourneyStatus {
     Blocked { ask: &'static str, reason: String },
 }
 
-/// Two resident capsule handles inside one Runtime. The Runtime does not
-/// expose this yet (RA-6).
+/// Empty pair a hosting stub can return. PASS never treats this as evidence.
+/// The journey reads live instance ids/pids from the Runtime.
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ResidentPair;
+
+/// Instance ids, pids, and grants a real Runtime host must report.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RuntimeResidentEvidence {
+    pub instance_1_id: String,
+    pub instance_1_pid: u32,
+    pub instance_1_grant: String,
+    pub instance_2_id: String,
+    pub instance_2_pid: u32,
+    pub instance_2_grant: String,
+}
 
 fn try_host_two_resident_instances() -> Result<ResidentPair, String> {
     Err(format!(
@@ -314,11 +330,83 @@ fn try_host_two_resident_instances() -> Result<ResidentPair, String> {
     ))
 }
 
+/// Independent of the stub return. Empty until the Runtime reports a pair.
+pub fn query_runtime_resident_instances() -> Result<RuntimeResidentEvidence, String> {
+    Err(
+        "Runtime does not report two distinct live resident instance ids/pids, \
+         each holding its own grant"
+            .into(),
+    )
+}
+
+fn pid_is_live(pid: u32) -> bool {
+    pid != 0 && Path::new(&format!("/proc/{pid}")).is_dir()
+}
+
+fn evidence_is_live_runtime_pair(ev: &RuntimeResidentEvidence) -> Result<(), String> {
+    if ev.instance_1_id.is_empty()
+        || ev.instance_2_id.is_empty()
+        || ev.instance_1_id == ev.instance_2_id
+    {
+        return Err("Runtime instance ids must be two distinct non-empty ids".into());
+    }
+    if ev.instance_1_pid == 0 || ev.instance_2_pid == 0 || ev.instance_1_pid == ev.instance_2_pid {
+        return Err("Runtime instance pids must be two distinct live pids".into());
+    }
+    if !pid_is_live(ev.instance_1_pid) || !pid_is_live(ev.instance_2_pid) {
+        return Err("Runtime-reported pid is not a live process".into());
+    }
+    if ev.instance_1_grant.is_empty()
+        || ev.instance_2_grant.is_empty()
+        || ev.instance_1_grant == ev.instance_2_grant
+    {
+        return Err("each resident instance must hold its own grant".into());
+    }
+    Ok(())
+}
+
+/// Evaluate an `Ok(ResidentPair)` from the host. An empty stub pair is FAIL.
+pub fn status_after_host_ok(pair: ResidentPair) -> JourneyStatus {
+    let session = Session::mint_instance1();
+    finish_hosted_pair(&session, pair)
+}
+
+fn finish_hosted_pair(session: &Session, pair: ResidentPair) -> JourneyStatus {
+    let _ = pair;
+    match query_runtime_resident_instances() {
+        Err(reason) => JourneyStatus::Fail(format!(
+            "Ok from stub with empty ResidentPair: FAIL ({reason})"
+        )),
+        Ok(evidence) => match evidence_is_live_runtime_pair(&evidence) {
+            Err(reason) => JourneyStatus::Fail(reason),
+            Ok(()) => match session.validate_as(INSTANCE_2) {
+                Err(ValidationError::WrongCapsule { expected, got })
+                    if expected == INSTANCE_1 && got == INSTANCE_2 =>
+                {
+                    JourneyStatus::Pass(format!(
+                        "A6 resident: Runtime hosted {} pid {} and {} pid {}; \
+                         sibling refused WrongCapsule {{ expected:{expected} got:{got} }}",
+                        evidence.instance_1_id,
+                        evidence.instance_1_pid,
+                        evidence.instance_2_id,
+                        evidence.instance_2_pid
+                    ))
+                }
+                other => JourneyStatus::Fail(format!(
+                    "resident instance-2 presenting instance-1 token: {other:?}"
+                )),
+            },
+        },
+    }
+}
+
 /// Ready journey: mint instance-1's real token and present it as a second
 /// *resident* instance. Until the Runtime hosts that pair, the status is
-/// BLOCKED. Removing validate step 4 from the Runtime this process loaded
-/// makes the readiness check FAIL (sibling accepted). The journey never
-/// returns PASS while RA-6 is open.
+/// BLOCKED. An `Ok` from a stub with an empty [`ResidentPair`] is FAIL.
+/// PASS requires two distinct live instance ids/pids reported by the Runtime,
+/// each holding its own grant, sibling refused by the Runtime. Removing
+/// validate step 4 from the Runtime this process loaded makes the readiness
+/// check FAIL (sibling accepted).
 pub fn resident_two_instance_token_journey() -> JourneyStatus {
     let session = Session::mint_instance1();
     match session.validate_as(INSTANCE_2) {
@@ -331,24 +419,8 @@ pub fn resident_two_instance_token_journey() -> JourneyStatus {
         }
     }
     match try_host_two_resident_instances() {
-        Err(reason) => JourneyStatus::Blocked {
-            ask: RA_6,
-            reason,
-        },
-        Ok(_pair) => {
-            match session.validate_as(INSTANCE_2) {
-                Err(ValidationError::WrongCapsule { expected, got })
-                    if expected == INSTANCE_1 && got == INSTANCE_2 =>
-                {
-                    JourneyStatus::Pass(format!(
-                        "A6 resident: instance-2 presenting instance-1 token refused WrongCapsule {{ expected:{expected} got:{got} }}"
-                    ))
-                }
-                other => JourneyStatus::Fail(format!(
-                    "resident instance-2 presenting instance-1 token: {other:?}"
-                )),
-            }
-        }
+        Err(reason) => JourneyStatus::Blocked { ask: RA_6, reason },
+        Ok(pair) => finish_hosted_pair(&session, pair),
     }
 }
 

@@ -16,13 +16,22 @@ This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
   instances inside one Home. Two resident instances are **RA-6**. The
   ready journey reports **BLOCKED**, never PASS, until the Runtime hosts
   that pair. Removing validate step 4 from the Runtime this process
-  loaded makes that journey FAIL.
-- **A12:** leftover census records the inode/path set a run created. A
-  rename to an unrelated name (`moved-away`) and a leftover with no lab
-  marker are found. `ELASTOS_TMP_ROOT` is guarded: `/`, empty, `$HOME`,
-  live Home paths, and anything not under the pack mktemp are refused.
-  `run.sh` / `mac-pack.sh` set `ELASTOS_TMP_ROOT` to a fresh `mktemp -d`
-  folder and clean only that. A clean isolated root is PASS.
+  loaded makes that journey FAIL. An `Ok` from a stub with an empty
+  `ResidentPair` is FAIL. PASS needs two distinct live instance ids/pids
+  reported by the Runtime, each holding its own grant, sibling refused
+  by the Runtime.
+- **A12:** leftover census records the (dev, inode, birth/ctime,
+  size+content hash) set a run created. A rename to an unrelated name
+  (`moved-away`), a leftover with no lab marker, and a same-path
+  delete+recreate that reuses an inode are found. The snapshot is taken
+  before the Runtime starts; if the Runtime already wrote, it fails.
+  The run-window watch also covers `$TMPDIR`, XDG cache/data/state/runtime
+  dirs, and `~/Library/Caches` / `~/Library/Application Support`.
+  `ELASTOS_TMP_ROOT` is guarded after realpath: `/`, empty, `$HOME`, a
+  `..` component, a symlink at or under isolation, a reachable live Home,
+  and anything whose canonical path is not under the pack mktemp are
+  refused. `run.sh` / `mac-pack.sh` set `ELASTOS_TMP_ROOT` to a fresh
+  `mktemp -d` folder and clean only that. A clean isolated root is PASS.
   `ThrowawayHome::new` + `census::cleanup` are called; on Linux that
   construction is NOT RUN.
 

@@ -1,0 +1,11 @@
+id: M-A6-STUB-OK
+file: src/a6.rs
+test: tests::a6_resident_two_instances_is_blocked
+--- old
+fn try_host_two_resident_instances() -> Result<ResidentPair, String> {
+    Err(format!(
+--- new
+fn try_host_two_resident_instances() -> Result<ResidentPair, String> {
+    return Ok(ResidentPair);
+    Err(format!(
+--- end

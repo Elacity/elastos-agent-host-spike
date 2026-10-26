@@ -113,6 +113,20 @@ mod tests {
     }
 
     #[test]
+    fn a6_empty_resident_pair_cannot_pass() {
+        match a6::status_after_host_ok(a6::ResidentPair) {
+            a6::JourneyStatus::Fail(reason) => {
+                assert!(
+                    reason.contains("empty ResidentPair") || reason.contains("stub"),
+                    "{reason}"
+                );
+                println!("empty ResidentPair FAIL: {reason}");
+            }
+            other => panic!("Ok(empty ResidentPair) must FAIL, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a6_does_not_claim_resident_instances() {
         let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a6.rs"));
         let findings = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/FINDINGS.md"));
@@ -212,6 +226,44 @@ mod tests {
         let err = a12::check_tmp_root(relative).expect_err("relative");
         assert!(err.contains("absolute"), "{err}");
         println!("A12 HOME, live Home, and relative ELASTOS_TMP_ROOT refused");
+    }
+
+    #[test]
+    fn a12_isolation_parent_tmp_root_is_refused() {
+        let iso = a12::isolation_root();
+        let escaped = iso.join("..");
+        let err = a12::check_tmp_root(&escaped).expect_err("isolation/..");
+        assert!(err.contains(".."), "{err}");
+        println!("A12 ELASTOS_TMP_ROOT=$ISOLATION/.. refused: {err}");
+    }
+
+    #[test]
+    fn a12_nested_dotdot_tmp_root_is_refused() {
+        let iso = a12::isolation_root();
+        let escaped = iso.join("hold").join("..").join("..");
+        let err = a12::check_tmp_root(&escaped).expect_err("hold/../..");
+        assert!(err.contains(".."), "{err}");
+        println!("A12 ELASTOS_TMP_ROOT=$ISOLATION/hold/../.. refused: {err}");
+    }
+
+    #[test]
+    fn a12_symlink_to_live_home_tmp_root_is_refused() {
+        let iso = a12::isolation_root();
+        let pid = std::process::id();
+        let fake_live = std::env::temp_dir().join(format!("a12-fake-live-{pid}"));
+        let _ = fs::remove_dir_all(&fake_live);
+        fs::create_dir_all(fake_live.join(".local/share/elastos")).unwrap();
+        let link = iso.join(format!("live-via-symlink-{pid}"));
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&fake_live, &link).unwrap();
+        let err = a12::check_tmp_root(&link).expect_err("symlink to live Home");
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_dir_all(&fake_live);
+        assert!(
+            err.contains("symlink") || err.contains("live Home"),
+            "{err}"
+        );
+        println!("A12 ELASTOS_TMP_ROOT symlink to live Home refused: {err}");
     }
 
     #[test]
@@ -355,6 +407,140 @@ mod tests {
             leftover.display()
         );
         println!("A12 no-marker leftover found after rename to moved-away");
+    }
+
+    #[test]
+    fn a12_snapshot_before_runtime_fails_if_already_wrote() {
+        let dir = a12::isolated_dir("late-snap");
+        let leftover = a12::create_plain_leftover(&dir, "already.txt", b"runtime wrote first\n")
+            .expect("write");
+        let err =
+            a12::snapshot_before_runtime(&dir).expect_err("snapshot after Runtime wrote must fail");
+        a12::remove_isolated(&dir);
+        assert!(err.contains("before the Runtime"), "{err}");
+        assert!(leftover.ends_with("already.txt"), "{}", leftover.display());
+        println!("A12 late snapshot refused: {err}");
+    }
+
+    #[test]
+    fn a12_inode_reuse_same_path_is_found() {
+        let parent = a12::isolated_dir("inode-reuse");
+        let path = parent.join("slot.txt");
+        fs::write(&path, b"first\n").unwrap();
+        #[cfg(unix)]
+        let before_ino = {
+            use std::os::unix::fs::MetadataExt;
+            fs::symlink_metadata(&path).unwrap().ino()
+        };
+        let before = a12::snapshot(&parent).expect("before");
+        fs::remove_file(&path).unwrap();
+        let mut reused = false;
+        for i in 0..300 {
+            fs::write(&path, format!("second-{i}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if fs::symlink_metadata(&path).unwrap().ino() == before_ino {
+                    reused = true;
+                    break;
+                }
+            }
+            fs::remove_file(&path).unwrap();
+        }
+        if !path.exists() {
+            fs::write(&path, b"second-final\n").unwrap();
+        }
+        let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
+        a12::remove_isolated(&parent);
+        assert!(
+            reused,
+            "same-path inode reuse did not happen; identity check would not be decisive"
+        );
+        assert!(
+            leftovers.iter().any(|p| p == &path),
+            "same-path delete+recreate must be found even if the inode is reused: {leftovers:?}"
+        );
+        println!("A12 inode-reuse leftover found at {}", path.display());
+    }
+
+    #[test]
+    fn a12_run_window_watches_tmpdir_xdg_library() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let sandbox = a12::isolation_root().join(format!("run-window-home-{pid}-{stamp}"));
+        let xdg_cache = sandbox.join("xdg-cache");
+        let xdg_data = sandbox.join("xdg-data");
+        let xdg_state = sandbox.join("xdg-state");
+        let xdg_runtime = sandbox.join("xdg-runtime");
+        let lib_cache = sandbox.join("Library/Caches");
+        let lib_support = sandbox.join("Library/Application Support");
+        for dir in [
+            &xdg_cache,
+            &xdg_data,
+            &xdg_state,
+            &xdg_runtime,
+            &lib_cache,
+            &lib_support,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let prev_home = std::env::var_os("HOME");
+        let prev_cache = std::env::var_os("XDG_CACHE_HOME");
+        let prev_data = std::env::var_os("XDG_DATA_HOME");
+        let prev_state = std::env::var_os("XDG_STATE_HOME");
+        let prev_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("HOME", &sandbox);
+        std::env::set_var("XDG_CACHE_HOME", &xdg_cache);
+        std::env::set_var("XDG_DATA_HOME", &xdg_data);
+        std::env::set_var("XDG_STATE_HOME", &xdg_state);
+        std::env::set_var("XDG_RUNTIME_DIR", &xdg_runtime);
+        let roots = a12::extra_watch_roots();
+        assert!(roots.contains(&std::env::temp_dir()), "{roots:?}");
+        assert!(roots.contains(&xdg_cache), "{roots:?}");
+        assert!(roots.contains(&xdg_data), "{roots:?}");
+        assert!(roots.contains(&xdg_state), "{roots:?}");
+        assert!(roots.contains(&xdg_runtime), "{roots:?}");
+        assert!(roots.contains(&lib_cache), "{roots:?}");
+        assert!(roots.contains(&lib_support), "{roots:?}");
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        let tmp_file = std::env::temp_dir().join(format!("a12-run-window-tmp-{pid}-{stamp}.txt"));
+        let cache_file = xdg_cache.join("outside.txt");
+        let lib_file = lib_cache.join("outside.txt");
+        fs::write(&tmp_file, b"tmpdir leftover\n").unwrap();
+        fs::write(&cache_file, b"xdg leftover\n").unwrap();
+        fs::write(&lib_file, b"library leftover\n").unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        let _ = fs::remove_file(&tmp_file);
+        restore_env("HOME", prev_home);
+        restore_env("XDG_CACHE_HOME", prev_cache);
+        restore_env("XDG_DATA_HOME", prev_data);
+        restore_env("XDG_STATE_HOME", prev_state);
+        restore_env("XDG_RUNTIME_DIR", prev_runtime);
+        a12::remove_isolated(&sandbox);
+        assert!(
+            leftovers.iter().any(|path| path == &tmp_file),
+            "run window must see $TMPDIR leftover: {leftovers:?}"
+        );
+        assert!(
+            leftovers.iter().any(|path| path == &cache_file),
+            "run window must see XDG cache leftover: {leftovers:?}"
+        );
+        assert!(
+            leftovers.iter().any(|path| path == &lib_file),
+            "run window must see Library/Caches leftover: {leftovers:?}"
+        );
+        println!("A12 run-window watches found TMPDIR, XDG, and Library leftovers");
+    }
+
+    fn restore_env(key: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 
     #[test]

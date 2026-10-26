@@ -1,18 +1,29 @@
 //! A12 leftover census for Runtime-owned temp roots.
 //!
-//! Detection records the inode/path set the run created. It does not depend
-//! on a name prefix or a lab marker. Real Runtime leftovers have no lab
-//! marker; a rename to an unrelated name (`moved-away`) must still be found.
+//! Detection records the (dev, inode, birth/ctime, size+content hash) set
+//! the run created. It does not depend on a name prefix or a lab marker.
+//! Same-path delete+recreate with a reused inode is found. Real Runtime
+//! leftovers have no lab marker; a rename to an unrelated name
+//! (`moved-away`) must still be found.
 //!
-//! `ELASTOS_TMP_ROOT` is guarded: `/`, empty, `$HOME`, live Home paths, and
-//! anything not under the pack's fresh mktemp isolation are refused.
+//! The census snapshot is taken before the Runtime starts. If the Runtime
+//! already wrote, the snapshot fails. The run-window watch also covers
+//! `$TMPDIR`, XDG cache/data/state/runtime dirs, and
+//! `~/Library/Caches` / `~/Library/Application Support` (Mac).
+//!
+//! `ELASTOS_TMP_ROOT` is guarded: canonicalize (realpath) first. `/`, empty,
+//! `$HOME`, a `..` component, a symlink anywhere at or under isolation, a
+//! reachable live Home, and anything whose canonical path is not inside the
+//! pack's fresh mktemp isolation are refused.
 //! `ThrowawayHome` / `census::cleanup` are called for real; on Linux that
 //! construction is NOT RUN.
 
-use std::collections::BTreeSet;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -43,11 +54,22 @@ pub fn live_runtime_tmp_root() -> PathBuf {
     PathBuf::from("/tmp/elastos")
 }
 
-/// Inodes and paths present under a watch root at one moment.
+/// Identity of one path at one moment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
+    pub birth_or_ctime: u128,
+    pub size: u64,
+    pub content_hash: u64,
+}
+
+/// Paths and file identities present under a watch root at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FsSnapshot {
     pub inodes: BTreeSet<(u64, u64)>,
     pub paths: BTreeSet<PathBuf>,
+    pub ids: BTreeMap<PathBuf, FileId>,
 }
 
 /// Isolation root created by `mktemp -d` (or the env set by `run.sh`).
@@ -113,7 +135,81 @@ fn is_under(child: &Path, parent: &Path) -> bool {
     child == parent || child.starts_with(parent)
 }
 
-/// Refuse `/`, empty, `$HOME`, live Home paths, and anything outside isolation.
+fn path_has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|part| matches!(part, Component::ParentDir))
+}
+
+fn first_symlink_at_or_under(path: &Path, isolation: &Path) -> Option<PathBuf> {
+    let mut acc = PathBuf::new();
+    for part in path.components() {
+        acc.push(part);
+        if acc != isolation && !is_under(&acc, isolation) {
+            continue;
+        }
+        match fs::symlink_metadata(&acc) {
+            Ok(meta) if meta.file_type().is_symlink() => return Some(acc),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn realpath(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return fs::canonicalize(path)
+            .map_err(|_| format!("ELASTOS_TMP_ROOT could not canonicalize {}", path.display()));
+    }
+    let mut acc = PathBuf::new();
+    let mut last_existing = None;
+    let mut rest = PathBuf::new();
+    let mut seen_missing = false;
+    for part in path.components() {
+        if seen_missing {
+            rest.push(part);
+            continue;
+        }
+        acc.push(part);
+        if acc.exists() {
+            last_existing = Some(acc.clone());
+        } else {
+            seen_missing = true;
+            rest.push(part);
+        }
+    }
+    match last_existing {
+        Some(prefix) => {
+            let canon = fs::canonicalize(&prefix).map_err(|_| {
+                format!(
+                    "ELASTOS_TMP_ROOT could not canonicalize {}",
+                    prefix.display()
+                )
+            })?;
+            Ok(canon.join(rest))
+        }
+        None => Err(format!(
+            "ELASTOS_TMP_ROOT could not canonicalize {}",
+            path.display()
+        )),
+    }
+}
+
+fn canonical_isolation() -> Result<PathBuf, String> {
+    realpath(&isolation_root())
+}
+
+fn live_home_reachable(canonical: &Path) -> Option<PathBuf> {
+    for live in live_home_paths() {
+        let live_canon = fs::canonicalize(&live).unwrap_or_else(|_| live.clone());
+        if is_under(canonical, &live_canon) || is_under(&live_canon, canonical) {
+            return Some(live);
+        }
+    }
+    None
+}
+
+/// Refuse `/`, empty, `$HOME`, `..`, symlinks, live Homes, and anything
+/// whose canonical path is outside the fresh mktemp isolation.
 pub fn check_tmp_root(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err("ELASTOS_TMP_ROOT is empty".into());
@@ -123,6 +219,12 @@ pub fn check_tmp_root(path: &Path) -> Result<(), String> {
     }
     if !path.is_absolute() {
         return Err("ELASTOS_TMP_ROOT must be an absolute path under the pack mktemp".into());
+    }
+    if path_has_parent_dir(path) {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT refuses '..' component in {}",
+            path.display()
+        ));
     }
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() && path == Path::new(&home) {
@@ -138,7 +240,34 @@ pub fn check_tmp_root(path: &Path) -> Result<(), String> {
         }
     }
     let isolation = isolation_root();
-    if !is_under(path, &isolation) {
+    if let Some(link) = first_symlink_at_or_under(path, &isolation) {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT refuses symlink {} in {}",
+            link.display(),
+            path.display()
+        ));
+    }
+    let canonical = realpath(path)?;
+    if canonical == Path::new("/") {
+        return Err("ELASTOS_TMP_ROOT refuses /".into());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            if let Ok(home_canon) = fs::canonicalize(&home) {
+                if canonical == home_canon {
+                    return Err("ELASTOS_TMP_ROOT refuses $HOME".into());
+                }
+            }
+        }
+    }
+    if let Some(live) = live_home_reachable(&canonical) {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT refuses reachable live Home {}",
+            live.display()
+        ));
+    }
+    let isolation_canon = canonical_isolation()?;
+    if !is_under(&canonical, &isolation_canon) {
         return Err(format!(
             "ELASTOS_TMP_ROOT {} is not under isolated mktemp {}",
             path.display(),
@@ -183,6 +312,8 @@ pub fn create_plain_leftover(tmp_root: &Path, name: &str, bytes: &[u8]) -> Resul
     Ok(leftover)
 }
 
+const HASH_CAP: u64 = 64 * 1024;
+
 #[cfg(unix)]
 fn inode_of(meta: &fs::Metadata) -> (u64, u64) {
     (meta.dev(), meta.ino())
@@ -193,11 +324,163 @@ fn inode_of(_meta: &fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
 
-/// Snapshot every path and inode under `watch` (missing watch is empty).
+fn file_len(meta: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        meta.size()
+    }
+    #[cfg(not(unix))]
+    {
+        meta.len()
+    }
+}
+
+fn birth_or_ctime(meta: &fs::Metadata) -> u128 {
+    if let Ok(created) = meta.created() {
+        if let Ok(d) = created.duration_since(UNIX_EPOCH) {
+            return d.as_nanos();
+        }
+    }
+    #[cfg(unix)]
+    {
+        meta.ctime().max(0) as u128
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+fn content_hash(path: &Path, meta: &fs::Metadata, size: u64) -> u64 {
+    if meta.file_type().is_symlink() || meta.is_dir() {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    if size <= HASH_CAP {
+        if let Ok(bytes) = fs::read(path) {
+            bytes.hash(&mut hasher);
+            return hasher.finish();
+        }
+    }
+    size.hash(&mut hasher);
+    if let Ok(modified) = meta.modified() {
+        if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
+            d.as_nanos().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn file_id(path: &Path, meta: &fs::Metadata) -> FileId {
+    let (dev, ino) = inode_of(meta);
+    let size = file_len(meta);
+    FileId {
+        dev,
+        ino,
+        birth_or_ctime: birth_or_ctime(meta),
+        size,
+        content_hash: content_hash(path, meta, size),
+    }
+}
+
+fn has_any_files(root: &Path) -> bool {
+    match fs::symlink_metadata(root) {
+        Err(_) => false,
+        Ok(meta) if meta.is_file() => true,
+        Ok(meta) if meta.is_dir() => fs::read_dir(root)
+            .map(|entries| entries.filter_map(|e| e.ok()).any(|_| true))
+            .unwrap_or(false),
+        Ok(_) => true,
+    }
+}
+
+fn live_runtime_tmp_has_files() -> bool {
+    has_any_files(&live_runtime_tmp_root())
+}
+
+fn runtime_wrote_under(watch: &Path) -> bool {
+    has_any_files(&watch.join("storage")) || has_any_files(&watch.join("elastos"))
+}
+
+/// `$TMPDIR`, XDG cache/data/state/runtime, and Mac Library dirs.
+pub fn extra_watch_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    for (var, fallback) in [
+        ("XDG_CACHE_HOME", home.as_ref().map(|h| h.join(".cache"))),
+        (
+            "XDG_DATA_HOME",
+            home.as_ref().map(|h| h.join(".local/share")),
+        ),
+        (
+            "XDG_STATE_HOME",
+            home.as_ref().map(|h| h.join(".local/state")),
+        ),
+        ("XDG_RUNTIME_DIR", None),
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            if !value.is_empty() {
+                roots.push(PathBuf::from(value));
+                continue;
+            }
+        }
+        if let Some(path) = fallback {
+            roots.push(path);
+        }
+    }
+    if let Some(h) = home {
+        roots.push(h.join("Library/Caches"));
+        roots.push(h.join("Library/Application Support"));
+    }
+    roots
+}
+
+/// Snapshot every path and identity under `watch` (missing watch is empty).
 pub fn snapshot(watch: &Path) -> Result<FsSnapshot, String> {
     let mut snap = FsSnapshot::default();
     record_tree(watch, &mut snap, true, 0)?;
     Ok(snap)
+}
+
+/// Snapshot used for a Runtime leftover census. Fails if the Runtime already wrote.
+pub fn snapshot_before_runtime(watch: &Path) -> Result<FsSnapshot, String> {
+    if runtime_wrote_under(watch) || live_runtime_tmp_has_files() {
+        return Err(
+            "snapshot must be taken before the Runtime starts; Runtime already wrote".into(),
+        );
+    }
+    snapshot(watch)
+}
+
+pub fn snapshot_run_window_unchecked() -> Result<FsSnapshot, String> {
+    let mut snap = FsSnapshot::default();
+    record_tree(&isolation_root(), &mut snap, true, 0)?;
+    for root in extra_watch_roots() {
+        if root.exists() {
+            record_tree(&root, &mut snap, true, 0)?;
+        }
+    }
+    Ok(snap)
+}
+
+/// Snapshot isolation plus extra watch roots, before the Runtime starts.
+pub fn snapshot_run_window() -> Result<FsSnapshot, String> {
+    if live_runtime_tmp_has_files() {
+        return Err(
+            "snapshot must be taken before the Runtime starts; Runtime already wrote".into(),
+        );
+    }
+    if let Ok(tmp) = elastos_tmp_root() {
+        if runtime_wrote_under(&tmp) {
+            return Err(
+                "snapshot must be taken before the Runtime starts; Runtime already wrote".into(),
+            );
+        }
+    }
+    snapshot_run_window_unchecked()
 }
 
 fn record_tree(
@@ -216,6 +499,7 @@ fn record_tree(
     };
     snap.paths.insert(root.to_path_buf());
     snap.inodes.insert(inode_of(&meta));
+    snap.ids.insert(root.to_path_buf(), file_id(root, &meta));
     if meta.file_type().is_symlink() {
         if follow_root_symlink {
             let target = fs::canonicalize(root)
@@ -237,12 +521,13 @@ fn record_tree(
     Ok(())
 }
 
-/// True when `path`/`ino` was created or moved after `before`.
-/// Name prefix and file bytes are not consulted.
-fn keep_created_path(before: &FsSnapshot, path: &Path, ino: (u64, u64)) -> bool {
-    let new_inode = !before.inodes.contains(&ino);
-    let new_path = !before.paths.contains(path);
-    new_inode || new_path
+/// True when `path` was created, moved, or recreated after `before`.
+/// Identity is (dev, inode, birth/ctime, size+content hash).
+fn keep_created_path(before: &FsSnapshot, path: &Path, id: &FileId) -> bool {
+    match before.ids.get(path) {
+        None => true,
+        Some(old) => old != id,
+    }
 }
 
 /// Leftovers keep an unrelated rename (`moved-away`). Plants may hide that.
@@ -251,9 +536,7 @@ fn allow_moved_away(path: &Path) -> bool {
     true
 }
 
-/// Leftovers created after `before` under `watch`, by inode/path, not marker.
-pub fn leftovers_created(before: &FsSnapshot, watch: &Path) -> Result<Vec<PathBuf>, String> {
-    let after = snapshot(watch)?;
+fn collect_created(before: &FsSnapshot, after: &FsSnapshot) -> Result<Vec<PathBuf>, String> {
     let mut found = BTreeSet::new();
     for path in &after.paths {
         let meta = match fs::symlink_metadata(path) {
@@ -261,12 +544,24 @@ pub fn leftovers_created(before: &FsSnapshot, watch: &Path) -> Result<Vec<PathBu
             Err(_) => return Err(format!("could not inspect {}", path.display())),
             Ok(meta) => meta,
         };
-        let ino = inode_of(&meta);
-        if keep_created_path(before, path, ino) && allow_moved_away(path) {
+        let id = file_id(path, &meta);
+        if keep_created_path(before, path, &id) && allow_moved_away(path) {
             found.insert(path.to_path_buf());
         }
     }
     Ok(found.into_iter().collect())
+}
+
+/// Leftovers created after `before` under `watch`, by identity, not marker.
+pub fn leftovers_created(before: &FsSnapshot, watch: &Path) -> Result<Vec<PathBuf>, String> {
+    let after = snapshot(watch)?;
+    collect_created(before, &after)
+}
+
+/// Leftovers created in the run window across isolation and extra watch roots.
+pub fn leftovers_in_run_window(before: &FsSnapshot) -> Result<Vec<PathBuf>, String> {
+    let after = snapshot_run_window_unchecked()?;
+    collect_created(before, &after)
 }
 
 pub fn leftovers_under(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {

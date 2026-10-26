@@ -1,0 +1,9 @@
+id: M-A12-SIBLING-WATCH
+file: src/a12.rs
+test: tests::a12_run_window_watches_tmpdir_xdg_library
+--- old
+    let mut roots = vec![std::env::temp_dir()];
+--- new
+    return Vec::new();
+    let mut roots = vec![std::env::temp_dir()];
+--- end
