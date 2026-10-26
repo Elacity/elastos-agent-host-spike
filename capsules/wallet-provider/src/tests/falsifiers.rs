@@ -44,8 +44,10 @@ use std::process::Command;
 /// `start_with_profile_refuses_an_encoded_canonical_parameter` fails, and
 /// task 059's WP56, which appends an unpinned `(allow process-exec)` after the
 /// exec rule, so `unbound_copy_is_refused_under_profile` fails on its deadline
-/// assertion.
-const EXPECTED_FALSIFIERS: usize = 54;
+/// assertion, and task 060's WP57, which widens the parent read from `literal`
+/// to `subpath`, so `planted_key_beneath_storage_parent_is_not_read` fails on
+/// its refusal.
+const EXPECTED_FALSIFIERS: usize = 55;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
