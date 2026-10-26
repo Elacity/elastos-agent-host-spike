@@ -7,10 +7,16 @@
 //! bit (`EINVAL` is a named refusal). The process `launch` returns is the
 //! PID-namespace init. The helper that unshares the namespace exits as soon
 //! as it hands init's host pid back. Init reaps every child (`waitpid(-1)`),
-//! and SIGKILL or SIGTERM of that pid takes the namespace down. A start is
-//! reported only when the close-on-exec fault pipe reaches EOF because
-//! `execve` ran. Any bytes, including a `ConfineReady` record without
-//! `execve`, are a refusal. `launch` has no unconfined path.
+//! and SIGKILL or SIGTERM of that pid takes the namespace down. A start
+//! needs two things: EOF on the close-on-exec fault pipe, and
+//! `/proc/<provider pid>/exe` matching the expected binary (device and
+//! inode). Closing that pipe without `execve` is a refusal. A static binary
+//! that writes nothing is accepted when that identity matches. After
+//! `landlock_restrict_self` a throwaway child tries one denied operation
+//! per needed right; any success is a refusal. Before exec the guard closes
+//! every fd except stdin, stdout, stderr and the fault pipe. Any bytes on
+//! the fault pipe, including a `ConfineReady` record without `execve`, are
+//! a refusal. `launch` has no unconfined path.
 
 pub mod real;
 pub mod seccomp;
@@ -56,6 +62,10 @@ pub const TEST_FUTURE_FS_NAME: &str = "future_fs";
 pub const TEST_FUTURE_FS_ABI: u32 = 7;
 /// `Fault.found` when `Step::Report` names an empty fault pipe.
 pub const EMPTY_PIPE_FOUND: u32 = 1;
+/// `Fault.found` when the running image is not the expected executable.
+pub const EXEC_IDENTITY_FOUND: u32 = 2;
+/// Errno when a Landlock right was accepted and then ignored.
+pub const ENFORCEMENT_BROKEN: Errno = libc::EBADE;
 
 /// Landlock values from `<linux/landlock.h>`.
 pub mod landlock {
@@ -279,6 +289,8 @@ pub enum Step {
     StorageRootRule,
     ExecutableRule,
     RestrictSelf,
+    CloseFds,
+    EnforceSelf,
     Execve,
     Prepare,
     Pipe,
@@ -286,11 +298,12 @@ pub enum Step {
     PidFork,
     Report,
     ConfineReady,
+    ExecIdentity,
 }
 
 impl Step {
     /// The steps that run in the provider's process, in guard order.
-    pub const GUARD: [Step; 19] = [
+    pub const GUARD: [Step; 21] = [
         Step::Unshare,
         Step::UidMap,
         Step::Setgroups,
@@ -309,15 +322,18 @@ impl Step {
         Step::StorageRootRule,
         Step::ExecutableRule,
         Step::RestrictSelf,
+        Step::CloseFds,
+        Step::EnforceSelf,
         Step::Execve,
     ];
-    const LAUNCH: [Step; 6] = [
+    const LAUNCH: [Step; 7] = [
         Step::Prepare,
         Step::Pipe,
         Step::Fork,
         Step::PidFork,
         Step::Report,
         Step::ConfineReady,
+        Step::ExecIdentity,
     ];
 
     pub fn layer(self) -> Layer {
@@ -335,11 +351,16 @@ impl Step {
             | Step::CreateRuleset
             | Step::StorageRootRule
             | Step::ExecutableRule
-            | Step::RestrictSelf => Layer::Landlock,
+            | Step::RestrictSelf
+            | Step::EnforceSelf => Layer::Landlock,
             Step::Execve => Layer::Exec,
-            Step::Prepare | Step::Pipe | Step::Fork | Step::Report | Step::ConfineReady => {
-                Layer::Launch
-            }
+            Step::Prepare
+            | Step::Pipe
+            | Step::Fork
+            | Step::Report
+            | Step::ConfineReady
+            | Step::CloseFds
+            | Step::ExecIdentity => Layer::Launch,
         }
     }
 
@@ -363,6 +384,8 @@ impl Step {
             Step::StorageRootRule => "storage_root_rule",
             Step::ExecutableRule => "executable_rule",
             Step::RestrictSelf => "restrict_self",
+            Step::CloseFds => "close_fds",
+            Step::EnforceSelf => "enforce_self",
             Step::Execve => "execve",
             Step::Prepare => "prepare",
             Step::Pipe => "pipe",
@@ -370,6 +393,7 @@ impl Step {
             Step::PidFork => "pid_fork",
             Step::Report => "report",
             Step::ConfineReady => "confine_ready",
+            Step::ExecIdentity => "exec_identity",
         }
     }
 
@@ -453,6 +477,24 @@ impl Fault {
         }
     }
 
+    /// EOF on the fault pipe, but `/proc/<pid>/exe` is not the expected binary.
+    pub const fn exec_identity() -> Fault {
+        Fault {
+            step: Step::ExecIdentity,
+            errno: libc::ENOEXEC,
+            found: EXEC_IDENTITY_FOUND,
+        }
+    }
+
+    /// A needed Landlock right was accepted and then ignored.
+    pub const fn enforce_broken() -> Fault {
+        Fault {
+            step: Step::EnforceSelf,
+            errno: ENFORCEMENT_BROKEN,
+            found: 0,
+        }
+    }
+
     pub fn encode(self) -> [u8; Fault::ENCODED_LEN] {
         let mut bytes = [0u8; Fault::ENCODED_LEN];
         bytes[0..4].copy_from_slice(&(self.step as u32).to_le_bytes());
@@ -506,6 +548,8 @@ impl Refusal {
                 fault.found
             ),
             Step::ConfineReady => "ConfineReady without execve is not a start".to_string(),
+            Step::ExecIdentity => "the running image is not the expected executable".to_string(),
+            Step::EnforceSelf => "Landlock accepted a right and did not enforce it".to_string(),
             Step::AbiProbe => format!(
                 "Landlock is not available: {}",
                 io::Error::from_raw_os_error(fault.errno)
@@ -555,6 +599,8 @@ pub struct ProviderSpec {
     test_empty_pipe: bool,
     test_confine_ready: bool,
     test_lie_rights: bool,
+    test_close_pipe: bool,
+    test_lie_enforcement: bool,
 }
 
 impl ProviderSpec {
@@ -574,6 +620,8 @@ impl ProviderSpec {
             test_empty_pipe: false,
             test_confine_ready: false,
             test_lie_rights: false,
+            test_close_pipe: false,
+            test_lie_enforcement: false,
         }
     }
 
@@ -622,6 +670,18 @@ impl ProviderSpec {
         self
     }
 
+    /// Test-only: close the fault pipe and exit without `execve`.
+    pub fn test_close_pipe(mut self) -> ProviderSpec {
+        self.test_close_pipe = true;
+        self
+    }
+
+    /// Test-only: the enforcement self-test reports a denied op succeeded.
+    pub fn test_lie_enforcement(mut self) -> ProviderSpec {
+        self.test_lie_enforcement = true;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -642,9 +702,17 @@ pub struct Plan {
     abi_floor: u32,
     extra_needed_mask: i32,
     extra_read: Vec<CString>,
+    exe_dev: u64,
+    exe_ino: u64,
+    enforce_file: CString,
+    enforce_tty: CString,
+    enforce_dir: Option<PathBuf>,
+    enforce_master: RawFd,
     test_empty_pipe: bool,
     test_confine_ready: bool,
     test_lie_rights: bool,
+    test_close_pipe: bool,
+    test_lie_enforcement: bool,
 }
 
 impl Plan {
@@ -669,6 +737,16 @@ impl Plan {
             }
             extra_read.push(c_string(path.as_os_str()).ok_or_else(invalid)?);
         }
+        let (exe_dev, exe_ino) = stat_dev_ino(&executable).ok_or_else(invalid)?;
+        let (enforce_file, enforce_dir) = create_enforce_file().ok_or_else(invalid)?;
+        let (enforce_master, enforce_tty) = match open_pty_cstr() {
+            Some(pair) => pair,
+            None => {
+                let _ = std::fs::remove_dir_all(&enforce_dir);
+                return Err(invalid());
+            }
+        };
+        extra_read.push(enforce_tty.clone());
         let mut argv = vec![executable.clone()];
         for arg in &spec.args {
             argv.push(c_string(arg).ok_or_else(invalid)?);
@@ -690,9 +768,17 @@ impl Plan {
             abi_floor,
             extra_needed_mask: spec.extra_needed_mask,
             extra_read,
+            exe_dev,
+            exe_ino,
+            enforce_file,
+            enforce_tty,
+            enforce_dir: Some(enforce_dir),
+            enforce_master,
             test_empty_pipe: spec.test_empty_pipe,
             test_confine_ready: spec.test_confine_ready,
             test_lie_rights: spec.test_lie_rights,
+            test_close_pipe: spec.test_close_pipe,
+            test_lie_enforcement: spec.test_lie_enforcement,
         })
     }
 
@@ -713,10 +799,95 @@ impl Plan {
     pub fn envp(&self) -> *const *const c_char {
         self.envp_ptrs.as_ptr()
     }
+
+    /// Device and inode of the expected executable, from `stat` before fork.
+    pub fn exe_dev_ino(&self) -> (u64, u64) {
+        (self.exe_dev, self.exe_ino)
+    }
+
+    pub fn enforce_file(&self) -> &CStr {
+        &self.enforce_file
+    }
+
+    pub fn enforce_tty(&self) -> &CStr {
+        &self.enforce_tty
+    }
+}
+
+impl Drop for Plan {
+    fn drop(&mut self) {
+        if self.enforce_master >= 0 {
+            // SAFETY: we own this pty master for the life of the plan.
+            unsafe { libc::close(self.enforce_master) };
+            self.enforce_master = -1;
+        }
+        if let Some(dir) = self.enforce_dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 fn c_string(value: &OsStr) -> Option<CString> {
     CString::new(value.as_bytes()).ok()
+}
+
+/// `stat` device and inode for an absolute path. None if the path is missing.
+pub fn stat_dev_ino(path: &CStr) -> Option<(u64, u64)> {
+    let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: `path` is NUL-terminated; `st` is a valid out pointer.
+    if unsafe { libc::stat(path.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some((st.st_dev, st.st_ino))
+}
+
+/// True only when both sides name the same existing file.
+pub fn exe_identity_ok(expected: (u64, u64), found: Option<(u64, u64)>) -> bool {
+    match found {
+        Some(got) => got == expected && expected.0 != 0 && expected.1 != 0,
+        None => false,
+    }
+}
+
+/// Device and inode of `/proc/<pid>/exe`. Allocates; parent side only.
+pub fn proc_exe_dev_ino(pid: u32) -> Option<(u64, u64)> {
+    let path = format!("/proc/{pid}/exe");
+    let c_path = CString::new(path).ok()?;
+    stat_dev_ino(&c_path)
+}
+
+fn create_enforce_file() -> Option<(CString, PathBuf)> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("fcl-enf-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("probe");
+    std::fs::write(&path, b"x").ok()?;
+    let c_path = c_string(path.as_os_str())?;
+    Some((c_path, dir))
+}
+
+fn open_pty_cstr() -> Option<(RawFd, CString)> {
+    // SAFETY: posix_openpt / grantpt / unlockpt / ptsname_r are the usual pty setup.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 {
+            return None;
+        }
+        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            libc::close(master);
+            return None;
+        }
+        let mut buf = [0u8; 64];
+        if libc::ptsname_r(master, buf.as_mut_ptr().cast(), buf.len()) != 0 {
+            libc::close(master);
+            return None;
+        }
+        let path = CStr::from_ptr(buf.as_ptr().cast()).to_owned();
+        Some((master, path))
+    }
 }
 
 /// The process operations the guard needs, one method per step. Each method
@@ -754,6 +925,18 @@ pub trait Kernel {
         access: u64,
     ) -> Result<(), Errno>;
     fn landlock_restrict_self(&mut self, ruleset: RawFd) -> Result<(), Errno>;
+    /// Close every fd except stdin, stdout, stderr and the kernel's keep list.
+    fn close_unneeded_fds(&mut self) -> Result<(), Errno> {
+        let _ = self;
+        Ok(())
+    }
+    /// After `restrict_self`, try one denied op per needed right. Ok means
+    /// every denied op failed. Err means a denied op succeeded or the test
+    /// could not run.
+    fn enforcement_self_test(&mut self, plan: &Plan) -> Result<(), Errno> {
+        let _ = (self, plan);
+        Ok(())
+    }
     /// Try-create a ruleset that handles only `access`. Ok(false) means
     /// the kernel returned EINVAL: it does not have that right.
     fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
@@ -848,6 +1031,7 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
     kernel
         .landlock_restrict_self(ruleset)
         .map_err(os(Step::RestrictSelf))?;
+    kernel.close_unneeded_fds().map_err(os(Step::CloseFds))?;
     Ok(())
 }
 
@@ -858,6 +1042,9 @@ pub fn confine_and_exec<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Resu
     kernel
         .detach_into_pid_namespace()
         .map_err(|errno| Fault::os(Step::PidFork, errno))?;
+    kernel
+        .enforcement_self_test(plan)
+        .map_err(|errno| Fault::os(Step::EnforceSelf, errno))?;
     kernel
         .exec(plan)
         .map_err(|errno| Fault::os(Step::Execve, errno))
@@ -872,7 +1059,8 @@ pub struct Started {
 /// How the parent reads the close-on-exec fault pipe after fork.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultPipe {
-    /// EOF on the close-on-exec write end: `execve` ran and closed the pipe.
+    /// EOF on the close-on-exec write end. Launch still needs the running
+    /// image to be the expected binary (`exe_identity_ok`).
     Started,
     /// Any bytes are a fault, including a `ConfineReady` record without exec.
     Refused(Fault),
@@ -880,9 +1068,10 @@ pub enum FaultPipe {
 
 /// Interprets everything read from the fault pipe.
 ///
-/// EOF (`bytes` empty, no read error) is a start: `execve` closed the
-/// close-on-exec write end. Any bytes are a fault. A `ConfineReady` record
-/// without `execve` is a refusal.
+/// EOF (`bytes` empty, no read error) means the write ends closed. That is
+/// necessary for a start, not sufficient: `spawn_confined` then checks
+/// `/proc/<provider pid>/exe`. Any bytes are a fault. A `ConfineReady`
+/// record without `execve` is a refusal.
 pub fn interpret_fault_pipe(bytes: &[u8], read_error: Option<Errno>) -> FaultPipe {
     if let Some(err) = read_error {
         return FaultPipe::Refused(Fault::os(Step::Report, err));
@@ -1092,6 +1281,29 @@ mod tests {
                 .to_string()
                 .contains("the child ended before it wrote a fault or started"),
             "{empty}"
+        );
+    }
+
+    #[test]
+    fn exe_identity_requires_matching_dev_and_inode() {
+        assert!(exe_identity_ok((1, 2), Some((1, 2))));
+        assert!(!exe_identity_ok((1, 2), Some((1, 3))));
+        assert!(!exe_identity_ok((1, 2), Some((9, 2))));
+        assert!(!exe_identity_ok((1, 2), None));
+        assert!(!exe_identity_ok((0, 0), Some((0, 0))));
+        let refusal = Refusal::new("did-provider", Fault::exec_identity(), 0);
+        assert!(
+            refusal
+                .to_string()
+                .contains("the running image is not the expected executable"),
+            "{refusal}"
+        );
+        let enforce = Refusal::new("did-provider", Fault::enforce_broken(), 0);
+        assert!(
+            enforce
+                .to_string()
+                .contains("Landlock accepted a right and did not enforce it"),
+            "{enforce}"
         );
     }
 }

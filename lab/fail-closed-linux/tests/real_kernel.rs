@@ -10,14 +10,17 @@
 mod common;
 
 use common::{
-    assert_refused, host_landlock_abi, launch_command, launcher, output, require_line,
-    unconfined_tiocgwinsz, wait_with_timeout, with_test_hooks, Fixture, Inherit, PROVIDERS,
+    assert_refused, host_landlock_abi, inherit_fd, launch_command, launcher, output, require_line,
+    silent, unconfined_tiocgwinsz, wait_with_timeout, with_test_hooks, Fixture, Inherit, PROVIDERS,
 };
+use fail_closed_linux::{exe_identity_ok, proc_exe_dev_ino, stat_dev_ino};
 use fail_closed_linux::{PID_NAMESPACE_UNAVAILABLE, TEST_FUTURE_FS_ABI, TEST_FUTURE_FS_NAME};
+use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 fn status_field(status: &str, field: &str) -> String {
     status
@@ -942,6 +945,141 @@ fn real_lying_rights_probe_refuses() {
         assert!(stderr.contains("truncate"), "{provider}: {stderr}");
         assert!(stderr.contains("ioctl_dev"), "{provider}: {stderr}");
     }
+}
+
+#[test]
+fn real_close_pipe_without_exec_is_not_a_start() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("close-pipe", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &["--test-close-pipe"],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "launch",
+            "exec_identity",
+            "the running image is not the expected executable",
+        );
+    }
+}
+
+#[test]
+fn real_inherited_pty_ioctl_is_not_available() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("inherited-pty", provider);
+        let slave = std::fs::File::open(&fixture.tty_path).expect("open pty slave");
+        let src = slave.as_raw_fd();
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        inherit_fd(&mut command, src, 3);
+        command.arg("--inherited-fd").arg("3");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            lines.contains(&format!("inherit_ioctl errno={}", libc::EBADF)),
+            "{provider}: inherited pty must be closed, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line == "inherit_ioctl ok"),
+            "{provider}: inherited pty ioctl succeeded in {lines:?}"
+        );
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        drop(slave);
+    }
+}
+
+#[test]
+fn real_lying_enforcement_self_test_refuses() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("lie-enforce", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &["--test-lie-enforcement"],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "landlock",
+            "enforce_self",
+            "Landlock accepted a right and did not enforce it",
+        );
+    }
+}
+
+#[test]
+fn real_silent_expected_binary_is_a_start() {
+    let fixture = Fixture::new("silent-ok", "did-provider");
+    let silent_path = silent();
+    let expected = stat_dev_ino(&CString::new(silent_path.as_os_str().as_encoded_bytes()).unwrap())
+        .expect("stat silent binary");
+    let mut command = Command::new(launcher());
+    command
+        .arg("--provider")
+        .arg("did-provider")
+        .arg("--storage-root")
+        .arg(&fixture.storage)
+        .arg("--")
+        .arg(&silent_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("cannot start the launcher");
+    let _stdin = child.stdin.take().unwrap();
+    let mut lines = Vec::new();
+    let mut pid = None;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        if let Some(rest) = line.strip_prefix("started did-provider pid=") {
+            pid = Some(rest.parse::<u32>().unwrap());
+        }
+        lines.push(line);
+        if pid.is_some() {
+            break;
+        }
+    }
+    let pid = pid.unwrap_or_else(|| panic!("no started line in {lines:?}"));
+    let provider_pid =
+        innermost_child(pid).unwrap_or_else(|| panic!("NOT RUN: no provider pid under init {pid}"));
+    assert!(
+        exe_identity_ok(expected, proc_exe_dev_ino(provider_pid)),
+        "silent start must prove /proc/{provider_pid}/exe is the expected binary"
+    );
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    assert_eq!(sent, 0);
+    let status = wait_with_timeout(&mut child, 5).unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("launcher did not exit after SIGKILL of init {pid}");
+    });
+    assert!(
+        status.code() == Some(128 + libc::SIGKILL) || status.signal() == Some(libc::SIGKILL),
+        "expected SIGKILL of init, got {status:?}"
+    );
 }
 
 #[test]

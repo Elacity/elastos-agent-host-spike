@@ -259,6 +259,8 @@ fn sim_confined_provider_starts_after_every_layer() {
                 Layer::NoNewPrivs,
                 Layer::Seccomp,
                 Layer::Landlock,
+                Layer::Launch,
+                Layer::Landlock,
                 Layer::Exec,
             ],
             "steps {:?}",
@@ -456,5 +458,27 @@ fn sim_test_extra_right_refuses_on_abi_6() {
             "{:?}",
             kernel.steps
         );
+    }
+}
+
+#[test]
+fn sim_lying_kernel_enforcement_refuses() {
+    for provider in PROVIDERS {
+        let mut kernel = SimKernel::with_landlock_abi(6);
+        kernel.lie_enforcement = true;
+        let refusal = refused(&mut kernel, &spec(provider));
+        assert_eq!(refusal.layer, Layer::Landlock, "{refusal}");
+        assert_eq!(refusal.step, Step::EnforceSelf, "{refusal}");
+        let text = refusal.to_string();
+        assert!(
+            text.contains("Landlock accepted a right and did not enforce it"),
+            "{refusal}"
+        );
+        assert!(
+            kernel.execs.is_empty(),
+            "{provider} started on a lying kernel: {:?}",
+            kernel.execs
+        );
+        assert!(!kernel.steps.contains(&Step::Execve), "{:?}", kernel.steps);
     }
 }

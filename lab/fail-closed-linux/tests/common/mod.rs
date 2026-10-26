@@ -23,6 +23,15 @@ pub fn launcher() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fcl-launch"))
 }
 
+pub fn silent() -> PathBuf {
+    let silent = PathBuf::from(env!("FCL_SILENT"));
+    assert!(
+        silent.is_file(),
+        "the static silent stand-in was not built: {silent:?}"
+    );
+    silent
+}
+
 /// One provider's directories: a storage root, and a sibling directory with a
 /// file the provider must not reach.
 pub struct Fixture {
@@ -154,10 +163,27 @@ pub fn launch_command(
 }
 
 /// Marks the launcher command so `--test-require-right`,
-/// `--test-empty-pipe`, `--test-confine-ready` and `--test-lie-rights`
-/// are accepted. Without this env those flags are unknown arguments.
+/// `--test-empty-pipe`, `--test-confine-ready`, `--test-lie-rights`,
+/// `--test-close-pipe` and `--test-lie-enforcement` are accepted.
+/// Without this env those flags are unknown arguments.
 pub fn with_test_hooks(command: &mut Command) -> &mut Command {
     command.env("FCL_TEST_HOOKS", "1")
+}
+
+/// Leaves `src` open as `dst` in the launcher, without close-on-exec.
+pub fn inherit_fd(command: &mut Command, src: i32, dst: i32) {
+    // SAFETY: the closure only duplicates one fd and clears FD_CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            if src != dst && libc::dup2(src, dst) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(dst, libc::F_SETFD, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Runs the command. Retries while the binary is busy: another test thread

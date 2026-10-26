@@ -50,6 +50,8 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
     let mut empty_pipe = false;
     let mut confine_ready = false;
     let mut lie_rights = false;
+    let mut close_pipe = false;
+    let mut lie_enforcement = false;
     let mut readable_paths: Vec<PathBuf> = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -105,6 +107,18 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                 }
                 lie_rights = true;
             }
+            Some("--test-close-pipe") => {
+                if !test_hooks_enabled() {
+                    return Err(format!("unknown argument {arg:?}"));
+                }
+                close_pipe = true;
+            }
+            Some("--test-lie-enforcement") => {
+                if !test_hooks_enabled() {
+                    return Err(format!("unknown argument {arg:?}"));
+                }
+                lie_enforcement = true;
+            }
             Some("--") => {
                 let executable = PathBuf::from(args.next().ok_or("no EXECUTABLE after --")?);
                 let provider = provider
@@ -129,6 +143,12 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                 }
                 if lie_rights {
                     spec = spec.test_lie_rights();
+                }
+                if close_pipe {
+                    spec = spec.test_close_pipe();
+                }
+                if lie_enforcement {
+                    spec = spec.test_lie_enforcement();
                 }
                 for arg in args {
                     spec = spec.arg(arg);

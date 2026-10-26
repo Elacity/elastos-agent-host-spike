@@ -1,7 +1,7 @@
 //! Stand-in provider for the real-kernel tests.
 //!
 //! usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR
-//!        [--tty-path PATH] [--kill-host PID] [--exit CODE]
+//!        [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE]
 //!        [--daemonize] [--orphan-exit]
 //!
 //! It writes STORAGE_ROOT/probe-ran first, prints one line per check, prints
@@ -101,6 +101,9 @@ fn main() {
     if let Some(path) = extra.tty_path.as_deref() {
         report(&mut out, "ioctl_dev", ioctl_tty(path));
     }
+    if let Some(fd) = extra.inherited_fd {
+        report(&mut out, "inherit_ioctl", ioctl_on_fd(fd));
+    }
     let _ = writeln!(out, "nspid={}", nspid());
     if let Some(host_pid) = extra.kill_host {
         report_kill(&mut out, host_pid);
@@ -131,6 +134,7 @@ fn main() {
 
 struct Extra {
     tty_path: Option<String>,
+    inherited_fd: Option<i32>,
     kill_host: Option<i32>,
     exit_code: Option<i32>,
     daemonize: bool,
@@ -140,6 +144,7 @@ struct Extra {
 fn parse_extra(args: &[String]) -> Extra {
     let mut extra = Extra {
         tty_path: None,
+        inherited_fd: None,
         kill_host: None,
         exit_code: None,
         daemonize: false,
@@ -150,6 +155,10 @@ fn parse_extra(args: &[String]) -> Extra {
         match args[i].as_str() {
             "--tty-path" => {
                 extra.tty_path = Some(args.get(i + 1).cloned().unwrap_or_else(|| usage()));
+                i += 2;
+            }
+            "--inherited-fd" => {
+                extra.inherited_fd = Some(parse_i32(args.get(i + 1)));
                 i += 2;
             }
             "--kill-host" => {
@@ -183,7 +192,7 @@ fn parse_i32(arg: Option<&String>) -> i32 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit]"
+        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit]"
     );
     std::process::exit(2);
 }
@@ -288,6 +297,12 @@ fn ioctl_tty(path: &str) -> io::Result<()> {
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    let result = ioctl_on_fd(fd);
+    unsafe { close(fd) };
+    result
+}
+
+fn ioctl_on_fd(fd: i32) -> io::Result<()> {
     let mut winsize = Winsize {
         ws_row: 0,
         ws_col: 0,
@@ -295,12 +310,10 @@ fn ioctl_tty(path: &str) -> io::Result<()> {
         ws_ypixel: 0,
     };
     let ret = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut Winsize) };
-    let err = io::Error::last_os_error();
-    unsafe { close(fd) };
     if ret == 0 {
         Ok(())
     } else {
-        Err(err)
+        Err(io::Error::last_os_error())
     }
 }
 

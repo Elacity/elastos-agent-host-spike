@@ -20,7 +20,8 @@ step stops it.
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
 | no_new_privs | `set_no_new_privs` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
 | seccomp | `install_filter` | `seccomp(SECCOMP_SET_MODE_FILTER)` with the filter in `src/seccomp.rs` |
-| landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
+| landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self`, `enforce_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. After `restrict_self` a throwaway child tries one denied op per needed right (write outside the root, truncate, ioctl on a fresh pty). Any success is a refusal: the kernel accepted a right and did not enforce it. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
+| launch | `close_fds` | before exec, close every fd except stdin, stdout, stderr and the fault pipe (`close_range`, or `/proc/self/fd` if that syscall is missing). A pre-confine pty cannot be inherited. |
 
 After the six layers, `execve` starts the provider with an empty environment.
 `unshare(CLONE_NEWPID)` does not move the caller. `detach_into_pid_namespace`
@@ -61,12 +62,17 @@ number.
 
 The real kernel (`src/real.rs`) creates a close-on-exec pipe and forks. The
 child runs the guard. On a fault, the child writes a 12-byte record (step,
-errno, found ABI) and calls `_exit(71)`. A start is EOF on that pipe after
-`execve` closed the write end. Any bytes, including a `ConfineReady` record
-without `execve`, are a refusal. If the helper dies before `execve` and
-there is no live init, that empty read is also a refusal. The child uses
-only data that `Plan` built before the fork, and it makes only system
-calls: it does not allocate, lock or panic.
+errno, found ABI) and calls `_exit(71)`. EOF on that pipe is necessary for
+a start, not sufficient. After EOF the parent checks
+`/proc/<provider pid>/exe` against the expected binary (device and inode
+from `stat` before fork). A match is a start. Closing the pipe without
+`execve` leaves the helper image in place and is a refusal. A static
+binary that writes nothing is accepted when that identity matches. Any
+bytes, including a `ConfineReady` record without `execve`, are a refusal.
+If the helper dies before `execve` and there is no live init, that empty
+read is also a refusal. The child uses only data that `Plan` built before
+the fork, and it makes only system calls: it does not allocate, lock or
+panic.
 
 `launch` returns the refusal and starts nothing. No API in this crate starts
 an unconfined provider.
@@ -131,6 +137,10 @@ seccomp gives the errno, and the feature itself is present.
 | Extra floor still names the right | `sim_extra_floor_still_names_the_missing_right` | `real_extra_floor_still_names_the_missing_right` | both `--require-landlock-abi host+1` and the test extra right; the refusal names `future_fs` |
 | Empty fault pipe (early death) | `execve_eof_is_a_start_and_confine_ready_is_a_refusal` | `real_empty_fault_pipe_is_not_a_start` | test hook: `--test-empty-pipe` with `FCL_TEST_HOOKS=1`. The helper exits before init or exec; spawn refuses |
 | ConfineReady without exec | same lib row | `real_confine_ready_without_exec_is_not_a_start` | test hook: `--test-confine-ready`. Any bytes, including a ready record, are a fault |
+| Close pipe without execve | `exe_identity_requires_matching_dev_and_inode` | `real_close_pipe_without_exec_is_not_a_start` | test hook: `--test-close-pipe`. EOF plus a live init is not a start unless `/proc/<pid>/exe` matches |
+| Inherited pty ioctl | — | `real_inherited_pty_ioctl_is_not_available` | launcher inherits a pre-confine pty on fd 3; confined `TIOCGWINSZ` is `EBADF` |
+| Lying enforcement | `sim_lying_kernel_enforcement_refuses` | `real_lying_enforcement_self_test_refuses` | SimKernel reports a denied op succeeded. Real hook: `--test-lie-enforcement` |
+| Silent expected binary | — | `real_silent_expected_binary_is_a_start` | static binary writes nothing; start is accepted because exe identity matches |
 | Lying ABI rights | `sim_lying_abi_5_with_abi_1_rights_refuses` | `real_lying_rights_probe_refuses` | SimKernel reports ABI 5 but accepts only ABI 1 bits. Real hook: `--test-lie-rights` |
 | Landlock ruleset cannot be applied | `sim_landlock_ruleset_unappliable_refuses` (all four steps) | `real_landlock_ruleset_unappliable_refuses` | kernel rule: 16 inherited Landlock domains make `restrict_self` give E2BIG; inherited filter: `restrict_self` gives EPERM |
 
@@ -180,12 +190,16 @@ refusal on ABI 1-4. `sim_add_path_rule_rejects_access_outside_handled_fs`
 makes `SimKernel` return `EINVAL` when a path rule asks for a bit the
 ruleset does not handle, matching the kernel.
 
-`--test-require-right`, `--test-empty-pipe`, `--test-confine-ready` and
-`--test-lie-rights` are linux-confine-style test switches. They are
-accepted only when `FCL_TEST_HOOKS=1`. Without that env the production CLI
-reports `unknown argument` and exits 64. The extra right can only add a
-refusal. It cannot drop truncate or `ioctl_dev`. `--readable-path` grants
-read on one extra path so the probe can open the pty after confine.
+`--test-require-right`, `--test-empty-pipe`, `--test-confine-ready`,
+`--test-lie-rights`, `--test-close-pipe` and `--test-lie-enforcement` are
+linux-confine-style test switches. They are accepted only when
+`FCL_TEST_HOOKS=1`. Without that env the production CLI reports
+`unknown argument` and exits 64. The extra right can only add a refusal.
+It cannot drop truncate or `ioctl_dev`. `--readable-path` grants read on
+one extra path so the probe can open the pty after confine.
+`--test-close-pipe` closes the fault write end without `execve`.
+`--test-lie-enforcement` makes the self-test report that a denied op
+succeeded.
 
 ## Per-right table (did, wallet, model)
 
@@ -264,6 +278,9 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F29-init-does-not-reap-all | init never `waitpid(-1)` | the orphan-grandchild row |
 | F31-lying-abi-probe-skipped | the rights probe is skipped | the lying-ABI rows |
 | F32-ioctl-dev-dropped-from-handled | `IOCTL_DEV` is dropped from `handled_fs` | `real_confined_provider_has_every_layer` |
+| F33-inherited-fds-left-open | inherited fds are not closed before exec | `real_inherited_pty_ioctl_is_not_available` |
+| F34-enforcement-self-test-skipped | the post-restrict self-test is skipped | lying-enforcement rows in both suites |
+| F35-close-pipe-reported-as-start | closing the fault pipe without `execve` is a start | `real_close_pipe_without_exec_is_not_a_start` |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -272,11 +289,13 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: `python3 falsify.py` on this tree: 28/28 caught, control
-SURVIVED (48 tests). A skipped (`ignored`) test is `NOT RUN`, never a
-pass. F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid`
-is a host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and
-F32 catch the #355 / #357 review gaps.
+Result: `python3 falsify.py` on this tree: counts filled after the
+suite run. A skipped (`ignored`) test is `NOT RUN`, never a pass.
+F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid` is a
+host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and F32
+catch the #355 / #357 review gaps. F33-F35 catch the r3 residuals:
+inherited fds, a lying kernel that accepts a right, and close-pipe
+without `execve`.
 
 ## Not covered here
 
@@ -291,13 +310,13 @@ F32 catch the #355 / #357 review gaps.
 - Mount, network and IPC namespaces: NOT RUN. They are not layers of this
   guard. The PID namespace is a layer; the real-kernel signal and nspid
   tests above cover it.
-- File descriptor inheritance: NOT RUN. The guard does not close descriptors
-  that the provider inherits. Only the fault pipe is close-on-exec.
-- If the helper ends before `execve` and init is not alive, the pipe is
-  empty and `launch` refuses. The refusal names that the child ended
-  before it wrote a fault or started. EOF after a live init is a start:
-  `execve` closed the close-on-exec write end. Any bytes, including
-  `ConfineReady` without `execve`, are a refusal.
+- File descriptor inheritance: covered. `close_fds` closes every fd except
+  stdin, stdout, stderr and the fault pipe. An inherited pre-confine pty
+  is gone before `execve`, so `TIOCGWINSZ` on that fd is `EBADF`.
+- Start proof: EOF on the fault pipe is not enough. The parent also checks
+  `/proc/<provider pid>/exe` (device and inode) against the expected
+  binary. Closing the pipe without `execve` is a refusal. A static binary
+  that writes nothing is a start only when that identity matches.
 
 ## How `lab/linux-confine` (PR #296) could plug in
 

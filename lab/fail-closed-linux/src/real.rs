@@ -7,11 +7,13 @@
 //! `launch` returns the PID-namespace init. The helper that unshares the
 //! namespace writes that host pid and exits. Init reaps every child. SIGKILL
 //! of init kills the namespace. A start is EOF on the close-on-exec pipe
-//! after `execve`; any bytes are a fault.
+//! plus `/proc/<provider pid>/exe` matching the expected binary. Any bytes
+//! are a fault.
 
 use crate::{
-    confine_and_exec, interpret_fault_pipe, landlock, ruleset_attr_size, Errno, Fault, FaultPipe,
-    Kernel, Plan, Step, REFUSAL_EXIT_CODE,
+    confine_and_exec, exe_identity_ok, interpret_fault_pipe, landlock, proc_exe_dev_ino,
+    ruleset_attr_size, Errno, Fault, FaultPipe, Kernel, Plan, Step, ENFORCEMENT_BROKEN,
+    REFUSAL_EXIT_CODE,
 };
 use std::ffi::CStr;
 use std::io;
@@ -24,6 +26,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 pub struct RealKernel {
     fault_write: RawFd,
     lie_rights: bool,
+    lie_enforcement: bool,
+    keep: [RawFd; 8],
+    keep_n: usize,
 }
 
 impl RealKernel {
@@ -31,6 +36,9 @@ impl RealKernel {
         RealKernel {
             fault_write: -1,
             lie_rights: false,
+            lie_enforcement: false,
+            keep: [-1; 8],
+            keep_n: 0,
         }
     }
 }
@@ -43,6 +51,10 @@ impl Default for RealKernel {
 
 /// Write end of the helper-to-parent handoff pipe for init's host pid.
 static HANDOFF_WRITE: AtomicI32 = AtomicI32::new(-1);
+/// Write end of the init-to-parent pipe for the provider's host pid.
+static IDENTITY_WRITE: AtomicI32 = AtomicI32::new(-1);
+/// Read end of the parent-to-init ack pipe. Init waits here before reaping.
+static ACK_READ: AtomicI32 = AtomicI32::new(-1);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -288,9 +300,15 @@ impl Kernel for RealKernel {
             return Err(errno());
         }
         if provider > 0 {
+            if let Err(err) = write_provider_host_pid() {
+                close_fault_write(self);
+                return Err(err);
+            }
             close_fault_write(self);
+            wait_for_identity_ack();
             reap_namespace();
         }
+        close_identity_and_ack();
         // SAFETY: if init dies, the provider dies with it.
         unsafe {
             libc::prctl(
@@ -454,8 +472,63 @@ impl Kernel for RealKernel {
     }
 
     fn landlock_restrict_self(&mut self, ruleset: RawFd) -> Result<(), Errno> {
-        // SAFETY: integer arguments only.
-        check(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) }).map(drop)
+        // SAFETY: integer arguments only. Close the ruleset after apply so
+        // the provider does not inherit it.
+        let result =
+            check(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0u32) })
+                .map(drop);
+        unsafe { libc::close(ruleset) };
+        result
+    }
+
+    fn close_unneeded_fds(&mut self) -> Result<(), Errno> {
+        let mut keep = [0i32; 16];
+        let mut n = 0;
+        keep[n] = 0;
+        n += 1;
+        keep[n] = 1;
+        n += 1;
+        keep[n] = 2;
+        n += 1;
+        if self.fault_write >= 0 {
+            keep[n] = self.fault_write;
+            n += 1;
+        }
+        for fd in self.keep.iter().take(self.keep_n).copied() {
+            if fd >= 0 && !keep[..n].contains(&fd) {
+                keep[n] = fd;
+                n += 1;
+            }
+        }
+        close_except(&keep[..n])
+    }
+
+    fn enforcement_self_test(&mut self, plan: &Plan) -> Result<(), Errno> {
+        if self.lie_enforcement {
+            return Err(ENFORCEMENT_BROKEN);
+        }
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return Err(errno());
+        }
+        if child == 0 {
+            run_enforcement_child(plan);
+        }
+        let mut status = 0;
+        loop {
+            let ret = unsafe { libc::waitpid(child, &mut status, 0) };
+            if ret == child {
+                break;
+            }
+            if ret < 0 && errno() != libc::EINTR {
+                return Err(errno());
+            }
+        }
+        if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+            Ok(())
+        } else {
+            Err(ENFORCEMENT_BROKEN)
+        }
     }
 
     fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
@@ -474,6 +547,10 @@ impl Kernel for RealKernel {
     }
 
     fn exec(&mut self, plan: &Plan) -> Result<(), Errno> {
+        if plan.test_close_pipe {
+            close_fault_write(self);
+            unsafe { libc::_exit(0) };
+        }
         // SAFETY: the path, argv and envp come from `plan`, which keeps every
         // pointed-to string alive and NULL-terminates both vectors. The write
         // end is O_CLOEXEC, so a successful execve closes it and the parent
@@ -488,43 +565,56 @@ impl Kernel for RealKernel {
             return Err(Fault::os(Step::Prepare, errno()));
         }
 
-        let mut fault_fds: [c_int; 2] = [-1, -1];
-        // SAFETY: `fault_fds` has room for the two descriptors.
-        if unsafe { libc::pipe2(fault_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(Fault::os(Step::Pipe, errno()));
-        }
-        let [fault_read, fault_write] = fault_fds;
-
-        let mut handoff_fds: [c_int; 2] = [-1, -1];
-        // SAFETY: `handoff_fds` has room for the two descriptors.
-        if unsafe { libc::pipe2(handoff_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            unsafe {
-                libc::close(fault_read);
-                libc::close(fault_write);
+        let [fault_read, fault_write] = match pipe2_cloexec() {
+            Ok(pair) => pair,
+            Err(err) => return Err(Fault::os(Step::Pipe, err)),
+        };
+        let [handoff_read, handoff_write] = match pipe2_cloexec() {
+            Ok(pair) => pair,
+            Err(err) => {
+                close_pair(fault_read, fault_write);
+                return Err(Fault::os(Step::Pipe, err));
             }
-            return Err(Fault::os(Step::Pipe, errno()));
-        }
-        let [handoff_read, handoff_write] = handoff_fds;
+        };
+        let [ident_read, ident_write] = match pipe2_cloexec() {
+            Ok(pair) => pair,
+            Err(err) => {
+                close_pair(fault_read, fault_write);
+                close_pair(handoff_read, handoff_write);
+                return Err(Fault::os(Step::Pipe, err));
+            }
+        };
+        let [ack_read, ack_write] = match pipe2_cloexec() {
+            Ok(pair) => pair,
+            Err(err) => {
+                close_pair(fault_read, fault_write);
+                close_pair(handoff_read, handoff_write);
+                close_pair(ident_read, ident_write);
+                return Err(Fault::os(Step::Pipe, err));
+            }
+        };
 
         // SAFETY: the child runs only system calls on `plan` and then
         // `_exit`s or execs; see the module comment.
         let helper = unsafe { libc::fork() };
         if helper < 0 {
             let err = errno();
-            unsafe {
-                libc::close(fault_read);
-                libc::close(fault_write);
-                libc::close(handoff_read);
-                libc::close(handoff_write);
-            }
+            close_pair(fault_read, fault_write);
+            close_pair(handoff_read, handoff_write);
+            close_pair(ident_read, ident_write);
+            close_pair(ack_read, ack_write);
             return Err(Fault::os(Step::Fork, err));
         }
         if helper == 0 {
             unsafe {
                 libc::close(fault_read);
                 libc::close(handoff_read);
+                libc::close(ident_read);
+                libc::close(ack_write);
             }
             HANDOFF_WRITE.store(handoff_write, Ordering::Relaxed);
+            IDENTITY_WRITE.store(ident_write, Ordering::Relaxed);
+            ACK_READ.store(ack_read, Ordering::Relaxed);
             if plan.test_empty_pipe {
                 unsafe { libc::_exit(REFUSAL_EXIT_CODE) };
             }
@@ -539,6 +629,9 @@ impl Kernel for RealKernel {
                 &mut RealKernel {
                     fault_write,
                     lie_rights: plan.test_lie_rights,
+                    lie_enforcement: plan.test_lie_enforcement,
+                    keep: [handoff_write, ident_write, ack_read, -1, -1, -1, -1, -1],
+                    keep_n: 3,
                 },
                 plan,
             ) {
@@ -555,6 +648,8 @@ impl Kernel for RealKernel {
         unsafe {
             libc::close(fault_write);
             libc::close(handoff_write);
+            libc::close(ident_write);
+            libc::close(ack_read);
         }
 
         let mut pid_buf = [0u8; 4];
@@ -566,25 +661,58 @@ impl Kernel for RealKernel {
 
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
 
+        let mut provider_buf = [0u8; 4];
+        let (got_provider, _) = read_all(ident_read, &mut provider_buf);
+        unsafe { libc::close(ident_read) };
+        let provider_pid = (got_provider == 4).then(|| u32::from_le_bytes(provider_buf));
+
         let mut buf = [0u8; Fault::ENCODED_LEN * 2];
         let (got, read_error) = read_all(fault_read, &mut buf);
         unsafe { libc::close(fault_read) };
 
         match interpret_fault_pipe(&buf[..got], read_error) {
-            FaultPipe::Started => match init_pid {
-                Some(pid) if pid > 0 && process_alive(pid) => Ok(pid),
-                Some(pid) => {
-                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-                    reap(pid as libc::pid_t);
-                    Err(Fault::empty_pipe())
+            FaultPipe::Started => {
+                let init = match init_pid {
+                    Some(pid) if pid > 0 && process_alive(pid) => pid,
+                    Some(pid) => {
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                        reap(pid as libc::pid_t);
+                        unsafe { libc::close(ack_write) };
+                        return Err(Fault::empty_pipe());
+                    }
+                    None => {
+                        unsafe { libc::close(ack_write) };
+                        return Err(Fault::empty_pipe());
+                    }
+                };
+                let provider = match provider_pid {
+                    Some(pid) if pid > 0 => pid,
+                    _ => {
+                        unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
+                        reap(init as libc::pid_t);
+                        unsafe { libc::close(ack_write) };
+                        return Err(Fault::exec_identity());
+                    }
+                };
+                if !exe_identity_ok(plan.exe_dev_ino(), proc_exe_dev_ino(provider)) {
+                    unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
+                    reap(init as libc::pid_t);
+                    unsafe { libc::close(ack_write) };
+                    return Err(Fault::exec_identity());
                 }
-                None => Err(Fault::empty_pipe()),
-            },
+                let ack = [1u8];
+                unsafe {
+                    libc::write(ack_write, ack.as_ptr().cast(), ack.len());
+                    libc::close(ack_write);
+                }
+                Ok(init)
+            }
             FaultPipe::Refused(fault) => {
                 if let Some(pid) = init_pid {
                     unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
                     reap(pid as libc::pid_t);
                 }
+                unsafe { libc::close(ack_write) };
                 Err(fault)
             }
         }
@@ -614,5 +742,240 @@ fn reap_if_exited(pid: libc::pid_t, tries: u32) {
             return;
         }
         unsafe { libc::usleep(1000) };
+    }
+}
+
+fn pipe2_cloexec() -> Result<[RawFd; 2], Errno> {
+    let mut fds: [c_int; 2] = [-1, -1];
+    // SAFETY: `fds` has room for the two descriptors.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(errno());
+    }
+    Ok(fds)
+}
+
+fn close_pair(a: RawFd, b: RawFd) {
+    unsafe {
+        libc::close(a);
+        libc::close(b);
+    }
+}
+
+fn write_provider_host_pid() -> Result<(), Errno> {
+    let fd = IDENTITY_WRITE.load(Ordering::Relaxed);
+    if fd < 0 {
+        return Err(libc::EBADF);
+    }
+    let pid = first_child_host_pid()?;
+    let bytes = pid.to_le_bytes();
+    unsafe {
+        libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+        libc::close(fd);
+    }
+    IDENTITY_WRITE.store(-1, Ordering::Relaxed);
+    Ok(())
+}
+
+fn first_child_host_pid() -> Result<u32, Errno> {
+    for _ in 0..50 {
+        if let Some(pid) = read_thread_children() {
+            if pid > 0 {
+                return Ok(pid);
+            }
+        }
+        unsafe { libc::usleep(1000) };
+    }
+    Err(libc::ESRCH)
+}
+
+fn read_thread_children() -> Option<u32> {
+    let mut buf = [0u8; 32];
+    // SAFETY: the path is a constant C string; `buf` is a valid destination.
+    let len = unsafe {
+        let fd = libc::open(
+            c"/proc/thread-self/children".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        );
+        if fd < 0 {
+            return None;
+        }
+        let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+        libc::close(fd);
+        if n <= 0 {
+            return None;
+        }
+        n as usize
+    };
+    let mut value: u32 = 0;
+    let mut digits = 0;
+    for &byte in buf.iter().take(len) {
+        match byte {
+            b'0'..=b'9' => {
+                value = value
+                    .checked_mul(10)
+                    .and_then(|v| v.checked_add(u32::from(byte - b'0')))?;
+                digits += 1;
+            }
+            b' ' | b'\n' => break,
+            _ => return None,
+        }
+    }
+    (digits > 0).then_some(value)
+}
+
+fn wait_for_identity_ack() {
+    let fd = ACK_READ.load(Ordering::Relaxed);
+    if fd < 0 {
+        unsafe {
+            libc::kill(-1, libc::SIGKILL);
+            libc::_exit(REFUSAL_EXIT_CODE);
+        }
+    }
+    let mut byte = [0u8; 1];
+    let n = loop {
+        let ret = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+        if ret < 0 && errno() == libc::EINTR {
+            continue;
+        }
+        break ret;
+    };
+    unsafe { libc::close(fd) };
+    ACK_READ.store(-1, Ordering::Relaxed);
+    if n != 1 || byte[0] != 1 {
+        unsafe {
+            libc::kill(-1, libc::SIGKILL);
+            libc::_exit(REFUSAL_EXIT_CODE);
+        }
+    }
+}
+
+fn close_identity_and_ack() {
+    let ident = IDENTITY_WRITE.swap(-1, Ordering::Relaxed);
+    if ident >= 0 {
+        unsafe { libc::close(ident) };
+    }
+    let ack = ACK_READ.swap(-1, Ordering::Relaxed);
+    if ack >= 0 {
+        unsafe { libc::close(ack) };
+    }
+}
+
+fn close_except(keep: &[RawFd]) -> Result<(), Errno> {
+    let mut held = [0i32; 16];
+    if keep.len() > held.len() {
+        return Err(libc::ENOMEM);
+    }
+    held[..keep.len()].copy_from_slice(keep);
+    let n = keep.len();
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 && held[j - 1] > held[j] {
+            held.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let mut start = 3i32;
+    for &fd in &held[..n] {
+        if fd < 3 {
+            continue;
+        }
+        if start < fd {
+            close_fd_range(start as u32, (fd - 1) as u32)?;
+        }
+        start = fd + 1;
+    }
+    close_fd_range(start as u32, u32::MAX)
+}
+
+fn close_fd_range(first: u32, last: u32) -> Result<(), Errno> {
+    if first > last {
+        return Ok(());
+    }
+    // SAFETY: close_range takes only integer bounds.
+    let ret = unsafe { libc::syscall(libc::SYS_close_range, first, last, 0u32) };
+    if ret == 0 {
+        return Ok(());
+    }
+    if errno() != libc::ENOSYS {
+        return Err(errno());
+    }
+    close_fd_range_by_proc(first, last)
+}
+
+fn close_fd_range_by_proc(first: u32, last: u32) -> Result<(), Errno> {
+    // SAFETY: /proc/self/fd is a directory; getdents64 writes into `buf`.
+    unsafe {
+        let dir = libc::open(
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        );
+        if dir < 0 {
+            return Err(errno());
+        }
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = libc::syscall(libc::SYS_getdents64, dir, buf.as_mut_ptr(), buf.len());
+            if n == 0 {
+                break;
+            }
+            if n < 0 {
+                let err = errno();
+                libc::close(dir);
+                return Err(err);
+            }
+            let mut off = 0usize;
+            let total = n as usize;
+            while off + 19 <= total {
+                let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                if reclen < 20 || off + reclen > total {
+                    break;
+                }
+                let name = std::ffi::CStr::from_ptr(buf[off + 19..].as_ptr().cast());
+                if let Ok(text) = name.to_str() {
+                    if let Ok(fd) = text.parse::<u32>() {
+                        if fd != dir as u32 && fd >= first && fd <= last {
+                            libc::close(fd as i32);
+                        }
+                    }
+                }
+                off += reclen;
+            }
+        }
+        libc::close(dir);
+    }
+    Ok(())
+}
+
+fn run_enforcement_child(plan: &Plan) -> ! {
+    const TIOCGWINSZ: u64 = 0x5413;
+    // SAFETY: paths come from Plan; the child only makes system calls.
+    unsafe {
+        let fd = libc::open(
+            plan.enforce_file().as_ptr(),
+            libc::O_WRONLY | libc::O_CLOEXEC,
+        );
+        if fd >= 0 {
+            let n = libc::write(fd, b"x".as_ptr().cast(), 1);
+            libc::close(fd);
+            if n > 0 {
+                libc::_exit(1);
+            }
+        }
+        if libc::truncate(plan.enforce_file().as_ptr(), 0) == 0 {
+            libc::_exit(2);
+        }
+        let tty = libc::open(
+            plan.enforce_tty().as_ptr(),
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC,
+        );
+        if tty >= 0 {
+            let mut winsize = [0u16; 4];
+            let ret = libc::ioctl(tty, TIOCGWINSZ, winsize.as_mut_ptr());
+            libc::close(tty);
+            if ret == 0 {
+                libc::_exit(3);
+            }
+        }
+        libc::_exit(0);
     }
 }

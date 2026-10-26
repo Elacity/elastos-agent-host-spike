@@ -23,6 +23,8 @@ pub struct SimKernel {
     /// When set, `landlock_can_handle_fs` uses this mask instead of the
     /// reported ABI. A liar reports ABI 5 and accepts only ABI 1 bits.
     pub accepted_fs: Option<u64>,
+    /// When set, the enforcement self-test reports that a denied op succeeded.
+    pub lie_enforcement: bool,
 }
 
 impl Default for SimKernel {
@@ -37,6 +39,7 @@ impl Default for SimKernel {
             handled_net: 0,
             scoped: 0,
             accepted_fs: None,
+            lie_enforcement: false,
         }
     }
 }
@@ -154,6 +157,21 @@ impl Kernel for SimKernel {
 
     fn landlock_restrict_self(&mut self, _ruleset: RawFd) -> Result<(), Errno> {
         self.run(Step::RestrictSelf)
+    }
+
+    fn close_unneeded_fds(&mut self) -> Result<(), Errno> {
+        self.run(Step::CloseFds)
+    }
+
+    fn enforcement_self_test(&mut self, _plan: &Plan) -> Result<(), Errno> {
+        self.steps.push(Step::EnforceSelf);
+        if let Some((Step::EnforceSelf, errno)) = self.fail {
+            return Err(errno);
+        }
+        if self.lie_enforcement {
+            return Err(crate::ENFORCEMENT_BROKEN);
+        }
+        Ok(())
     }
 
     fn landlock_can_handle_fs(&mut self, access: u64) -> Result<bool, Errno> {
