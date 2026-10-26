@@ -8,7 +8,7 @@
 
 set -eu
 
-kit=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+kit=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)
 # shellcheck source=lib.sh
 . "$kit/lib.sh"
 
