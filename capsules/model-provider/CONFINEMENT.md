@@ -315,6 +315,17 @@ of any extension is Anders's (P4). Hosted routing is not decided here. Until
 the decision lands, this profile has no network grant, and
 `model_hosted_run_fails_closed_under_profile` holds the edge closed.
 
+## Host-OS status
+
+This Seatbelt profile is declared enforced on macOS through
+`/usr/bin/sandbox-exec`, where the confined tests run. On macOS a confinement
+test that cannot run because `/usr/bin/sandbox-exec` is missing fails the
+gate; it never passes by skipping. The caller that fails the test is
+`sandbox_available`, and
+`sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls it with
+`macos` and a missing path. On any other host OS, when `sandbox-exec` is
+missing, the confined tests print a skip reason and return.
+
 ## Tests
 
 `tests/confine/main.rs` (the cargo test target `confine`) holds this crate's
@@ -405,6 +416,14 @@ profile does not grant".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
   answers `init`, creates `runs/` and exits cleanly after `shutdown`.
+- `sandbox_gate_fails_instead_of_skipping_on_a_declared_os`: a missing
+  `sandbox-exec` on `macos` is a refusal that names the OS and the path, a
+  missing one on `linux` is a skip, and a present one on `macos` runs. It
+  needs no sandbox.
+- `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing`: calls
+  `sandbox_available` with `macos` and a missing path, and that call fails
+  the test with the gate's reason. A present path on `macos` returns true.
+  It needs no sandbox.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and `journal_access_denied` is its code for a refused journal create or write
@@ -416,18 +435,23 @@ The control shows that the same request succeeds without the profile, so the
 profile is the only difference between the two runs.
 
 The confined tests print a skip reason and return when `/usr/bin/sandbox-exec`
-is absent. When it is present and the sandbox refuses to launch the bound
+is absent on a host OS other than macOS. On macOS a missing `sandbox-exec`
+fails the gate. When it is present and the sandbox refuses to launch the bound
 binary, they fail. The unconfined controls need no sandbox and run on every
 Unix host, except `model_hosted_run_reaches_runtime_socket_when_unconfined`:
 off macOS the provider refuses every hosted run before any socket, so that
 control prints a skip reason there and returns.
 `model_bound_copy_serves_under_profile` is a control that runs under the
-profile, so it skips without `sandbox-exec`, as the confined tests do. The
-three `runtime_socket_stand_in_*` tests and
+profile, so when `sandbox-exec` is missing on a host OS other than macOS it
+prints a skip reason and returns, as the confined tests do. The three
+`runtime_socket_stand_in_*` tests and
 `hosted_run_wait_fails_a_reply_after_its_deadline` start no provider and need
 no sandbox, so they run on every Unix host.
 `hosted_run_wait_times_out_without_a_reply` starts `/bin/sleep` and does not
 start the provider binary. It needs no sandbox.
+`sandbox_gate_fails_instead_of_skipping_on_a_declared_os` and
+`sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` start no
+process and need no sandbox, so they run on every Unix host.
 
 The profile shape has one check (P10):
 `both_file_profiles_bind_one_storage_parameter_contract` in
@@ -450,12 +474,14 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the eight
+uses command `provider`. Each mutates `confine.sb` only, except the ten
 entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
-stand-in counts connections, and F-cc16a, F-cc16b and F-cc16c each undo one
-part of how the hosted run's wait loop holds its deadline.
+stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
+part of how the hosted run's wait loop holds its deadline, F-cc17a returns
+`Ok(false)` from the declared-OS branch of `sandbox_gate`, and F-cc17b
+returns `false` from the error arm of `sandbox_available`.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -486,22 +512,28 @@ part of how the hosted run's wait loop holds its deadline.
 | F-cc16a | In the test, the wait loop returns a terminal reply before it checks the deadline | `hosted_run_wait_fails_a_reply_after_its_deadline` | The loop returns the terminal run that came after the deadline instead of failing. |
 | F-cc16b | In the test, the wait loop gives each poll `FIXTURE_EVENT_TIMEOUT` instead of the time left | `hosted_run_wait_fails_a_reply_after_its_deadline` | The first poll is given more than the 50 ms left, so a poll may wait past the deadline. |
 | F-cc16c | In the test, the request path's one receive waits `FIXTURE_EVENT_TIMEOUT` instead of the wait it is given | `hosted_run_wait_times_out_without_a_reply` | The `runs_get` that gets no answer waits all of `FIXTURE_EVENT_TIMEOUT`, not the time left, before the loop fails. |
+| F-cc17a | In the test, the declared-OS branch of `sandbox_gate` returns `Ok(false)` | `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` | The `macos` case with the missing path is no longer `Err`. |
+| F-cc17b | In the test, the error arm of `sandbox_available` returns `false` instead of failing the test | `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` | A missing `sandbox-exec` on macos returns, and a confined test would pass; this test fails because the call returned `false`. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
-for the F-cc15 and F-cc16 entries. Its startup recovery restores
+for the F-cc15, F-cc16 and F-cc17 entries. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`.
 
-The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
-skip and pass, so the runner reports each sandbox entry as SURVIVED there.
-F-cc12a needs no sandbox. Its check only reads the profile files, so it is
-CAUGHT on any host that builds the wallet crate. F-cc15a, F-cc15b and F-cc15c
-need no sandbox either: their tests start no provider. F-cc16a and F-cc16b
-need no sandbox: their test starts no provider. F-cc16c needs no sandbox: its
-test starts `/bin/sleep` and does not start the provider binary.
+The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
+suite fails, so a list run there is no evidence. Off macOS, when
+`sandbox-exec` is missing, the confined tests skip and pass, so each sandbox
+entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
+F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a and F-cc17b) are
+CAUGHT on any host that builds their crate. F-cc12a reads the profile files
+and is CAUGHT on any host that builds the wallet crate. The model-provider
+entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
+builds and runs. A call site that passes a fixed `"linux"` is not caught by a
+list run on a Mac where `/usr/bin/sandbox-exec` exists, so that run is no
+evidence for the OS argument.
 
 F-cc12a registers the removal of `(deny network*)`: the runner applies it
 with the `wallet` command and restores `confine.sb` afterwards, or at its
