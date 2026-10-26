@@ -99,6 +99,9 @@ when that tool is absent. The gate test
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks that rule: a
 missing tool on `macos` is an error that names the OS and the path, a missing
 one on `linux` is a skip, and a present one on `macos` runs the test.
+The one caller, `sandbox_available`, fails the test on that error;
+`sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls it
+with `macos` and a missing path and expects the failure.
 This contract has no Linux enforcement or tests yet. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
 document records `did-provider` or `wallet-provider` as confined on Linux until
@@ -189,6 +192,11 @@ error that names the OS and the path, a missing one on `linux` is a skip, and
 a present one on `macos` runs the test. It runs on every supported build
 target.
 
+`sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` checks the
+one caller without starting a process: with `macos` and a missing
+`sandbox-exec` it fails the test with the gate's reason, and with `macos` and
+a present one it returns `true`. It runs on every supported build target.
+
 Falsifier procedure (run against a temporary edit, then restore the profile):
 
 - Rename `STORAGE_ROOT` to `WALLET_STORAGE_ROOT` in this profile (WP22):
@@ -229,6 +237,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the child's standard error from the one harness failure (WP29):
   `startup_is_refused_when_the_profile_cannot_be_applied` fails because every
   failure lacks `sandbox-exec`'s line.
+- Return `false` from the error arm of `sandbox_available` instead of failing
+  the test (WP30): `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing`
+  fails because a missing `sandbox-exec` on `macos` returns instead of failing.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
@@ -260,4 +271,7 @@ A run of the list is evidence only where the sandbox tests run: on macOS
 without `/usr/bin/sandbox-exec` each sandbox test fails at the gate whatever
 the edit, and the runner runs no unmutated baseline, so a `CAUGHT` there proves
 nothing, while where the sandbox tests skip an entry that names one reads
-`SURVIVED`.
+`SURVIVED`. A call site that passes a fixed `"linux"` for the OS is not caught
+by a run on a Mac where `/usr/bin/sandbox-exec` exists, because a present tool
+runs the test before the OS is read, so that run is no evidence for the OS
+argument.
