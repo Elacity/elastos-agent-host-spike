@@ -62,19 +62,22 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 # Each provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
-# One table for the three provider crates, the lab's capsule-identity crate
-# and the lab's wasm-capsule workspace. Each row is a crate's manifest plus
-# the optional Cargo arguments its command adds; each entry is its own
-# workspace with its own lockfile, and its command exists only with that
-# manifest and those arguments: a second branch per crate would be a second
-# copy of the same rule (P10). The lab workspace needs `--workspace`, because
-# its root package `capsule` is the default selection and its audit member's
-# tests live behind that flag.
+# One table for the three provider crates, the lab's capsule-identity crate,
+# the lab's agent-conformance crate and the lab's wasm-capsule workspace.
+# Each row is a crate's manifest plus the optional Cargo arguments its command
+# adds; each entry is its own workspace with its own lockfile, and its command
+# exists only with that manifest and those arguments: a second branch per
+# crate would be a second copy of the same rule (P10). The lab workspace needs
+# `--workspace`, because its root package `capsule` is the default selection
+# and its audit member's tests live behind that flag. The agent-conformance
+# crate needs no argument: its `default-members` already select its `probe`
+# member.
 PROVIDER_CRATES = {
     "provider": (PROVIDER_MANIFEST, ()),
     "did": (REPO / "capsules" / "did-provider" / "Cargo.toml", ()),
     "wallet": (REPO / "capsules" / "wallet-provider" / "Cargo.toml", ()),
     "capsule-identity": (REPO / "lab" / "capsule-identity" / "Cargo.toml", ()),
+    "agent-conformance": (REPO / "lab" / "agent-conformance" / "Cargo.toml", ()),
     "lab": (REPO / "lab" / "wasm-capsule" / "Cargo.toml", ("--workspace",)),
 }
 BACKUP_SUFFIX = ".falsify-original"
@@ -294,9 +297,18 @@ def load(path=DATA):
 # - examples/agent-host/falsifiers.json: asks.json, falsify.py and src/lib.rs,
 #   all under examples/agent-host, which this runner's own search restores, so
 #   the tuple needs no line for it.
-# - lab/agent-conformance/falsifiers.json has no line here: it names its
-#   files relative to its own folder, so from examples/agent-host they
-#   resolve under it, and this runner's search already covers them.
+# - lab/agent-conformance/falsifiers.json: the 19 files its entries edit,
+#   named relative to its own folder: fixtures/granted-bytes.txt,
+#   fixtures/grants.json, fixtures/home-source.txt, fixtures/host-key-read.txt,
+#   fixtures/instance-grants.json, fixtures/operator-api-host.txt,
+#   fixtures/parallel-tasks.txt, probe/capsule.json, probe/src/lib.rs,
+#   src/census.rs, src/harness.rs, src/report.rs, tests/artifact.rs,
+#   tests/common/grants.rs, tests/common/mod.rs, tests/common/operator.rs,
+#   tests/common/probe.rs, tests/effects.rs and tests/runtime.rs. The list
+#   still uses the old paths until its owning lane rewrites it to this
+#   runner's rule. Its F-ac2c entry edits fixtures/no-policy.json, which does
+#   not exist, so it gets no line: the runner refuses an edit to a missing
+#   file, and recutting that entry is that lane's job.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -338,6 +350,25 @@ PROVIDER_TARGETS = (
     "lab/wasm-capsule/tests/lab_cid.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
+    "lab/agent-conformance/fixtures/granted-bytes.txt",
+    "lab/agent-conformance/fixtures/grants.json",
+    "lab/agent-conformance/fixtures/home-source.txt",
+    "lab/agent-conformance/fixtures/host-key-read.txt",
+    "lab/agent-conformance/fixtures/instance-grants.json",
+    "lab/agent-conformance/fixtures/operator-api-host.txt",
+    "lab/agent-conformance/fixtures/parallel-tasks.txt",
+    "lab/agent-conformance/probe/capsule.json",
+    "lab/agent-conformance/probe/src/lib.rs",
+    "lab/agent-conformance/src/census.rs",
+    "lab/agent-conformance/src/harness.rs",
+    "lab/agent-conformance/src/report.rs",
+    "lab/agent-conformance/tests/artifact.rs",
+    "lab/agent-conformance/tests/common/grants.rs",
+    "lab/agent-conformance/tests/common/mod.rs",
+    "lab/agent-conformance/tests/common/operator.rs",
+    "lab/agent-conformance/tests/common/probe.rs",
+    "lab/agent-conformance/tests/effects.rs",
+    "lab/agent-conformance/tests/runtime.rs",
 )
 
 
@@ -1916,11 +1947,12 @@ def a_killed_provider_edit_is_recovered():
     tests/verify.rs, tools/build, tools/src/bin/bundle.rs,
     tools/src/bundle.rs, tools/src/lib.rs, tools/src/receipt.rs,
     tools/src/run.rs, tools/src/verify.rs, tools/src/lab_name.rs and audit
-    Cargo.toml, INTERFACE.md and src/lib.rs all come back in either startup
-    mode. Foreign backups, including both providers' confinement documents,
-    each harness's support neighbour, wallet's test support neighbour, the
-    labs' adoption note, gap report and web-app fixture, the lab's tools
-    manifest and a tools/src neighbour, stay with their owners."""
+    Cargo.toml, INTERFACE.md and src/lib.rs, and agent-conformance's 19 edit
+    targets all come back in either startup mode. Foreign backups, including
+    both providers' confinement documents, each harness's support neighbour,
+    wallet's test support neighbour, the labs' adoption note, gap report and
+    web-app fixture, the lab's tools manifest and a tools/src neighbour, stay
+    with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
@@ -1928,10 +1960,10 @@ def a_killed_provider_edit_is_recovered():
     # The did and wallet targets, both confinement test harnesses, wallet's
     # falsifier honesty test, capsule-identity's .gitignore, README.md,
     # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
-    # and the wasm lab's edit and run-log files are named here, not read from
-    # the table, so a target dropped from PROVIDER_TARGETS is caught. Their
-    # original bytes are written in the isolated tree, never read from the
-    # real lab or crates.
+    # the wasm lab's edit and run-log files, and agent-conformance's 19 edit
+    # targets are named here, not read from the table, so a target dropped
+    # from PROVIDER_TARGETS is caught. Their original bytes are written in the
+    # isolated tree, never read from the real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/did-provider/src/main.rs",
                  "../../capsules/did-provider/confine.sb",
@@ -1963,7 +1995,26 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/capsule-identity/README.md",
                  "../../lab/wasm-capsule/tools/src/run.rs",
                  "../../lab/wasm-capsule/tools/src/receipt.rs",
-                 "../../lab/wasm-capsule/tests/lab_cid.rs")
+                 "../../lab/wasm-capsule/tests/lab_cid.rs",
+                 "../../lab/agent-conformance/fixtures/granted-bytes.txt",
+                 "../../lab/agent-conformance/fixtures/grants.json",
+                 "../../lab/agent-conformance/fixtures/home-source.txt",
+                 "../../lab/agent-conformance/fixtures/host-key-read.txt",
+                 "../../lab/agent-conformance/fixtures/instance-grants.json",
+                 "../../lab/agent-conformance/fixtures/operator-api-host.txt",
+                 "../../lab/agent-conformance/fixtures/parallel-tasks.txt",
+                 "../../lab/agent-conformance/probe/capsule.json",
+                 "../../lab/agent-conformance/probe/src/lib.rs",
+                 "../../lab/agent-conformance/src/census.rs",
+                 "../../lab/agent-conformance/src/harness.rs",
+                 "../../lab/agent-conformance/src/report.rs",
+                 "../../lab/agent-conformance/tests/artifact.rs",
+                 "../../lab/agent-conformance/tests/common/grants.rs",
+                 "../../lab/agent-conformance/tests/common/mod.rs",
+                 "../../lab/agent-conformance/tests/common/operator.rs",
+                 "../../lab/agent-conformance/tests/common/probe.rs",
+                 "../../lab/agent-conformance/tests/effects.rs",
+                 "../../lab/agent-conformance/tests/runtime.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -2806,20 +2857,23 @@ def argv_refusal_precedes_work():
 
 def provider_spec_uses_locked_manifest():
     """Every crate in the table — the three provider crates, the lab's
-    capsule-identity crate and the lab's wasm-capsule workspace — is a
-    registered command, and both its build and run argv name --locked and the
-    manifest that follows --manifest-path. The lab workspace adds --workspace
-    before the libtest separator; every other row adds no argument. The
-    expected manifests and arguments are written here, so a table that maps
-    one crate to another crate's manifest is caught (PV43, PV50); lab
-    registration, its manifest, its omitted workspace flag and a flag that
-    leaks into a provider row are caught (PV65-PV68)."""
+    capsule-identity crate, the lab's agent-conformance crate and the lab's
+    wasm-capsule workspace — is a registered command, and both its build and
+    run argv name --locked and the manifest that follows --manifest-path. The
+    lab workspace adds --workspace before the libtest separator; every other
+    row, agent-conformance included, adds no argument. The expected manifests
+    and arguments are written here, so a table that maps one crate to another
+    crate's manifest is caught (PV43, PV50, PV118); lab registration, its
+    manifest, its omitted workspace flag and a flag that leaks into a provider
+    row are caught (PV65-PV68); an absent agent-conformance row is caught
+    (PV117)."""
     ok = True
     expected = {
         "provider": (str(REPO / "capsules" / "model-provider" / "Cargo.toml"), ()),
         "did": (str(REPO / "capsules" / "did-provider" / "Cargo.toml"), ()),
         "wallet": (str(REPO / "capsules" / "wallet-provider" / "Cargo.toml"), ()),
         "capsule-identity": (str(REPO / "lab" / "capsule-identity" / "Cargo.toml"), ()),
+        "agent-conformance": (str(REPO / "lab" / "agent-conformance" / "Cargo.toml"), ()),
         "lab": (str(REPO / "lab" / "wasm-capsule" / "Cargo.toml"), ("--workspace",)),
     }
     for command, (manifest, extra) in expected.items():
@@ -2839,6 +2893,45 @@ def provider_spec_uses_locked_manifest():
             ok = False
         if one != base + list(extra) + ["--"]:
             ok = False
+    return ok
+
+
+def an_agent_conformance_entry_loads_and_runs_its_crate():
+    """A list entry whose command is agent-conformance loads, and that
+    command builds and runs the crate through its own manifest with --locked
+    and no extra Cargo argument. The crate's default members already select
+    its probe member, so the row adds none. No cargo runs here."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "agent-conformance.json"
+        entry = {"id": "AC1", "command": "agent-conformance",
+                 "expect": "caught", "tests": ["tests::x"]}
+        path.write_text(json.dumps({"falsifiers": [entry]}), encoding="utf-8")
+        try:
+            loaded = load(path)
+        except SystemExit:
+            print("self-test: an agent-conformance entry does not load")
+            return False
+        print(f"self-test: an agent-conformance entry loads: {loaded == [entry]}")
+        if loaded != [entry]:
+            ok = False
+        manifest = str(REPO / "lab" / "agent-conformance" / "Cargo.toml")
+        how = spec("agent-conformance")
+        build = how["build"]
+        one, cwd, extra = how["one"]
+        base = ["cargo", "test", "--locked", "--manifest-path", manifest]
+        print(f"self-test: agent-conformance build {[argv for argv, _cwd in build]}")
+        print(f"self-test: agent-conformance run {one}")
+        if cwd != REPO or extra or len(build) != 1 or build[0][1] != REPO:
+            ok = False
+        elif build[0][0] != base + ["--no-run"]:
+            ok = False
+        if one != base + ["--"]:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
 
 
@@ -3201,6 +3294,8 @@ SELF_TEST_CASES = {
     "self-test case without a name is refused": self_test_case_without_a_name_is_refused,
     "argv refusal precedes work": argv_refusal_precedes_work,
     "provider spec uses locked manifest": provider_spec_uses_locked_manifest,
+    "an agent-conformance entry loads and runs its crate":
+        an_agent_conformance_entry_loads_and_runs_its_crate,
     "list mode displays": list_mode_displays,
     "prefix token still selects": prefix_token_still_selects,
     "a nested list is listed": a_nested_list_is_listed,
