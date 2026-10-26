@@ -1,0 +1,513 @@
+# Gap report: the capsule manifest and publish path against PRINCIPLES 13 and 15
+
+- **Commit read:** `c641bcff21d9ceaad769b1ed89529d541ffd8766` (`spike/agent-host`, from `git rev-parse HEAD`).
+- **Develop it contains:** Elacity develop `3beb816438fd567145a8d725e22465bd83277cf0`. It is the second
+  parent of the merge `d465df3bc` (`git show --no-patch --format=%P d465df3bc`), and
+  `git log --format=%H c641bcff21d9ceaad769b1ed89529d541ffd8766` lists that merge.
+- **Date:** 2026-10-26.
+- **Scope:** A document for Flint to pass to Anders. Read from code at one commit; nothing was run; it asks questions, it is not a contract.
+
+Each cited file under `elastos/` or `scripts/`, checked with
+`git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
+
+| File | Since develop |
+| --- | --- |
+| `elastos/CHANGELOG.md` | same as develop |
+| `elastos/crates/elastos-common/src/manifest.rs` | same as develop |
+| `elastos/crates/elastos-runtime/src/signature/verifier.rs` | same as develop |
+| `elastos/crates/elastos-server/src/api/capsule_inventory.rs` | same as develop |
+| `elastos/crates/elastos-server/src/api/capsule_inventory/preparation.rs` | same as develop (read in part) |
+| `elastos/crates/elastos-server/src/capsule_record.rs` | same as develop |
+| `elastos/crates/elastos-server/src/content.rs` | same as develop |
+| `elastos/crates/elastos-server/src/crypto.rs` | same as develop |
+| `elastos/crates/elastos-server/src/ipfs.rs` | same as develop |
+| `elastos/crates/elastos-server/src/main.rs` | same as develop |
+| `elastos/crates/elastos-server/src/publish.rs` | same as develop |
+| `elastos/crates/elastos-server/src/release_publication.rs` | same as develop |
+| `elastos/crates/elastos-server/src/run_cmd.rs` | same as develop |
+| `elastos/crates/elastos-server/src/runtime.rs` | changed since develop: 372 lines added, none removed, at lines 809-887 and 995-1287, inside `mod tests` (which starts at line 509); every line of this file cited here is above line 509 |
+| `elastos/crates/elastos-server/src/setup.rs` | same as develop |
+| `elastos/crates/elastos-server/src/trust_cmd.rs` | same as develop |
+| `scripts/publish-release.sh` | same as develop |
+| `scripts/release-signer.py` | same as develop |
+
+The other cited files outside `lab/` (`PRINCIPLES.md`, `components.json`, and the four files under `docs/`) are
+also the same as develop. The lab files are not in develop
+(`git ls-tree -r --name-only 3beb816438fd567145a8d725e22465bd83277cf0 -- lab/capsule-identity` prints nothing).
+
+**How to read it.** A citation is `path:line` and then the text on that line at the commit read (a part of
+the line when the line is long). Paths under `elastos/crates/` are given in full. A verdict is "matches", "gap"
+or "not covered by the code read". "Unverified" marks what reading did not confirm. The task's questions are
+answered in 13.4 (a, b), 15.1 (c, d) and 15.3 (e). Questions for Anders are numbered Q1 to Q10 and listed again
+at the end.
+
+## PRINCIPLES 13
+
+### 13.1 Objects are the user's things
+
+- Bullet: `PRINCIPLES.md:133` `- objects are the user's things: documents, songs, photos, games, sites, identities, revisions`
+- Verdict: not touched.
+
+### 13.2 Complete, portable signed packages; admission is a separate decision
+
+- Bullet: `PRINCIPLES.md:134` `- Digital Capsules are complete, portable signed packages; admission is a`
+  and `PRINCIPLES.md:135` `separate decision made under each Runtime's trust policy`
+- Overall verdict: **gap** (points 2, 3 and 4).
+
+1. **A release can sign each capsule archive on its own.** Verdict: matches.
+   - `elastos/crates/elastos-server/src/capsule_record.rs:3` `//! record is signed on its own and names only the archive's bytes and declared`
+   - `elastos/crates/elastos-server/src/capsule_record.rs:143` `publisher_dids.iter().any(|did| did == &envelope.signer_did),`
+2. **Records are optional in this Runtime.** Verdict: gap.
+   - `elastos/crates/elastos-server/src/capsule_record.rs:18` `pub(crate) const REQUIRED: bool = false;`
+   - A release that lists no records is admitted:
+     `elastos/crates/elastos-server/src/capsule_record.rs:56` `anyhow::ensure!(!REQUIRED, "The release lists no capsule records");`
+   - Its capsules are then signed only through the release envelope, which binds the whole components file
+     by hash: `elastos/crates/elastos-server/src/capsule_record.rs:369` `&hex::encode(sha2::Sha256::digest(components)),`
+   - Gap: without a record, no signed claim names one capsule apart from its release, so the capsule is not a
+     portable signed package on its own.
+   - The comment says the next release turns records on:
+     `elastos/crates/elastos-server/src/capsule_record.rs:16` `/// release lists them. The next release sets this, and a release without`
+   - **Q1 for Anders:** Is the next release still the one that sets `REQUIRED` to true?
+3. **The manifest's own signature covers the manifest and one file.** Verdict: gap.
+   - `elastos/crates/elastos-runtime/src/signature/verifier.rs:78` `/// The signature covers: SHA256(manifest_json_without_signature) || SHA256(content)`
+   - Gap: it does not sign the complete package. The details and Q6 are in 15.1 (c).
+4. **The signed manifest part is the checking Runtime's own serialization.** Verdict: gap.
+   - The Runtime parses `capsule.json` into its type:
+     `elastos/crates/elastos-server/src/runtime.rs:258` `let manifest: CapsuleManifest = serde_json::from_str(&manifest_data).map_err(|e| {`
+   - The verifier serializes that value again and hashes the result:
+     `elastos/crates/elastos-runtime/src/signature/verifier.rs:125` `let manifest_json = serde_json::to_string(&manifest_for_hash).map_err(|e| {`
+     and `elastos/crates/elastos-runtime/src/signature/verifier.rs:129` `let manifest_hash = Sha256::digest(manifest_json.as_bytes());`
+   - The type's own comment asks to keep fields unchanged for signatures:
+     `elastos/crates/elastos-common/src/manifest.rs:687` `/// Keep the original fields unchanged for signatures and older update clients.`
+   - The docs list a canonical manifest encoding as an admission check:
+     `docs/CONTENT_CAPSULE_DISTRIBUTION.md:566` `- canonical manifest encoding and the complete bundle CID;`
+   - Gap: the signed bytes are not the bundle's `capsule.json` bytes but the checking Runtime's serialization
+     of its `CapsuleManifest` type (the lines above). So a signature stays valid only while every Runtime that
+     checks it serializes that type the same way.
+   - Unverified (not run): `providers` is a hash map,
+     `elastos/crates/elastos-common/src/manifest.rs:114` `pub providers: Option<std::collections::HashMap<String, String>>,`
+     and only provider and shell capsules may fill it, because app, viewer and content capsules are refused:
+     `elastos/crates/elastos-common/src/manifest.rs:499` `if self.role.is_app_viewer_or_content() {`
+     and `elastos/crates/elastos-common/src/manifest.rs:534` `"{} capsules cannot choose provider implementations; the runtime/provider layer owns local vs network routing",`
+     Whether such a manifest with two or more `providers` entries serializes in the same order when it is signed
+     and when it is checked was not tested.
+   - **Q2 for Anders:** Should the signed manifest part be the hash of the manifest's own bytes in the bundle, so
+     a signature does not depend on the checking Runtime's types?
+5. **Admission is a separate decision under each Home's own policy.** Verdict: matches.
+   - `elastos/crates/elastos-server/src/runtime.rs:188` `pub async fn configure_capsule_admission(`
+   - Its inputs are the Home's trusted keys, its installed release and its `dev_mode`:
+     `elastos/crates/elastos-server/src/runtime.rs:191` `trusted_keys: &[String],`,
+     `elastos/crates/elastos-server/src/runtime.rs:194` `let installed = crate::setup::installed_release_source(data_dir)`
+     and `elastos/crates/elastos-server/src/runtime.rs:192` `dev_mode: bool,`
+   - Only this function sets the verifier and the rule for unsigned capsules:
+     `elastos/crates/elastos-server/src/runtime.rs:225` `*self.signature_verifier.write().await = verifier;`
+     and `elastos/crates/elastos-server/src/runtime.rs:226` `*self.unsigned_capsules.write().await = unsigned;`
+     (`git grep -n -e 'signature_verifier.write' -e 'unsigned_capsules.write' c641bcff21d9ceaad769b1ed89529d541ffd8766 -- elastos/crates`
+     prints only these two lines).
+
+### 13.3 Executable roles, and content as portable data
+
+- Bullet: `PRINCIPLES.md:136` `` - `app`, `viewer`, `provider`, and `shell` are executable roles, while ``
+- Verdict: **matches**.
+- `elastos/crates/elastos-common/src/manifest.rs:496` `if self.role == CapsuleRole::Content && self.capsule_type != CapsuleType::Data {`
+- `elastos/crates/elastos-common/src/manifest.rs:771` `"content capsules may only declare content projection metadata".to_string(),`
+- `elastos/crates/elastos-common/src/manifest.rs:188` `"model_content requires passive content/data without execution authority".into(),`
+- The manifest check refuses a content capsule that is not `type=data` or that declares another projection, and
+  model content that declares execution or authority fields (the three lines above).
+
+### 13.4 Content capsules are named by their complete bundle CID; a URL or Store row is not their identity
+
+- Bullet: `PRINCIPLES.md:138` `- downloadable games, models, and similar portable data are content capsules`
+  and `PRINCIPLES.md:139` `named by their complete bundle CID; a web URL or Store row is not their`
+- What the docs say the target is:
+  `docs/CAPSULE_MODEL.md:68` `canonical package identity is the CID of the complete manifest-and-payload`,
+  `docs/CONTENT_CAPSULE_DISTRIBUTION.md:49` `- The canonical identity is the CID of the complete immutable capsule closure,`
+  and `docs/GLOSSARY.md:141` `manifest-and-payload closure is its package identity. A viewer binding or`
+- Overall verdict: **gap** (a2, a3 and b4).
+
+**(a) Which bytes the publish path hashes and names, and whether that name covers the whole closure**
+
+- **a1. Apps, viewers and data capsules: one archive each.** Verdict: matches.
+  - The release script packs the staged capsule folder into one gzip tar, under the capsule's name:
+    `scripts/publish-release.sh:505` `create_capsule_tar "$archive" "$stage_root" "$capsule_name" || return`
+    and `scripts/publish-release.sh:653` `package.add(Path(stage_root) / capsule_name, arcname=capsule_name, filter=normalize)`
+  - A `data` capsule stages its whole source tree:
+    `scripts/publish-release.sh:488` `copy_clean_capsule_tree "$capsule_dir" "${stage_root}/${capsule_name}" || return`
+  - A wasm or web-projection capsule stages `capsule.json`, its `browser/` folder and its entrypoint:
+    `scripts/publish-release.sh:695` `copy_release_source_file "${capsule_dir}/capsule.json" "$dest/capsule.json" || return`,
+    `scripts/publish-release.sh:696` `if [[ -d "${capsule_dir}/browser" ]]; then`,
+    `scripts/publish-release.sh:701` `copy_release_source_file "$built_wasm" "${dest}/${entrypoint}" || return`
+    and `scripts/publish-release.sh:703` `cp "$built_wasm" "${dest}/${entrypoint}" || return`
+  - For the platform-independent apps, the script takes a prebuilt archive instead when one is given:
+    `scripts/publish-release.sh:954` `if [[ -n "${ARTIFACTS_DIR:-}" && -f "${ARTIFACTS_DIR}/${capsule}.capsule.tar.gz" ]]; then`
+    Unverified: what builds that archive.
+  - The row records the archive file's hash and size:
+    `scripts/publish-release.sh:962` `updates_json=$(record_direct_asset "$updates_json" "$capsule" "$staged" "capsules/${capsule}" "$release_path" "$capsule") || return`,
+    `scripts/publish-release.sh:716` `checksum=$(sha256 "$staged") || return`
+    and `scripts/publish-release.sh:717` `size=$(file_size "$staged") || return`
+  - Its CID is what the IPFS provider returns when it adds that file:
+    `scripts/publish-release.sh:1038` `cid=$(ipfs_add "$staged") || return`
+    and `scripts/publish-release.sh:265` `req=$(jq -nc --arg path "$absolute" '{op:"add_path", path:$path, pin:true}')`
+  - The release signer puts the archive's hash, size and CID in the capsule's record:
+    `scripts/release-signer.py:540` `"capsule_version": version, "sha256": checked_hash(checksum[len("sha256:"):]),`
+    and `scripts/release-signer.py:541` `"size": info["size"], "cid": info["cid"], "release_path": relative_path(info["release_path"]),`
+  - At publication, each imported CID must equal its signed pin:
+    `elastos/crates/elastos-server/src/publish.rs:383` `require_import_cid(&actual, &artifact.cid)?;`
+  - So, by the lines above, for these capsules one name (the archive's SHA-256, size and CID) covers the
+    manifest and every staged file together.
+- **a2. The name is a CID of one archive form, and two CID forms are accepted.** Verdict: gap.
+  - The archive bytes include the folder name and tar headers, with owners and times zeroed and modes
+    normalized: `scripts/publish-release.sh:640` `info.uid = info.gid = info.mtime = 0`
+    and `scripts/publish-release.sh:643` `info.mode = 0o777 if info.issym() else (`
+  - A signed pin may be a raw-block CID or the CID the provider returns, and the code says the two differ:
+    `elastos/crates/elastos-server/src/publish.rs:372` `// The catalogue's signed pin is a raw block. The existing provider`,
+    `elastos/crates/elastos-server/src/publish.rs:373` `// imports files as UnixFS; publish the bounded raw block through`
+    and the branch `elastos/crates/elastos-server/src/publish.rs:370` `if actual != artifact.cid && cid::Cid::try_from(artifact.cid.as_str())?.codec() == 0x55`
+  - The publisher accepts both codecs:
+    `elastos/crates/elastos-server/src/release_publication.rs:555` `matches!(cid.codec(), 0x55 | 0x70)`
+  - Model packages use a DAG-PB closure CID instead (a4).
+  - Gap: the CID names this archive form (folder name, tar headers), not the bundle's files as such, and the
+    code read accepts more than one CID form for the same archive without saying which one is its package
+    identity. P13 and the docs name one complete bundle CID.
+  - **Q3 for Anders:** Which single CID form is the package identity for every capsule kind, so that records,
+    catalogs and Homes all name a capsule the same way?
+- **a3. Provider capsules: the manifest and the binary are two rows.** Verdict: gap.
+  - The manifest and its icons are one archive:
+    `scripts/publish-release.sh:559` `copy_release_source_file "${capsule_dir}/capsule.json" "${stage_root}/${capsule_name}/capsule.json" || return`
+    and `scripts/publish-release.sh:979` `release_path="${provider}-capsule-metadata.tar.gz"`
+  - The provider binary is another row, one for each name in this list:
+    `scripts/publish-release.sh:103` `SUPPORT_BINARY_ASSETS=(` and
+    `scripts/publish-release.sh:842` `release_path="${name}-${setup_platform}"`
+  - Each row needs its own record:
+    `elastos/crates/elastos-server/src/capsule_record.rs:116` `for (platform, info) in component.platforms.iter().chain(metadata) {`
+  - Gap: no one name covers a provider's manifest and its executable payload. Each half is signed, but in a
+    record of its own.
+  - **Q4 for Anders:** Should a provider capsule's manifest and binary be named and signed as one closure, like
+    other capsules?
+- **a4. Model content capsules: a DAG-PB closure CID in a signed catalog entry.** Verdict: matches.
+  - `elastos/crates/elastos-server/src/api/capsule_inventory.rs:181` `anyhow::bail!("model package requires a canonical DAG-PB SHA-256 closure CIDv1");`
+  - The entry's object manifest lists each file with its path, SHA-256 and size:
+    `elastos/crates/elastos-server/src/content.rs:2922` `.any(|key| !matches!(key.as_str(), "path" | "sha256" | "size"))`
+    and its `content_digest` must match that list:
+    `elastos/crates/elastos-server/src/content.rs:2963` `|| closure.content_digest != format!("sha256:{:x}", digest.finalize())`
+  - This is the docs' rule:
+    `docs/CAPSULE_MODEL.md:69` `closure. A signed catalog entry points to that CID, an availability receipt`
+  - The catalog check alone is descriptive:
+    `elastos/crates/elastos-server/src/content.rs:2877` `/// This proves descriptive consistency only; payload verification and admission`
+    Preparation then compares the fetched object manifest with the signed one:
+    `elastos/crates/elastos-server/src/api/capsule_inventory/preparation.rs:2788` `anyhow::anyhow!("fetched index differs from signed catalog")`
+  - The entry carries the capsule manifest beside the CID:
+    `elastos/crates/elastos-server/src/api/capsule_inventory.rs:49` `capsule_manifest: Value,`
+    Unverified: whether preparation checks the package's own `capsule.json` against it; the preparation
+    file (15,504 lines) was read only in part.
+
+**(b) Whether a URL, release path, capsule name, or catalog or Store row acts as an identity, or as the lookup key for one**
+
+- **b1. The capsule name and release path are lookup keys; the signed hash, size and CID are what is checked.**
+  Verdict: matches.
+  - `elastos/crates/elastos-server/src/capsule_record.rs:46` `pub(crate) struct CapsuleRecords(BTreeMap<(String, String), CapsuleRecord>);`
+  - `elastos/crates/elastos-server/src/capsule_record.rs:93` `checksum == Some(record.sha256.as_str())`
+    and `elastos/crates/elastos-server/src/capsule_record.rs:95` `&& info.cid.as_deref() == Some(record.cid.as_str()),`
+  - A release path is a flat file name, not a URL:
+    `scripts/publish-release.sh:1023` `*/*|*\\*|.|..) die "Invalid direct asset filename: $release_path" ;;`
+  - An old row with no release path is matched by its signed digest and size:
+    `elastos/crates/elastos-server/src/release_publication.rs:616` `// Legacy capsule descriptors omit release_path. Their signed digest and`
+- **b2. A catalog row points to a CID.** Verdict: matches.
+  - Model catalog entries need unique package CIDs, and unique names:
+    `elastos/crates/elastos-server/src/api/capsule_inventory.rs:184` `anyhow::bail!("model catalog entries require unique package CIDs");`
+    and `elastos/crates/elastos-server/src/api/capsule_inventory.rs:200` `anyhow::bail!("model catalog entries require unique capsule names");`
+  - A components row holds its CID beside its release path:
+    `components.json:203` `"cid": "",` and `components.json:206` `"release_path": "shell-linux-amd64",`
+    and the release fills in each CID by release path:
+    `scripts/publish-release.sh:1041` `.release_path? == $path then .cid = $cid`
+  - Not covered by the code read: Home and Marketplace rows, and the gateway URLs that update fetches use.
+- **b3. At launch, an unsigned capsule's release row is found by the name in its own manifest.** Verdict:
+  matches (the name is a lookup key).
+  - `elastos/crates/elastos-server/src/runtime.rs:366` `crate::setup::verify_installed_release_capsule(data_dir, &manifest.name, path)`
+  - `elastos/crates/elastos-server/src/setup.rs:1595` `/// release, and the capsule's CID and archive receipts match its entry.`
+  - A question about the row shape this check reads is in 15.1 (d2).
+- **b4. One capsule names another only by name.** Verdict: gap.
+  - A requirement is a name: `elastos/crates/elastos-common/src/manifest.rs:276` `pub struct CapsuleRequirement {`
+    and `elastos/crates/elastos-common/src/manifest.rs:277` `pub name: String,`
+  - The publish tool resolves a requirement by name in the source tree:
+    `elastos/crates/elastos-server/src/publish.rs:1233` `if !manifests.contains_key(&requirement.name) {`
+  - The `viewer` field's comment says a path or a CID:
+    `elastos/crates/elastos-common/src/manifest.rs:126` `/// Viewer capsule: path or CID of a capsule that can display this data capsule`
+    but the check says a path or a capsule name:
+    `elastos/crates/elastos-common/src/manifest.rs:595` `"viewer \"{}\" must be a relative path or capsule name",`
+    and the code that serves a viewer tries a path, then a folder name:
+    `elastos/crates/elastos-server/src/main.rs:1870` `// Try relative path first (e.g. "../gba-emulator"), then search standard locations`
+    and `elastos/crates/elastos-server/src/ipfs.rs:571` `// Standard install location: $XDG_DATA_HOME/elastos/capsules/<name>`
+    Not covered by the code read: the other places that read `viewer` (Home and the gateway catalog).
+  - By contrast, a microVM image is named by CID:
+    `elastos/crates/elastos-common/src/manifest.rs:1240` `pub rootfs_cid: Option<String>,`
+  - Gap: a capsule's manifest does not pin the capsules it needs by hash. The `viewer` comment promises a CID
+    form that no code read resolves (P12).
+  - **Q5 for Anders:** Should a reference to another capsule (`requires`, `viewer`) be pinned to that capsule's
+    CID, at least in the signed release? If not, should the `viewer` comment drop "or CID"?
+
+### 13.5 Service offers are not package identity
+
+- Bullet: `PRINCIPLES.md:141` `- service offers describe running provider capabilities and grants; they are`
+- Verdict: not touched.
+
+### 13.6 Source packages and development projections are build inputs
+
+- Bullet: `PRINCIPLES.md:143` `- source packages and development projections are build inputs, not complete`
+- Verdict: **matches**.
+- The publish tool reads source manifests from the workspace:
+  `elastos/crates/elastos-server/src/publish.rs:1102` `for rel in ["capsules", "elastos/capsules"] {`
+- When a prepared release names a source commit, capsule files come from that commit:
+  `scripts/publish-release.sh:591` `if [[ -n "${RELEASE_PREPARE_SOURCE_COMMIT:-}" ]]; then`
+  and `scripts/publish-release.sh:597` `git archive -o "$archive" "${RELEASE_PREPARE_SOURCE_COMMIT}:${prefix%/}" &&`
+- The signed release records a source commit and tree:
+  `elastos/crates/elastos-server/src/release_publication.rs:122` `for field in ["commit", "tree"] {`
+- A Home without an installed release runs unsigned capsules only with an explicit flag:
+  `elastos/crates/elastos-server/src/runtime.rs:186` ``/// Homes admit unsigned capsules only with `dev_mode = true`, which source``
+  and an installed release ignores that flag:
+  `elastos/crates/elastos-server/src/runtime.rs:207` `(Some(_), _) => UnsignedCapsules::InstalledRelease(data_dir.to_path_buf()),`
+
+### 13.7 Spaces are where objects and services resolve
+
+- Bullet: `PRINCIPLES.md:145` `` - spaces are where objects and services resolve: `localhost://...`, `elastos://...`, WebSpaces ``
+- Verdict: **matches**.
+- `elastos/crates/elastos-common/src/manifest.rs:610` `"unsupported URI scheme in provides \"{}\"; allowed: elastos://, localhost://",`
+- The same scheme check runs for capabilities and storage:
+  `elastos/crates/elastos-common/src/manifest.rs:617` `if !is_allowed_uri_scheme(cap) {` and
+  `elastos/crates/elastos-common/src/manifest.rs:644` `if !is_allowed_uri_scheme(storage) {`
+
+### 13.8 Human nouns on product surfaces
+
+- Bullet: `PRINCIPLES.md:146` `- user-facing product surfaces should lead with human nouns such as`
+- Verdict: not touched.
+
+## PRINCIPLES 15
+
+### 15.1 CIDs and hashes for integrity; verified DIDs and signatures for publisher identity
+
+- Bullet: `PRINCIPLES.md:162` `- use CIDs and hashes for content integrity, and verified DIDs and signatures`
+  and `PRINCIPLES.md:163` `for publisher identity`
+- Overall verdict: **gap** (c1, c2, d1 and d2).
+
+**Integrity**
+
+- **i1. Release archives are checked by their signed hash, size and CID.** Verdict: matches.
+  - `elastos/crates/elastos-server/src/capsule_record.rs:83` `/// and CID. Bytes fetched for the row are then checked against the same values.`
+  - `elastos/crates/elastos-server/src/release_publication.rs:900` `"artifact hash differs: {}",`
+
+**(c) What the capsule signature covers, and whether it names a verified DID or a raw trusted key**
+
+- **c1. It covers the manifest and the entrypoint file.** Verdict: gap.
+  - `elastos/crates/elastos-runtime/src/signature/verifier.rs:78` `/// The signature covers: SHA256(manifest_json_without_signature) || SHA256(content)`
+  - At launch the content is the entrypoint file:
+    `elastos/crates/elastos-server/src/runtime.rs:389` `// Compute content hash (hash the entrypoint file)`
+    and `elastos sign` reads the same one file:
+    `elastos/crates/elastos-server/src/trust_cmd.rs:67` `let entrypoint_path = path.join(&manifest.entrypoint);`
+  - The signed message is the two hashes and nothing else:
+    `elastos/crates/elastos-runtime/src/signature/verifier.rs:132` `message.extend_from_slice(&manifest_hash);`
+    and `elastos/crates/elastos-runtime/src/signature/verifier.rs:133` `message.extend_from_slice(content_hash);`
+  - Gap: it signs the manifest and one payload file, not the complete package (13.2).
+- **c2. It names no publisher; it is checked against a list of raw keys.** Verdict: gap.
+  - The manifest holds a signature and no signer:
+    `elastos/crates/elastos-common/src/manifest.rs:130` `/// Optional base64-encoded signature`
+  - The verifier holds raw keys and tries each one:
+    `elastos/crates/elastos-runtime/src/signature/verifier.rs:16` `trusted_keys: Vec<VerifyingKey>,`
+    and `elastos/crates/elastos-runtime/src/signature/verifier.rs:95` `// Try each trusted key`
+  - On an installed Home, the release's publisher keys and the configured keys both check it:
+    `elastos/crates/elastos-server/src/runtime.rs:183` `/// An installed signed release always enforces signatures: its publisher`
+    and `elastos/crates/elastos-server/src/runtime.rs:184` `` /// keys and `trusted_keys` verify signed capsules, and an unsigned capsule ``
+    Configured keys are raw hex:
+    `elastos/crates/elastos-server/src/runtime.rs:198` `verifier.add_trusted_key_hex(key)?;`
+    and the publisher DIDs are first decoded into raw keys:
+    `elastos/crates/elastos-server/src/runtime.rs:201` `let key = crate::crypto::decode_did_key(did)`
+  - Gap: a pass says only that some key on the list signed, not which publisher, so no verified DID names the
+    publisher. The docs and the Inspector already treat a signature alone as weaker than publisher trust:
+    `docs/CAPSULE_MODEL.md:53` `A valid signature proves control of its signing key; Runtime publisher policy establishes publisher trust.`
+    and `docs/CAPSULE_INSPECTOR.md:26` `Inspector reports manifest signature evidence as declared but unverified:`
+  - **Q6 for Anders:** Should the capsule signature take the record's form (a domain tag, and a named `did:key`
+    signer checked against the accepted DIDs, over one name for the whole bundle), so a pass names its
+    publisher and covers the whole package? That would also answer Q2.
+- **c3. The per-capsule record names a verified DID.** Verdict: matches.
+  - `elastos/crates/elastos-server/src/capsule_record.rs:33` `pub(crate) signer_did: String,`
+  - `elastos/crates/elastos-server/src/capsule_record.rs:143` `publisher_dids.iter().any(|did| did == &envelope.signer_did),`
+  - `elastos/crates/elastos-server/src/capsule_record.rs:148` `crate::crypto::verify_domain_separated_signature(`
+  - The publisher's own tool checks the records against its pinned DID before it publishes:
+    `elastos/crates/elastos-server/src/release_publication.rs:188` `crate::capsule_record::CapsuleRecords::from_release(r, &[pinned_did.to_owned()])?;`
+- **c4. `author` is free text, not an identity.** Verdict: matches.
+  - `elastos/crates/elastos-common/src/manifest.rs:30` `pub author: Option<String>,`
+  - Publishing refuses only placeholder authors:
+    `elastos/crates/elastos-server/src/publish.rs:1087` `if matches!(author, "local-development" | "example-publisher") {`
+  - Not covered by the code read: how Home or the Inspector show `author`.
+
+**(d) How many capsule signing and naming schemes exist (and P10: one path per operation)**
+
+Four schemes sign capsule bytes or rows:
+
+1. The manifest `signature` (c1, c2):
+   `elastos/crates/elastos-runtime/src/signature/verifier.rs:119` `/// Format: SHA256(manifest_json_without_signature) || content_hash`
+   It is checked at launch:
+   `elastos/crates/elastos-server/src/runtime.rs:400` `if !verifier.verify_capsule(manifest, &content_hash)? {`
+   and written by `elastos sign`:
+   `elastos/crates/elastos-server/src/trust_cmd.rs:71` `sign_capsule(&signing_key, &mut manifest, &content_hash)?;`
+2. The per-capsule record (c3):
+   `elastos/crates/elastos-server/src/capsule_record.rs:13` `pub(crate) const DOMAIN: &str = "elastos.capsule.record.v1";`
+3. The release envelope, which binds the components file and so every row in it (13.2, point 2):
+   `elastos/crates/elastos-server/src/capsule_record.rs:363` `"elastos.release.v1",`
+4. The model catalog envelope:
+   `elastos/crates/elastos-server/src/api/capsule_inventory.rs:15` `const MODEL_CATALOG_DOMAIN: &str = "elastos.model.catalog.v1";`
+
+A capsule's bytes are named in four ways, and the first has two row shapes:
+
+- A. The archive's SHA-256, size and CID, raw or UnixFS as the pin says (13.4 a1 and a2):
+  `elastos/crates/elastos-server/src/capsule_record.rs:29` `pub(crate) sha256: String,`,
+  `elastos/crates/elastos-server/src/capsule_record.rs:30` `pub(crate) size: u64,`
+  and `elastos/crates/elastos-server/src/capsule_record.rs:31` `pub(crate) cid: String,`
+  Its second row shape is the older `capsules` registry entry:
+  `components.json:3` `"capsules": {` and `components.json:6` `"sha256": "",`
+  whose hash must equal the archive row's:
+  `elastos/crates/elastos-server/src/setup.rs:1569` `"capsule component '{name}' package sha256 does not match platform archive checksum"`
+- B. The model closure: a DAG-PB CID and a `content_digest` over its file list (13.4 a4).
+- C. The entrypoint's SHA-256 inside scheme 1:
+  `elastos/crates/elastos-server/src/runtime.rs:397` `let content_hash = hash_content(&content);`
+- D. A capsule run by CID:
+  `elastos/crates/elastos-server/src/run_cmd.rs:132` `tracing::info!("Running capsule from CID: {}", cid);`
+  The Runtime reads `capsule.json` at a path under that CID:
+  `elastos/crates/elastos-server/src/content.rs:3027` `let manifest_bytes = match fetch_bytes_via_provider(registry, cid, Some("capsule.json")).await {`
+  For other types it reads only the entrypoint besides:
+  `elastos/crates/elastos-server/src/content.rs:3070` `fetch_bytes_via_provider(registry, cid, Some(&manifest.entrypoint)).await?;`
+  and a microVM is refused on this path:
+  `elastos/crates/elastos-server/src/content.rs:3061` `"MicroVM capsule opens still require the explicit operator path until content availability supports streamed large-object materialization"`
+  A `data` capsule must carry an object manifest:
+  `elastos/crates/elastos-server/src/content.rs:3021` ``/// Data capsules must carry `_elastos_object.json`; that manifest is the file``
+
+The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not counted here.
+
+- **d1. Two forms sign capsule bytes.** Verdict: gap.
+  - Scheme 1 signs the two hashes with no domain tag, checked against raw keys (c1, c2). Scheme 2 uses the
+    Runtime's domain-separated form with a named DID (c3):
+    `elastos/crates/elastos-server/src/crypto.rs:91` `` /// Signing input: `SHA256(domain || b"\0" || payload)` → Ed25519 sign. ``
+  - No committed capsule manifest carries a signature:
+    `git grep -n '"signature"' c641bcff21d9ceaad769b1ed89529d541ffd8766 -- '*capsule.json'` prints nothing
+    (a read-only search at this commit).
+  - Gap: one operation, signing a capsule, has two forms with different trust rules (P10).
+  - **Q7 for Anders:** Is scheme 1 still needed? If not, can capsules be signed only through scheme 2, so there
+    is one path?
+- **d2. Two row shapes in `components.json`.** Verdict: gap.
+  - The docs already ask for one shape:
+    `docs/CONTENT_CAPSULE_DISTRIBUTION.md:534` `` state. It is not the global content catalog. The current duplicate `capsules` ``
+  - A release that lists records must have an empty `capsules` registry:
+    `elastos/crates/elastos-server/src/capsule_record.rs:108` `"The release lists capsule records, so its capsule registry must be empty"`
+  - The launch check of an unsigned capsule from the installed release needs both shapes:
+    `elastos/crates/elastos-server/src/setup.rs:1606` `let (Some(component), Some(entry)) = (manifest.external.get(name), manifest.capsules.get(name))`
+    and otherwise refuses:
+    `elastos/crates/elastos-server/src/setup.rs:1608` `anyhow::bail!("'{name}' is not a capsule of the installed signed release");`
+  - Gap: two row shapes describe one archive (P10).
+  - Read from the lines above, not run: on a Home whose installed release lists records, this check would find
+    no `capsules` entry and refuse the capsule. Unverified: whether any capsule reaches this check on such a
+    Home.
+  - **Q8 for Anders:** Once releases list records, which row shape should that launch check read, and can the
+    `capsules` shape then be retired?
+
+### 15.2 External repositories and gateways stay behind content-provider contracts; imports end in the same CID path
+
+- Bullet: `PRINCIPLES.md:164` `- keep external repositories and gateways behind content-provider contracts;`
+  and `PRINCIPLES.md:165` `importing bytes must end in the same verified content-capsule and CID path`
+- Verdict: **matches**.
+- The publisher imports each artifact through the IPFS provider and checks the CID against the signed pin:
+  `elastos/crates/elastos-server/src/publish.rs:368` `.import_file(&snapshot.join("artifacts").join(&artifact.name))`
+  and `elastos/crates/elastos-server/src/publish.rs:514` `"Imported CID differs from its signed reference"`
+- For a raw pin it also posts the block to the provider's local Kubo API:
+  `elastos/crates/elastos-server/src/publish.rs:567` `.post(base.join("/api/v0/block/put")?)`
+  and checks that CID the same way:
+  `elastos/crates/elastos-server/src/publish.rs:381` `require_import_cid(&raw, &artifact.cid)?;`
+- Both routes end in the same `require_import_cid` check (the line above and 13.4 a1), so the bullet holds.
+- A P10 point, not a P15 gap: the raw route is a second import route, beside the provider's own operations:
+  `elastos/crates/elastos-server/src/publish.rs:374` `// that provider's own local Kubo endpoint as well.`
+- **Q9 for Anders:** Should the IPFS provider take raw blocks itself, so the publisher has one import route?
+- Not covered by the code read: imports from external repositories. The docs place them in a gateway provider:
+  `docs/CONTENT_CAPSULE_DISTRIBUTION.md:544` `If Hugging Face support is added, it belongs in a dedicated gateway provider`
+
+### 15.3 IPLD-compatible manifests for published objects
+
+- Bullet: `PRINCIPLES.md:166` `- use IPLD-compatible manifests for published objects, signed heads,`
+  and `PRINCIPLES.md:167` `provenance, and availability receipts when content graphs need traversal or`
+- Verdict: **gap** for release capsules. This answers (e).
+- A release capsule's `capsule.json` sits inside its gzip tar (13.4 a1), and the publisher imports the tar as
+  one file:
+  `elastos/crates/elastos-server/src/publish.rs:701` `.request(serde_json::json!({"op":"add_path", "path":file, "pin":true}))`
+  So, by these lines, the manifest is not an IPLD node, and no IPLD link reaches it.
+- Records, and the links of an object manifest, hold CIDs as plain strings:
+  `elastos/crates/elastos-server/src/capsule_record.rs:31` `pub(crate) cid: String,`
+  and `elastos/crates/elastos-server/src/content.rs:5954` `pub cid: String,` (in `ContentObjectLink`, from line
+  5952).
+- The code has two forms that the changelog calls IPLD-compatible. One is the object manifest:
+  `elastos/crates/elastos-server/src/content.rs:98` `const OBJECT_MANIFEST_SCHEMA: &str = "elastos.content.object.manifest/v1";`
+  and `elastos/CHANGELOG.md:2377` `giving Documents, shares, and sites a common IPLD-compatible object shape`
+  A model closure is checked in that form:
+  `elastos/crates/elastos-server/src/content.rs:2927` `let closure = parse_content_object_manifest("model-catalog", &serde_json::to_vec(object)?)?;`
+  The other is an optional release object that the head names:
+  `elastos/crates/elastos-server/src/publish.rs:184` `release_object_cid: Option<String>,`
+  and `elastos/CHANGELOG.md:2392` `release-object sidecars so public releases can expose IPLD-compatible manifest links`
+  Unverified: this report did not check either form against an IPLD codec.
+- Gap: the manifest of a release capsule (any role) is not published in an IPLD-compatible form; a model
+  closure's object manifest is, by the changelog's claim. Unverified: whether release capsules meet the
+  bullet's condition, content graphs that "need traversal or synchronization".
+- **Q10 for Anders:** Should every published capsule use the model closure's form (a DAG-PB closure with an
+  object manifest), so one manifest form serves traversal for every capsule kind? That would also answer Q3.
+
+### 15.4 Encrypted content uses the normal content path
+
+- Bullet: `PRINCIPLES.md:169` `- encrypted content must use the normal content path`
+- Verdict: not touched.
+
+### 15.5 Decryption and license policy go through an explicit provider
+
+- Bullet: `PRINCIPLES.md:170` `- decryption and license policy should be mediated by an explicit provider, not reimplemented inside every app`
+- Verdict: not touched.
+
+### 15.6 Runtime routes capability-checked access and decryption requests
+
+- Bullet: `PRINCIPLES.md:171` `- Runtime may route a capability-checked access/decryption request through a`
+- Verdict: not touched.
+
+### 15.7 dKMS crosses machines over Carrier
+
+- Bullet: `PRINCIPLES.md:175` `- when a first-party production dKMS service crosses an ElastOS machine`
+- Verdict: not touched.
+
+## Questions
+
+For Anders, each from the entry named:
+
+- Q1 (13.2): Is the next release still the one that sets `REQUIRED` to true?
+- Q2 (13.2): Should the signed manifest part be the hash of the manifest's own bytes, not the checking
+  Runtime's serialization?
+- Q3 (13.4 a2): Which single CID form is the package identity for every capsule kind?
+- Q4 (13.4 a3): Should a provider capsule's manifest and binary be named and signed as one closure?
+- Q5 (13.4 b4): Should `requires` and `viewer` be pinned to CIDs, at least in the signed release, or should the
+  `viewer` comment drop "or CID"?
+- Q6 (15.1 c2): Should the capsule signature take the record's form, so a pass names its publisher and covers
+  the whole package?
+- Q7 (15.1 d1): Is the manifest `signature` scheme still needed?
+- Q8 (15.1 d2): Which row shape should the launch check read once releases list records, and can `capsules` be
+  retired?
+- Q9 (15.2): Should the IPFS provider take raw blocks, so the publisher has one import route?
+- Q10 (15.3): Should every published capsule use the model closure's object form?
+
+Security: this report records no security finding. It is a gap list, not a security review.
+
+## What the lab harness shows and does not show
+
+The lab harness of task 005 is in the commit read. It checks identity apart from admission: it answers only
+whether bytes match a name (`lab/capsule-identity/README.md:9` `- It answers one question: do these bytes match this name?`)
+and sits in no admission or launch path
+(`lab/capsule-identity/README.md:11` `decision. It sits in no admission or launch path, and no Runtime code calls`).
+Its schema check is the Runtime's own manifest type
+(`lab/capsule-identity/src/lib.rs:423` `let manifest: CapsuleManifest = serde_json::from_slice(bytes)`).
+Its value is a lab CID, not the Runtime's CID
+(`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` and
+`lab/capsule-identity/README.md:158` `plain framed stream of regular files instead, so its value never equals the`).
+Its results hold for one Mac and these fixtures only
+(`lab/capsule-identity/README.md:165` `One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0`).
+It does not show how the Runtime should name, sign, admit or publish a capsule, and this report did not run
+its tests.
