@@ -1,0 +1,9 @@
+id: M-A6-GENERIC-DENIED
+file: src/a6.rs
+test: tests::a6_sibling_presenting_owner_token_is_refused
+--- old
+            "wrong_capsule expected:{token_capsule} got:{caller_capsule}"
+--- new
+            "denied"
+--- end
+# Control: a generic error must not satisfy the claimed reason.

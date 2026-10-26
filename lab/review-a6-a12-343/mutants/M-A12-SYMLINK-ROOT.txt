@@ -1,0 +1,4 @@
+id: M-A12-SYMLINK-ROOT
+# Not a source edit. leftovers_under(&[symlink_to_dir_with_file]) lists the
+# symlink and returns without reading the target. A leftover behind a
+# symlink-named /tmp/elastos/storage is invisible.

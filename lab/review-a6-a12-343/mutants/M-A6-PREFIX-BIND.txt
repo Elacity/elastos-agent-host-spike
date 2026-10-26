@@ -1,0 +1,10 @@
+id: M-A6-PREFIX-BIND
+file: src/a6.rs
+tests: tests::a6_owner_may_use_own_session_token, tests::a6_sibling_presenting_owner_token_is_refused
+--- old
+    if token_capsule != caller_capsule {
+--- new
+    if !caller_capsule.starts_with(token_capsule) {
+--- end
+# Extra case the named tests never present: token instance-1, caller instance-1-evil.
+# Expected for a real A6 bind: refuse. This mutant accepts.

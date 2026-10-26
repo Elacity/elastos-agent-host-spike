@@ -1,0 +1,14 @@
+id: M-A12-HARDCODE-FAIL
+file: src/a12.rs
+tests: tests::a12_census_lists_runtime_storage, tests::a12_planted_storage_file_is_caught
+--- old
+pub fn runtime_temp_census() -> Result<String, String> {
+    runtime_temp_census_at(&runtime_owned_temp_roots())
+}
+--- new
+pub fn runtime_temp_census() -> Result<String, String> {
+    Err("runtime-temp census: FAIL leftovers:3 paths:[\"/tmp/elastos\", \"/tmp/elastos/storage\", \"/tmp/elastos/storage/a6-a12-evidence-fix-planted\"]".into())
+}
+--- end
+# The list test only reads RUNTIME_TEMP_ROOTS. The plant test only requires
+# those substrings. There is no clean-PASS test of runtime_temp_census().

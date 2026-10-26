@@ -1,0 +1,9 @@
+id: M-A6-COMMENT-STEP4
+file: elastos/crates/elastos-runtime/src/capability/manager.rs (string copy only)
+check: a6::runtime_step4_present
+--- old
+        if token.capsule != caller_capsule_id {
+--- new
+        // if token.capsule != caller_capsule_id {
+--- end
+# The source pin is a substring search. A commented-out if still counts as present.

@@ -1,0 +1,3 @@
+id: M-A12-RENAME-ROOT
+# Not a source edit. Rename the walked root and recreate the name empty.
+# leftovers_under sees the new empty tree and not the renamed one.
