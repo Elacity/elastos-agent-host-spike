@@ -83,6 +83,26 @@ fn rewrite_in_place(path: &Path, bytes: &[u8]) {
         .unwrap();
 }
 
+/// Restore mtime only. ctime is the remaining stamp; utimensat cannot set it.
+fn restore_mtime(path: &Path, mtime: (i64, i64)) {
+    let c_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+        .unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: mtime.0,
+            tv_nsec: mtime.1,
+        },
+    ];
+    assert_eq!(
+        unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) },
+        0
+    );
+}
+
 fn no_attempt_kept_the_stamp() -> ! {
     panic!(
         "no attempt kept the stat identity across a same-size rewrite in {ATTEMPTS} tries: \
@@ -158,6 +178,7 @@ fn browser_image_check_admits_a_same_size_rootfs_rewrite_from_the_same_tick() {
         ensure(&data).expect("a valid image set verifies");
         let recorded: Vec<Stamp> = paths.iter().map(|path| stamp(path)).collect();
         rewrite_in_place(&paths[1], b"changed-image");
+        restore_mtime(&paths[1], recorded[1].mtime);
         if paths.iter().map(|path| stamp(path)).collect::<Vec<_>>() != recorded {
             continue;
         }
@@ -263,13 +284,9 @@ fn published_release_check_reports_a_same_size_artifact_rewrite_from_the_same_ti
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let publication = Publication::open_published(&output, &did).expect("the snapshot admits");
         let recorded = stamp(&path);
-        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
         rewrite_in_place(&path, &[original[0] ^ 1]);
         // Any writer can restore mtime (utimensat). Only ctime still guards.
-        fs::File::open(&path)
-            .unwrap()
-            .set_times(fs::FileTimes::new().set_modified(mtime))
-            .unwrap();
+        restore_mtime(&path, recorded.mtime);
         if stamp(&path) != recorded {
             continue;
         }

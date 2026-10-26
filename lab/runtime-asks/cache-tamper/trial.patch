@@ -1,0 +1,191 @@
+diff --git a/elastos/crates/elastos-server/src/release_publication.rs b/elastos/crates/elastos-server/src/release_publication.rs
+index 6aad02e3..89e8bbe6 100644
+--- a/elastos/crates/elastos-server/src/release_publication.rs
++++ b/elastos/crates/elastos-server/src/release_publication.rs
+@@ -322,17 +322,20 @@ impl Publication {
+                 && directory_stamp(&self._artifact_directory)? == self.artifact_directory_stamp,
+             "publication directory changed"
+         );
+-        for metadata in &self.metadata_files {
+-            ensure!(
+-                stamp(&metadata.file)? == metadata.admitted,
+-                "publication metadata changed"
+-            );
++        let metadata_sha = [
++            digest(&self.head),
++            digest(&self.release),
++            digest(&self.installer),
++        ];
++        for (metadata, expected) in self.metadata_files.iter().zip(metadata_sha) {
++            ensure_same_generation(&metadata.file, &metadata.admitted, expected)?;
+         }
+         for artifact in self.artifacts.values() {
+-            ensure!(
+-                stamp(&artifact.file)? == artifact.admitted,
+-                "publication artifact changed"
+-            );
++            ensure_same_generation(
++                &artifact.file,
++                &artifact.admitted,
++                &artifact.descriptor.sha256,
++            )?;
+         }
+         Ok(())
+     }
+@@ -353,17 +356,30 @@ impl Publication {
+             directory_stamp(&artifacts)? == self.artifact_directory_stamp,
+             "publication artifact directory changed"
+         );
+-        for (name, metadata) in METADATA.iter().zip(&self.metadata_files) {
+-            ensure!(
+-                stamp(&regular(&root, name, metadata.admitted.size)?)? == metadata.admitted,
+-                "publication metadata path changed: {name}"
+-            );
++        let metadata_sha = [
++            digest(&self.head),
++            digest(&self.release),
++            digest(&self.installer),
++        ];
++        for ((name, metadata), expected) in METADATA
++            .iter()
++            .zip(&self.metadata_files)
++            .zip(metadata_sha)
++        {
++            ensure_same_generation(
++                &regular(&root, name, metadata.admitted.size)?,
++                &metadata.admitted,
++                expected,
++            )
++            .with_context(|| format!("publication metadata path changed: {name}"))?;
+         }
+         for (name, artifact) in &self.artifacts {
+-            ensure!(
+-                stamp(&regular(&artifacts, name, artifact.descriptor.size)?)? == artifact.admitted,
+-                "publication artifact path changed: {name}"
+-            );
++            ensure_same_generation(
++                &regular(&artifacts, name, artifact.descriptor.size)?,
++                &artifact.admitted,
++                &artifact.descriptor.sha256,
++            )
++            .with_context(|| format!("publication artifact path changed: {name}"))?;
+         }
+         self.held_unchanged()?;
+         let root = directory(&self.root_path)?;
+@@ -837,6 +853,38 @@ fn stamp(file: &File) -> Result<StatStamp> {
+     Ok(StatStamp::from_metadata(&m))
+ }
+ 
++fn coarse_now() -> (i64, i64) {
++    let mut now = libc::timespec {
++        tv_sec: 0,
++        tv_nsec: 0,
++    };
++    // CLOCK_REALTIME_COARSE is the stamp Linux 6.12 writes into ctime/mtime
++    // before multigrain timestamps. A write in this tick does not move them.
++    assert_eq!(
++        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &mut now) },
++        0
++    );
++    (now.tv_sec, now.tv_nsec)
++}
++
++/// Git racy-git: a stamp is not a generation if its ctime is not older than
++/// the current coarse clock. Another same-size write can still share it.
++fn stamp_is_racy(stamp: &StatStamp) -> bool {
++    (stamp.ctime, stamp.ctime_nsec) >= coarse_now()
++}
++
++fn ensure_same_generation(file: &File, admitted: &StatStamp, expected_sha: &str) -> Result<()> {
++    let now = stamp(file)?;
++    ensure!(now == *admitted, "publication file changed");
++    if stamp_is_racy(&now) {
++        ensure!(
++            stream_file(file, admitted.size, |_| Ok(()))? == expected_sha,
++            "publication file changed"
++        );
++    }
++    Ok(())
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ struct DirectoryStamp {
+     dev: u64,
+@@ -1192,12 +1240,24 @@ mod tests {
+         assert!(!fixture.input.join("candidate-executed").exists());
+     }
+ 
++    fn wait_until_stamps_are_old(path: &std::path::Path) {
++        loop {
++            let m = std::fs::metadata(path).unwrap();
++            use std::os::unix::fs::MetadataExt;
++            if (m.ctime(), m.ctime_nsec()) < super::coarse_now() {
++                break;
++            }
++            std::hint::spin_loop();
++        }
++    }
++
+     #[test]
+     fn published_cache_check_keeps_hash_reads_at_admission_and_requested_artifact() {
+         let fixture = PublicPublicationFixture::new();
+         let output = fixture.parent.join("published");
+         fixture.open().unwrap().snapshot_into(&output).unwrap();
+         let publication = Publication::open_published(&output, &fixture.did).unwrap();
++        wait_until_stamps_are_old(&output.join("artifacts/home.tar.gz"));
+         let reads = STREAM_READS.with(|reads| reads.get());
+         for _ in 0..3 {
+             publication.unchanged_published().unwrap();
+diff --git a/elastos/crates/elastos-server/src/setup/browser_vm_image.rs b/elastos/crates/elastos-server/src/setup/browser_vm_image.rs
+index 93c908cd..51be6b97 100644
+--- a/elastos/crates/elastos-server/src/setup/browser_vm_image.rs
++++ b/elastos/crates/elastos-server/src/setup/browser_vm_image.rs
+@@ -24,8 +24,10 @@ const IO_CHUNK_SIZE: usize = 64 * 1024;
+ const STAGING_PREFIX: &str = ".browser-image-stage-";
+ const VERIFIED_SET_CACHE_LIMIT: usize = 8;
+ 
+-// Like AuthState's verified-file cache, use inode plus nanosecond change time:
+-// a same-size rewrite with restored mtime still requires verification.
++// Like AuthState's verified-file cache, use inode plus nanosecond change time.
++// A same-size rewrite in one CLOCK_REALTIME_COARSE tick keeps those fields, so
++// the identity also carries a content hash (racy-git: do not trust a stamp
++// that is not older than the current coarse clock).
+ #[derive(Clone, PartialEq, Eq)]
+ struct FileIdentity {
+     dev: u64,
+@@ -34,6 +36,7 @@ struct FileIdentity {
+     mode: u32,
+     mtime: (i64, i64),
+     ctime: (i64, i64),
++    sha256: String,
+ }
+ 
+ #[derive(Clone, PartialEq, Eq)]
+@@ -49,7 +52,7 @@ fn verified_sets() -> &'static Mutex<VecDeque<VerifiedSetKey>> {
+     CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
+ }
+ 
+-fn file_identity(metadata: &fs::Metadata) -> anyhow::Result<FileIdentity> {
++fn file_identity(path: &Path, metadata: &fs::Metadata) -> anyhow::Result<FileIdentity> {
+     #[cfg(unix)]
+     {
+         use std::os::unix::fs::MetadataExt;
+@@ -60,6 +63,7 @@ fn file_identity(metadata: &fs::Metadata) -> anyhow::Result<FileIdentity> {
+             mode: metadata.mode(),
+             mtime: (metadata.mtime(), metadata.mtime_nsec()),
+             ctime: (metadata.ctime(), metadata.ctime_nsec()),
++            sha256: hash_reader(&mut fs::File::open(path)?, None)?,
+         })
+     }
+     #[cfg(not(unix))]
+@@ -76,8 +80,8 @@ fn image_identities(paths: &[PathBuf; 4]) -> anyhow::Result<Vec<(FileIdentity, F
+                 "Browser image artifact must be a regular file"
+             );
+             Ok((
+-                file_identity(&fs::symlink_metadata(path)?)?,
+-                file_identity(&target)?,
++                file_identity(path, &fs::symlink_metadata(path)?)?,
++                file_identity(path, &target)?,
+             ))
+         })
+         .collect()
