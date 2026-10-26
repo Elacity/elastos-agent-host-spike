@@ -79,6 +79,10 @@ AC-006-STORAGE remains the separate `run` blocker above.
 
 ## Launch by bundle CID (025)
 
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `capsule_named_by_hash` | AC-025-CID | Provider-resolvable directory CID and a measured offline content backend for the existing launch path. |
+
 Verdict: **blocked: AC-025-CID** for the full `capsule_named_by_hash` journey.
 The fixture needs a provider-resolvable directory CID and a measured offline
 content backend before that row can run. The existing CLI accepts `--cid` and
@@ -561,6 +565,10 @@ AC-006-STORAGE retains its existing scope and blocker.
 
 ### AC-005-REASON — resource-stop cause on the CLI
 
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `process_isolation::runaway_is_stopped_with_reason` | AC-005-REASON | Preserve the Wasmtime resource-stop cause through ComponentProvider and CLI stderr. |
+
 `process_isolation::runaway_is_stopped_with_reason` is
 `#[ignore = "blocked: AC-005-REASON"]`. Runtime must preserve the resource-stop
 cause from Wasmtime through ComponentProvider and `elastos run` stderr (for
@@ -741,6 +749,10 @@ census neither enumerates nor reads nor removes that directory. The table's
 scope and the same invocation's VERSIONS.json keep these limits visible.
 
 ### AC-021-GRANTS — cross-session live-grant visibility
+
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `run_leaves_no_live_grant` | AC-021-GRANTS | Shell-authorized view of every session's live grants, filtered by Runtime for exhausted, revoked and expired grants. |
 
 `run_leaves_no_live_grant` is ignored with `blocked: AC-021-GRANTS`. When
 explicitly selected, it reuses the granted-read journey and requires a global

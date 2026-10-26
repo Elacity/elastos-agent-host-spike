@@ -2,28 +2,85 @@
 
 use crate::identity::{sha256, Observation, ProbeIdentity, PREFIX};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-fn grade(result: &str) -> String {
+struct GapRow {
+    ids: String,
+    runtime_change: String,
+}
+
+fn blocker_ids(reason: &str) -> BTreeSet<&str> {
+    reason.split(';').map(str::trim).collect()
+}
+
+fn grade(name: &str, result: &str, gaps: &[GapRow]) -> Result<String, String> {
     if result == "ok" {
-        return "PASS".into();
+        if !gaps.is_empty() {
+            return Err(format!("GAPS.md: {name}: still lists it as blocked"));
+        }
+        return Ok("PASS".into());
     }
     if let Some(reason) = result.strip_prefix("ignored, blocked: ") {
         let parts: Vec<_> = reason.split(';').map(str::trim).collect();
         if parts.iter().all(|part| !part.is_empty()) {
-            return format!("BLOCKED ({})", parts.join("; "));
+            check_blocked_gap(name, reason, gaps)?;
+            return Ok(format!("BLOCKED ({})", parts.join("; ")));
         }
     }
-    "FAIL".into()
+    Ok("FAIL".into())
+}
+
+fn check_blocked_gap(name: &str, reason: &str, gaps: &[GapRow]) -> Result<(), String> {
+    let ids = blocker_ids(reason);
+    let joined = ids.iter().copied().collect::<Vec<_>>().join("; ");
+    let gap = match gaps {
+        [] => {
+            return Err(format!(
+                "GAPS.md: {name}: missing row for blocker IDs: {joined}"
+            ))
+        }
+        [gap] => gap,
+        _ => {
+            return Err(format!(
+                "GAPS.md: {name}: expected exactly one row for blocker IDs: {joined}; found {}",
+                gaps.len()
+            ))
+        }
+    };
+    let listed_ids = blocker_ids(&gap.ids);
+    if ids != listed_ids {
+        let missing = ids
+            .difference(&listed_ids)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let extra = listed_ids
+            .difference(&ids)
+            .copied()
+            .map(|id| if id.is_empty() { "<empty>" } else { id })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "GAPS.md: {name}: missing blocker IDs: [{missing}]; extra blocker IDs: [{extra}]"
+        ));
+    }
+    if gap.runtime_change.is_empty() {
+        return Err(format!(
+            "GAPS.md: {name}: missing Runtime change for blocker IDs: {joined}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Default)]
 struct Evidence {
     rows: BTreeMap<String, Vec<String>>,
+    gaps: BTreeMap<String, Vec<GapRow>>,
+    gaps_readable: bool,
     skipped: BTreeMap<String, Vec<String>>,
     reasons: BTreeMap<String, Vec<String>>,
     identities: Identities,
@@ -32,7 +89,7 @@ struct Evidence {
 }
 
 impl Evidence {
-    fn parse(listed: &str, output: &str) -> Self {
+    fn parse(listed: &str, output: &str, gaps: Option<&str>) -> Self {
         let mut evidence = Self::default();
         for line in listed.lines() {
             if let Some(name) = line.strip_suffix(": test") {
@@ -42,6 +99,29 @@ impl Evidence {
                     evidence.duplicate_inventory = true;
                 }
             }
+        }
+        evidence.gaps_readable = gaps.is_some();
+        if let Some(gaps) = gaps {
+            for line in gaps.lines() {
+                let Some(row) = line.trim().strip_prefix('|') else {
+                    continue;
+                };
+                let mut cells = row.split('|').map(str::trim);
+                let Some(name) = cells
+                    .next()
+                    .and_then(|cell| cell.strip_prefix('`')?.strip_suffix('`'))
+                else {
+                    continue;
+                };
+                if evidence.rows.contains_key(name) {
+                    evidence.gaps.entry(name.into()).or_default().push(GapRow {
+                        ids: cells.next().unwrap_or_default().into(),
+                        runtime_change: cells.next().unwrap_or_default().into(),
+                    });
+                }
+            }
+        } else {
+            evidence.failures.push("could not read GAPS.md".into());
         }
         for line in output.lines() {
             if let Some(encoded) = line.strip_prefix(PREFIX) {
@@ -94,7 +174,23 @@ impl Evidence {
                     .push(reason.into());
             }
         }
+        for (name, values) in &evidence.rows {
+            if values.len() == 1 {
+                if let Err(reason) = grade(name, &values[0], evidence.gap_rows(name)) {
+                    evidence
+                        .reasons
+                        .entry(name.clone())
+                        .or_default()
+                        .push(reason.clone());
+                    evidence.failures.push(reason);
+                }
+            }
+        }
         evidence
+    }
+
+    fn gap_rows(&self, name: &str) -> &[GapRow] {
+        self.gaps.get(name).map(Vec::as_slice).unwrap_or_default()
     }
 
     fn table(&self, cargo_ok: bool) -> (String, bool) {
@@ -103,7 +199,7 @@ impl Evidence {
             text.push_str("cargo | FAIL\n");
             return (text, false);
         }
-        let mut passed = cargo_ok && !self.rows.is_empty();
+        let mut passed = cargo_ok && !self.rows.is_empty() && self.gaps_readable;
         if !passed {
             text.push_str("cargo | FAIL\n");
         }
@@ -155,7 +251,7 @@ impl Evidence {
                 "FAIL".into()
             }
         } else if values.len() == 1 {
-            grade(&values[0])
+            grade(name, &values[0], self.gap_rows(name)).unwrap_or_else(|_| "FAIL".into())
         } else {
             "FAIL".into()
         }
@@ -346,8 +442,8 @@ impl GitIdentity {
 
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
 /// visible even if compilation or a test binary failed before reporting a row.
-pub fn table(listed: &str, output: &str, cargo_ok: bool) -> (String, bool) {
-    Evidence::parse(listed, output).table(cargo_ok)
+pub fn table(listed: &str, output: &str, cargo_ok: bool, gaps: Option<&str>) -> (String, bool) {
+    Evidence::parse(listed, output, gaps).table(cargo_ok)
 }
 
 pub struct RunReport {
@@ -366,8 +462,9 @@ pub fn write_run(
     cargo_ok: bool,
     git: Result<GitIdentity, &str>,
     receipt: &Path,
+    gaps: Option<&str>,
 ) -> RunReport {
-    let mut report = render_run(listed, output, cargo_ok, git);
+    let mut report = render_run(listed, output, cargo_ok, git, gaps);
     let written = write_exclusive(receipt, &report.receipt_bytes);
     report.receipt_written = written.is_ok();
     if let Err(reason) = written {
@@ -387,8 +484,9 @@ pub fn render_run(
     output: &str,
     cargo_ok: bool,
     git: Result<GitIdentity, &str>,
+    gaps: Option<&str>,
 ) -> RunReport {
-    let mut evidence = Evidence::parse(listed, output);
+    let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
     evidence.require_identities();
     let git = match git.and_then(|git| git.validate().map(|()| git)) {

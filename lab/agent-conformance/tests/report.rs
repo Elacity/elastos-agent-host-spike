@@ -5,34 +5,48 @@ fn run_table_requires_cargo_results() {
     let listed = "works: test\nblocked: test\n";
     let output = "test works ... ok\ntest blocked ... ignored, blocked: RT3 model grant\n";
     assert_eq!(
-        table(listed, output, true),
+        table(listed, output, true, Some("| `blocked` | RT3 model grant | Fixture change. |")),
         (
             "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\nblocked | BLOCKED (RT3 model grant)\nworks | PASS\n".into(),
             true
         )
     );
     for result in ["FAILED", "ignored", "ignored, blocked: ", "", "unknown"] {
-        let (text, passed) = table("case: test\n", &format!("test case ... {result}\n"), true);
+        let (text, passed) = table(
+            "case: test\n",
+            &format!("test case ... {result}\n"),
+            true,
+            Some(""),
+        );
         assert!(!passed, "result must fail: {result}");
         assert!(text.contains("case | FAIL\n"));
     }
     for output in ["", "test case ... ok\ntest case ... ok\n"] {
         assert_eq!(
-            table("case: test\n", output, true),
+            table("case: test\n", output, true, Some("")),
             (
                 "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncase | FAIL\n".into(),
                 false
             )
         );
     }
-    assert!(!table(listed, output, false).1);
-    assert!(!table("", "test unlisted ... ok\n", true).1);
-    assert!(!table("", "", true).1);
-    assert!(!table("case: test\ncase: test\n", "test case ... ok\n", true).1);
+    assert!(!table(listed, output, false, Some("")).1);
+    assert!(!table("", "test unlisted ... ok\n", true, Some("")).1);
+    assert!(!table("", "", true, Some("")).1);
+    assert!(
+        !table(
+            "case: test\ncase: test\n",
+            "test case ... ok\n",
+            true,
+            Some("")
+        )
+        .1
+    );
     let (blocked, passed) = table(
         "memory: test\n",
         "test memory ... ignored, blocked: UsersAI binding; AC-002-ARGS\n",
         true,
+        Some("| `memory` | UsersAI binding; AC-002-ARGS | Fixture change. |"),
     );
     assert!(passed);
     assert!(blocked.contains("memory | BLOCKED (UsersAI binding; AC-002-ARGS)\n"));
@@ -41,7 +55,8 @@ fn run_table_requires_cargo_results() {
         table(
             &format!("{name}: test\n"),
             &format!("test {name} ... ok\n"),
-            true
+            true,
+            Some("")
         )
         .0,
         format!("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{name} | PASS\n")
@@ -69,6 +84,11 @@ fn run_table_requires_cargo_results() {
             cargo_ok,
             Ok(git.clone()),
             &path,
+            Some(&if result.starts_with("ignored, blocked: ") {
+                format!("| `{LIVE}` | RT3 model grant | Fixture change. |")
+            } else {
+                String::new()
+            }),
         );
         assert_eq!(combined.passed, expected);
         assert_eq!(read_receipt(&path)["suite_outcome"], outcome);
@@ -81,6 +101,7 @@ fn run_table_requires_cargo_results() {
         true,
         Ok(git),
         &home.root().join("incomplete.json"),
+        Some(""),
     );
     assert!(!no_identity.passed);
     assert!(no_identity.table.contains("case | PASS\n"));
@@ -114,6 +135,7 @@ fn run_table_grades_blocker_lists_by_one_rule() {
                 "case: test\n",
                 &format!("test case ... ignored, blocked: {reason}\n"),
                 true,
+                Some(&format!("| `case` | {reason} | Fixture change. |"))
             ),
             (
                 format!("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\ncase | {expected}\n"),
@@ -134,6 +156,124 @@ use std::{fs, path::Path};
 
 const LIVE: &str = "default_activation_refuses_without_selector";
 
+fn gaps_report(result: &str, gaps: Option<&str>) -> agent_conformance::report::RunReport {
+    let (observations, git) = synthetic(1, true);
+    agent_conformance::report::render_run(
+        "case: test\n",
+        &output(&observations)
+            .replace(LIVE, "case")
+            .replace(" ... ok", &format!(" ... {result}")),
+        true,
+        Ok(git),
+        gaps,
+    )
+}
+
+fn assert_gap_failure(report: agent_conformance::report::RunReport, reason: &str) {
+    assert!(!report.passed, "GAPS mismatch must fail the run");
+    assert!(report.table.contains(&format!("case | FAIL | {reason}\n")));
+    assert_eq!(report.failures, [reason]);
+    let receipt: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    assert_eq!(receipt["suite_outcome"], "FAIL");
+    assert_eq!(receipt["command_success"], false);
+    assert_eq!(receipt["missing_or_invalid"], serde_json::json!([reason]));
+}
+
+#[test]
+fn blocked_row_needs_gaps_row() {
+    for gaps in [
+        "",
+        "| `source.rs` | RT3 | File description. |",
+        "| `unlisted_test` | RT3 | Change. |",
+    ] {
+        assert_gap_failure(
+            gaps_report("ignored, blocked: RT3", Some(gaps)),
+            "GAPS.md: case: missing row for blocker IDs: RT3",
+        );
+    }
+    assert_gap_failure(
+        gaps_report(
+            "ignored, blocked: RT3",
+            Some("| `case` | RT3 | Change. |\n| `case` | RT3 | Change. |"),
+        ),
+        "GAPS.md: case: expected exactly one row for blocker IDs: RT3; found 2",
+    );
+}
+
+#[test]
+fn blocked_row_ids_must_match_gaps() {
+    for (ids, missing, extra) in [
+        ("RT4", "RT3", "RT4"),
+        ("RT3; RT4", "", "RT4"),
+        ("", "RT3", "<empty>"),
+        ("RT3; ", "", "<empty>"),
+    ] {
+        assert_gap_failure(
+            gaps_report(
+                "ignored, blocked: RT3",
+                Some(&format!("| `case` | {ids} | Change. |")),
+            ),
+            &format!(
+                "GAPS.md: case: missing blocker IDs: [{missing}]; extra blocker IDs: [{extra}]"
+            ),
+        );
+    }
+    assert_gap_failure(
+        gaps_report(
+            "ignored, blocked: RT3; RT4",
+            Some("| `case` | RT3 | Change. |"),
+        ),
+        "GAPS.md: case: missing blocker IDs: [RT4]; extra blocker IDs: []",
+    );
+}
+
+#[test]
+fn blocked_row_needs_runtime_change() {
+    for gaps in ["| `case` | RT3 | \t |", "| `case` | RT3 |"] {
+        assert_gap_failure(
+            gaps_report("ignored, blocked: RT3", Some(gaps)),
+            "GAPS.md: case: missing Runtime change for blocker IDs: RT3",
+        );
+    }
+}
+
+#[test]
+fn gaps_listed_test_that_passes_fails() {
+    assert_gap_failure(
+        gaps_report("ok", Some("| `case` | RT3 | Change. |")),
+        "GAPS.md: case: still lists it as blocked",
+    );
+}
+
+#[test]
+fn blocked_row_accepts_reordered_ids_and_ignores_other_rows() {
+    let report = gaps_report(
+        "ignored, blocked: UsersAI binding; RT3",
+        Some("| `source.rs` | RT4 | File. |\n| `unlisted_test` | RT4 | Change. |\n| `case` | RT3; UsersAI binding; RT3 | Change. |"),
+    );
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(report
+        .table
+        .contains("case | BLOCKED (UsersAI binding; RT3)\n"));
+    assert!(report.failures.is_empty());
+    assert!(!report.table.contains("unlisted_test"));
+    assert!(
+        gaps_report(
+            "ok",
+            Some("| `source.rs` | RT4 | File. |\n| `unlisted_test` | RT4 | Change. |")
+        )
+        .passed
+    );
+}
+
+#[test]
+fn unreadable_gaps_fails_the_run() {
+    let report = gaps_report("ok", None);
+    assert!(!report.passed);
+    assert_eq!(report.failures, ["could not read GAPS.md"]);
+    assert!(report.table.contains("cargo | FAIL\n"));
+}
+
 #[test]
 fn agent_host_row_requires_its_launched_identity() {
     use agent_conformance::report::render_run;
@@ -153,6 +293,7 @@ fn agent_host_row_requires_its_launched_identity() {
         &evidence(&observations, "ok"),
         true,
         Ok(git.clone()),
+        Some(""),
     );
     assert!(!missing.passed);
     assert!(missing
@@ -171,7 +312,8 @@ fn agent_host_row_requires_its_launched_identity() {
             &listed,
             &evidence(&observations, "ok"),
             true,
-            Ok(git.clone())
+            Ok(git.clone()),
+            Some("")
         )
         .passed
     );
@@ -181,14 +323,17 @@ fn agent_host_row_requires_its_launched_identity() {
         &evidence(&observations, "ok"),
         true,
         Ok(git.clone()),
+        Some(""),
     );
     assert!(passed.passed);
     assert!(passed.table.contains(&format!(
         "{name} | PASS | real agent-host capsule, deny half; no model call (RT3)"
     )));
-    assert!(!table("other: test\n", "test other ... ok\n", true)
-        .0
-        .contains(name));
+    assert!(
+        !table("other: test\n", "test other ... ok\n", true, Some(""))
+            .0
+            .contains(name)
+    );
     let failed = render_run(
         &listed,
         &format!(
@@ -197,6 +342,7 @@ fn agent_host_row_requires_its_launched_identity() {
         ),
         false,
         Ok(git),
+        Some(""),
     );
     assert!(!failed.passed);
     assert!(failed.table.contains(&format!(
@@ -321,6 +467,7 @@ fn versions_receipt_binds_current_run() {
             true,
             Ok(git.clone()),
             &path,
+            Some(""),
         );
         assert!(report.passed, "{:?}", report.failures);
         let document = read_receipt(&path);
@@ -407,7 +554,7 @@ fn versions_receipt_rejects_incomplete_identity() {
     let mut refusal = |list: &str, out: &str, git, reason: &str| {
         serial += 1;
         let path = home.root().join(format!("refusal-{serial}.json"));
-        let report = write_run(list, out, true, git, &path);
+        let report = write_run(list, out, true, git, &path, Some(""));
         assert!(!report.passed, "accepted: {reason}");
         assert!(
             report.failures.iter().any(|failure| failure == reason),
@@ -566,6 +713,7 @@ fn versions_receipt_rejects_incomplete_identity() {
         true,
         Ok(git.clone()),
         &path,
+        Some(""),
     );
     assert!(first.passed);
     let original = fs::read(&path).unwrap();
@@ -575,6 +723,7 @@ fn versions_receipt_rejects_incomplete_identity() {
         true,
         Ok(git.clone()),
         &path,
+        Some(""),
     );
     assert!(!repeated.passed);
     assert!(!repeated.receipt_written);
@@ -587,12 +736,20 @@ fn versions_receipt_rejects_incomplete_identity() {
         true,
         Ok(git.clone()),
         &home.root().join("absent/VERSIONS.json"),
+        Some(""),
     );
     assert!(!missing_parent.passed);
     assert_eq!(missing_parent.failures, ["receipt write failed: NotFound"]);
     let symlink = home.root().join("receipt-link");
     std::os::unix::fs::symlink(&path, &symlink).unwrap();
-    let refused_link = write_run(&listed, &output(&observations), true, Ok(git), &symlink);
+    let refused_link = write_run(
+        &listed,
+        &output(&observations),
+        true,
+        Ok(git),
+        &symlink,
+        Some(""),
+    );
     assert_eq!(
         refused_link.failures,
         ["receipt write failed: AlreadyExists"]
@@ -624,6 +781,7 @@ fn versions_receipt_uses_the_staged_bundle_identity() {
             true,
             Ok(git),
             &path,
+            Some(""),
         );
         assert!(report.passed, "{:?}", report.failures);
         let receipt = read_receipt(&path);
@@ -657,6 +815,7 @@ fn run_table_grades_skipped_only_with_failed_test() {
             "case: test\n",
             &format!("{marker}test case ... FAILED\n"),
             cargo_ok,
+            Some(""),
         );
         assert!(!passed);
         assert!(text.contains("case | SKIPPED (loopback bind refused)\n"));
@@ -666,6 +825,11 @@ fn run_table_grades_skipped_only_with_failed_test() {
             "case: test\n",
             &format!("{marker}test case ... {result}\n"),
             true,
+            Some(if result == "ignored, blocked: RT3" {
+                "| `case` | RT3 | Fixture change. |"
+            } else {
+                ""
+            }),
         );
         assert!(!passed);
         assert!(text.contains("case | FAIL\n"));
@@ -676,13 +840,18 @@ fn run_table_grades_skipped_only_with_failed_test() {
         "SKIPPED case: \ntest case ... FAILED\n".into(),
         "test case ... FAILED\nRuntime refusal\n".into(),
     ] {
-        let (text, passed) = table("case: test\n", &output, false);
+        let (text, passed) = table("case: test\n", &output, false, Some(""));
         assert!(!passed);
         assert!(text.contains("case | FAIL\n"));
     }
-    assert!(table("", &format!("{marker}test case ... FAILED\n"), false)
-        .0
-        .contains("case | FAIL\n"));
+    assert!(table(
+        "",
+        &format!("{marker}test case ... FAILED\n"),
+        false,
+        Some("")
+    )
+    .0
+    .contains("case | FAIL\n"));
 }
 
 #[test]
@@ -694,7 +863,7 @@ fn skipped_report_keeps_a_nonzero_exit() {
         "SKIPPED {LIVE}: loopback bind refused: PermissionDenied\n{}",
         output(&observations).replace(" ... ok", " ... FAILED")
     );
-    let memory = agent_conformance::report::render_run(&listed, &output, false, Ok(git));
+    let memory = agent_conformance::report::render_run(&listed, &output, false, Ok(git), Some(""));
     assert!(!memory.passed);
     assert!(memory.table.contains(&format!(
         "{LIVE} | SKIPPED (loopback bind refused: PermissionDenied)\n"
@@ -732,6 +901,7 @@ fn host_key_receipt_requires_this_launched_bundle() {
             &output(observations).replace(LIVE, name),
             true,
             Ok(git.clone()),
+            Some(""),
         )
     };
     let missing = render(&observations);
@@ -770,18 +940,33 @@ fn host_key_receipt_requires_this_launched_bundle() {
 fn cleanup_report_keeps_scope_and_grant_blocker() {
     let listed = "granted_read_succeeds: test\nrun_leaves_no_live_grant: test\n";
     let results = "test granted_read_succeeds ... ok\ntest run_leaves_no_live_grant ... ignored, blocked: AC-021-GRANTS\n";
-    let (text, passed) = table(listed, results, true);
+    let (text, passed) = table(
+        listed,
+        results,
+        true,
+        Some("| `run_leaves_no_live_grant` | AC-021-GRANTS | Fixture change. |"),
+    );
     assert!(passed);
     assert!(text.contains("granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows"));
     assert!(text.contains("run_leaves_no_live_grant | BLOCKED (AC-021-GRANTS) | cleanup census"));
-    let (text, passed) = table(listed, &results.replace("... ok", "... FAILED"), false);
+    let (text, passed) = table(
+        listed,
+        &results.replace("... ok", "... FAILED"),
+        false,
+        Some("| `run_leaves_no_live_grant` | AC-021-GRANTS | Fixture change. |"),
+    );
     assert!(!passed);
     assert!(text.contains("granted_read_succeeds | FAIL | cleanup census"));
     let skipped = format!(
         "SKIPPED granted_read_succeeds: prerequisite unavailable\n{}",
         results.replace("... ok", "... FAILED")
     );
-    let (text, passed) = table(listed, &skipped, false);
+    let (text, passed) = table(
+        listed,
+        &skipped,
+        false,
+        Some("| `run_leaves_no_live_grant` | AC-021-GRANTS | Fixture change. |"),
+    );
     assert!(!passed);
     assert!(text
         .contains("granted_read_succeeds | SKIPPED (prerequisite unavailable) | cleanup census"));
@@ -812,6 +997,7 @@ fn instance_receipt_requires_both_launches_and_scope() {
                 &output(observations).replace(LIVE, name),
                 true,
                 Ok(git.clone()),
+                Some(""),
             )
         };
         let complete = render(&observations);

@@ -5284,3 +5284,133 @@ owners. The eight principles answers and file-line evidence above still apply
 to the unchanged implementation. The repository has no humanizer skill; this
 record uses direct statements of behavior and ownership. The supervisor owns
 review and publication.
+
+
+## 034 — BLOCKED rows require matching GAPS evidence
+
+034: The existing report grader now checks each BLOCKED row against one matching
+`GAPS.md` row, and rejects stale passing rows with fixed reasons.
+
+`src/bin/report.rs::main` reads `build::lane()/GAPS.md` and passes its text into
+`write_run`, `render_run` and the existing `Evidence::parse` path. Cargo still
+owns the test inventory and results. The parser selects only backticked names
+from that inventory. `grade` and `check_blocked_gap` require exactly one row,
+the same trimmed semicolon-separated ID set, and a nonempty Runtime-change
+cell. Failures name the test and the missing or extra IDs in the table and
+report failures. A passing test with a GAPS row fails as stale evidence.
+An unreadable file fails with `could not read GAPS.md`.
+
+The report tests keep their existing assertions and receive explicit GAPS
+inputs. `tests/common/grants.rs::report_inventory` supplies the lane document
+to that same grader. `GAPS.md` gains the three missing rows for bundle-CID
+launch, resource-stop reasons and cross-session live-grant visibility.
+`RUNBOOK.md` describes the new requirement in two lines. The existing cancel
+and kill-worker scope label stays intact.
+
+Six new synthetic tests cover this rule:
+`blocked_row_needs_gaps_row` (also duplicate rows and unrelated table rows),
+`blocked_row_ids_must_match_gaps` (different, missing, extra and empty IDs),
+`blocked_row_needs_runtime_change`, `gaps_listed_test_that_passes_fails`,
+`blocked_row_accepts_reordered_ids_and_ignores_other_rows` (set order,
+duplicate IDs and inventory filtering), and `unreadable_gaps_fails_the_run`.
+
+### Hand-run falsifiers
+
+The falsifiers stay out of `falsifiers.json` because the runner's `lab` command runs `lab/wasm-capsule`, so a new ID here reads NOT RUN; move them into the list when this lane has its own runner command (BACKLOG item 7).
+
+Each harness test used `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml --test report TEST -- --exact --nocapture`.
+Each named test passed before the edit, failed with the edit, and passed after
+restoration. Every named test failed for F-gaps-any-reason, including the
+Runtime-change test. The extra F-gaps-unreadable proves the missing-input
+refusal. The fixture falsifier ran the real `./run.sh` for all three steps.
+JSON strings in the old/new columns specify the exact replacement bytes;
+`\n` denotes one newline and `""` denotes deletion.
+
+| ID | File (relative to lane) | Exact old text | Exact new text | Named tests / command | Libtest lines and results | Failing assertion or report refusal |
+| --- | --- | --- | --- | --- | --- | --- |
+| F-gaps-any-reason | <code>src/report.rs</code> | <code>&quot;            check_blocked_gap(name, reason, gaps)?;&quot;</code> | <code>&quot;            // Accept any non-empty blocker reason.&quot;</code> | <code>blocked_row_needs_gaps_row</code><br><code>blocked_row_ids_must_match_gaps</code><br><code>blocked_row_needs_runtime_change</code> | baseline: <code>test blocked_row_needs_gaps_row ... ok</code> (exit 0, 0.794 s)<br>baseline: <code>test blocked_row_ids_must_match_gaps ... ok</code> (exit 0, 0.089 s)<br>baseline: <code>test blocked_row_needs_runtime_change ... ok</code> (exit 0, 0.090 s)<br>planted: <code>test blocked_row_needs_gaps_row ... FAILED</code> (exit 101, 1.083 s)<br>planted: <code>test blocked_row_ids_must_match_gaps ... FAILED</code> (exit 101, 0.093 s)<br>planted: <code>test blocked_row_needs_runtime_change ... FAILED</code> (exit 101, 0.086 s)<br>restored: <code>test blocked_row_needs_gaps_row ... ok</code> (exit 0, 0.831 s)<br>restored: <code>test blocked_row_ids_must_match_gaps ... ok</code> (exit 0, 0.091 s)<br>restored: <code>test blocked_row_needs_runtime_change ... ok</code> (exit 0, 0.086 s) | <code>tests/report.rs:173: assert!(!report.passed, &quot;GAPS mismatch must fail the run&quot;)</code> |
+| F-gaps-stale-pass | <code>src/report.rs</code> | <code>&quot;        if !gaps.is_empty() {&quot;</code> | <code>&quot;        if false &amp;&amp; !gaps.is_empty() {&quot;</code> | <code>gaps_listed_test_that_passes_fails</code> | baseline: <code>test gaps_listed_test_that_passes_fails ... ok</code> (exit 0, 0.785 s)<br>planted: <code>test gaps_listed_test_that_passes_fails ... FAILED</code> (exit 101, 1.060 s)<br>restored: <code>test gaps_listed_test_that_passes_fails ... ok</code> (exit 0, 0.844 s) | <code>tests/report.rs:173: assert!(!report.passed, &quot;GAPS mismatch must fail the run&quot;)</code> |
+| F-gaps-row | <code>GAPS.md</code> | <code>&quot;&#124; `ungranted_model_call_is_refused` &#124; RT3 &#124; Anders supplies the component model-call grant contract and its refusal path. &#124;\n&quot;</code> | <code>&quot;&quot;</code> | <code>ungranted_model_call_is_refused (report row; ./run.sh)</code> | Planted libtest: <code>test ungranted_model_call_is_refused ... ignored, blocked: RT3</code><br>baseline: exit 0, 214.080 s; <code>ungranted_model_call_is_refused &#124; BLOCKED (RT3)</code><br>planted: exit 1, 220.407 s; <code>ungranted_model_call_is_refused &#124; FAIL &#124; GAPS.md: ungranted_model_call_is_refused: missing row for blocker IDs: RT3</code><br>restored: exit 0, 216.941 s; <code>ungranted_model_call_is_refused &#124; BLOCKED (RT3)</code><br> | The report requires a matching row and returns exit 1: <code>GAPS.md: ungranted_model_call_is_refused: missing row for blocker IDs: RT3</code>. Cargo tests themselves passed. |
+| F-gaps-unreadable | <code>src/report.rs</code> | <code>&quot;        let mut evidence = Self::default();&quot;</code> | <code>&quot;        let gaps = gaps.or(Some(\&quot;\&quot;));\n        let mut evidence = Self::default();&quot;</code> | <code>unreadable_gaps_fails_the_run</code> | baseline: <code>test unreadable_gaps_fails_the_run ... ok</code> (exit 0, 0.803 s)<br>planted: <code>test unreadable_gaps_fails_the_run ... FAILED</code> (exit 101, 1.028 s)<br>restored: <code>test unreadable_gaps_fails_the_run ... ok</code> (exit 0, 0.808 s) | <code>tests/report.rs:272: assertion failed: !report.passed</code> |
+
+All four edits are restored and each old-text anchor occurs exactly once.
+Existing report falsifier anchor counts retain their base values.
+
+### Real table and gates
+
+Both successful `run.sh` runs reported these ten ignored rows, with zero FAIL
+rows. The baseline exited 0 in 214.080 seconds; the restored run exited 0 in
+216.941 seconds. Their receipts record `suite_outcome: BLOCKED` and
+`command_success: true`. The planted run exited 1 in 220.407 seconds and
+recorded `suite_outcome: FAIL` with the one missing-row failure above.
+
+```text
+agent_can_read_human_space_with_grant | BLOCKED (UsersAI binding; AC-002-ARGS)
+agent_cannot_read_other_agent_memory | BLOCKED (UsersAI binding; AC-002-ARGS)
+agent_memory_under_own_principal | BLOCKED (UsersAI binding; AC-002-ARGS)
+capsule_named_by_hash | BLOCKED (AC-025-CID)
+operator_storage_is_under_throwaway_home | BLOCKED (AC-006-STORAGE)
+parallel_capsules_complete_independently | BLOCKED (RT4)
+parallel_instances_return_success_payloads | BLOCKED (AC-002-ARGS)
+process_isolation::runaway_is_stopped_with_reason | BLOCKED (AC-005-REASON)
+run_leaves_no_live_grant | BLOCKED (AC-021-GRANTS) | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows
+ungranted_model_call_is_refused | BLOCKED (RT3)
+```
+
+All lane runs used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, lane-local `target/host` and `target/host-build`, and
+the shared heavy-build lease. Each gate retained its 600-second deadline.
+The volume had 46 GiB free before builds, above the 12 GiB estimate plus the
+2 GiB reserve. The final commands passed:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  exit 0, 0.140 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`:
+  exit 0, 217.495 seconds; 81 passed, zero failed, ten ignored. The report
+  target passed all 18 tests. The kill-worker test passed on all three host
+  `run.sh` runs and on this gate.
+- `git diff --check`, `bash -n lab/agent-conformance/run.sh`, product-data
+  validation (42 capsules, two profiles, 28 method contracts), its 99 Node
+  tests, Runtime formatting from `elastos/`, and chain-provider formatting:
+  PASS. These checks changed zero files outside the lane.
+
+The first sandboxed `run.sh` attempt exited 1 in 58.502 seconds because the
+sandbox refused loopback setup (`Operation not permitted`) and process-group
+inspection (`could not inspect child process group`). That attempt supplies
+zero live journey acceptance. The unchanged candidate then passed with the
+host access required by these isolated fixtures. The known kill-worker
+cleanup flake did not occur on the host runs; its code and assertions retain
+their base behavior.
+
+`Cargo.toml`, `Cargo.lock`, `falsifiers.json` and `run.sh` match the base bytes.
+The evidence is local and uncommitted under `target/task-034/`; receipt paths
+and SHA-256 values are in its `receipts.json`. The receipts identify the base
+commit with a dirty candidate, rather than a committed task change. The local
+lifecycle inventory records this worktree, proof and retained test roots;
+the supervisor owns review and their cleanup decision. The shared build
+lease is released. The repository has no humanizer skill source; this record
+uses direct statements of behavior and ownership.
+
+### Principles check
+
+Paths below are relative to `lab/agent-conformance/`.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `src/bin/report.rs:39` reads test metadata; `src/identity.rs:79` retains checked bundle identity. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `src/report.rs:37` checks report evidence; `src/harness.rs:220` retains the cleared launch environment. |
+| 3. A second path or rule copy for one operation? | No | `src/report.rs:92` extends the existing inventory parser; `src/report.rs:20` remains the single grading rule. |
+| 4. Runtime core grows? | No | `src/report.rs:37` keeps the change in the lab report; Runtime and provider sources retain their base bytes. |
+| 5. New refusals deny by default with clear reasons? | Yes | `src/report.rs:37` refuses missing, duplicate, differing or incomplete rows; `src/report.rs:20` refuses stale passing rows. |
+| 6. Capsule logic stays inside and calls through granted Bus operations? | Yes | `probe/src/lib.rs:138` requests the grant before the provider call at line 146; the probe is unchanged. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/report.rs:183` through `:270` supply synthetic checks; the table above records every named test failing planted and passing restored. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:518` retains the receipt's separate identity, admission and Runtime-grant statement; this change grades blocker evidence only. |
+
+Final handoff check: `target/host/debug/report --check-earlier-runs` exited 0;
+all test Home processes have ended. The ledger keeps 51 new retained test
+roots (27,982,568 bytes) for supervisor review, with removal when that review
+ends. Seven changed files are confined to this lane. The current branch is
+zero commits ahead and zero behind its cached `spike/spike/agent-host` ref;
+remote state was not fetched. The builder made zero Git-state changes. The
+supervisor owns review, publication and the recorded cleanup decisions.

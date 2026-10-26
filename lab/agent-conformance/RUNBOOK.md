@@ -23,6 +23,8 @@ An empty reason or part gives FAIL.
 A failure, missing result, repeated result, ignored test without a blocker ID,
 or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
 remain open in [GAPS.md](GAPS.md).
+BLOCKED requires exactly one `GAPS.md` row with the test name, matching blocker IDs and a Runtime change.
+A missing or conflicting row, an unreadable `GAPS.md`, or a listed test that passes gives FAIL and a fixed reason.
 
 - `home_is_throwaway`: checks the Mac data path, fresh root, path guard, symlink refusals and removal after success.
 - `launch_env_is_only_the_throwaway_home`: checks the four allowed environment entries, including `ELASTOS_CARRIER_MDNS=0`, null stdin, exit status and both output streams.
