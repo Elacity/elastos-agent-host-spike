@@ -1,4 +1,2 @@
-scratch/
-last-run.json
-mutants-run.json
+/scratch/
 *.log

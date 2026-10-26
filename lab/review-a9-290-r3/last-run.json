@@ -1,0 +1,29 @@
+{
+  "reviewed_sha": "8d4d50104edcfd1eee03e4cd93816e7ed62b6088",
+  "tested_code_sha": "578e0959a374af726bbc8f113afdbb5e7723636d",
+  "worktree": "/tmp/pr-290-r3",
+  "fmt_exit": 0,
+  "test_exit": 0,
+  "clippy_exit": 0,
+  "official_tests": "17 passed; 0 failed; 0 ignored",
+  "official_listed": 17,
+  "official_plants": 6,
+  "official_plants_caught": 6,
+  "official_mutants": "8 caught; 0 surviving",
+  "race_20000": {
+    "iters": 20000,
+    "threads": 4,
+    "ok": 235,
+    "denied": 19765,
+    "escaped": 0
+  },
+  "sha": {
+    "lib.rs": "421aefc17dbbeff701dba066d09fe2e7d549fd5b988ce25c360c467decbffb03",
+    "walk.rs": "4926d2229970f32c7933bbfdde67d0317a5fa16fddd81b7828350a8a653a8460",
+    "launch.rs": "d3ed87a9acfe22eab892fa13083a9ea6dabbdbbc37ac9501610f027a6c2c267c"
+  },
+  "worktree_dirty": "",
+  "shared_temp_before": false,
+  "shared_temp_after": false,
+  "github_reviews_on_290": 0
+}
