@@ -1,0 +1,11 @@
+id: F23-sim-ignores-access-mask
+file: src/sim.rs
+test: simulated::sim_add_path_rule_rejects_access_outside_handled_fs
+--- old
+        if access & !self.handled_fs != 0 {
+            self.steps.push(step);
+            return Err(libc::EINVAL);
+        }
+--- new
+        let _ = access;
+--- end

@@ -42,6 +42,18 @@ pub const PID_NAMESPACE_UNAVAILABLE: &str = "the PID namespace cannot be created
 pub const MISSING_TRUNCATE: i32 = 1;
 /// Bit in `Fault.errno` when `Step::AbiFloor` names a missing `ioctl_dev`.
 pub const MISSING_IOCTL_DEV: i32 = 2;
+/// Bit in `Fault.errno` when a test-only extra right is missing.
+///
+/// Production `FILE_PROFILE_NEEDED_RIGHTS` does not include this bit.
+/// `ProviderSpec::require_test_right` and the `FCL_TEST_HOOKS` CLI switch
+/// add it so a real ABI 6 host can still refuse on the per-right path.
+pub const MISSING_TEST_FUTURE_FS: i32 = 4;
+/// Name of the test-only extra right. No current Landlock ABI expresses it.
+pub const TEST_FUTURE_FS_NAME: &str = "future_fs";
+/// First ABI that would express the test-only extra right. Above ABI 6.
+pub const TEST_FUTURE_FS_ABI: u32 = 7;
+/// `Fault.found` when `Step::Report` names an empty fault pipe.
+pub const EMPTY_PIPE_FOUND: u32 = 1;
 
 /// Landlock values from `<linux/landlock.h>`.
 pub mod landlock {
@@ -165,11 +177,20 @@ pub fn ruleset_attr_size(handled_net: u64, scoped: u64) -> usize {
 /// Mask of needed rights this ABI cannot express. `None` means every
 /// needed right is present; the guard must not drop a bit from the mask.
 pub fn missing_required_mask(abi: u32) -> Option<i32> {
+    missing_required_mask_with(abi, 0)
+}
+
+/// Like `missing_required_mask`, plus any test-only extra bits in `extra`.
+/// Extra bits can only add a refusal. They cannot drop a file-profile right.
+pub fn missing_required_mask_with(abi: u32, extra: i32) -> Option<i32> {
     let mut mask = 0;
     for right in FILE_PROFILE_NEEDED_RIGHTS {
         if abi < right.minimum_abi {
             mask |= right.mask;
         }
+    }
+    if extra & MISSING_TEST_FUTURE_FS != 0 && abi < TEST_FUTURE_FS_ABI {
+        mask |= MISSING_TEST_FUTURE_FS;
     }
     (mask != 0).then_some(mask)
 }
@@ -177,11 +198,16 @@ pub fn missing_required_mask(abi: u32) -> Option<i32> {
 /// Reason text for a missing-right refusal. Names each right and the ABI
 /// that first expresses it.
 pub fn missing_rights_reason(abi: u32, mask: i32) -> String {
-    let names: Vec<String> = FILE_PROFILE_NEEDED_RIGHTS
+    let mut names: Vec<String> = FILE_PROFILE_NEEDED_RIGHTS
         .iter()
         .filter(|right| mask & right.mask != 0)
         .map(|right| format!("{} (needs ABI {})", right.name, right.minimum_abi))
         .collect();
+    if mask & MISSING_TEST_FUTURE_FS != 0 {
+        names.push(format!(
+            "{TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
+        ));
+    }
     format!(
         "this kernel's Landlock ABI {abi} cannot deny {}",
         names.join("; ")
@@ -252,6 +278,7 @@ pub enum Step {
     Fork,
     PidFork,
     Report,
+    ConfineReady,
 }
 
 impl Step {
@@ -276,12 +303,13 @@ impl Step {
         Step::RestrictSelf,
         Step::Execve,
     ];
-    const LAUNCH: [Step; 5] = [
+    const LAUNCH: [Step; 6] = [
         Step::Prepare,
         Step::Pipe,
         Step::Fork,
         Step::PidFork,
         Step::Report,
+        Step::ConfineReady,
     ];
 
     pub fn layer(self) -> Layer {
@@ -300,7 +328,9 @@ impl Step {
             | Step::ExecutableRule
             | Step::RestrictSelf => Layer::Landlock,
             Step::Execve => Layer::Exec,
-            Step::Prepare | Step::Pipe | Step::Fork | Step::Report => Layer::Launch,
+            Step::Prepare | Step::Pipe | Step::Fork | Step::Report | Step::ConfineReady => {
+                Layer::Launch
+            }
         }
     }
 
@@ -329,6 +359,7 @@ impl Step {
             Step::Fork => "fork",
             Step::PidFork => "pid_fork",
             Step::Report => "report",
+            Step::ConfineReady => "confine_ready",
         }
     }
 
@@ -385,6 +416,25 @@ impl Fault {
         }
     }
 
+    /// Written after the five layers succeed and before `exec`. The parent
+    /// treats this record plus EOF as a start. An empty pipe is not a start.
+    pub const fn confine_ready() -> Fault {
+        Fault {
+            step: Step::ConfineReady,
+            errno: 0,
+            found: 0,
+        }
+    }
+
+    /// The child ended without writing a ready record or a refusal.
+    pub const fn empty_pipe() -> Fault {
+        Fault {
+            step: Step::Report,
+            errno: libc::EPIPE,
+            found: EMPTY_PIPE_FOUND,
+        }
+    }
+
     pub fn encode(self) -> [u8; Fault::ENCODED_LEN] {
         let mut bytes = [0u8; Fault::ENCODED_LEN];
         bytes[0..4].copy_from_slice(&(self.step as u32).to_le_bytes());
@@ -421,7 +471,17 @@ impl Refusal {
                 "Landlock ABI {} is below the required {}",
                 fault.found, landlock_abi_floor
             ),
-            Step::AbiFloor => missing_rights_reason(fault.found, fault.errno),
+            Step::AbiFloor => {
+                let rights = missing_rights_reason(fault.found, fault.errno);
+                if fault.found < landlock_abi_floor {
+                    format!(
+                        "{rights}; Landlock ABI {} is below the required {}",
+                        fault.found, landlock_abi_floor
+                    )
+                } else {
+                    rights
+                }
+            }
             Step::AbiProbe => format!(
                 "Landlock is not available: {}",
                 io::Error::from_raw_os_error(fault.errno)
@@ -430,6 +490,9 @@ impl Refusal {
                 "{PID_NAMESPACE_UNAVAILABLE}: {}",
                 io::Error::from_raw_os_error(fault.errno)
             ),
+            Step::Report if fault.found == EMPTY_PIPE_FOUND => {
+                "the child ended before it wrote a fault or started".to_string()
+            }
             _ => io::Error::from_raw_os_error(fault.errno).to_string(),
         };
         Refusal {
@@ -463,6 +526,8 @@ pub struct ProviderSpec {
     args: Vec<OsString>,
     storage_root: PathBuf,
     landlock_abi_floor: u32,
+    extra_needed_mask: i32,
+    test_empty_pipe: bool,
 }
 
 impl ProviderSpec {
@@ -477,6 +542,8 @@ impl ProviderSpec {
             args: Vec::new(),
             storage_root: storage_root.into(),
             landlock_abi_floor: 0,
+            extra_needed_mask: 0,
+            test_empty_pipe: false,
         }
     }
 
@@ -489,6 +556,20 @@ impl ProviderSpec {
     /// check. It cannot skip a needed right the kernel lacks.
     pub fn require_landlock_abi(mut self, abi: u32) -> ProviderSpec {
         self.landlock_abi_floor = abi;
+        self
+    }
+
+    /// Test-only: require an extra right on top of the file profile.
+    /// The extra right can only add a refusal. It cannot drop truncate or
+    /// `ioctl_dev`. Used with the `FCL_TEST_HOOKS` CLI switch.
+    pub fn require_test_right(mut self, mask: i32) -> ProviderSpec {
+        self.extra_needed_mask |= mask;
+        self
+    }
+
+    /// Test-only: the child exits before it writes a fault or starts.
+    pub fn test_empty_pipe(mut self) -> ProviderSpec {
+        self.test_empty_pipe = true;
         self
     }
 
@@ -510,6 +591,8 @@ pub struct Plan {
     gid_map: Vec<u8>,
     filter: Vec<libc::sock_filter>,
     abi_floor: u32,
+    extra_needed_mask: i32,
+    test_empty_pipe: bool,
 }
 
 impl Plan {
@@ -546,6 +629,8 @@ impl Plan {
             gid_map: format!("{gid} {gid} 1\n").into_bytes(),
             filter: seccomp::filter(),
             abi_floor,
+            extra_needed_mask: spec.extra_needed_mask,
+            test_empty_pipe: spec.test_empty_pipe,
         })
     }
 
@@ -653,11 +738,12 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
         .map_err(os(Step::InstallFilter))?;
 
     let abi = kernel.landlock_abi().map_err(os(Step::AbiProbe))?;
+    // Name a missing right first. The extra ABI floor must not hide it.
+    if let Some(mask) = missing_required_mask_with(abi, plan.extra_needed_mask) {
+        return Err(Fault::missing_rights(abi, mask));
+    }
     if abi < plan.abi_floor {
         return Err(Fault::abi_floor(abi));
-    }
-    if let Some(mask) = missing_required_mask(abi) {
-        return Err(Fault::missing_rights(abi, mask));
     }
     let ruleset = kernel
         .landlock_create_ruleset(
@@ -694,6 +780,49 @@ pub fn confine_and_exec<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Resu
 pub struct Started {
     pub provider: String,
     pub pid: u32,
+}
+
+/// How the parent reads the close-on-exec fault pipe after fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultPipe {
+    /// The child wrote `ConfineReady` and then the write end closed: exec ran.
+    Started,
+    /// The child wrote a refusal, the pipe was empty, or the record was bad.
+    Refused(Fault),
+}
+
+/// Interprets everything read from the fault pipe.
+///
+/// An empty read (`bytes` is empty and there is no read error) is a refusal.
+/// It is not a start. A `ConfineReady` record alone is a start. A ready
+/// record followed by a second record is the exec failure after confine.
+pub fn interpret_fault_pipe(bytes: &[u8], read_error: Option<Errno>) -> FaultPipe {
+    if let Some(err) = read_error {
+        return FaultPipe::Refused(Fault::os(Step::Report, err));
+    }
+    if bytes.is_empty() {
+        return FaultPipe::Refused(Fault::empty_pipe());
+    }
+    if bytes.len() < Fault::ENCODED_LEN {
+        return FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO));
+    }
+    let first = match Fault::decode(&bytes[..Fault::ENCODED_LEN]) {
+        Some(fault) => fault,
+        None => return FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO)),
+    };
+    if first.step == Step::ConfineReady && first.errno == 0 {
+        if bytes.len() == Fault::ENCODED_LEN {
+            return FaultPipe::Started;
+        }
+        if bytes.len() >= Fault::ENCODED_LEN * 2 {
+            return match Fault::decode(&bytes[Fault::ENCODED_LEN..Fault::ENCODED_LEN * 2]) {
+                Some(fault) => FaultPipe::Refused(fault),
+                None => FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO)),
+            };
+        }
+        return FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO));
+    }
+    FaultPipe::Refused(first)
 }
 
 /// Starts the provider confined, or refuses. A refusal starts nothing.
@@ -827,5 +956,55 @@ mod tests {
         assert_eq!(scoped_for_abi(5), 0);
         assert_eq!(scoped_for_abi(6), landlock::SCOPE_SIGNAL);
         assert_eq!(scoped_for_abi(SCOPE_SIGNAL_ABI - 1), 0);
+    }
+
+    #[test]
+    fn extra_test_right_is_absent_from_the_file_profile() {
+        assert_eq!(missing_required_mask(6), None);
+        assert_eq!(
+            missing_required_mask_with(6, MISSING_TEST_FUTURE_FS),
+            Some(MISSING_TEST_FUTURE_FS)
+        );
+        assert_eq!(
+            missing_required_mask_with(4, MISSING_TEST_FUTURE_FS),
+            Some(MISSING_IOCTL_DEV | MISSING_TEST_FUTURE_FS)
+        );
+        let reason = missing_rights_reason(6, MISSING_TEST_FUTURE_FS);
+        assert!(reason.contains("future_fs (needs ABI 7)"), "{reason}");
+        assert!(!FILE_PROFILE_NEEDED_RIGHTS
+            .iter()
+            .any(|right| right.mask == MISSING_TEST_FUTURE_FS));
+    }
+
+    #[test]
+    fn empty_fault_pipe_is_a_refusal_not_a_start() {
+        assert_eq!(
+            interpret_fault_pipe(&[], None),
+            FaultPipe::Refused(Fault::empty_pipe())
+        );
+        let ready = Fault::confine_ready().encode();
+        assert_eq!(interpret_fault_pipe(&ready, None), FaultPipe::Started);
+        let unshare = Fault::os(Step::Unshare, libc::EPERM).encode();
+        assert_eq!(
+            interpret_fault_pipe(&unshare, None),
+            FaultPipe::Refused(Fault::os(Step::Unshare, libc::EPERM))
+        );
+        let mut ready_then_exec = Vec::from(ready);
+        ready_then_exec.extend_from_slice(&Fault::os(Step::Execve, libc::ENOENT).encode());
+        assert_eq!(
+            interpret_fault_pipe(&ready_then_exec, None),
+            FaultPipe::Refused(Fault::os(Step::Execve, libc::ENOENT))
+        );
+        assert_eq!(
+            interpret_fault_pipe(&ready[..6], None),
+            FaultPipe::Refused(Fault::os(Step::Report, libc::EPROTO))
+        );
+        let refusal = Refusal::new("did-provider", Fault::empty_pipe(), 0);
+        assert!(
+            refusal
+                .to_string()
+                .contains("the child ended before it wrote a fault or started"),
+            "{refusal}"
+        );
     }
 }

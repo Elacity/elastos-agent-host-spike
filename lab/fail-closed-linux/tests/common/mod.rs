@@ -2,8 +2,9 @@
 
 use fail_closed_linux::landlock;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,9 @@ pub struct Fixture {
     pub storage: PathBuf,
     pub outside_dir: PathBuf,
     pub outside_file: PathBuf,
+    pub planted_dev: PathBuf,
+    /// Open /dev/null, kept so the probe can ioctl the inherited descriptor.
+    pub device: File,
 }
 
 impl Fixture {
@@ -42,11 +46,25 @@ impl Fixture {
         fs::create_dir_all(&outside_dir).unwrap();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, b"outside the storage root").unwrap();
+        let planted_dev = outside_dir.join("planted-dev");
+        let _ = fs::remove_file(&planted_dev);
+        std::os::unix::fs::symlink("/dev/null", &planted_dev).unwrap();
+        let device = File::open("/dev/null").expect("plant /dev/null for ioctl");
+        // File::open sets CLOEXEC. Clear it so the probe still has the fd
+        // after fcl-launch and the provider exec.
+        let fd = device.as_raw_fd();
+        // SAFETY: `fd` is open; clearing FD_CLOEXEC is an integer fcntl.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD on planted /dev/null");
+        let set = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+        assert_eq!(set, 0, "clear FD_CLOEXEC on planted /dev/null");
         Fixture {
             root,
             storage,
             outside_dir,
             outside_file,
+            planted_dev,
+            device,
         }
     }
 
@@ -60,6 +78,8 @@ impl Fixture {
             self.storage.clone().into(),
             self.outside_file.clone().into(),
             self.outside_dir.clone().into(),
+            "--device-fd".into(),
+            self.device.as_raw_fd().to_string().into(),
         ]
     }
 
@@ -138,6 +158,13 @@ pub fn launch_command(
         }
     }
     command
+}
+
+/// Marks the launcher command so `--test-require-right` and
+/// `--test-empty-pipe` are accepted. Without this env those flags are
+/// unknown arguments, like linux-confine's production `lc-setup`.
+pub fn with_test_hooks(command: &mut Command) -> &mut Command {
+    command.env("FCL_TEST_HOOKS", "1")
 }
 
 /// Runs the command. Retries while the binary is busy: another test thread

@@ -1,16 +1,20 @@
 //! Stand-in provider for the real-kernel tests.
 //!
-//! usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--kill-host PID] [--exit CODE]
+//! usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR
+//!        [--device-fd FD] [--kill-host PID] [--exit CODE]
 //!
 //! It writes STORAGE_ROOT/probe-ran first, prints one line per check, prints
 //! `nspid=` from `/proc/self/status`, prints `ready`, then waits until stdin
-//! closes so the test can read the running process. `--kill-host` tries
-//! `kill(PID, 0)` and a kill of its own child. `--exit` ends with that code
-//! instead of waiting.
+//! closes so the test can read the running process. `--device-fd` is an
+//! inherited character-device descriptor planted by the fixture. `--kill-host`
+//! tries `kill(PID, 0)` and a kill of its own child. `--exit` ends with that
+//! code instead of waiting.
 
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 
@@ -21,6 +25,8 @@ extern "C" {
     fn getpid() -> i32;
     fn waitpid(pid: i32, wstatus: *mut i32, options: i32) -> i32;
     fn _exit(status: i32) -> !;
+    fn truncate(path: *const i8, length: i64) -> i32;
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
 }
 
 const SIGKILL: i32 = 9;
@@ -69,6 +75,24 @@ fn main() {
             }
         }),
     );
+    report(
+        &mut out,
+        "truncate_storage",
+        truncate_path(&storage.join("probe.txt")),
+    );
+    report(&mut out, "truncate_outside", truncate_path(outside_file));
+    report(
+        &mut out,
+        "o_trunc_outside",
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(outside_file)
+            .map(drop),
+    );
+    if let Some(fd) = extra.device_fd {
+        report(&mut out, "ioctl_dev", ioctl_device(fd));
+    }
     let _ = writeln!(out, "nspid={}", nspid());
     if let Some(host_pid) = extra.kill_host {
         report_kill(&mut out, host_pid);
@@ -85,18 +109,24 @@ fn main() {
 }
 
 struct Extra {
+    device_fd: Option<i32>,
     kill_host: Option<i32>,
     exit_code: Option<i32>,
 }
 
 fn parse_extra(args: &[String]) -> Extra {
     let mut extra = Extra {
+        device_fd: None,
         kill_host: None,
         exit_code: None,
     };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--device-fd" => {
+                extra.device_fd = Some(parse_i32(args.get(i + 1)));
+                i += 2;
+            }
             "--kill-host" => {
                 extra.kill_host = Some(parse_i32(args.get(i + 1)));
                 i += 2;
@@ -120,7 +150,7 @@ fn parse_i32(arg: Option<&String>) -> i32 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--kill-host PID] [--exit CODE]"
+        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--device-fd FD] [--kill-host PID] [--exit CODE]"
     );
     std::process::exit(2);
 }
@@ -172,6 +202,29 @@ fn report_kill(out: &mut impl Write, host_pid: i32) {
         kill(child, SIGKILL);
         let mut status = 0;
         waitpid(child, &mut status, 0);
+    }
+}
+
+fn truncate_path(path: &Path) -> io::Result<()> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let ret = unsafe { truncate(c_path.as_ptr(), 0) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn ioctl_device(fd: i32) -> io::Result<()> {
+    // Linux FIONREAD. Same number on x86_64 and aarch64.
+    const FIONREAD: u64 = 0x541B;
+    let mut avail: i32 = 0;
+    let ret = unsafe { ioctl(fd, FIONREAD, &mut avail as *mut i32) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 

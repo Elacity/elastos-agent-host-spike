@@ -9,8 +9,9 @@ use common::{probe, PROVIDERS};
 use fail_closed_linux::sim::{SimKernel, SIM_PID};
 use fail_closed_linux::{
     file_profile_launches_on_abi, handled_fs_for_abi, handled_net_for_abi, landlock, launch,
-    missing_required_mask, scoped_for_abi, Errno, Layer, ProviderSpec, Refusal, Step,
-    MISSING_IOCTL_DEV, MISSING_TRUNCATE, PID_NAMESPACE_UNAVAILABLE,
+    missing_required_mask, scoped_for_abi, Errno, Kernel, Layer, ProviderSpec, Refusal, Step,
+    MISSING_IOCTL_DEV, MISSING_TEST_FUTURE_FS, MISSING_TRUNCATE, PID_NAMESPACE_UNAVAILABLE,
+    TEST_FUTURE_FS_ABI, TEST_FUTURE_FS_NAME,
 };
 
 fn spec(provider: &str) -> ProviderSpec {
@@ -361,5 +362,69 @@ fn sim_missing_right_is_never_silently_dropped() {
                 kernel.execs
             );
         }
+    }
+}
+
+#[test]
+fn sim_add_path_rule_rejects_access_outside_handled_fs() {
+    let mut kernel = SimKernel::new();
+    let fd = kernel
+        .landlock_create_ruleset(handled_fs_for_abi(1), 0, 0)
+        .expect("ABI 1 ruleset");
+    let err = kernel
+        .landlock_add_path_rule(fd, c"/srv/storage", landlock::STORAGE_ROOT_ACCESS)
+        .expect_err("TRUNCATE is outside ABI 1 handled_fs");
+    assert_eq!(err, libc::EINVAL);
+    assert_eq!(kernel.steps.last(), Some(&Step::StorageRootRule));
+
+    let mut kernel = SimKernel::new();
+    let fd = kernel
+        .landlock_create_ruleset(handled_fs_for_abi(1), 0, 0)
+        .expect("ABI 1 ruleset");
+    kernel
+        .landlock_add_path_rule(fd, c"/bin/probe", landlock::EXECUTABLE_ACCESS)
+        .expect("EXECUTE|READ is inside ABI 1 handled_fs");
+}
+
+#[test]
+fn sim_extra_floor_still_names_the_missing_right() {
+    for provider in PROVIDERS {
+        let mut kernel = SimKernel::with_landlock_abi(4);
+        let refusal = refused(&mut kernel, &spec(provider).require_landlock_abi(6));
+        assert_stopped_at(&refusal, &kernel, provider, Step::AbiFloor);
+        assert_eq!(refusal.errno, Some(MISSING_IOCTL_DEV), "{refusal}");
+        let text = refusal.to_string();
+        assert!(text.contains("ioctl_dev (needs ABI 5)"), "{refusal}");
+        assert!(text.contains("cannot deny"), "{refusal}");
+        assert!(
+            text.contains("Landlock ABI 4 is below the required 6"),
+            "{refusal}"
+        );
+        assert!(kernel.execs.is_empty(), "{:?}", kernel.execs);
+    }
+}
+
+#[test]
+fn sim_test_extra_right_refuses_on_abi_6() {
+    for provider in PROVIDERS {
+        let mut kernel = SimKernel::with_landlock_abi(6);
+        let refusal = refused(
+            &mut kernel,
+            &spec(provider).require_test_right(MISSING_TEST_FUTURE_FS),
+        );
+        assert_stopped_at(&refusal, &kernel, provider, Step::AbiFloor);
+        assert_eq!(refusal.errno, Some(MISSING_TEST_FUTURE_FS), "{refusal}");
+        let text = refusal.to_string();
+        assert!(
+            text.contains(&format!(
+                "this kernel's Landlock ABI 6 cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
+            )),
+            "{refusal}"
+        );
+        assert!(
+            !kernel.steps.contains(&Step::CreateRuleset),
+            "{:?}",
+            kernel.steps
+        );
     }
 }

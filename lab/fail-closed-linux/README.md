@@ -101,9 +101,9 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 
 | Suite | Tests |
 | --- | --- |
-| `lib` (unit) | 6 passed |
-| `simulated` | 14 passed |
-| `real_kernel` | 13 passed |
+| `lib` (unit) | 8 passed |
+| `simulated` | 17 passed |
+| `real_kernel` | 17 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -122,6 +122,9 @@ seccomp gives the errno, and the feature itself is present.
 | seccomp cannot be installed | `sim_seccomp_install_failure_refuses` (EINVAL, ENOSYS) | `real_seccomp_install_failure_refuses` | inherited filter: `seccomp` gives ENOSYS |
 | Landlock missing | `sim_landlock_missing_refuses` (ENOSYS, EOPNOTSUPP) | `real_landlock_missing_refuses` | inherited filter: `landlock_create_ruleset` gives ENOSYS or EOPNOTSUPP |
 | Landlock ABI too old | `sim_landlock_abi_too_old_refuses` (ABI 1 to 4 name the missing right; ABI 6 with 7 required) | `real_landlock_abi_below_required_refuses` | kernel rule: `--require-landlock-abi` set to the host ABI plus 1 |
+| Per-right floor on this ABI 6 host | `sim_test_extra_right_refuses_on_abi_6` | `real_per_right_floor_refuses_on_this_kernel` | test hook: `--test-require-right future_fs` (needs ABI 7) with `FCL_TEST_HOOKS=1`. The extra floor is not this row |
+| Extra floor still names the right | `sim_extra_floor_still_names_the_missing_right` | `real_extra_floor_still_names_the_missing_right` | both `--require-landlock-abi host+1` and the test extra right; the refusal names `future_fs` |
+| Empty fault pipe | `empty_fault_pipe_is_a_refusal_not_a_start` | `real_empty_fault_pipe_is_not_a_start` | test hook: `--test-empty-pipe` with `FCL_TEST_HOOKS=1`. The child exits before a record |
 | Landlock ruleset cannot be applied | `sim_landlock_ruleset_unappliable_refuses` (all four steps) | `real_landlock_ruleset_unappliable_refuses` | kernel rule: 16 inherited Landlock domains make `restrict_self` give E2BIG; inherited filter: `restrict_self` gives EPERM |
 
 The positive tests:
@@ -133,9 +136,12 @@ The positive tests:
   `Seccomp: 2`, `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb` all zero,
   an identity `uid_map`, and a user namespace that differs from the test's.
   Inside, the probe sees EPERM on an inet socket and a unix socket, EACCES on
-  a read and a write outside its storage root and on `/etc/passwd`, and a
-  working write and read inside its storage root. It prints `nspid=2` (it is
-  the init's child in the new PID namespace).
+  a read and a write outside its storage root and on `/etc/passwd`, a working
+  write, read and `truncate` inside its storage root, `truncate` and `O_TRUNC`
+  of the outside file denied, and `ioctl` on a planted `/dev/null` descriptor
+  denied. The fixture plants `outside/planted-dev` as a symlink to `/dev/null`
+  and passes `--device-fd` with the open descriptor. It prints `nspid=2` (it
+  is the init's child in the new PID namespace).
 - `real_confined_child_cannot_signal_host` asks the probe to `kill` the test
   process's real pid (`kill(pid, 0)`). The kernel returns ESRCH or EPERM; the
   test records that errno. The same probe forks a child in its namespace and
@@ -156,7 +162,14 @@ ABI 5.
 
 `sim_per_right_floor_for_each_abi` walks ABI 1 through 6 for each provider.
 `sim_missing_right_is_never_silently_dropped` requires the named-right
-refusal on ABI 1-4.
+refusal on ABI 1-4. `sim_add_path_rule_rejects_access_outside_handled_fs`
+makes `SimKernel` return `EINVAL` when a path rule asks for a bit the
+ruleset does not handle, matching the kernel.
+
+`--test-require-right` and `--test-empty-pipe` are linux-confine-style test
+switches. They are accepted only when `FCL_TEST_HOOKS=1`. Without that env
+the production CLI reports `unknown argument` and exits 64. The extra right
+can only add a refusal. It cannot drop truncate or `ioctl_dev`.
 
 ## Per-right table (did, wallet, model)
 
@@ -225,6 +238,10 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F11-abi-floor-off-by-one | ABI 6 passes an extra required ABI of 7 | the extra-floor ABI rows in both suites |
 | F18-missing-right-silently-passed | a missing needed right is ignored and the start continues | the per-right ABI rows |
 | F19-pid-unshare-skipped | `unshare(CLONE_NEWPID)` is skipped | `real_confined_provider_has_every_layer`, `real_confined_child_cannot_signal_host` |
+| F23-sim-ignores-access-mask | SimKernel accepts a path rule outside `handled_fs` | `sim_add_path_rule_rejects_access_outside_handled_fs` |
+| F24-extra-floor-hides-missing-right | `--require-landlock-abi` is checked before a missing right | the extra-floor-names-right rows |
+| F25-empty-pipe-reported-as-start | an empty fault pipe is treated as a start | the empty-pipe rows |
+| F26-test-extra-right-ignored | the test-only extra right is dropped from the mask | the per-right extra-right rows |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -233,9 +250,10 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: 19 of 19 caught, and the control survived with 33 tests passed.
-A skipped (`ignored`) test is `NOT RUN`, never a pass. F19 (skip
-`CLONE_NEWPID`) is caught because the probe's `nspid` is a host pid.
+Result: recorded after `python3 falsify.py` on this tree. A skipped
+(`ignored`) test is `NOT RUN`, never a pass. F19 (skip `CLONE_NEWPID`)
+is caught because the probe's `nspid` is a host pid. F23-F26 catch the
+#338 review gaps.
 
 ## Not covered here
 
@@ -252,9 +270,11 @@ A skipped (`ignored`) test is `NOT RUN`, never a pass. F19 (skip
   tests above cover it.
 - File descriptor inheritance: NOT RUN. The guard does not close descriptors
   that the provider inherits. Only the fault pipe is close-on-exec.
-- If the child crashes before `exec` without writing a fault, the pipe is
-  empty and `launch` reports a start. Nothing runs in that case.
-  `std::process::Command` has the same limit.
+- If the child ends before it writes a ready record or a fault, the pipe is
+  empty and `launch` refuses. The refusal names that the child ended before
+  it wrote a fault or started. The provider is not started. After the five
+  layers succeed the child writes a ready record, then `exec`. The parent
+  treats ready-then-EOF as a start.
 
 ## How `lab/linux-confine` (PR #296) could plug in
 

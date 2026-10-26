@@ -11,9 +11,9 @@ mod common;
 
 use common::{
     assert_refused, host_landlock_abi, launch_command, launcher, output, require_line,
-    wait_with_timeout, Fixture, Inherit, PROVIDERS,
+    wait_with_timeout, with_test_hooks, Fixture, Inherit, PROVIDERS,
 };
-use fail_closed_linux::PID_NAMESPACE_UNAVAILABLE;
+use fail_closed_linux::{PID_NAMESPACE_UNAVAILABLE, TEST_FUTURE_FS_ABI, TEST_FUTURE_FS_NAME};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
@@ -105,12 +105,29 @@ fn real_confined_provider_has_every_layer() {
             format!("read_etc_passwd errno={}", libc::EACCES),
             "storage_write ok".to_string(),
             "storage_read ok".to_string(),
+            "truncate_storage ok".to_string(),
         ] {
             assert!(
                 lines.contains(&expected),
                 "{provider}: missing {expected:?} in {lines:?}"
             );
         }
+        for denied in ["truncate_outside", "o_trunc_outside", "ioctl_dev"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.starts_with(&format!("{denied} errno="))),
+                "{provider}: missing denied {denied} in {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line == &format!("{denied} ok")),
+                "{provider}: {denied} was allowed in {lines:?}"
+            );
+        }
+        assert!(
+            fixture.planted_dev.exists(),
+            "{provider}: planted device node missing"
+        );
 
         drop(stdin);
         let done = child.wait_with_output().unwrap();
@@ -590,4 +607,117 @@ fn innermost_child(pid: u32) -> Option<u32> {
         }
     }
     last
+}
+
+#[test]
+fn real_per_right_floor_refuses_on_this_kernel() {
+    let host = host_landlock_abi();
+    assert!(
+        host < TEST_FUTURE_FS_ABI,
+        "this row needs a host ABI below {TEST_FUTURE_FS_ABI}, got {host}"
+    );
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("per-right-floor", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &["--test-require-right", TEST_FUTURE_FS_NAME],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "landlock",
+            "abi_floor",
+            &format!(
+                "this kernel's Landlock ABI {host} cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
+            ),
+        );
+    }
+}
+
+#[test]
+fn real_extra_floor_still_names_the_missing_right() {
+    let host = host_landlock_abi();
+    let required = (host + 1).to_string();
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("extra-floor-names-right", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &[
+                "--require-landlock-abi",
+                &required,
+                "--test-require-right",
+                TEST_FUTURE_FS_NAME,
+            ],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "landlock",
+            "abi_floor",
+            &format!(
+                "this kernel's Landlock ABI {host} cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
+            ),
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "Landlock ABI {host} is below the required {required}"
+            )),
+            "{provider}: extra floor hidden\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn real_empty_fault_pipe_is_not_a_start() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("empty-pipe", provider);
+        let mut command = launch_command(
+            &launcher(),
+            provider,
+            &fixture,
+            &["--test-empty-pipe"],
+            Inherit::Nothing,
+        );
+        with_test_hooks(&mut command);
+        let run = output(command);
+        assert_refused(
+            &run,
+            &fixture,
+            provider,
+            "launch",
+            "report",
+            "the child ended before it wrote a fault or started",
+        );
+    }
+}
+
+#[test]
+fn real_production_cli_rejects_test_hooks_without_switch() {
+    let fixture = Fixture::new("hooks-off", "did-provider");
+    let run = output(launch_command(
+        &launcher(),
+        "did-provider",
+        &fixture,
+        &["--test-require-right", TEST_FUTURE_FS_NAME],
+        Inherit::Nothing,
+    ));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(64), "{stderr}");
+    assert!(
+        stderr.contains("unknown argument"),
+        "production CLI accepted a test hook:\n{stderr}"
+    );
 }

@@ -5,8 +5,8 @@
 //! built before the fork. It does not allocate, lock or panic.
 
 use crate::{
-    confine_and_exec, landlock, ruleset_attr_size, Errno, Fault, Kernel, Plan, Step,
-    REFUSAL_EXIT_CODE,
+    confine_and_exec, interpret_fault_pipe, landlock, ruleset_attr_size, Errno, Fault, FaultPipe,
+    Kernel, Plan, Step, REFUSAL_EXIT_CODE,
 };
 use std::ffi::CStr;
 use std::io;
@@ -33,6 +33,11 @@ impl Default for RealKernel {
 }
 
 static REAP_CHILD: AtomicI32 = AtomicI32::new(0);
+
+/// Write end of the child's fault pipe. Set after fork, used to write the
+/// ready record from `exec` before `execve`. -1 means no pipe (should not
+/// happen in the child).
+static FAULT_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -388,6 +393,17 @@ impl Kernel for RealKernel {
     }
 
     fn exec(&mut self, plan: &Plan) -> Result<(), Errno> {
+        // Tell the parent confine succeeded before execve replaces us.
+        // A failed write stops exec: an empty pipe is a refusal, not a start.
+        let fd = FAULT_PIPE_WRITE.load(Ordering::Relaxed);
+        if fd >= 0 {
+            let bytes = Fault::confine_ready().encode();
+            // SAFETY: `bytes` is valid for its length; `fd` is the pipe write end.
+            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            if n as usize != bytes.len() {
+                return Err(if n < 0 { errno() } else { libc::EIO });
+            }
+        }
         // SAFETY: the path, argv and envp come from `plan`, which keeps every
         // pointed-to string alive and NULL-terminates both vectors.
         unsafe { libc::execve(plan.executable().as_ptr(), plan.argv(), plan.envp()) };
@@ -417,6 +433,12 @@ impl Kernel for RealKernel {
         if pid == 0 {
             // SAFETY: closing our copy of the read end, then reporting and exiting.
             unsafe { libc::close(read_end) };
+            FAULT_PIPE_WRITE.store(write_end, Ordering::Relaxed);
+            // Test hook: end before a record. The parent must refuse, not start.
+            if plan.test_empty_pipe {
+                // SAFETY: `_exit` does not return.
+                unsafe { libc::_exit(REFUSAL_EXIT_CODE) };
+            }
             let fault = match confine_and_exec(
                 &mut RealKernel {
                     fault_write: write_end,
@@ -436,7 +458,7 @@ impl Kernel for RealKernel {
 
         // SAFETY: the parent closes its copy of the write end.
         unsafe { libc::close(write_end) };
-        let mut buf = [0u8; Fault::ENCODED_LEN];
+        let mut buf = [0u8; Fault::ENCODED_LEN * 2];
         let mut got = 0usize;
         let mut read_error = None;
         while got < buf.len() {
@@ -459,18 +481,15 @@ impl Kernel for RealKernel {
         // SAFETY: the read end came from pipe2 above.
         unsafe { libc::close(read_end) };
 
-        if got == 0 && read_error.is_none() {
-            return Ok(pid as u32);
-        }
-        if read_error.is_some() {
-            // SAFETY: `pid` is our child; we do not know its state, so stop it.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-        reap(pid);
-        match read_error {
-            Some(err) => Err(Fault::os(Step::Report, err)),
-            None => {
-                Err(Fault::decode(&buf[..got]).unwrap_or(Fault::os(Step::Report, libc::EPROTO)))
+        match interpret_fault_pipe(&buf[..got], read_error) {
+            FaultPipe::Started => Ok(pid as u32),
+            FaultPipe::Refused(fault) => {
+                if read_error.is_some() {
+                    // SAFETY: `pid` is our child; we do not know its state, so stop it.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                reap(pid);
+                Err(fault)
             }
         }
     }

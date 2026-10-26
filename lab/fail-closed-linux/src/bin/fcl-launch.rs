@@ -7,14 +7,20 @@
 //! when a signal ended it).
 
 use fail_closed_linux::real::RealKernel;
-use fail_closed_linux::{launch, ProviderSpec, REFUSAL_EXIT_CODE};
-use std::ffi::OsString;
+use fail_closed_linux::{
+    launch, ProviderSpec, MISSING_TEST_FUTURE_FS, REFUSAL_EXIT_CODE, TEST_FUTURE_FS_NAME,
+};
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::exit;
 
 const USAGE_EXIT_CODE: i32 = 64;
 const WAIT_FAILED_EXIT_CODE: i32 = 70;
 const USAGE: &str = "usage: fcl-launch --provider NAME --storage-root DIR [--require-landlock-abi N] -- EXECUTABLE [ARG...]";
+
+fn test_hooks_enabled() -> bool {
+    std::env::var_os("FCL_TEST_HOOKS").as_deref() == Some(OsStr::new("1"))
+}
 
 fn main() {
     let spec = match parse(std::env::args_os().skip(1).collect()) {
@@ -40,6 +46,8 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
     let mut provider = None;
     let mut storage_root = None;
     let mut landlock_abi = None;
+    let mut extra_test_right = false;
+    let mut empty_pipe = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -60,6 +68,25 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                         .ok_or_else(|| "--require-landlock-abi needs a number".to_string())?,
                 );
             }
+            Some("--test-require-right") => {
+                if !test_hooks_enabled() {
+                    return Err(format!("unknown argument {arg:?}"));
+                }
+                let name = value("--test-require-right")?;
+                let name = name
+                    .to_str()
+                    .ok_or_else(|| "--test-require-right must be UTF-8".to_string())?;
+                if name != TEST_FUTURE_FS_NAME {
+                    return Err(format!("unknown test right {name}"));
+                }
+                extra_test_right = true;
+            }
+            Some("--test-empty-pipe") => {
+                if !test_hooks_enabled() {
+                    return Err(format!("unknown argument {arg:?}"));
+                }
+                empty_pipe = true;
+            }
             Some("--") => {
                 let executable = PathBuf::from(args.next().ok_or("no EXECUTABLE after --")?);
                 let provider = provider
@@ -69,6 +96,12 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                 let mut spec = ProviderSpec::new(provider, executable, storage_root);
                 if let Some(abi) = landlock_abi {
                     spec = spec.require_landlock_abi(abi);
+                }
+                if extra_test_right {
+                    spec = spec.require_test_right(MISSING_TEST_FUTURE_FS);
+                }
+                if empty_pipe {
+                    spec = spec.test_empty_pipe();
                 }
                 for arg in args {
                     spec = spec.arg(arg);

@@ -133,13 +133,18 @@ impl Kernel for SimKernel {
         &mut self,
         _ruleset: RawFd,
         _path: &CStr,
-        _access: u64,
+        access: u64,
     ) -> Result<(), Errno> {
         let step = if self.steps.contains(&Step::StorageRootRule) {
             Step::ExecutableRule
         } else {
             Step::StorageRootRule
         };
+        // Same as the kernel: a bit outside handled_fs is EINVAL.
+        if access & !self.handled_fs != 0 {
+            self.steps.push(step);
+            return Err(libc::EINVAL);
+        }
         self.run(step)
     }
 
