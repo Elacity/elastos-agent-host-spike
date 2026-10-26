@@ -1,0 +1,24 @@
+id: M-A12-HASH-MTIME
+file: src/a12.rs
+test: tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+--- old
+    match fs::read(path) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => return 0,
+    }
+--- new
+    let size = file_len(meta);
+    if size > 64 * 1024 {
+        size.hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
+                d.as_nanos().hash(&mut hasher);
+            }
+        }
+        return hasher.finish();
+    }
+    match fs::read(path) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => return 0,
+    }
+--- end

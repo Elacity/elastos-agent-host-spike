@@ -1,10 +1,12 @@
 //! A12 leftover census for Runtime-owned temp roots.
 //!
-//! Detection records the (dev, inode, birth/ctime, size+content hash) set
-//! the run created. It does not depend on a name prefix or a lab marker.
-//! Same-path delete+recreate with a reused inode is found. Real Runtime
-//! leftovers have no lab marker; a rename to an unrelated name
-//! (`moved-away`) must still be found.
+//! Detection records the (dev, inode, ctime, size+full-content hash) set
+//! the run created. It does not depend on a name prefix, a lab marker,
+//! birth time, or size+mtime. Same-path delete+recreate with a reused
+//! inode and the same bytes is found. An in-place rewrite of a file
+//! larger than 64 KiB with mtime restored is found. Real Runtime leftovers
+//! have no lab marker; a rename to an unrelated name (`moved-away`) must
+//! still be found.
 //!
 //! The census snapshot is taken before the Runtime starts. If the Runtime
 //! already wrote, the snapshot fails. The run-window watch also covers
@@ -14,15 +16,20 @@
 //! `ELASTOS_TMP_ROOT` is guarded: canonicalize (realpath) first. `/`, empty,
 //! `$HOME`, a `..` component, a symlink anywhere at or under isolation, a
 //! reachable live Home, and anything whose canonical path is not inside the
-//! pack's fresh mktemp isolation are refused.
+//! pack's fresh mktemp isolation are refused. Writes reopen that path with
+//! `O_NOFOLLOW` / `openat` after the check, so swapping the folder for a
+//! symlink cannot land a leftover in a fake live Home.
 //! `ThrowawayHome` / `census::cleanup` are called for real; on Linux that
 //! construction is NOT RUN.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,11 +62,14 @@ pub fn live_runtime_tmp_root() -> PathBuf {
 }
 
 /// Identity of one path at one moment.
+///
+/// Time is inode ctime, not birth time. Large files hash full content,
+/// not size+mtime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub dev: u64,
     pub ino: u64,
-    pub birth_or_ctime: u128,
+    pub ctime: i64,
     pub size: u64,
     pub content_hash: u64,
 }
@@ -301,15 +311,109 @@ pub fn create_runtime_storage_leftover(tmp_root: &Path) -> Result<PathBuf, Strin
 }
 
 /// Leftover with caller bytes. Census must find this with no lab marker.
+/// Re-checks the root and writes through `O_NOFOLLOW` / `openat`.
 pub fn create_plain_leftover(tmp_root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let storage = tmp_root.join("storage");
-    fs::create_dir_all(&storage).map_err(|_| format!("could not create {}", storage.display()))?;
-    let leftover = storage.join(name);
-    fs::write(&leftover, bytes).map_err(|_| format!("could not write {}", leftover.display()))?;
-    Ok(leftover)
+    write_isolated_leftover(tmp_root, "storage", name, bytes)
 }
 
-const HASH_CAP: u64 = 64 * 1024;
+fn refused_name(name: &str) -> bool {
+    name.is_empty()
+        || name.contains('/')
+        || name.contains('\0')
+        || name == "."
+        || name == ".."
+        || name.contains('\\')
+}
+
+fn open_or_create_dir_nofollow(path: &Path) -> Result<fs::File, String> {
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+    match opts.open(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|create_err| {
+                format!("could not create {}: {create_err}", path.display())
+            })?;
+            opts.open(path).map_err(|open_err| {
+                format!(
+                    "ELASTOS_TMP_ROOT write refuses {} after create: {open_err}",
+                    path.display()
+                )
+            })
+        }
+        Err(error) => Err(format!(
+            "ELASTOS_TMP_ROOT write refuses {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn mkdirat_open(parent: &fs::File, name: &str) -> Result<fs::File, String> {
+    if refused_name(name) {
+        return Err(format!("refused directory name {name:?}"));
+    }
+    let c_name = CString::new(name).map_err(|_| format!("refused directory name {name:?}"))?;
+    let created = unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o755) };
+    if created != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != ErrorKind::AlreadyExists {
+            return Err(format!("could not mkdirat {name}: {err}"));
+        }
+    }
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT write refuses {name}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn writeat(dir: &fs::File, name: &str, bytes: &[u8]) -> Result<(), String> {
+    if refused_name(name) {
+        return Err(format!("refused file name {name:?}"));
+    }
+    let c_name = CString::new(name).map_err(|_| format!("refused file name {name:?}"))?;
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT write refuses {name}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| format!("could not write {name}: {error}"))
+}
+
+/// Re-check the root, then write through an fd opened with `O_NOFOLLOW`.
+pub fn write_isolated_leftover(
+    tmp_root: &Path,
+    dir_name: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    check_tmp_root(tmp_root)?;
+    let root_fd = open_or_create_dir_nofollow(tmp_root)?;
+    let dir_fd = mkdirat_open(&root_fd, dir_name)?;
+    writeat(&dir_fd, name, bytes)?;
+    Ok(tmp_root.join(dir_name).join(name))
+}
 
 #[cfg(unix)]
 fn inode_of(meta: &fs::Metadata) -> (u64, u64) {
@@ -332,38 +436,26 @@ fn file_len(meta: &fs::Metadata) -> u64 {
     }
 }
 
-fn birth_or_ctime(meta: &fs::Metadata) -> u128 {
-    if let Ok(created) = meta.created() {
-        if let Ok(d) = created.duration_since(UNIX_EPOCH) {
-            return d.as_nanos();
-        }
-    }
+fn inode_ctime(meta: &fs::Metadata) -> i64 {
     #[cfg(unix)]
     {
-        meta.ctime().max(0) as u128
+        meta.ctime()
     }
     #[cfg(not(unix))]
     {
+        let _ = meta;
         0
     }
 }
 
-fn content_hash(path: &Path, meta: &fs::Metadata, size: u64) -> u64 {
+fn content_hash(path: &Path, meta: &fs::Metadata) -> u64 {
     if meta.file_type().is_symlink() || meta.is_dir() {
         return 0;
     }
     let mut hasher = DefaultHasher::new();
-    if size <= HASH_CAP {
-        if let Ok(bytes) = fs::read(path) {
-            bytes.hash(&mut hasher);
-            return hasher.finish();
-        }
-    }
-    size.hash(&mut hasher);
-    if let Ok(modified) = meta.modified() {
-        if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
-            d.as_nanos().hash(&mut hasher);
-        }
+    match fs::read(path) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => return 0,
     }
     hasher.finish()
 }
@@ -374,9 +466,9 @@ fn file_id(path: &Path, meta: &fs::Metadata) -> FileId {
     FileId {
         dev,
         ino,
-        birth_or_ctime: birth_or_ctime(meta),
+        ctime: inode_ctime(meta),
         size,
-        content_hash: content_hash(path, meta, size),
+        content_hash: content_hash(path, meta),
     }
 }
 
@@ -519,7 +611,7 @@ fn record_tree(
 }
 
 /// True when `path` was created, moved, or recreated after `before`.
-/// Identity is (dev, inode, birth/ctime, size+content hash).
+/// Identity is (dev, inode, ctime, size+full-content hash).
 fn keep_created_path(before: &FsSnapshot, path: &Path, id: &FileId) -> bool {
     match before.ids.get(path) {
         None => true,
@@ -727,24 +819,16 @@ impl StoragePlant {
     pub fn place() -> Result<Self, String> {
         let tmp = elastos_tmp_root()?;
         let storage = tmp.join("storage");
-        let path = storage.join(PLANTED_NAME);
+        let existed_tmp = tmp.exists();
+        let existed_storage = storage.exists();
+        let path = write_isolated_leftover(&tmp, "storage", PLANTED_NAME, LEFTOVER_MARKER)?;
         let mut created = Vec::new();
-        for dir in [tmp, storage] {
-            match fs::symlink_metadata(&dir) {
-                Err(error) if error.kind() == ErrorKind::NotFound => {
-                    fs::create_dir(&dir)
-                        .map_err(|_| format!("could not create {}", dir.display()))?;
-                    created.push(dir);
-                }
-                Err(_) => return Err(format!("could not inspect {}", dir.display())),
-                Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
-                    return Err(format!("{} is not a directory", dir.display()));
-                }
-                Ok(_) => {}
-            }
+        if !existed_storage {
+            created.push(storage);
         }
-        fs::write(&path, LEFTOVER_MARKER)
-            .map_err(|_| format!("could not plant {}", path.display()))?;
+        if !existed_tmp {
+            created.push(tmp);
+        }
         Ok(Self { path, created })
     }
 

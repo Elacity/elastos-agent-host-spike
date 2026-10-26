@@ -6,9 +6,12 @@
 //!
 //! Two resident instances in one Runtime is RA-6. The ready journey reports
 //! BLOCKED while hosting is absent. PASS requires evidence a real Runtime
-//! host produced: two distinct live instance ids/pids, each holding its own
-//! grant, sibling refused by the Runtime. An `Ok` from a stub with an empty
-//! [`ResidentPair`] is FAIL.
+//! host produced: two independent resident capsule instances inside one
+//! Runtime, each positively proven (not merely a live `/proc` pid), each
+//! holding its own grant, sibling refused by the Runtime. Two live pids
+//! such as this process and pid 1 are FAIL. An `Ok` from a stub with an
+//! empty [`ResidentPair`] is FAIL. Without RA-6 the honest result is
+//! BLOCKED, never PASS.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -343,6 +346,37 @@ fn pid_is_live(pid: u32) -> bool {
     pid != 0 && Path::new(&format!("/proc/{pid}")).is_dir()
 }
 
+/// A live `/proc` directory is not proof the pid is a resident capsule.
+/// This lab process and pid 1 never count. RA-6 fills the host inspect.
+pub fn prove_resident_capsule_instance(pid: u32, instance_id: &str) -> Result<(), String> {
+    if instance_id.is_empty() {
+        return Err("resident instance id is empty".into());
+    }
+    if !pid_is_live(pid) {
+        return Err(format!("pid {pid} is not a live process"));
+    }
+    if pid == 1 {
+        return Err("pid 1 is not a resident capsule instance hosted by this Runtime".into());
+    }
+    if pid == std::process::id() {
+        return Err(format!(
+            "pid {pid} is this lab process, not a resident capsule instance hosted by this Runtime"
+        ));
+    }
+    match inspect_runtime_hosted_resident(pid, instance_id) {
+        Some(()) => Ok(()),
+        None => Err(format!(
+            "pid {pid} is not positively proven a resident capsule instance \
+             hosted by this Runtime (instance {instance_id})"
+        )),
+    }
+}
+
+/// Positive inspect of the Runtime this process loaded. Absent until RA-6.
+fn inspect_runtime_hosted_resident(_pid: u32, _instance_id: &str) -> Option<()> {
+    None
+}
+
 fn evidence_is_live_runtime_pair(ev: &RuntimeResidentEvidence) -> Result<(), String> {
     if ev.instance_1_id.is_empty()
         || ev.instance_2_id.is_empty()
@@ -356,6 +390,8 @@ fn evidence_is_live_runtime_pair(ev: &RuntimeResidentEvidence) -> Result<(), Str
     if !pid_is_live(ev.instance_1_pid) || !pid_is_live(ev.instance_2_pid) {
         return Err("Runtime-reported pid is not a live process".into());
     }
+    prove_resident_capsule_instance(ev.instance_1_pid, &ev.instance_1_id)?;
+    prove_resident_capsule_instance(ev.instance_2_pid, &ev.instance_2_id)?;
     if ev.instance_1_grant.is_empty()
         || ev.instance_2_grant.is_empty()
         || ev.instance_1_grant == ev.instance_2_grant
@@ -363,6 +399,35 @@ fn evidence_is_live_runtime_pair(ev: &RuntimeResidentEvidence) -> Result<(), Str
         return Err("each resident instance must hold its own grant".into());
     }
     Ok(())
+}
+
+/// Evaluate claimed Runtime evidence. This process plus pid 1 is FAIL.
+pub fn status_for_claimed_resident_pair(evidence: RuntimeResidentEvidence) -> JourneyStatus {
+    let session = Session::mint_instance1();
+    finish_claimed_evidence(&session, evidence)
+}
+
+fn finish_claimed_evidence(session: &Session, evidence: RuntimeResidentEvidence) -> JourneyStatus {
+    match evidence_is_live_runtime_pair(&evidence) {
+        Err(reason) => JourneyStatus::Fail(reason),
+        Ok(()) => match session.validate_as(INSTANCE_2) {
+            Err(ValidationError::WrongCapsule { expected, got })
+                if expected == INSTANCE_1 && got == INSTANCE_2 =>
+            {
+                JourneyStatus::Pass(format!(
+                    "A6 resident: Runtime hosted {} pid {} and {} pid {}; \
+                     sibling refused WrongCapsule {{ expected:{expected} got:{got} }}",
+                    evidence.instance_1_id,
+                    evidence.instance_1_pid,
+                    evidence.instance_2_id,
+                    evidence.instance_2_pid
+                ))
+            }
+            other => JourneyStatus::Fail(format!(
+                "resident instance-2 presenting instance-1 token: {other:?}"
+            )),
+        },
+    }
 }
 
 /// Evaluate an `Ok(ResidentPair)` from the host. An empty stub pair is FAIL.
@@ -377,36 +442,19 @@ fn finish_hosted_pair(session: &Session, pair: ResidentPair) -> JourneyStatus {
         Err(reason) => JourneyStatus::Fail(format!(
             "Ok from stub with empty ResidentPair: FAIL ({reason})"
         )),
-        Ok(evidence) => match evidence_is_live_runtime_pair(&evidence) {
-            Err(reason) => JourneyStatus::Fail(reason),
-            Ok(()) => match session.validate_as(INSTANCE_2) {
-                Err(ValidationError::WrongCapsule { expected, got })
-                    if expected == INSTANCE_1 && got == INSTANCE_2 =>
-                {
-                    JourneyStatus::Pass(format!(
-                        "A6 resident: Runtime hosted {} pid {} and {} pid {}; \
-                         sibling refused WrongCapsule {{ expected:{expected} got:{got} }}",
-                        evidence.instance_1_id,
-                        evidence.instance_1_pid,
-                        evidence.instance_2_id,
-                        evidence.instance_2_pid
-                    ))
-                }
-                other => JourneyStatus::Fail(format!(
-                    "resident instance-2 presenting instance-1 token: {other:?}"
-                )),
-            },
-        },
+        Ok(evidence) => finish_claimed_evidence(session, evidence),
     }
 }
 
 /// Ready journey: mint instance-1's real token and present it as a second
 /// *resident* instance. Until the Runtime hosts that pair, the status is
 /// BLOCKED. An `Ok` from a stub with an empty [`ResidentPair`] is FAIL.
-/// PASS requires two distinct live instance ids/pids reported by the Runtime,
-/// each holding its own grant, sibling refused by the Runtime. Removing
-/// validate step 4 from the Runtime this process loaded makes the readiness
-/// check FAIL (sibling accepted).
+/// Two live `/proc` pids that are not proven resident capsules (this
+/// process plus pid 1) are FAIL, never PASS. PASS requires two independent
+/// resident capsule instances inside one Runtime, each holding its own
+/// grant, sibling refused by the Runtime. Removing validate step 4 from
+/// the Runtime this process loaded makes the readiness check FAIL
+/// (sibling accepted).
 pub fn resident_two_instance_token_journey() -> JourneyStatus {
     let session = Session::mint_instance1();
     match session.validate_as(INSTANCE_2) {

@@ -1,0 +1,14 @@
+id: M-A12-NO-ISOLATION
+file: src/a12.rs
+test: tests::a12_outside_isolation_tmp_root_is_refused
+--- old
+    if !is_under(&canonical, &isolation_canon) {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT {} is not under isolated mktemp {}",
+            path.display(),
+            isolation.display()
+        ));
+    }
+--- new
+    let _ = isolation_canon;
+--- end

@@ -127,6 +127,41 @@ mod tests {
     }
 
     #[test]
+    fn a6_this_process_and_pid1_cannot_pass() {
+        let this_pid = std::process::id();
+        assert!(
+            std::path::Path::new("/proc/1").is_dir(),
+            "pid 1 must be live so this plant is the r4 case"
+        );
+        let evidence = a6::RuntimeResidentEvidence {
+            instance_1_id: a6::INSTANCE_1.into(),
+            instance_1_pid: this_pid,
+            instance_1_grant: "grant-1".into(),
+            instance_2_id: a6::INSTANCE_2.into(),
+            instance_2_pid: 1,
+            instance_2_grant: "grant-2".into(),
+        };
+        match a6::status_for_claimed_resident_pair(evidence) {
+            a6::JourneyStatus::Fail(reason) => {
+                assert!(
+                    reason.contains("not a resident capsule")
+                        || reason.contains("not positively proven")
+                        || reason.contains("this lab process")
+                        || reason.contains("pid 1"),
+                    "{reason}"
+                );
+                println!("this pid + pid 1 FAIL: {reason}");
+            }
+            a6::JourneyStatus::Pass(line) => {
+                panic!("this process plus pid 1 must FAIL, not PASS: {line}")
+            }
+            a6::JourneyStatus::Blocked { ask, reason } => {
+                panic!("this process plus pid 1 must FAIL, not BLOCKED ({ask}): {reason}")
+            }
+        }
+    }
+
+    #[test]
     fn a6_does_not_claim_resident_instances() {
         let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a6.rs"));
         let findings = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/FINDINGS.md"));
@@ -238,6 +273,17 @@ mod tests {
     }
 
     #[test]
+    fn a12_outside_isolation_tmp_root_is_refused() {
+        let outside = Path::new("/var/tmp");
+        let err = a12::check_tmp_root(outside).expect_err("/var/tmp is outside isolation");
+        assert!(
+            err.contains("is not under isolated mktemp"),
+            "isolation-under check must refuse /var/tmp: {err}"
+        );
+        println!("A12 ELASTOS_TMP_ROOT=/var/tmp refused: {err}");
+    }
+
+    #[test]
     fn a12_nested_dotdot_tmp_root_is_refused() {
         let iso = a12::isolation_root();
         let escaped = iso.join("hold").join("..").join("..");
@@ -261,6 +307,36 @@ mod tests {
         let _ = fs::remove_dir_all(&fake_live);
         assert!(err.contains("refuses symlink"), "{err}");
         println!("A12 ELASTOS_TMP_ROOT symlink to live Home refused: {err}");
+    }
+
+    #[test]
+    fn a12_tmp_root_symlink_swap_after_check_cannot_write_outside() {
+        let iso = a12::isolation_root();
+        let pid = std::process::id();
+        let hold = iso.join(format!("toctou-hold-{pid}"));
+        let _ = fs::remove_dir_all(&hold);
+        let _ = fs::remove_file(&hold);
+        fs::create_dir_all(&hold).unwrap();
+        a12::check_tmp_root(&hold).expect("hold under isolation");
+        let fake_live = std::env::temp_dir().join(format!("a12-toctou-live-{pid}"));
+        let _ = fs::remove_dir_all(&fake_live);
+        fs::create_dir_all(fake_live.join(".local/share/elastos")).unwrap();
+        fs::remove_dir_all(&hold).unwrap();
+        std::os::unix::fs::symlink(&fake_live, &hold).unwrap();
+        let write = a12::create_plain_leftover(&hold, "escaped.txt", b"after-swap\n");
+        let escaped = fake_live.join("storage").join("escaped.txt");
+        let wrote_outside = escaped.is_file();
+        let _ = fs::remove_file(&hold);
+        let _ = fs::remove_dir_all(&fake_live);
+        assert!(
+            !wrote_outside,
+            "swap after check_tmp_root must not write into a fake live Home: write={write:?}"
+        );
+        assert!(
+            write.is_err(),
+            "write after symlink swap must be refused: {write:?}"
+        );
+        println!("A12 TOCTOU swap after check refused: {write:?}");
     }
 
     #[test]
@@ -420,6 +496,33 @@ mod tests {
     }
 
     #[test]
+    fn a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote() {
+        let _lock = a12::lock_real_root();
+        let watch = a12::isolated_dir("live-tmp-elastos-snap");
+        let live = a12::live_runtime_tmp_root();
+        let existed = live.exists();
+        let plant = live.join(format!(
+            "a6-a12-live-snap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&live).expect("create live /tmp/elastos plant dir");
+        fs::write(&plant, b"live /tmp/elastos leftover\n").expect("plant live leftover");
+        let err = a12::snapshot_before_runtime(&watch)
+            .expect_err("clean watch must still fail when /tmp/elastos already wrote");
+        let _ = fs::remove_file(&plant);
+        if !existed {
+            let _ = fs::remove_dir(&live);
+        }
+        a12::remove_isolated(&watch);
+        assert!(err.contains("before the Runtime"), "{err}");
+        println!("A12 live /tmp/elastos late snapshot refused: {err}");
+    }
+
+    #[test]
     fn a12_inode_reuse_same_path_is_found() {
         let parent = a12::isolated_dir("inode-reuse");
         let path = parent.join("slot.txt");
@@ -458,6 +561,99 @@ mod tests {
             "same-path delete+recreate must be found even if the inode is reused: {leftovers:?}"
         );
         println!("A12 inode-reuse leftover found at {}", path.display());
+    }
+
+    #[test]
+    fn a12_same_bytes_inode_reuse_is_found() {
+        let parent = a12::isolated_dir("same-bytes-reuse");
+        let path = parent.join("slot.txt");
+        fs::write(&path, b"same-bytes\n").unwrap();
+        #[cfg(unix)]
+        let before_ino = {
+            use std::os::unix::fs::MetadataExt;
+            fs::symlink_metadata(&path).unwrap().ino()
+        };
+        let before = a12::snapshot(&parent).expect("before");
+        fs::remove_file(&path).unwrap();
+        let mut reused = false;
+        for _ in 0..300 {
+            fs::write(&path, b"same-bytes\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if fs::symlink_metadata(&path).unwrap().ino() == before_ino {
+                    reused = true;
+                    break;
+                }
+            }
+            fs::remove_file(&path).unwrap();
+        }
+        if !path.exists() {
+            fs::write(&path, b"same-bytes\n").unwrap();
+        }
+        let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
+        a12::remove_isolated(&parent);
+        assert!(
+            reused,
+            "same-bytes inode reuse did not happen; identity check would not be decisive"
+        );
+        assert!(
+            leftovers.iter().any(|p| p == &path),
+            "same-path same-bytes inode reuse must be found: {leftovers:?}"
+        );
+        println!(
+            "A12 same-bytes inode-reuse leftover found at {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn a12_large_file_inplace_rewrite_mtime_restored_is_found() {
+        let parent = a12::isolated_dir("large-rewrite");
+        let path = parent.join("big.bin");
+        let first = vec![b'A'; 65 * 1024];
+        fs::write(&path, &first).unwrap();
+        let before = a12::snapshot(&parent).expect("before");
+        let stamp = parent.join("stamp");
+        fs::write(&stamp, b"stamp\n").unwrap();
+        let _ = std::process::Command::new("touch")
+            .arg("-r")
+            .arg(&path)
+            .arg(&stamp)
+            .status();
+        let mut second = vec![b'B'; 65 * 1024];
+        second[0] = b'Z';
+        fs::write(&path, &second).unwrap();
+        let _ = std::process::Command::new("touch")
+            .arg("-r")
+            .arg(&stamp)
+            .arg(&path)
+            .status();
+        let after = a12::snapshot(&parent).expect("after");
+        let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
+        let before_hash = before
+            .ids
+            .get(&path)
+            .map(|id| id.content_hash)
+            .expect("before FileId");
+        let after_hash = after
+            .ids
+            .get(&path)
+            .map(|id| id.content_hash)
+            .expect("after FileId");
+        a12::remove_isolated(&parent);
+        assert_ne!(
+            before_hash, after_hash,
+            "65 KiB rewrite must change the full-content hash, not size+mtime"
+        );
+        assert!(
+            leftovers.iter().any(|p| p == &path),
+            "65 KiB in-place rewrite with mtime restored must be found: {leftovers:?}"
+        );
+        println!(
+            "A12 large-file in-place rewrite leftover found at {}",
+            path.display()
+        );
     }
 
     #[test]

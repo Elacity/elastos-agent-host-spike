@@ -1,0 +1,16 @@
+id: M-A12-TOCTOU-FOLLOW
+file: src/a12.rs
+test: tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside
+--- old
+    check_tmp_root(tmp_root)?;
+    let root_fd = open_or_create_dir_nofollow(tmp_root)?;
+    let dir_fd = mkdirat_open(&root_fd, dir_name)?;
+    writeat(&dir_fd, name, bytes)?;
+    Ok(tmp_root.join(dir_name).join(name))
+--- new
+    let storage = tmp_root.join(dir_name);
+    fs::create_dir_all(&storage).map_err(|_| format!("could not create {}", storage.display()))?;
+    let leftover = storage.join(name);
+    fs::write(&leftover, bytes).map_err(|_| format!("could not write {}", leftover.display()))?;
+    Ok(leftover)
+--- end
