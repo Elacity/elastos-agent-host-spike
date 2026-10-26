@@ -136,6 +136,25 @@ pub struct Decisions {
     pub denied: usize,
 }
 
+fn check_request_sequence(requests: &[Value], expected: &[(&str, &str, &str)]) -> Result<()> {
+    if requests.len() != expected.len() || requests.is_empty() {
+        return Err("request sequence: exact request count required");
+    }
+    let session = field(&requests[0], "session_id")?;
+    let mut ids = BTreeSet::new();
+    for (request, (resource, action, reason)) in requests.iter().zip(expected) {
+        if field(request, "session_id")? != session
+            || !ids.insert(field(request, "request_id")?)
+            || field(request, "resource")? != *resource
+            || field(request, "action")? != *action
+            || field(request, "reason")? != *reason
+        {
+            return Err("request sequence: one session, distinct requests and exact ordered fields required");
+        }
+    }
+    Ok(())
+}
+
 const OVERLAP_BOUND: Duration = Duration::from_secs(10);
 pub const CANCEL_REASON: &str = "fixture cancel: instance-1 cancelled mid-run";
 pub const KILL_REASON: &str = "fixture settlement: worker killed";
@@ -344,6 +363,7 @@ pub struct Controller {
     used: BTreeSet<usize>,
     pub decisions: Decisions,
     overlap: Option<Overlap>,
+    requests: Vec<Value>,
 }
 
 impl Controller {
@@ -366,6 +386,7 @@ impl Controller {
             used: BTreeSet::new(),
             decisions: Decisions::default(),
             overlap: None,
+            requests: Vec::new(),
         })
     }
 
@@ -625,6 +646,7 @@ impl Controller {
                 return Ok(());
             }
         }
+        self.requests.extend(pending.iter().cloned());
         let decisions = match self.fixture.decisions(&pending, &self.used) {
             Ok(decisions) => decisions,
             Err(reason) => {
@@ -680,6 +702,12 @@ impl Controller {
             overlap.advance();
         }
         Ok(())
+    }
+
+    /// Verify the observed sequence without exposing request or session IDs.
+    #[cfg(feature = "agent-host")]
+    pub fn check_requests(&self, expected: &[(&str, &str, &str)]) -> Result<()> {
+        check_request_sequence(&self.requests, expected)
     }
 
     fn deny(&mut self, request: &Value, reason: &str) -> Result<()> {
@@ -1011,6 +1039,7 @@ pub fn assert_memory_surfaces() {
         used: BTreeSet::new(),
         decisions: Decisions::default(),
         overlap: None,
+        requests: Vec::new(),
     };
     let home = ThrowawayHome::new().unwrap();
     assert_eq!(
@@ -1455,6 +1484,7 @@ mod tests {
             used: BTreeSet::new(),
             decisions: Decisions::default(),
             overlap: Some(Overlap::new()),
+            requests: Vec::new(),
         };
         let lines = [
             "instance overlap: synthetic",
@@ -1525,6 +1555,7 @@ mod tests {
             used: BTreeSet::new(),
             decisions: Decisions::default(),
             overlap: None,
+            requests: Vec::new(),
         };
         assert!(controller
             .check_bytes(b"ordinary output", Surface::Stdout)
@@ -1536,5 +1567,41 @@ mod tests {
             "credential checker must reject the in-memory canary"
         );
         assert!(!header_token("fixture\r\nheader"));
+    }
+}
+
+#[test]
+fn request_sequence_requires_exact_order_and_one_session() {
+    let expected = [
+        ("fixture-journal", "write", "fixture reason"),
+        ("fixture-journal", "read", "fixture reason"),
+    ];
+    let requests = vec![
+        json!({"request_id":"request-a", "session_id":"session-a", "resource":"fixture-journal", "action":"write", "reason":"fixture reason"}),
+        json!({"request_id":"request-b", "session_id":"session-a", "resource":"fixture-journal", "action":"read", "reason":"fixture reason"}),
+    ];
+    check_request_sequence(&requests, &expected).unwrap();
+    assert!(check_request_sequence(&requests[..1], &expected).is_err());
+    assert!(check_request_sequence(
+        &[requests.clone(), vec![requests[0].clone()]].concat(),
+        &expected
+    )
+    .is_err());
+    let mut reversed = requests.clone();
+    reversed.reverse();
+    assert!(check_request_sequence(&reversed, &expected).is_err());
+    for (field, value) in [
+        ("session_id", "other-session"),
+        ("request_id", "request-a"),
+        ("resource", "other-resource"),
+        ("action", "write"),
+        ("reason", "other-reason"),
+    ] {
+        let mut wrong = requests.clone();
+        wrong[1][field] = value.into();
+        assert!(
+            check_request_sequence(&wrong, &expected).is_err(),
+            "request sequence refuses {field}"
+        );
     }
 }
