@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# A stand-in tools/build that writes the module, then makes OUT_DIR ($1)
+# read-only, so bundle/ cannot be created in it.
+set -euo pipefail
+printf '\000asm\001\000\000\000' > "$1/capsule.wasm"
+chmod 555 "$1"
