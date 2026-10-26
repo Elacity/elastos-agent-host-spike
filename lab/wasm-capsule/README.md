@@ -231,6 +231,9 @@ falsifiers cover the walk and the encoding.
 Task 017: the retired name label is checked in every git-listed lane file,
 docs, `falsifiers.json` and `audit/` included (falsifier
 F-WC3-RETIRED-LABEL-DOC); the code names keep the docs exemption.
+Task 018: `lane_files_reads_names_git_would_quote` lists a temp git repo
+holding `review"note.md`; dropping `-z` fails it (hand-proven, pending R2; not
+in runner-caught totals).
 
 ### Why the tests live in the root package
 
