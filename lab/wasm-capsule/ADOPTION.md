@@ -48,6 +48,20 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   `VerifiedBundle` (`cid()`, `entries()`, `imports()`) for wc-005 to stage.
   It is a lab check of name, signer and imports; it is no admission or launch
   decision (README.md, "Verify (wc-004)").
+- `wasm_capsule_tools::run` — the lab's engine runner, as library calls.
+  `run_engine` (wc-005a, task 014) runs one test-only host engine on
+  `entrypoint()`'s verified bytes, written from memory into a new `0o700`
+  folder, with a fixed argv, stdin null and an empty environment. `run`
+  (wc-005b, task 015) takes a `RunInput` (bundle path, in-memory signature,
+  accepted signer DIDs, both engine program paths, work root), calls
+  `verify_bundle` once with no grants, then `run_engine` for `wasmtime` and
+  then for `wasmer`, one after the other, and requires both to succeed with
+  byte-identical stdout. It returns the verified `cid()` and both outputs
+  (README.md, "Same output on two engines (wc-005b)").
+  The two-engine result is a behaviour proof on one **core module** on this
+  Mac, not the Component ABI. `wasmtime` and `wasmer` are test-only host
+  engines here; neither is endorsed. This is separate from Wasmer's role
+  inside a capsule as the POSIX RTOS PoC.
 - `capsule/capsule.json` — this capsule's `elastos.capsule/v1` manifest, with
   only fields of the Runtime's `CapsuleManifest`. The tools crate compiles its
   bytes in (`CAPSULE_MANIFEST`). It lists no Wasm imports: the module's own
@@ -100,6 +114,10 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   bundles through that one function.
 - `digest` is a placeholder pure function to anchor identity and portability
   work. It is not a product capability.
+- The two-engine run (wc-005b) shows that one verified core module printed the
+  same `FIXED_OUTPUT` for `FIXED_INPUT` on `wasmtime` 45.0.1 and `wasmer` 7.5.0
+  on this one Mac. It says nothing about the Component ABI, other engines,
+  other machines or other modules, and endorses neither engine.
 
 ## wc-003 discovery: how the Runtime names an artifact
 
