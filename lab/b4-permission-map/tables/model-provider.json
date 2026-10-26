@@ -376,6 +376,25 @@
   "provider": "model-provider",
   "rights": [
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "allow",
+        "rationale": "Every side already grants execute of the one bound provider binary and refuses any other file. The unified model keeps that allow."
+      },
       "declared": "bound-executable",
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -404,6 +423,25 @@
       "title": "exec the bound provider binary"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "allow",
+        "rationale": "The approved storage right is the eight-right mask on STORAGE_ROOT (0x41be). macOS uses the subpath write rule. Both Linux labs grant the same eight bits and omit ioctl, refer, and special-file create."
+      },
       "declared": "storage",
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -432,6 +470,25 @@
       "title": "read and write under STORAGE_ROOT"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none if deny is adopted; if the right is kept, add a private-parent mount",
+          "linux-confine": "none if deny is adopted; if the right is kept, extend hide_parent_siblings to did and model",
+          "macos": "drop (allow file-read* (literal (param \"STORAGE_PARENT\"))) and split STORAGE_PARENT out of the C8 storage right"
+        },
+        "declared_as": "STORAGE_PARENT",
+        "fail_closed_linux": "OPEN DECISION",
+        "linux_confine": "OPEN DECISION",
+        "macos": "OPEN DECISION",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": false
+        },
+        "open_decision": true,
+        "proposed": "deny",
+        "rationale": "STORAGE_PARENT is its own right here, split out of C8 storage. Landlock cannot name a directory alone: a path rule on the host parent covers siblings. Linux is already the tighter side (missing on did/model; wallet on #296 remounts a private parent). Fail-closed proposes deny of a host-parent grant. C8 still bundles the Seatbelt literal under storage, and macOS init has F-cc1-rm-parent, so this stays an open decision. The keep-the-right path is the #296 wallet remount on every provider, not a host-parent Landlock rule."
+      },
       "declared": "storage",
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -473,6 +530,25 @@
       "title": "literal read of STORAGE_PARENT only"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "drop (allow file-read* (literal \"/\")) and the model file-read-data form"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "OPEN DECISION",
+        "linux_confine": "OPEN DECISION",
+        "macos": "OPEN DECISION",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": false
+        },
+        "open_decision": true,
+        "proposed": "deny",
+        "rationale": "One polarity for `/`. A Landlock rule on `/` grants the whole tree, so both Linux labs add none. That is the tighter side. Seatbelt's literal `/` is a macOS loader pin, not a shared grant Linux can copy. Fail-closed proposes deny as the unified right. Open until a named test shows the macOS loader starts without that pin, or Sash and Anders reclassify it as macOS-loader-only and drop it from the shared model."
+      },
       "declared": "startup-root-directory",
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -514,6 +590,25 @@
       "title": "startup read of /"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "drop (allow sysctl-read)"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "OPEN DECISION",
+        "linux_confine": "OPEN DECISION",
+        "macos": "OPEN DECISION",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": false,
+          "macos": false
+        },
+        "open_decision": true,
+        "proposed": "deny",
+        "rationale": "One polarity for sysctl-read. Linux has no sysctl right. #307 names none. #296 admits uname and loader syscalls; that is a loader set, not a shared sysctl grant. Fail-closed proposes deny as the unified right. Open until a named test shows the macOS loader starts without sysctl-read, or the C8 baseline names the Linux loader syscalls as Linux-only and drops the shared right."
+      },
       "declared": "startup-sysctl",
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/real.rs",
@@ -555,6 +650,25 @@
       "title": "startup sysctl-read"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "Every side already refuses a read outside STORAGE_ROOT. The unified model keeps that deny."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -585,6 +699,25 @@
       "title": "read outside STORAGE_ROOT"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "Every side already refuses a write outside STORAGE_ROOT. The unified model keeps that deny."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -615,6 +748,25 @@
       "title": "write outside STORAGE_ROOT"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "Providers speak stdin/stdout. macOS denies network*. Both Linux labs deny SYS_socket. The unified model keeps that deny."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/seccomp.rs",
@@ -645,6 +797,25 @@
       "title": "network sockets"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "drop the AF_UNIX socketpair exception so the provider filter denies the pair",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "MUST CHANGE",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": false,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "macOS counts a Unix-domain pair under network* and denies it. #307 denies SYS_socketpair with no AF_UNIX exception. #296 allows AF_UNIX socketpair for Tokio. Fail-closed keeps the tighter deny. A separate fixer is closing the #296 exception. #296 is the side that changes."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/seccomp.rs",
@@ -688,6 +859,25 @@
       "title": "AF_UNIX socketpair"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "Every side already grants execute only on the bound binary. The unified model keeps that deny."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -718,6 +908,25 @@
       "title": "exec a file other than PROVIDER_EXECUTABLE"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "unshare CLONE_NEWPID so a host pid cannot be named; SCOPE_SIGNAL at ABI 6 is not a substitute",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "MUST CHANGE",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": false,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "A provider must not signal a host pid. macOS has no signal-outbound grant. #296 unshares CLONE_NEWPID, so a host pid cannot be named. #307 unshares only CLONE_NEWUSER and sets LANDLOCK_SCOPE_SIGNAL at ABI 6; that is partial, not a deny. The unified model is deny with a PID namespace carrier. #307 is the side that changes."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",
@@ -761,6 +970,25 @@
       "title": "signal a host process"
     },
     {
+      "baseline": {
+        "change": {
+          "fail-closed-linux": "none",
+          "linux-confine": "none",
+          "macos": "none"
+        },
+        "declared_as": null,
+        "fail_closed_linux": "CONFORMS",
+        "linux_confine": "CONFORMS",
+        "macos": "CONFORMS",
+        "matches_proposal": {
+          "fail-closed-linux": true,
+          "linux-confine": true,
+          "macos": true
+        },
+        "open_decision": false,
+        "proposed": "deny",
+        "rationale": "IOCTL_DEV is not in the eight-right storage mask. macOS has no file-ioctl grant. Both Linux labs refuse a start that cannot deny ioctl. The unified model keeps that deny."
+      },
       "declared": null,
       "fail_closed_linux": {
         "file": "lab/fail-closed-linux/src/lib.rs",

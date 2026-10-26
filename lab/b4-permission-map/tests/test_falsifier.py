@@ -11,6 +11,7 @@ from pathlib import Path
 LAB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LAB))
 
+from b4map.baseline import planted_network_allow_caught
 from b4map.compare import build_report, mismatch_ids
 from b4map.gitread import load_pins, repo_root
 from check import planted_network_caught
@@ -58,6 +59,28 @@ class FalsifierTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("F-B4-MACOS-NETWORK-ALLOW CAUGHT", result.stdout)
 
+    def test_cli_prints_baseline_network_allow_caught(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(LAB / "check.py"),
+                "--plant-baseline",
+                str(LAB / "plants" / "baseline-network-allow"),
+            ],
+            cwd=repo_root(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("F-B4-BASELINE-NETWORK-ALLOW CAUGHT", result.stdout)
+
+    def test_committed_baseline_is_not_a_network_catch(self):
+        report = build_report(repo_root(), load_pins())
+        self.assertFalse(planted_network_allow_caught(report))
+
 
 if __name__ == "__main__":
     unittest.main()
+

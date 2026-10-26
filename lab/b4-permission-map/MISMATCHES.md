@@ -17,6 +17,9 @@ Mismatch rows: **30**.
 Suggested fixes stay in this file. This lab does not edit
 `capsules/`, `lab/linux-confine/`, or `lab/fail-closed-linux/`.
 
+The proposed unified baseline is `baseline.json`. Scores against
+that file (CONFORMS / MUST CHANGE / OPEN DECISION) are `BASELINE.md`.
+
 ## did-provider
 
 ### `storage.parent` — literal read of STORAGE_PARENT only

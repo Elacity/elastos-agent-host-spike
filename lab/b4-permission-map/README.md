@@ -37,6 +37,11 @@ The checker splits the two `storage` rules so it can compare
 `STORAGE_ROOT` and `STORAGE_PARENT` one by one. The other rows are the
 implicit denials of `(deny default)` and `(deny network*)`.
 
+`baseline.json` is the proposed unified model. It declares each comparison
+right once, including a `STORAGE_PARENT` right, and one polarity for `/`
+and `sysctl-read`. Where a polarity is unsure, the file proposes the
+tighter side and marks `open_decision` for Sash and Anders.
+
 ## Outputs
 
 - `tables/did-provider.json`
@@ -44,6 +49,8 @@ implicit denials of `(deny default)` and `(deny network*)`.
 - `tables/model-provider.json`
 - `MISMATCHES.md` — every polarity, coverage, or Linux-split row, with
   `file:line` on both sides and a suggested fix. Fixes are not applied.
+- `BASELINE.md` — each platform scored against `baseline.json`
+  (`CONFORMS` / `MUST CHANGE` / `OPEN DECISION`)
 
 A mismatch is a right allowed on one platform and denied on the other, or
 enforced on one and missing on the other. #296 and #307 disagreeing is a
@@ -56,11 +63,13 @@ python3 -I lab/b4-permission-map/check.py --write
 python3 -I lab/b4-permission-map/check.py --check
 python3 -I -m unittest discover -s lab/b4-permission-map/tests -v
 python3 -I lab/b4-permission-map/check.py --plant lab/b4-permission-map/plants/macos-network-allow
+python3 -I lab/b4-permission-map/check.py --plant-baseline lab/b4-permission-map/plants/baseline-network-allow
 ```
 
-`run.sh` runs those four. The plant copies the did profile and appends
-`(allow network*)`. The checker must print
-`F-B4-MACOS-NETWORK-ALLOW CAUGHT`.
+`run.sh` runs those five. The profile plant copies the did profile and
+appends `(allow network*)`. The checker must print
+`F-B4-MACOS-NETWORK-ALLOW CAUGHT`. The baseline plant proposes `network`
+allow. The checker must print `F-B4-BASELINE-NETWORK-ALLOW CAUGHT`.
 
 ## What B4 still needs
 

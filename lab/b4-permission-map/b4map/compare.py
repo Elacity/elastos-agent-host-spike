@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .baseline import load_baseline, score_report
 from .catalog import COMPARISON_RIGHTS, NOT_RUN, PROVIDERS
 from .linux import fail_closed_sides, linux_confine_sides, load_linux
 from .macos import load_provider_macos
@@ -212,6 +213,7 @@ def build_report(
     root: Path,
     pins: dict,
     profile_overrides: dict[str, Path] | None = None,
+    baseline: dict | None = None,
 ) -> dict:
     c9_parsed, c0_parsed = load_linux(pins, root)
     providers = {}
@@ -234,7 +236,7 @@ def build_report(
         )
         providers[provider] = table
         mismatches.extend(table["mismatches"])
-    return {
+    report = {
         "status": NOT_RUN,
         "pins": {
             "linux_confine": pins["linux_confine"],
@@ -257,6 +259,7 @@ def build_report(
             "pid_gap": c0_parsed["pid_gap"],
         },
     }
+    return score_report(report, baseline if baseline is not None else load_baseline())
 
 
 def mismatch_ids(report: dict) -> list[str]:

@@ -9,6 +9,9 @@ This lab does not add a second template. It reads those files and splits
 the two `storage` rules so B4 can compare them one by one. The remaining
 rows are the implicit denials of `(deny default)` and `(deny network*)`.
 Those denials are not new declared rights.
+
+`baseline.json` proposes one polarity per comparison right, including a
+`STORAGE_PARENT` right. It is a proposal. It is not a second C8 template.
 """
 
 PROVIDERS = ("did-provider", "wallet-provider", "model-provider")

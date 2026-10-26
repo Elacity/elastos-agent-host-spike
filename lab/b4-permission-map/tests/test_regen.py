@@ -13,7 +13,7 @@ sys.path.insert(0, str(LAB))
 from b4map.catalog import PROVIDERS
 from b4map.compare import build_report
 from b4map.gitread import load_pins, repo_root
-from b4map.render import render_mismatches
+from b4map.render import render_baseline, render_mismatches
 
 
 class RegenTests(unittest.TestCase):
@@ -25,6 +25,7 @@ class RegenTests(unittest.TestCase):
             committed = json.loads(path.read_text())
             self.assertEqual(committed, report["providers"][provider])
         self.assertEqual((LAB / "MISMATCHES.md").read_text(), render_mismatches(report))
+        self.assertEqual((LAB / "BASELINE.md").read_text(), render_baseline(report))
 
 
 if __name__ == "__main__":
