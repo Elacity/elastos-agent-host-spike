@@ -132,6 +132,24 @@ oracles and supplies contract evidence, not Linux execution evidence.
   neither file-content reads nor writes outside the wallet grant.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
+- `startup_denial_reports_its_reason` covers the failure path. It starts the
+  provider under a fixture profile that holds `(version 1)` and `(deny default)`,
+  so `sandbox-exec` cannot exec it, waits for that child to exit, and sends
+  `init`. The one harness failure names the request, the child's exit status and
+  `sandbox-exec`'s own `execvp()` denial of the provider binary, `Operation not
+  permitted`, from standard error, so another denial cannot stand in for the exec
+  denial. A second fixture child reads one request and exits without answering,
+  so the response-stream branch reports the same three facts. An answer that is
+  not JSON fails with its own message, which names the request, the parse error
+  and the answer, and does not say the provider did not answer;
+  `invalid_json_answer_names_the_request_and_the_parse_error` checks it. The
+  harness drains standard error on its own thread while the child runs, so a
+  child that fills the pipe still reaches its own exit.
+  `stderr_is_drained_before_wait` writes 128 KiB to standard error and expects
+  every byte plus the child's own exit status; it fails when the drainer starts
+  only after the wait, because the child then never exits within the deadline.
+  The startup case skips with its printed reason when `sandbox-exec` is absent on
+  a host OS other than macOS.
 - `startup_is_refused_when_the_profile_cannot_be_applied` starts the provider
   under a profile that cannot be applied: a path that does not exist, a copy of
   `confine.sb` with its last `)` removed, and the real profile with every
@@ -170,6 +188,60 @@ oracles and supplies contract evidence, not Linux execution evidence.
   `(allow file-read* (literal (param "READ_FIXTURE_KEY")))`. The check refuses
   it with a reason that names `fixture-provider` and
   `non-canonical parameter token READ_FIXTURE_KEY`. The test reads no file.
+- `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  builds the passing fixture and appends
+  `(deny file-read* (literal "/x;")) (allow default)` and
+  `(deny file-read* (literal "/))"))`. The check refuses it with a reason that
+  names `fixture-provider` and `must reject (allow default)`, because the
+  parser reads the `;` and the parentheses inside those strings as text. The
+  same test checks that the two lines hold three forms with `(allow default)`
+  second, that a `;` outside a string comments out the rest of its line, that
+  an escaped quote and an escaped backslash stay inside their string, that
+  whitespace inside a string is kept and outside it collapses, and that a form
+  after a comment's newline still loads. The test reads no file and starts no
+  process.
+- `a_comment_inside_a_form_keeps_its_tokens_apart` reads a form whose tokens
+  a comment splits and expects both tokens back: `(allow;x`, a newline, then
+  `default)` gives `(allow default)`, and the network form gives
+  `(allow network*)`. The one check refuses the passing fixture with either
+  form appended, with the exact `must reject (allow default)` and
+  `network allow is refused` reasons. The test reads no file and starts no
+  process.
+- `a_space_after_the_opening_parenthesis_still_names_its_rule` reads a form
+  whose head a space or a comment separates from its first symbol:
+  `( allow default)` and `(;x`, a newline, then `allow default)` both give
+  `(allow default)`, and the network forms give `(allow network*)`. The one
+  check refuses the passing fixture with each of those appended, with the
+  exact `must reject (allow default)` and `network allow is refused` reasons.
+  The test reads no file and starts no process.
+- `a_bare_top_level_value_is_its_own_form` reads a bare value outside every
+  form as its own form: `1`, a newline, then `(allow default)` gives `1` and
+  `(allow default)`, and so do `1(allow default)` and `"x" (allow default)`; a
+  bare value at the end of the profile is a form too. The one check refuses
+  the passing fixture with each of those appended, and with
+  `1 (allow network*)`, with the exact `must reject (allow default)` and
+  `network allow is refused` reasons. The test reads no file and starts no
+  process.
+- `the_bare_value_fixture_loads_under_sandbox_exec` writes
+  `(version 1)(deny default) 1 (allow default)` to a temporary file and runs
+  `/usr/bin/sandbox-exec -f <file> /usr/bin/true`, which exits 0. Under
+  `(deny default)` alone that program cannot start, so the exit shows that
+  `sandbox-exec` reads the `1` as its own form and applies the
+  `(allow default)` after it. It checks that test's premise, not a rule, and
+  carries no falsifier entry.
+- `the_string_fixture_loads_under_sandbox_exec` writes `(version 1)`,
+  `(deny default)` and those two lines to a temporary file and runs
+  `/usr/bin/sandbox-exec -f <file> /usr/bin/true`, which exits 0. Under
+  `(deny default)` alone that program cannot start, so the exit shows that
+  `sandbox-exec` reads the `;` and the parentheses as text and applies the
+  `(allow default)`. It checks the fixture's premise, not a rule, and carries
+  no falsifier entry.
+- `profile_forms_rejects_unclosed_string` reads an unclosed string and expects
+  the existing "the profile must not end early" reason with `unclosed string`
+  in it. The test reads no file and starts no process.
+- `profile_forms_rejects_unclosed_form` reads an unclosed form and expects the
+  same reason with `unclosed form` in it, and a closed form then loads. The
+  test reads no file and starts no process.
 - `file_profile_contract_checks_the_model_profile_when_present` runs the same
   list function over a temporary `capsules/` directory that holds the passing
   fixture for all three required profiles. It checks exactly did-provider,
@@ -240,6 +312,46 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Return `false` from the error arm of `sandbox_available` instead of failing
   the test (WP30): `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing`
   fails because a missing `sandbox-exec` on `macos` returns instead of failing.
+- Cut each line at its first `;` and count parentheses in every token again
+  (WP31): `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  fails because the hidden `(allow default)` then passes the check, and
+  `profile_forms_rejects_unclosed_string` fails because the cut reads no
+  string to refuse.
+- Let an escaped character end its string (WP32):
+  `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  fails because the escaped quote closes the string and the profile ends
+  early.
+- Drop whitespace that sits inside a string (WP33): the same test fails
+  because the spaced in-string form loses its two spaces.
+- Keep whitespace outside strings instead of collapsing it (WP34): the same
+  test fails because the passing fixture no longer parses into the contract's
+  forms.
+- Run a comment to the end of the profile instead of its line (WP35): the
+  same test fails because the form after the comment's newline is lost.
+- Drop the unclosed-string refusal (WP36):
+  `profile_forms_rejects_unclosed_string` fails because the profile then ends
+  as an unclosed form.
+- Drop the unclosed-form refusal (WP37): `profile_forms_rejects_unclosed_form`
+  fails because the incomplete profile returns no refusal.
+- Drop the newline that ends a comment (WP38):
+  `a_comment_inside_a_form_keeps_its_tokens_apart` fails because
+  `(allow;x\ndefault)` reads as `(allowdefault)` and passes the check.
+- Drop the split outside every form (WP39):
+  `a_bare_top_level_value_is_its_own_form` fails because `1`, a newline, then
+  `(allow default)` reads as the one form `1 (allow default)` and passes the
+  check.
+- Add the separator space after an opening parenthesis (WP40):
+  `a_space_after_the_opening_parenthesis_still_names_its_rule` fails because
+  `( allow default)` reads as its own form and passes the check.
+- Start the drainer only after `wait_for_exit` has returned (WP41):
+  `stderr_is_drained_before_wait` fails on its exit assertion because the
+  child blocks on a full pipe and never exits within the deadline.
+- Use a fixed `Operation not permitted` instead of the child's standard error
+  in `unanswered` (WP42): `startup_denial_reports_its_reason` fails on its
+  `execvp()` assertion because the fixed text names no exec denial.
+- Return the shared unanswered message from the invalid-JSON branch (WP43):
+  `invalid_json_answer_names_the_request_and_the_parse_error` fails because the
+  answer loses its parse error and says the provider did not answer.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

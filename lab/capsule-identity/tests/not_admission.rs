@@ -103,9 +103,11 @@ fn valid_signature_grants_nothing_by_itself() {
 
 /// Every `pub fn` the library declares: identity checks only. `check_name`
 /// is listed twice: the free function and `CheckedBundle`'s checked form.
-/// The last five are task 011's package record: its digest, its payload, its
-/// signer and its two verifiers. None admits, grants or launches.
-const IDENTITY_FUNCTIONS: [&str; 20] = [
+/// The next five are task 011's package record: its digest, its payload, its
+/// signer and its two verifiers. The last four are task 015's variant
+/// binding: its payload, its signer and its two verifiers. None admits,
+/// grants or launches.
+const IDENTITY_FUNCTIONS: [&str; 24] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -126,6 +128,10 @@ const IDENTITY_FUNCTIONS: [&str; 20] = [
     "sign_package_record",
     "verify_checked_package_record",
     "verify_package_record",
+    "variant_binding_payload",
+    "sign_variant_binding",
+    "verify_checked_variant_binding",
+    "verify_variant_binding",
 ];
 
 /// How many times each name occurs in `names`.

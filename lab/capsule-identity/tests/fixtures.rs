@@ -46,6 +46,8 @@ fn lab_cid_matches_the_pinned_value_for_each_fixture() {
         (&AGENT_HOST, AGENT_HOST_LAB_CID),
         (&PROVIDER, PROVIDER_LAB_CID),
         (&MODEL, MODEL_LAB_CID),
+        (&PROVIDER_VARIANT_A, PROVIDER_VARIANT_A_LAB_CID),
+        (&PROVIDER_VARIANT_B, PROVIDER_VARIANT_B_LAB_CID),
     ] {
         // Two copies in two temp folders, each named twice: the folder's
         // path and the moment of naming never enter the value.

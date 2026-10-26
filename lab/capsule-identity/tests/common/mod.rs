@@ -36,6 +36,14 @@ pub const PROVIDER_LAB_CID: &str =
     "lab-cid:sha256:274c6cf5685ec5dd638e91d8ac5e2634ebbeb523e756684587b61c1cb52fd6b8";
 pub const MODEL_LAB_CID: &str =
     "lab-cid:sha256:c28893c87d43643092656fd4382bb8611659f12365a4533050639b909cc6a26f";
+pub const PROVIDER_VARIANT_A_LAB_CID: &str =
+    "lab-cid:sha256:cadd66f6496712053be0b5d994c6f9bee0961d4c76645d49e8cb68b5e7706979";
+pub const PROVIDER_VARIANT_B_LAB_CID: &str =
+    "lab-cid:sha256:753cf8894d4c47386dabf4efcb040337c7654bac885e37828d70ec791cf40b27";
+/// The lab CID of `recipes/provider-variant.recipe`: the encoder over one
+/// entry, `provider-variant.recipe` with the file's bytes.
+pub const PROVIDER_VARIANT_RECIPE_LAB_CID: &str =
+    "lab-cid:sha256:22de169e0c4ca22fff6b414664de8d8bc2c5fc375b9834369807ef828ed1050f";
 
 /// A committed fixture: its folder under `fixtures/` and the files of its
 /// bundle.
@@ -92,14 +100,38 @@ pub const MODEL: Fixture = Fixture {
     ],
 };
 
-pub const FIXTURES: [&Fixture; 6] = [
+/// Two platform variants of the provider, each its own bundle: the provider
+/// fixture's `capsule.json` byte for byte, and a one-line stand-in
+/// `ipfs-provider` whose bytes differ, so the two lab CIDs differ. The
+/// platform label is not in the folder name or the manifest: it lives only in
+/// the variant binding.
+pub const PROVIDER_VARIANT_A: Fixture = Fixture {
+    name: "provider-variant-a",
+    files: &["capsule.json", "ipfs-provider"],
+};
+
+pub const PROVIDER_VARIANT_B: Fixture = Fixture {
+    name: "provider-variant-b",
+    files: &["capsule.json", "ipfs-provider"],
+};
+
+pub const FIXTURES: [&Fixture; 8] = [
     &CONTENT_SAMPLE,
     &WEB_APP,
     &WC001_CORE,
     &AGENT_HOST,
     &PROVIDER,
     &MODEL,
+    &PROVIDER_VARIANT_A,
+    &PROVIDER_VARIANT_B,
 ];
+
+/// The committed bytes of the variant recipe, `recipes/provider-variant.recipe`.
+/// The library never reads it; tests give it these bytes.
+pub fn variant_recipe() -> Vec<u8> {
+    let path = lane_dir().join("recipes/provider-variant.recipe");
+    fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
 
 /// This lane's root: the folder holding `Cargo.toml` and `fixtures/`.
 pub fn lane_dir() -> PathBuf {

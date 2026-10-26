@@ -815,6 +815,188 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     }
 }
 
+/// A confined start that fails before it answers shows its reason.
+///
+/// The fixture profile keeps `(version 1)` first and `(deny default)` second,
+/// so `sandbox-exec` cannot exec the provider. The test waits for that child to
+/// exit, sends `init`, and requires the one harness failure to name the
+/// request, the exit status and `sandbox-exec`'s own denial on standard error.
+/// A fixture child that reads one request and exits without answering reaches
+/// the response-stream branch of the same harness with the same three facts.
+///
+/// Falsifier: drop the child's standard error from `unanswered` (WP29); the
+/// denied start loses `Operation not permitted`, so this test fails on that
+/// assertion at the first case.
+///
+/// Falsifier: use a fixed `Operation not permitted` instead of the child's
+/// standard error in `unanswered` (WP42); the denied start's failure names no
+/// `execvp()` denial, so this test fails on that assertion at the first case.
+#[test]
+fn startup_denial_reports_its_reason() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary wallet root");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile = resolved(profile_root.path()).join("deny-all.sb");
+    fs::write(&profile, "(version 1)\n(deny default)\n").expect("fixture profile must be writable");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": base.display().to_string() }
+    });
+
+    // The denied provider exits before it reads the request, so the harness
+    // cannot write it. It reports the exit status and the sandbox denial.
+    let canonical = canonical_bindings(&base);
+    create_shared_ancestors(&canonical);
+    let bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut denied = ConfinedProvider::start_under(&profile, &bindings);
+    let exit = denied.wait_for_exit();
+    assert_ne!(
+        exit.code(),
+        Some(0),
+        "sandbox-exec must not exec the provider: {exit}"
+    );
+    let denial = denied
+        .try_send(&request)
+        .expect_err("a denied provider must not answer");
+    assert!(
+        denial.contains(&request.to_string()),
+        "the failure must name the request: {denial}"
+    );
+    assert!(
+        denial.contains(&exit.to_string()),
+        "the failure must name the exit status: {denial}"
+    );
+    assert!(
+        denial.contains("Operation not permitted"),
+        "the failure must carry sandbox-exec's denial: {denial}"
+    );
+    assert!(
+        denial.contains("execvp()") && denial.contains(PROVIDER_BINARY),
+        "the denial must be sandbox-exec's exec denial of the provider binary: {denial}"
+    );
+    eprintln!("startup denial failure: {denial}");
+
+    // A child that answers nothing reaches the response-stream branch with the
+    // same three facts.
+    let mut silent = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read request; printf 'fixture: read one request\\n' >&2; exit 3");
+        command
+    });
+    let silence = silent
+        .try_send(&request)
+        .expect_err("a child that exits without answering must fail");
+    let exit = silent.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(3),
+        "the fixture must reach its own exit: {exit}"
+    );
+    assert!(
+        silence.contains(&request.to_string()),
+        "the failure must name the request: {silence}"
+    );
+    assert!(
+        silence.contains(&exit.to_string()),
+        "the failure must name the exit status: {silence}"
+    );
+    assert!(
+        silence.contains("fixture: read one request"),
+        "the failure must carry the child's standard error: {silence}"
+    );
+    eprintln!("response-stream failure: {silence}");
+}
+
+/// The harness drains standard error while the child runs.
+///
+/// The fixture writes 128 KiB, more than the pipe buffer, to standard error and
+/// exits with status 7. The harness must reach that status within its bounded
+/// deadline and collect every byte.
+///
+/// Falsifier: start reading only after `wait_for_exit` has returned (WP41);
+/// the fixture fills the pipe and blocks, so the wait kills it, and this test
+/// fails on its exit assertion, `no exit within 10s, so it was killed`.
+#[test]
+fn stderr_is_drained_before_wait() {
+    let mut child = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("dd if=/dev/zero bs=1024 count=128 >&2 2>/dev/null; exit 7");
+        command
+    });
+    let exit = child.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(7),
+        "the child must reach its own exit: {exit}"
+    );
+    let stderr = child.stderr();
+    assert_eq!(stderr.len(), 128 * 1024, "every drained byte must survive");
+    assert!(
+        stderr.as_bytes().iter().all(|byte| *byte == 0),
+        "the drained bytes must be the fixture's zero bytes"
+    );
+}
+
+/// An answer that is not JSON fails with its own message.
+///
+/// Through `spawn`, a fixture child reads one request, prints `not json` and a
+/// newline to standard output, and exits 0. The failure names the request,
+/// `invalid JSON`, the parse error `serde_json` gives for the answer and the
+/// answer itself, and it does not say the provider did not answer. The test
+/// starts no sandbox and does not call `sandbox_available`.
+///
+/// Falsifier: return the shared unanswered message from the invalid-JSON branch
+/// (WP43); the answer loses its parse error and says the provider did not
+/// answer, so this test fails on its `invalid JSON` assertion.
+#[test]
+fn invalid_json_answer_names_the_request_and_the_parse_error() {
+    let mut child = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read request; echo 'not json'; exit 0");
+        command
+    });
+    let request = json!({ "op": "status" });
+    let failure = child
+        .try_send(&request)
+        .expect_err("an answer that is not JSON must fail");
+    let parse_error = serde_json::from_str::<Value>("not json\n")
+        .expect_err("the fixture answer must not parse as JSON")
+        .to_string();
+    assert!(
+        failure.contains(&request.to_string()),
+        "the failure must name the request: {failure}"
+    );
+    assert!(
+        failure.contains("invalid JSON"),
+        "the failure must name the invalid JSON answer: {failure}"
+    );
+    assert!(
+        failure.contains(&parse_error),
+        "the failure must carry the parse error: {failure}"
+    );
+    assert!(
+        failure.contains("not json"),
+        "the failure must carry the answer: {failure}"
+    );
+    assert!(
+        !failure.contains("did not answer"),
+        "an invalid answer is not an unanswered request: {failure}"
+    );
+    eprintln!("invalid-JSON failure: {failure}");
+}
+
 /// Whether `form` is a top-level allow rule that grants the network. This is
 /// the one copy of the rule, used both by the provider's own profile test and
 /// by the shared file-profile contract check (P10).
@@ -1104,6 +1286,357 @@ fn file_profile_contract_rejects_a_non_canonical_token() {
     );
 }
 
+/// The profile lines whose `;`, `(` and `)` sit inside strings, with an
+/// `(allow default)` after the first one. `sandbox-exec` reads those three
+/// characters as text, so the lines hold two forms and then one more.
+const STRING_LINES: &str = r#"(deny file-read* (literal "/x;")) (allow default)
+(deny file-read* (literal "/))"))
+"#;
+
+/// The parser reads a `;` and every parenthesis inside a string as
+/// `sandbox-exec` does, so the one contract check sees the `(allow default)`
+/// that these lines hold. It keeps an escaped quote and an escaped backslash
+/// inside their string, keeps whitespace inside a string, collapses whitespace
+/// outside strings, and loads a form after a comment's newline. The fixtures
+/// are built in the test; no file is read and no process starts.
+///
+/// Falsifier: WP31 restores the plain cut at every `;` and the parenthesis
+/// count inside strings; this test fails because the hidden `(allow default)`
+/// then passes the check. WP32 to WP35 disable escaping, the in-string
+/// whitespace, the outside collapse and the comment's end at its newline;
+/// this test fails on each.
+#[test]
+fn file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete)
+        .expect("the passing fixture must pass the one check");
+    let profile = format!("{complete}{STRING_LINES}");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a fixture whose strings hold (allow default) must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
+        "the refusal must name the profile and the rule: {refusal}"
+    );
+
+    let forms = profile_forms(STRING_LINES);
+    assert_eq!(forms.len(), 3, "the two lines hold three forms: {forms:?}");
+    assert_eq!(
+        forms[1], "(allow default)",
+        "the second form must be the allow default: {forms:?}"
+    );
+
+    assert_eq!(
+        profile_forms("(version 1) ; (allow default)"),
+        vec!["(version 1)"],
+        "a `;` outside a string must comment out the rest of its line"
+    );
+
+    let escaped_quote = r#"(deny file-read* (literal "/a\"b)"))"#;
+    assert_eq!(
+        profile_forms(escaped_quote),
+        vec![escaped_quote],
+        "a backslash must escape the next character inside a string"
+    );
+
+    let escaped_backslash = r#"(deny file-read* (literal "/a\\"))"#;
+    assert_eq!(
+        profile_forms(escaped_backslash),
+        vec![escaped_backslash],
+        "an escaped backslash must stay inside its string"
+    );
+
+    let spaced = r#"(deny file-read* (literal "/a  b"))"#;
+    assert_eq!(
+        profile_forms(spaced),
+        vec![spaced],
+        "whitespace inside a string must be kept"
+    );
+
+    assert_eq!(
+        profile_forms("(version   1)"),
+        vec!["(version 1)"],
+        "whitespace outside strings must collapse to one space"
+    );
+
+    assert_eq!(
+        profile_forms("(version 1) ; (allow default)\n(deny default)"),
+        vec!["(version 1)", "(deny default)"],
+        "a form after a comment's newline must still load"
+    );
+}
+
+/// A comment inside a form ends at its newline, and that newline still
+/// separates the form's tokens, as `sandbox-exec` reads it. Without the
+/// separator `(allow;x\ndefault)` reads as `(allowdefault)`, which matches
+/// neither `is_default_allow` nor `is_network_allow`; both forms would then
+/// pass the one check while `sandbox-exec` applies them. The fixtures are
+/// built in the test; no file is read and no process starts.
+///
+/// Falsifier: WP38 drops the newline that ends a comment; this test fails
+/// because the glued form passes the check and the parser returns
+/// `(allowdefault)`.
+#[test]
+fn a_comment_inside_a_form_keeps_its_tokens_apart() {
+    assert_eq!(
+        profile_forms("(allow;x\ndefault)"),
+        vec!["(allow default)"],
+        "the newline that ends a comment must separate the tokens"
+    );
+    assert_eq!(
+        profile_forms("(allow;x\nnetwork*)"),
+        vec!["(allow network*)"],
+        "the newline that ends a comment must separate the tokens"
+    );
+
+    let complete = contract_fixture_profile(true);
+    for (line, refusal) in [
+        (
+            "(allow;x\ndefault)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "(allow;x\nnetwork*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+    ] {
+        let profile = format!("{complete}{line}");
+        let reason = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a form split by a comment must fail the one check");
+        assert_eq!(
+            reason, refusal,
+            "the refusal must be the exact reason for the hidden form"
+        );
+    }
+}
+
+/// Whitespace directly after an opening parenthesis does not change the rule
+/// name, as `sandbox-exec` reads it. Without the normalization
+/// `( allow default)` and `(;x\nallow default)` read as `( allow default)`,
+/// which matches neither `is_default_allow` nor `is_network_allow`; the hidden
+/// rule would then pass the one check while `sandbox-exec` applies it. The
+/// same holds for the network form. The fixtures are built in the test; no
+/// file is read and no process starts.
+///
+/// Falsifier: WP40 adds the separator space after an opening parenthesis; this
+/// test fails because the parser returns `( allow default)` and both spaced
+/// forms pass the check.
+#[test]
+fn a_space_after_the_opening_parenthesis_still_names_its_rule() {
+    for line in ["(allow default)", "( allow default)", "(;x\nallow default)"] {
+        assert_eq!(
+            profile_forms(line),
+            vec!["(allow default)"],
+            "whitespace after the opening parenthesis must not name a new rule"
+        );
+    }
+    for line in [
+        "(allow network*)",
+        "( allow network*)",
+        "(;x\nallow network*)",
+    ] {
+        assert_eq!(
+            profile_forms(line),
+            vec!["(allow network*)"],
+            "whitespace after the opening parenthesis must not name a new rule"
+        );
+    }
+
+    let complete = contract_fixture_profile(true);
+    for (line, refusal) in [
+        (
+            "( allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "(;x\nallow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "( allow network*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+        (
+            "(;x\nallow network*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+    ] {
+        let profile = format!("{complete}{line}");
+        let reason = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a spaced allow form must fail the one check");
+        assert_eq!(
+            reason, refusal,
+            "the refusal must be the exact reason for the spaced form"
+        );
+    }
+}
+
+/// A bare value outside every form, such as `1` or `"x"`, is its own form,
+/// as `sandbox-exec` reads it: whitespace or a `(` ends it. Without that split
+/// `1 (allow default)` reads as one form, which matches neither
+/// `is_default_allow` nor `is_network_allow`; the hidden rule would then pass
+/// the one check while `sandbox-exec` applies it. A bare value at the end of the
+/// profile is a form too, not an unclosed one. The fixtures are built in the
+/// test; no file is read and no process starts.
+///
+/// Falsifier: WP39 drops the split outside every form; this test fails
+/// because the parser returns `1 (allow default)` and the glued form passes
+/// the check.
+#[test]
+fn a_bare_top_level_value_is_its_own_form() {
+    assert_eq!(
+        profile_forms("1\n(allow default)"),
+        vec!["1", "(allow default)"],
+        "whitespace outside every form must end a bare value"
+    );
+    assert_eq!(
+        profile_forms("1(allow default)"),
+        vec!["1", "(allow default)"],
+        "a `(` outside every form must end a bare value"
+    );
+    assert_eq!(
+        profile_forms(r#""x" (allow default)"#),
+        vec![r#""x""#, "(allow default)"],
+        "a bare string must be its own form"
+    );
+    assert_eq!(
+        profile_forms("(version 1) 1"),
+        vec!["(version 1)", "1"],
+        "a bare value at the end of the profile must be its own form"
+    );
+
+    let complete = contract_fixture_profile(true);
+    for (line, refusal) in [
+        (
+            "1\n(allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "\"x\" (allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "1(allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "1 (allow network*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+    ] {
+        let profile = format!("{complete}{line}");
+        let reason = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a form after a bare value must fail the one check");
+        assert_eq!(
+            reason, refusal,
+            "the refusal must be the exact reason for the form after the bare value"
+        );
+    }
+}
+
+/// `sandbox-exec` itself reads a bare value before a form as two forms: it
+/// evaluates the `1`, ignores it and applies the `(allow default)` after it.
+/// The fixture writes `(version 1)(deny default) 1 (allow default)` to a
+/// temporary file and runs `/usr/bin/true` under it, which must exit 0. Under
+/// `(deny default)` alone `/usr/bin/true` cannot start, so the exit shows the
+/// premise of `a_bare_top_level_value_is_its_own_form`. It checks that premise,
+/// not a rule, so it carries no falsifier entry.
+#[test]
+fn the_bare_value_fixture_loads_under_sandbox_exec() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let mut file = tempfile::NamedTempFile::new().expect("temporary bare value fixture profile");
+    file.write_all(b"(version 1)(deny default) 1 (allow default)\n")
+        .expect("write the bare value fixture profile");
+    let output = Command::new(SANDBOX_EXEC)
+        .arg("-f")
+        .arg(file.path())
+        .arg("/usr/bin/true")
+        .output()
+        .expect("sandbox-exec must start");
+    assert!(
+        output.status.success(),
+        "sandbox-exec must load the bare value fixture and start true: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `sandbox-exec` itself reads the two string lines as `profile_forms` does:
+/// it parses their `;`, `(` and `)` as text and applies the `(allow default)`
+/// they hold. The fixture writes `(version 1)`, `(deny default)` and those two
+/// lines to a temporary file and runs `/usr/bin/true` under it, which must
+/// exit 0. Under `(deny default)` alone `/usr/bin/true` cannot start, so the
+/// exit shows the fixture's premise. It checks that premise, not a rule, so it
+/// carries no falsifier entry.
+#[test]
+fn the_string_fixture_loads_under_sandbox_exec() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let profile = format!("(version 1)\n(deny default)\n{STRING_LINES}");
+    let mut file = tempfile::NamedTempFile::new().expect("temporary string fixture profile");
+    file.write_all(profile.as_bytes())
+        .expect("write the string fixture profile");
+    let status = Command::new(SANDBOX_EXEC)
+        .arg("-f")
+        .arg(file.path())
+        .arg("/usr/bin/true")
+        .status()
+        .expect("sandbox-exec must start");
+    assert!(
+        status.success(),
+        "sandbox-exec must load the string fixture and start true: {status}"
+    );
+}
+
+/// The parser refuses an unclosed string with the existing "must not end
+/// early" reason and a detail that names the string. It reads no form past it.
+///
+/// Falsifier: WP36 drops the unclosed-string refusal; this test fails because
+/// the profile then ends as an unclosed form, whose reason names no string.
+#[test]
+fn profile_forms_rejects_unclosed_string() {
+    let refusal = std::panic::catch_unwind(|| profile_forms("(literal \"/unclosed)"))
+        .expect_err("an unclosed string must fail");
+    let message = refusal
+        .downcast_ref::<String>()
+        .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+    assert_eq!(
+        message.as_str(),
+        "the profile must not end early: unclosed string in (literal \"/unclosed)",
+        "the refusal must be the exact reason for the unclosed string"
+    );
+}
+
+/// The parser refuses an unclosed form with the existing "must not end early"
+/// reason and a detail that names the form, while a closed form loads.
+///
+/// Falsifier: WP37 drops the unclosed-form refusal; this test fails because
+/// the incomplete profile returns no refusal.
+#[test]
+fn profile_forms_rejects_unclosed_form() {
+    let refusal = std::panic::catch_unwind(|| profile_forms("(deny default"))
+        .expect_err("an unclosed form must fail");
+    let message = refusal
+        .downcast_ref::<String>()
+        .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+    assert_eq!(
+        message.as_str(),
+        "the profile must not end early: unclosed form (deny default",
+        "the refusal must be the exact reason for the unclosed form"
+    );
+    assert_eq!(
+        profile_forms("(deny default)"),
+        vec!["(deny default)"],
+        "a closed form must load"
+    );
+}
+
 /// The one list requires the model profile with the did and wallet profiles
 /// and refuses a missing or unreadable one instead of skipping it.
 #[test]
@@ -1162,31 +1695,123 @@ fn file_profile_contract_checks_the_model_profile_when_present() {
     );
 }
 
-/// Splits the profile into top-level s-expressions with comments removed, so a
-/// rule cannot hide behind line breaks or comments.
+/// Splits the profile into top-level s-expressions the way `sandbox-exec`
+/// reads it. `profile_characters` removes comments and marks strings; this
+/// function collapses whitespace outside strings, keeps every character inside
+/// one, counts parentheses only outside strings and collects the forms. Outside
+/// every form, whitespace or a `(` ends a bare value such as `1` or `"x"`, so
+/// that value is its own form and every top-level form starts its own entry.
+/// Whitespace directly after an opening parenthesis is dropped, so
+/// `( allow default)` reads as the form `(allow default)`.
+/// An unclosed form is a refusal with its own reason.
 fn profile_forms(profile: &str) -> Vec<String> {
-    let mut text = String::new();
-    for line in profile.lines() {
-        text.push_str(line.split(';').next().unwrap_or(""));
-        text.push(' ');
-    }
     let mut forms = Vec::new();
     let mut current = String::new();
     let mut depth = 0usize;
-    for token in text.split_whitespace() {
-        if !current.is_empty() {
-            current.push(' ');
+    let mut space_due = false;
+    for (ch, in_string) in profile_characters(profile) {
+        if in_string {
+            if space_due {
+                push_separator(&mut current);
+            }
+            space_due = false;
+            current.push(ch);
+            continue;
         }
-        current.push_str(token);
-        depth += token.matches('(').count();
-        depth = depth.saturating_sub(token.matches(')').count());
-        if depth == 0 && !current.is_empty() {
+        if depth == 0 && (ch.is_whitespace() || ch == '(') && !current.is_empty() {
             forms.push(std::mem::take(&mut current));
         }
+        match ch {
+            _ if ch.is_whitespace() => space_due = true,
+            '(' | ')' => {
+                if space_due {
+                    push_separator(&mut current);
+                }
+                space_due = false;
+                current.push(ch);
+                if ch == '(' {
+                    depth += 1;
+                } else {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && !current.is_empty() {
+                        forms.push(std::mem::take(&mut current));
+                    }
+                }
+            }
+            _ => {
+                if space_due {
+                    push_separator(&mut current);
+                }
+                space_due = false;
+                current.push(ch);
+            }
+        }
+    }
+    if depth == 0 && !current.is_empty() {
+        forms.push(std::mem::take(&mut current));
     }
     assert!(
         current.is_empty(),
-        "the profile must not end early: {current}"
+        "the profile must not end early: unclosed form {current}"
     );
     forms
+}
+
+/// Adds the one separator space between tokens. No separator is added directly
+/// after an opening parenthesis, where no token has started, so `( allow
+/// default)` reads as the form `(allow default)` and the allow rules still
+/// match it.
+fn push_separator(current: &mut String) {
+    if !current.is_empty() && !current.ends_with('(') {
+        current.push(' ');
+    }
+}
+
+/// The characters the profile reader consumes, each marked with whether it
+/// sits inside a double-quoted string. A `;` outside a string starts a comment
+/// that runs to the end of its line; the newline that ends the comment stays
+/// as a separator, so a comment inside a form keeps its two tokens apart.
+/// Inside a string a backslash escapes the next character, so a `;`, `(` and
+/// `)` there stay text and a quote does not end the string. The reader reads
+/// no block comment and no `#` literal, because no profile holds either. An
+/// unclosed string is a refusal with its own reason.
+fn profile_characters(profile: &str) -> Vec<(char, bool)> {
+    let mut characters = Vec::new();
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut escaped = false;
+    for ch in profile.chars() {
+        if in_comment {
+            in_comment = ch != '\n';
+            if !in_comment {
+                characters.push((ch, false));
+            }
+            continue;
+        }
+        if escaped {
+            characters.push((ch, true));
+            escaped = false;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            characters.push((ch, true));
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            characters.push((ch, true));
+            continue;
+        }
+        if !in_string && ch == ';' {
+            in_comment = true;
+            continue;
+        }
+        characters.push((ch, in_string));
+    }
+    assert!(
+        !in_string,
+        "the profile must not end early: unclosed string in {profile}"
+    );
+    characters
 }
