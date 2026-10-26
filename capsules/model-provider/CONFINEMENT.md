@@ -187,8 +187,8 @@ exit other than status 71 with `execvp()` and `Operation not permitted`, or
 a process still running after 2 seconds. The launch helper records the sha256
 when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
 when the file changes (`bound_executable_digest_mismatch_refuses_start`).
-That refusal is a lab stand-in for the Runtime's launch-by-hash check (M1 B1,
-Anders's half), not the Runtime's check.
+That refusal is a lab stand-in for the Runtime's launch-by-hash check, not the
+Runtime's check. This stand-in counts toward no M1 check.
 
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
