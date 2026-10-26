@@ -903,3 +903,40 @@
   `tools/Cargo.toml`, `capsule/`, `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo
   root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
   lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 039 (M1 A12 lab half, step 1 of 2: the run folder is removed after every engine start; base
+  `dc80a2935`). `tools/src/run.rs`: `run_engine` is now steps 1 and 2, then `make_run_dir` (step 3, unchanged
+  rule), `write_and_start` (steps 4 and 5, unchanged lines) and `finish_run`, which reads the outcome (the engine has
+  exited, or never started) and then calls `remove_run_dir` on every outcome after the folder was made:
+  `fs::remove_file` on `module.wasm` unless the writer refused to create it (`module_made`), then `fs::remove_dir`
+  on the folder, never `remove_dir_all`, so an entry someone else put there stays and the removal fails. After a
+  success a failed removal is refused with the new `Reason::RunDirNotRemoved(io::Error)`, text `the run folder cannot
+  be removed after the engine exited: <OS error>`, at the path it stopped at; after a refusal the first refusal stays
+  the answer and a failed removal is not reported (known limit, README). A killed runner leaves its folder (known
+  limit; 040's census covers a killed engine, not a killed runner). `tests/run.rs`: one shared shell snippet,
+  `RECORD_RUN_FOLDER` beside `MODULE_ARGUMENT`, records a stand-in's run folder during its run beside its own `$0`
+  (outside the work root): the module copy, the folder's mode (`/usr/bin/stat -f %Lp`) and its entries; `CAT_MODULE`,
+  `counting` and `recording` use it (no new stand-in helper). The tests that read the run folder after a run now read
+  those records and also assert the folder is gone; the second-run case of `run_directory_is_private_and_new` now
+  runs and makes a new `0o700` folder; the planted-folder case stays refused and the planted folder is not removed.
+  New tests `run_engine_removes_its_run_folder_after_every_outcome` (both engines: success, `FAILING`, a missing
+  absolute program), `run_leaves_an_empty_work_root` (two-engine pass, and wasmer failing) and
+  `run_folder_that_cannot_be_removed_is_refused` (extra file: `Directory not empty (os error 66)` at the run
+  folder, the extra file stays, the module file is gone; a folder at the module path: os error 1 at that path; extra
+  file then a failure: the failure is the answer). Three new falsifiers, runner-caught: F-WC5-RUN-DIR-KEPT,
+  F-WC5-RUN-DIR-KEPT-ON-FAILURE, F-WC5-REMOVAL-ERROR-DROPPED. F-WC5-DISK-REREAD's planted line now finds the bundle
+  with `run_dir.with_file_name("bundle")` (the write moved into `write_and_start`, which has no work root), anchor
+  unchanged, same bug; F-WC-README-COUNT re-anchored to 173. Before the edits every existing anchor in
+  `falsifiers.json` was found exactly once, and still is. Canonical runner, from the repo root, `python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json <63 ids>` (every entry that edits
+  `tools/src/run.rs`, every entry naming a test whose body or stand-in helper changed, F-WC-README-COUNT, and the three
+  new): "baseline: 37 named tests pass without an edit, 0 do not", "summary: 63 CAUGHT of 63", exit 0, no
+  `*.falsify-original` backup left. Both engines were on PATH, so F-WC5-BOTH-ARGS ran. Real engines
+  (`/opt/homebrew/bin` wasmtime 45.0.1, wasmer 7.5.0): `real_receipt_names_both_installed_engines`, the three wasmtime
+  cap tests, `zero_grants_zero_imports_runs_on_both_real_engines` and the other real runs print PASS, assertions on
+  output, status and receipt unchanged. README: the run section (step 6, which answer wins, the new reason), the
+  test list, totals 173 (three task 039) and 109 runner-caught, a task 039 section; ADOPTION gets one task 039
+  paragraph. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked`
+  (106 passed, 2 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0.
+  No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/`, `tools/build`, engine argv, receipt
+  text, lab CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
