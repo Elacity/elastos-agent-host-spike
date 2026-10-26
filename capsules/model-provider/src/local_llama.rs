@@ -905,10 +905,9 @@ async fn finish_guard_shutdown(
             if !exited_guard_signal_can_settle(guard_exited, error.raw_os_error()) {
                 return Err(guard_close_failed("guard_signal", error.raw_os_error()));
             }
-            // Darwin excludes zombies from killpg recipients and can return
-            // EPERM for a zombie-only group (XNU bsd/kern/kern_sig.c, killpg1).
-            // This permits only the owned reap below, not successful closure:
-            // the post-reap group probe must still establish ESRCH.
+            // The guard has already exited, so this permits only the owned reap
+            // below, not successful closure: the post-reap group probe must
+            // still establish ESRCH.
         }
     }
     let deadline = tokio::time::Instant::now() + GUARD_EXIT_GRACE;
@@ -916,16 +915,26 @@ async fn finish_guard_shutdown(
         .await
         .map_err(|_| LocalLlamaFault::Timeout)?
         .map_err(|error| guard_close_failed("guard_wait", error.raw_os_error()))?;
+    // Only ESRCH proves the group holds no member at all. A Darwin EPERM does
+    // not: it covers a group of only zombies and a live member that refuses the
+    // signal. Poll through that answer to the deadline, then report why the
+    // closure stayed unproven.
     loop {
         if unsafe { libc::kill(-guard_group, 0) } != 0 {
             let errno = std::io::Error::last_os_error().raw_os_error();
-            return if errno == Some(libc::ESRCH) {
-                Ok(())
-            } else {
-                Err(guard_close_failed("guard_absence", errno))
-            };
-        }
-        if tokio::time::Instant::now() >= deadline {
+            if errno == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            if !group_eperm_is_unsettled(errno) {
+                return Err(guard_close_failed("guard_absence", errno));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // Unproven closure keeps its reason: the group may hold a live
+                // member whose signal the OS refused.
+                return Err(guard_close_failed("guard_absence", Some(libc::EPERM)));
+            }
+        } else if tokio::time::Instant::now() >= deadline {
+            // A live member keeps the group present; absence is not established.
             return Err(LocalLlamaFault::Timeout);
         }
         sleep(
@@ -946,11 +955,33 @@ async fn finish_guard_shutdown(
 }
 
 #[cfg(unix)]
+fn group_eperm_is_unsettled(errno: Option<i32>) -> bool {
+    // XNU's killpg1 (bsd/kern/kern_sig.c) excludes zombies from its recipients
+    // and reports a group of only zombies as EPERM; it also reports EPERM when
+    // every live member refuses the signal. The answer never settles the
+    // group's state, and only Darwin gives it for a zombie-only group, so the
+    // rule is platform-scoped: the group stays unsettled until ESRCH or the
+    // deadline.
+    cfg!(target_os = "macos") && errno == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
 fn exited_guard_signal_can_settle(guard_exited: bool, errno: Option<i32>) -> bool {
-    cfg!(target_os = "macos") && guard_exited && errno == Some(libc::EPERM)
+    guard_exited && group_eperm_is_unsettled(errno)
+}
+
+// The last closure diagnostic this test thread reported. Tests use it to prove
+// that a refusal keeps its reason; it records only what `guard_close_failed`
+// already prints and does not change behaviour.
+#[cfg(all(test, unix))]
+thread_local! {
+    static LAST_CLOSURE_STAGE: std::cell::RefCell<Option<(&'static str, Option<i32>)>> =
+        std::cell::RefCell::new(None);
 }
 
 fn guard_close_failed(stage: &'static str, errno: Option<i32>) -> LocalLlamaFault {
+    #[cfg(all(test, unix))]
+    LAST_CLOSURE_STAGE.with(|last| *last.borrow_mut() = Some((stage, errno)));
     // Private diagnostics carry only a fixed stage and OS error number, never
     // artifact paths, model text, or caller identity. Failure semantics stay exact.
     eprintln!("[model-provider] local engine closure stage={stage} errno={errno:?}");
@@ -1669,6 +1700,107 @@ mod tests {
             "post-reap shutdown signalled the surviving member"
         );
         assert!(!process_exists(member_pid));
+    }
+
+    fn last_closure_stage() -> Option<(&'static str, Option<i32>)> {
+        LAST_CLOSURE_STAGE.with(|last| *last.borrow())
+    }
+
+    fn reset_last_closure_stage() {
+        LAST_CLOSURE_STAGE.with(|last| *last.borrow_mut() = None);
+    }
+
+    /// A reaped guard whose group still holds one zombie: a killed child of this
+    /// test that nobody has reaped yet. The test owns every Child handle, so
+    /// cleanup never signals a group it does not own.
+    async fn reaped_guard_with_zombie_member() -> (Child, libc::pid_t, Child, libc::pid_t) {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut guard_command = Command::new("/bin/cat");
+        guard_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        guard_command.as_std_mut().process_group(0);
+        let mut guard = guard_command.spawn().unwrap();
+        let group = guard.id().unwrap() as libc::pid_t;
+        let mut member_command = Command::new("/bin/cat");
+        member_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        member_command.as_std_mut().process_group(group);
+        let member = member_command.spawn().unwrap();
+        let member_pid = member.id().unwrap() as libc::pid_t;
+
+        guard.kill().await.unwrap(); // Owned wait leaves child.id() == None.
+        assert_eq!(unsafe { libc::kill(member_pid, libc::SIGKILL) }, 0);
+        // waitid with WNOWAIT observes the exit without reaping it, so the
+        // member stays a zombie until this test reaps its own Child.
+        let deadline = StdInstant::now() + FIXTURE_EVENT_TIMEOUT;
+        while !child_exited_without_reaping(member_pid).unwrap() {
+            assert!(
+                StdInstant::now() < deadline,
+                "the zombie member never reported its exit"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+        reset_last_closure_stage();
+        (guard, group, member, member_pid)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zombie_only_group_closes_once_the_zombie_is_reaped() {
+        let (mut guard, group, mut member, member_pid) = reaped_guard_with_zombie_member().await;
+        // The zombie's owner reaps it well inside the closure deadline. Darwin
+        // answers EPERM for the group until then, and that answer must keep the
+        // probe polling instead of failing the close.
+        let reaper = tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            member.wait().await
+        });
+        let result = tokio::time::timeout(
+            FIXTURE_EVENT_TIMEOUT,
+            finish_guard_shutdown(&mut guard, group, Duration::from_millis(100)),
+        )
+        .await;
+        let reaped = reaper.await;
+        assert_eq!(result.unwrap(), Ok(()));
+        assert!(!process_exists(member_pid));
+        assert_eq!(last_closure_stage(), None);
+        reaped.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zombie_left_past_the_deadline_is_a_close_failure() {
+        let (mut guard, group, mut member, member_pid) = reaped_guard_with_zombie_member().await;
+        let result = tokio::time::timeout(
+            FIXTURE_EVENT_TIMEOUT,
+            finish_guard_shutdown(&mut guard, group, Duration::from_millis(100)),
+        )
+        .await;
+        // The zombie is reaped only after the close returned, so the probe never
+        // saw ESRCH and closure stayed unproven.
+        let member_exit = member.wait().await;
+        assert!(!process_exists(member_pid));
+        member_exit.unwrap();
+        if cfg!(target_os = "macos") {
+            // An EPERM that lasts to the deadline is a refusal with its reason,
+            // not an anonymous timeout: the group may also hold a live member
+            // whose signal the OS refused.
+            assert_eq!(result.unwrap(), Err(LocalLlamaFault::Failed));
+            assert_eq!(
+                last_closure_stage(),
+                Some(("guard_absence", Some(libc::EPERM)))
+            );
+        } else {
+            // Linux counts the zombie as a group member, so the probe keeps
+            // succeeding until the deadline.
+            assert_eq!(result.unwrap(), Err(LocalLlamaFault::Timeout));
+            assert_eq!(last_closure_stage(), None);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

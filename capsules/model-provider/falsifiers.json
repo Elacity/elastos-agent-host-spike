@@ -1,5 +1,5 @@
 {
-  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. PV54 and PV55 remove or over-extend the failed test's own captured section that keeps a quoted child standard error out of the harness error search, and PV56-PV59 accept the end of the output as its closing delimiter, match the section header anywhere on a line, end the section at its last delimiter, remove only the first section, and PV60 lets a line that starts with the closing delimiter and goes on close a section. PV61-PV64 read the loader or Cargo marker after the section removal, accept text after the section header, and close a section at a line that ends with the closing delimiter. Files are relative to examples/agent-host.",
+  "about": "Model-provider lane falsifiers: each selftest entry breaks one falsify.py check, MP01 plants a wrapping add in counted_input_tokens so an overflowing repeated prefix no longer refuses, MP02-MP04 break the 60-second idle release behaviour, MP05-MP10 weaken the context-window admission tests, MP11 plants a nonzero cache size in the launched engine arguments, MP12-MP14 misreport the journal write outcome (a denied write as corrupt, a non-permission write as denied, and a denial without its operation), and MP15-MP16 bypass the shared journal write mapper at the replace and write call sites. The `did` and `wallet` commands share one provider-crate table with `provider`; PV43 maps `did` to the wallet manifest, PV44 and PV45 drop a did or wallet recovery target from PROVIDER_TARGETS, PV46 bypasses the refusal of an edit whose file does not exist, and PV47 and PV48 drop the model or the did confinement test harness target so a killed run leaves a mutated harness behind, and PV49 drops wallet's falsifier honesty test target, which wallet's list mutates (WP25). PV50 maps `capsule-identity` to the wasm-capsule manifest, and PV51-PV53 drop capsule-identity's source, test support or fixture target from PROVIDER_TARGETS, which the lab's list mutates. PV54 and PV55 remove or over-extend the failed test's own captured section that keeps a quoted child standard error out of the harness error search, and PV56-PV59 accept the end of the output as its closing delimiter, match the section header anywhere on a line, end the section at its last delimiter, remove only the first section, and PV60 lets a line that starts with the closing delimiter and goes on close a section. PV61-PV64 read the loader or Cargo marker after the section removal, accept text after the section header, and close a section at a line that ends with the closing delimiter. MP17-MP20 break the post-reap group probe for a zombie-only group on the Mac: MP17 restores the immediate EPERM failure, MP18 makes an EPERM that lasts to the deadline a bare timeout, MP19 accepts that EPERM as closure without ESRCH, and MP20 drops the deadline's closure reason; their evidence is macOS only. Files are relative to examples/agent-host.",
   "falsifiers": [
     {
       "id": "PV01",
@@ -1448,6 +1448,70 @@
       ],
       "tests": [
         "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "MP17",
+      "title": "the post-reap probe fails at once when the group answers EPERM, so a zombie-only group reads as a close error",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "            if !group_eperm_is_unsettled(errno) {\n                return Err(guard_close_failed(\"guard_absence\", errno));\n            }\n            if tokio::time::Instant::now() >= deadline {\n                // Unproven closure keeps its reason: the group may hold a live\n                // member whose signal the OS refused.\n                return Err(guard_close_failed(\"guard_absence\", Some(libc::EPERM)));\n            }",
+          "new": "            return Err(guard_close_failed(\"guard_absence\", errno));"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::zombie_only_group_closes_once_the_zombie_is_reaped"
+      ]
+    },
+    {
+      "id": "MP18",
+      "title": "an EPERM that lasts to the deadline is reported as a bare timeout instead of a closure failure",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "                return Err(guard_close_failed(\"guard_absence\", Some(libc::EPERM)));",
+          "new": "                return Err(LocalLlamaFault::Timeout);"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::zombie_left_past_the_deadline_is_a_close_failure"
+      ]
+    },
+    {
+      "id": "MP19",
+      "title": "the post-reap probe accepts EPERM as closure without ESRCH",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "            if errno == Some(libc::ESRCH) {\n                return Ok(());\n            }",
+          "new": "            if errno == Some(libc::ESRCH) || group_eperm_is_unsettled(errno) {\n                return Ok(());\n            }"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::zombie_left_past_the_deadline_is_a_close_failure"
+      ]
+    },
+    {
+      "id": "MP20",
+      "title": "the deadline's closure failure loses its stage and errno reason",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/local_llama.rs",
+          "old": "                return Err(guard_close_failed(\"guard_absence\", Some(libc::EPERM)));",
+          "new": "                return Err(LocalLlamaFault::Failed);"
+        }
+      ],
+      "tests": [
+        "local_llama::tests::zombie_left_past_the_deadline_is_a_close_failure"
       ]
     }
   ]
