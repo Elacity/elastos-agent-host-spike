@@ -18,16 +18,22 @@
 //! root. The real-Runtime rows stay BLOCKED. The exact change is in
 //! `PROPOSED-LAUNCHER-CHANGE.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod walk;
+
 /// Linux `O_NOFOLLOW`. Open the last component only; do not follow a link.
+/// Kept as a named hook so plant `F-A9-nofollow` / mutant `M-no-nofollow` can drop it.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 const O_NOFOLLOW: i32 = 0o400000;
 
 pub mod launch;
@@ -84,7 +90,7 @@ pub enum Refuse {
     Traversal,
     /// A symlink resolves outside the caller's root.
     Symlink,
-    /// The file is hard-linked, or its inode is not in the owner's tree.
+    /// The file is hard-linked, or its inode is owned by another agent.
     HardLink,
     /// The path leaves the caller's root some other way.
     OutsideRoot,
@@ -132,6 +138,7 @@ struct OpenAgent {
     instance: u64,
     owned_root: String,
     path: PathBuf,
+    root: fs::File,
 }
 
 /// One yard of per-agent directories. Cleanup removes the yard.
@@ -141,6 +148,8 @@ pub struct Store {
     agents: Vec<OpenAgent>,
     next_instance: u64,
     life: Life,
+    /// Inodes this store created through `write`, keyed to the agent index.
+    created: Mutex<HashMap<(u64, u64), usize>>,
 }
 
 impl Store {
@@ -166,6 +175,7 @@ impl Store {
             agents: Vec::new(),
             next_instance: 0,
             life: Life::Open,
+            created: Mutex::new(HashMap::new()),
         })
     }
 
@@ -197,12 +207,14 @@ impl Store {
             return Err(Refuse::OutsideRoot);
         }
         let owned_root = a5_owned_root(identity, &format!("{session}/{instance}"))?;
+        let root = walk::open_root(&canon)?;
         self.agents.push(OpenAgent {
             identity: identity.to_owned(),
             session: session.to_owned(),
             instance,
             owned_root: owned_root.clone(),
             path: canon,
+            root,
         });
         Ok(Grant {
             identity: identity.to_owned(),
@@ -222,31 +234,27 @@ impl Store {
     pub fn read(&self, grant: &Grant, path: &str) -> Result<Vec<u8>, Refuse> {
         let full = self.resolve(grant, path)?;
         let root = self.live_root_for(grant)?;
-        match fs::symlink_metadata(&full) {
-            Ok(meta) if meta.file_type().is_symlink() => Err(Refuse::Symlink),
-            Ok(meta) if meta.is_file() => {
-                refuse_hard_link(&meta)?;
-                inode_in_owner_tree(root, &full)?;
-                let confirmed = confirm_resolved(root, &full)?;
-                refuse_foreign_file(root, &confirmed)?;
-                let mut file = open_nofollow(&confirmed, false)?;
-                confirm_resolved(root, &confirmed)?;
-                refuse_foreign_file(root, &confirmed)?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)
-                    .map_err(|_| Refuse::OutsideRoot)?;
-                Ok(bytes)
-            }
-            Ok(_) => Err(Refuse::OutsideRoot),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(Refuse::NotFound),
-            Err(_) => Err(Refuse::OutsideRoot),
+        let parts = io_components(path, root, &full)?;
+        let mut file = walk::open_existing_file(&self.agent(grant)?.root, &parts)?;
+        let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(Refuse::OutsideRoot);
         }
+        refuse_hard_link(&meta)?;
+        created_inode_is_foreign(self, grant, &meta)?;
+        inode_in_owner_tree(root, &full)?;
+        refuse_foreign_file(root, &full)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| Refuse::OutsideRoot)?;
+        Ok(bytes)
     }
 
     /// Writes one file inside the grant's root.
     pub fn write(&self, grant: &Grant, path: &str, bytes: &[u8]) -> Result<(), Refuse> {
         let full = self.resolve(grant, path)?;
         let root = self.live_root_for(grant)?;
+        let parts = io_components(path, root, &full)?;
         if let Ok(meta) = fs::symlink_metadata(&full) {
             if meta.file_type().is_symlink() {
                 return Err(Refuse::Symlink);
@@ -256,19 +264,18 @@ impl Store {
             }
             refuse_foreign_file(root, &full)?;
         }
-        if let Some(parent) = full.parent() {
-            if !contained(root, parent) && parent != root {
-                return Err(Refuse::OutsideRoot);
-            }
-            if parent != root {
-                fs::create_dir_all(parent).map_err(|_| Refuse::OutsideRoot)?;
-            }
-            confirm_resolved(root, parent)?;
+        let mut file = walk::open_or_create_file(&self.agent(grant)?.root, &parts)?;
+        let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
+        if meta.file_type().is_symlink() {
+            return Err(Refuse::Symlink);
         }
-        confirm_resolved(root, &full)?;
-        let mut file = open_nofollow(&full, true)?;
-        confirm_resolved(root, &full)?;
-        refuse_foreign_file(root, &full)?;
+        if !meta.is_file() {
+            return Err(Refuse::OutsideRoot);
+        }
+        refuse_hard_link(&meta)?;
+        created_inode_is_foreign(self, grant, &meta)?;
+        record_created_inode(self, grant, &meta)?;
+        file.set_len(0).map_err(|_| Refuse::OutsideRoot)?;
         file.write_all(bytes).map_err(|_| Refuse::OutsideRoot)
     }
 
@@ -297,13 +304,12 @@ impl Store {
         if !meta.is_dir() {
             return Err(Refuse::OutsideRoot);
         }
-        let mut names = Vec::new();
-        for entry in fs::read_dir(&confirmed).map_err(|_| Refuse::OutsideRoot)? {
-            let entry = entry.map_err(|_| Refuse::OutsideRoot)?;
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-        names.sort();
-        Ok(names)
+        let parts = if path.is_empty() {
+            Vec::new()
+        } else {
+            io_components(path, &root, &confirmed)?
+        };
+        walk::list_names(&walk::open_dir(&self.agent(grant)?.root, &parts)?)
     }
 
     /// Renames one name to another inside the grant's root.
@@ -325,7 +331,9 @@ impl Store {
         if dst.exists() {
             refuse_foreign_file(&root, &dst)?;
         }
-        fs::rename(&src, &dst).map_err(|_| Refuse::OutsideRoot)?;
+        let from_parts = io_components(from, &root, &src)?;
+        let to_parts = io_components(to, &root, &dst)?;
+        walk::rename_rel(&self.agent(grant)?.root, &from_parts, &to_parts)?;
         assert_root_is_real_dir(&root)?;
         Ok(())
     }
@@ -338,6 +346,10 @@ impl Store {
         match self.life {
             Life::Removed | Life::Sealed => return Ok(()),
             Life::Open => {}
+        }
+        self.agents.clear();
+        if let Ok(mut created) = self.created.lock() {
+            created.clear();
         }
         if self.yard.exists() && fs::remove_dir_all(&self.yard).is_err() {
             seal_tree(&self.yard);
@@ -375,6 +387,19 @@ impl Store {
         let agent = self.agent(grant)?;
         assert_root_is_real_dir(&agent.path)?;
         Ok(&agent.path)
+    }
+
+    fn agent_index(&self, grant: &Grant) -> Result<usize, Refuse> {
+        self.require_open()?;
+        self.agents
+            .iter()
+            .position(|agent| {
+                agent.identity == grant.identity
+                    && agent.session == grant.session
+                    && agent.instance == grant.instance
+                    && agent.owned_root == grant.owned_root
+            })
+            .ok_or(Refuse::UnknownGrant)
     }
 
     fn resolve(&self, grant: &Grant, path: &str) -> Result<PathBuf, Refuse> {
@@ -665,6 +690,54 @@ fn refuse_hard_link(meta: &fs::Metadata) -> Result<(), Refuse> {
     Ok(())
 }
 
+fn created_inode_is_foreign(
+    store: &Store,
+    grant: &Grant,
+    meta: &fs::Metadata,
+) -> Result<(), Refuse> {
+    let idx = store.agent_index(grant)?;
+    let key = (meta.dev(), meta.ino());
+    let created = store.created.lock().map_err(|_| Refuse::OutsideRoot)?;
+    if let Some(&owner) = created.get(&key) {
+        if owner != idx {
+            return Err(Refuse::HardLink);
+        }
+    }
+    Ok(())
+}
+
+fn record_created_inode(store: &Store, grant: &Grant, meta: &fs::Metadata) -> Result<(), Refuse> {
+    created_inode_is_foreign(store, grant, meta)?;
+    let idx = store.agent_index(grant)?;
+    store
+        .created
+        .lock()
+        .map_err(|_| Refuse::OutsideRoot)?
+        .insert((meta.dev(), meta.ino()), idx);
+    Ok(())
+}
+
+fn io_components(path: &str, root: &Path, full: &Path) -> Result<Vec<OsString>, Refuse> {
+    let raw = Path::new(path);
+    let rel: &Path = if raw.is_absolute() {
+        full.strip_prefix(root).map_err(|_| Refuse::OutsideRoot)?
+    } else {
+        raw
+    };
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(name) => parts.push(name.to_os_string()),
+            Component::ParentDir => return Err(Refuse::Traversal),
+            _ => return Err(Refuse::HostPath),
+        }
+    }
+    if parts.is_empty() {
+        return Err(Refuse::HostPath);
+    }
+    Ok(parts)
+}
+
 fn refuse_foreign_file(root: &Path, path: &Path) -> Result<(), Refuse> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -681,6 +754,7 @@ fn refuse_foreign_file(root: &Path, path: &Path) -> Result<(), Refuse> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn map_open_error(path: &Path, error: std::io::Error) -> Refuse {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
@@ -694,6 +768,7 @@ fn map_open_error(path: &Path, error: std::io::Error) -> Refuse {
     }
 }
 
+#[allow(dead_code)]
 fn open_nofollow(path: &Path, write: bool) -> Result<fs::File, Refuse> {
     let mut opts = fs::OpenOptions::new();
     if write {
@@ -780,7 +855,12 @@ mod tests {
         assert_eq!(fs::read(host.join("note.txt")).unwrap(), b"hello-a");
 
         std::os::unix::fs::symlink("note.txt", host.join("alias")).unwrap();
-        assert_eq!(store.read(&a, "alias").unwrap(), b"hello-a");
+        assert_eq!(
+            store
+                .read(&a, "alias")
+                .expect_err("store does not follow a symlink"),
+            Refuse::Symlink
+        );
 
         let again = store.bind("agent-a", "session-a").unwrap();
         assert_eq!(again.owned_root(), "UsersAI/agent-a/session-a/2");
@@ -917,6 +997,12 @@ mod tests {
         let a_file = store.host_root(&a).unwrap().join("note.txt");
         let b_hard = store.host_root(&b).unwrap().join("hard.txt");
         fs::hard_link(&a_file, &b_hard).unwrap();
+        let live_meta = fs::symlink_metadata(&b_hard).unwrap();
+        assert!(live_meta.nlink() > 1);
+        assert_eq!(
+            refuse_hard_link(&live_meta).expect_err("nlink"),
+            Refuse::HardLink
+        );
 
         let denied = store.read(&b, "hard.txt").expect_err("hard link read");
         assert_eq!(denied, Refuse::HardLink);
@@ -934,6 +1020,99 @@ mod tests {
             inode_in_owner_tree(a_root, &outside).expect_err("foreign inode"),
             Refuse::HardLink
         );
+    }
+
+    #[test]
+    fn agent_b_is_denied_a_hard_linked_inode_after_a_unlinks() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let a_file = store.host_root(&a).unwrap().join("note.txt");
+        let b_hard = store.host_root(&b).unwrap().join("hard.txt");
+        fs::hard_link(&a_file, &b_hard).unwrap();
+        fs::remove_file(&a_file).unwrap();
+        assert_eq!(fs::symlink_metadata(&b_hard).unwrap().nlink(), 1);
+        assert_eq!(fs::read(&b_hard).unwrap(), b"hello-a");
+
+        let denied = store
+            .read(&b, "hard.txt")
+            .expect_err("unlinked hard link read");
+        assert_eq!(denied, Refuse::HardLink);
+        assert_eq!(denied.to_string(), "hard-linked inode is refused");
+        let denied = store
+            .write(&b, "hard.txt", b"from-b")
+            .expect_err("unlinked hard link write");
+        assert_eq!(denied, Refuse::HardLink);
+        assert_eq!(fs::read(&b_hard).unwrap(), b"hello-a");
+    }
+
+    #[test]
+    fn last_component_nofollow_is_required() {
+        let parent = Parent::new();
+        let target = parent.path().join("target");
+        let link = parent.path().join("link");
+        fs::write(&target, b"secret").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let denied = open_nofollow(&link, false).expect_err("must not follow");
+        assert_eq!(denied, Refuse::Symlink);
+        let denied = open_nofollow(&link, true).expect_err("must not create through a link");
+        assert_eq!(denied, Refuse::Symlink);
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn intermediate_dir_swap_write_leaves_nothing_in_b() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        const ITERS: u32 = 5000;
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        store.write(&b, "secret.txt", b"b-secret").unwrap();
+        let a_root = store.host_root(&a).unwrap().to_path_buf();
+        let b_root = store.host_root(&b).unwrap().to_path_buf();
+        let sub = a_root.join("sub");
+        fs::create_dir(&sub).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let sub = sub.clone();
+            let b_root = b_root.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = fs::remove_dir_all(&sub);
+                    let _ = std::os::unix::fs::symlink(&b_root, &sub);
+                    let _ = fs::remove_file(&sub);
+                    let _ = fs::remove_dir_all(&sub);
+                    let _ = fs::create_dir(&sub);
+                }
+            })
+        };
+
+        let mut escaped = 0u32;
+        let mut denied = 0u32;
+        for i in 0..ITERS {
+            let name = format!("sub/race-{i}.txt");
+            match store.write(&a, &name, b"from-a") {
+                Ok(()) => {
+                    if b_root.join(format!("race-{i}.txt")).exists() {
+                        escaped += 1;
+                    }
+                }
+                Err(_) => denied += 1,
+            }
+            if b_root.join(format!("race-{i}.txt")).exists() {
+                escaped += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = swapper.join();
+        assert_eq!(
+            escaped, 0,
+            "write landed in B's tree; denied={denied} iters={ITERS}"
+        );
+        assert_eq!(fs::read(b_root.join("secret.txt")).unwrap(), b"b-secret");
     }
 
     #[test]

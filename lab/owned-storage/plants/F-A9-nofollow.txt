@@ -1,0 +1,9 @@
+id: F-A9-nofollow
+file: src/lib.rs
+test: tests::last_component_nofollow_is_required
+--- old
+    opts.custom_flags(O_NOFOLLOW);
+    opts.open(path).map_err(|error| map_open_error(path, error))
+--- new
+    opts.open(path).map_err(|error| map_open_error(path, error))
+--- end

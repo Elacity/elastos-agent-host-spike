@@ -8,3 +8,6 @@ description = "Lab only: one storage root per agent instance, named by the grant
 
 # Stay out of the root ElastOS workspace.
 [workspace]
+
+[dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "std"] }

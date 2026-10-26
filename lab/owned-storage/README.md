@@ -6,7 +6,7 @@ The component launcher still passes `/tmp/elastos/storage` to every component ru
 
 The grant names the root with the A5 shape `UsersAI/<agent>/<rest>`. For this store, `rest` is `<session>/<instance>`. This crate does not call `lab/grant-binding`; the grant is unbound. `lab/grant-binding` and the cx-agent-conformance lane own A5.
 
-A path into another agent's root is refused with a reason. The refused paths are the other agent's host path, a `..` path, a symlink that leaves the root, a root directory replaced by a symlink, a hard-linked inode from another tree, and the shared temp directory `/tmp/elastos/storage`. Cleanup removes the yard. Drop removes it too. When removal fails, the yard is sealed so it cannot be read.
+A path into another agent's root is refused with a reason. The refused paths are the other agent's host path, a `..` path, any symlink (the walk uses `openat2` `RESOLVE_NO_SYMLINKS` or per-component `O_NOFOLLOW`), a root directory replaced by a symlink, a hard-linked inode (`st_nlink > 1` or an inode this store created for another agent, including after the other name is unlinked), and the shared temp directory `/tmp/elastos/storage`. The Store does not create hard links. Every path component is opened from the capsule root fd. Cleanup removes the yard. Drop removes it too. When removal fails, the yard is sealed so it cannot be read.
 
 Lab rows and Runtime rows are graded separately. Lab Store rows are Ready. Runtime rows stay BLOCKED until a live component refusal exists.
 
@@ -26,4 +26,4 @@ cargo fmt --manifest-path lab/owned-storage/Cargo.toml -- --check
 cargo test --locked --offline --manifest-path lab/owned-storage/Cargo.toml
 ```
 
-`plants/F-A9-share.txt` makes every instance use one directory. `planted_shared_root_is_caught` requires the denial tests to fail on that plant.
+`plants/F-A9-share.txt` makes every instance use one directory. `F-A9-hardlink-unlink` drops the created-inode owner check. `F-A9-nofollow` drops last-component `O_NOFOLLOW`. `planted_shared_root_is_caught` requires the denial tests to fail on those plants.

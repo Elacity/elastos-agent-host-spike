@@ -1,0 +1,28 @@
+id: F-A9-hardlink-unlink
+file: src/lib.rs
+test: tests::agent_b_is_denied_a_hard_linked_inode_after_a_unlinks
+--- old
+fn created_inode_is_foreign(
+    store: &Store,
+    grant: &Grant,
+    meta: &fs::Metadata,
+) -> Result<(), Refuse> {
+    let idx = store.agent_index(grant)?;
+    let key = (meta.dev(), meta.ino());
+    let created = store.created.lock().map_err(|_| Refuse::OutsideRoot)?;
+    if let Some(&owner) = created.get(&key) {
+        if owner != idx {
+            return Err(Refuse::HardLink);
+        }
+    }
+    Ok(())
+}
+--- new
+fn created_inode_is_foreign(
+    _store: &Store,
+    _grant: &Grant,
+    _meta: &fs::Metadata,
+) -> Result<(), Refuse> {
+    Ok(())
+}
+--- end
