@@ -1,0 +1,86 @@
+{
+  "about": "Lane falsifiers for lab/a5-binding-harness. Each replaces exact text (found once) and requires every named test to fail; restoring the bytes must make them pass. Apply and restore by hand; LOG.md records each run. These prove the harness, not the Runtime.",
+  "falsifiers": [
+    {
+      "id": "F-A5-FAKE-REFUSAL",
+      "title": "a fixture-local denied is accepted as a Runtime refusal",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/contract.rs",
+          "old": "            if evidence.refused_by != Actor::Runtime {\n                return Err(\"fixture refusal is not Runtime evidence\".to_owned());\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "fake_refusal_is_rejected",
+        "fixture_refusal_is_not_runtime_evidence"
+      ]
+    },
+    {
+      "id": "F-A5-SKIP-AS-PASS",
+      "title": "a skipped row is counted as passed",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/lib.rs",
+          "old": "    matches!(grade, Grade::Pass(_))\n",
+          "new": "    matches!(grade, Grade::Pass(_) | Grade::Skipped(_))\n"
+        }
+      ],
+      "tests": [
+        "skipped_is_never_accepted"
+      ]
+    },
+    {
+      "id": "F-A5-PUBLIC-AS-BIND",
+      "title": "a Public-storage read is counted as binding",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/journey.rs",
+          "old": "        if read.bound {\n            return Err(\"public storage read counted as binding\".to_owned());\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "public_read_as_binding_is_rejected"
+      ]
+    },
+    {
+      "id": "F-A5-SIBLING",
+      "title": "a sibling instance may use the grant",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/journey.rs",
+          "old": "        j.use_refused(&y, &grant, &path, INSTANCE_REASON)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "sibling_allowed_is_rejected"
+      ]
+    },
+    {
+      "id": "F-A5-SESSION-END",
+      "title": "a grant may be reused after session end",
+      "command": "a5-binding-harness",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/a5-binding-harness/src/journey.rs",
+          "old": "        j.use_refused(&a, &grant, &path, SESSION_REASON)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "session_survives_end_is_rejected"
+      ]
+    }
+  ]
+}
