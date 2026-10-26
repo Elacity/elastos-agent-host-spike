@@ -17,6 +17,10 @@
 #define CLONE_SIGHAND 0x00000800
 #define CLONE_FILES 0x00000400
 #define CLONE_FS 0x00000200
+#define CLONE_NEWNS 0x00020000
+#define CLONE_NEWUSER 0x10000000
+#define CLONE_NEWPID 0x20000000
+#define CLONE_NEWNET 0x40000000
 
 #ifndef SYS_clone3
 #define SYS_clone3 435
@@ -86,7 +90,7 @@ static void line(const char *op, const char *result, long err, const char *reaso
     wr("\n");
 }
 
-static void finish(int code) {
+__attribute__((noreturn, used)) void finish(int code) {
     sc(SYS_exit_group, code, 0, 0, 0, 0, 0);
     for (;;) {
     }
@@ -168,6 +172,14 @@ int main(int argc, char **argv) {
     report_clone("clone-vm-sigchld", CLONE_VM | SIGCHLD);
     report_clone("clone-vfork", CLONE_VFORK | CLONE_VM | SIGCHLD);
     report_clone("clone-thread", CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_FILES | CLONE_FS);
+    report_clone("clone-thread-newuser",
+                 CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | CLONE_NEWUSER);
+    report_clone("clone-thread-newnet",
+                 CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | CLONE_NEWNET);
+    report_clone("clone-thread-newpid",
+                 CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | CLONE_NEWPID);
+    report_clone("clone-thread-newns",
+                 CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | CLONE_NEWNS);
     report_sc("fork", sc(SYS_fork, 0, 0, 0, 0, 0, 0), "fork refused", "fork created a child");
     report_sc("vfork", sc(SYS_vfork, 0, 0, 0, 0, 0, 0), "vfork refused", "vfork created a child");
     report_clone3("clone3-sigchld", 0, SIGCHLD);

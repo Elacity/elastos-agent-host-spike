@@ -153,6 +153,9 @@ def one(root: pathlib.Path, check: dict) -> int:
             source = root / edit["file"]
             source.write_text(source.read_text().replace(edit["old"], edit["new"], 1))
         mutated = cargo(root, check["test"])
+        log = HERE / "out" / f"{name}.txt"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(mutated.stdout)
     finally:
         for source, original in originals:
             source.write_text(original)
