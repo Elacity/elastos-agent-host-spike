@@ -1,7 +1,8 @@
-# wc-003a: `wasm-capsule-tools`, the lab's host-side library. It holds the one
-# rule that names a lab bundle (src/lab_name.rs). A member of the lab workspace,
-# sharing its Cargo.lock. The root package `capsule` uses it only as a
-# dev-dependency for the named tests in ../tests/, so none of it reaches the
+# `wasm-capsule-tools`, the lab's host-side library. It names a lab bundle only
+# through cc-capsule-identity's lab CID (one re-export in src/lib.rs) and holds
+# this capsule's own `elastos.capsule/v1` manifest bytes. A member of the lab
+# workspace, sharing its Cargo.lock. The root package `capsule` uses it only as
+# a dev-dependency for the named tests in ../tests/, so none of it reaches the
 # capsule artifact.
 [package]
 name = "wasm-capsule-tools"
@@ -9,9 +10,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Exact pins at the versions the Runtime already locks (elastos/Cargo.lock),
-# resolved offline from the cargo cache. `sha2` hashes the canonical closure
-# in-process; `libc` gives the no-follow open its flags.
+# The one bundle-identity rule lives in the cc-capsule-identity lane's crate
+# (read-only here). It path-depends on the Runtime's `elastos-common` and
+# `elastos-identity`, so this workspace's Cargo.lock holds that crate's
+# dependencies too (README, "The lockfile coupling").
 [dependencies]
-libc = "=0.2.189"
-sha2 = "=0.10.9"
+capsule-identity = { path = "../../capsule-identity" }

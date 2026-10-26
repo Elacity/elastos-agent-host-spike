@@ -24,7 +24,7 @@
   ones at the Runtime's versions), sha256 `039aee94…` → `7056522c…`. 16 named
   tests in `tests/lab_name.rs`; 20 falsifiers proved by break → named test
   fails → revert (falsify.py `lab` pending R1). Discovery re-checked: the name
-  is `lab-sha256:<hex>`, never a CID. Pinned vector re-computed with
+  carried 007's lane-own label (PR #105), never a CID. Pinned vector re-computed with
   `printf | shasum -a 256`; `capsule.wasm` unchanged (`6dd9af1a…`).
 - wc-003a round 2 (review fix): `open_regular(path)` builds its own read-only
   options (caller-chosen options had let it empty or create a file), and its
@@ -33,3 +33,25 @@
   `inspection_failure_reports_path_and_cause` (18 named tests); falsifiers
   F-WC3-WRITABLE, -TRUNCATE, -CREATE and -INSPECT-CAUSE (24 for wc-003a), all
   caught by hand (falsify.py `lab` pending R1).
+- Task 010 (one lab identity rule, Rong's one-rule note): 007's lane-own name
+  rule (PR #105) is retired. `tools/src/lab_name.rs`, `tests/lab_name.rs` (18
+  tests) and the 24 wc-003a falsifiers are deleted. The tools crate now
+  path-depends on `lab/capsule-identity/` and names a bundle only through
+  `pub use capsule_identity::lab_cid as bundle_identity;`; `sha2` and `libc`
+  are dropped. New `capsule/capsule.json` (an `elastos.capsule/v1` manifest,
+  277 bytes, exposed as `CAPSULE_MANIFEST`); the root package dev-depends on
+  `elastos-common` (read-only) and `serde_json` to read it with the Runtime's
+  `CapsuleManifest`, and keeps no `[dependencies]`. `Cargo.lock` re-resolved
+  offline (31 → 135 registry crates; new names at capsule-identity's locked
+  versions, existing ones unchanged), sha256 `7056522c…` → `1e9608bc…`. The
+  reproducibility copy is laid out as `<root>/lab/wasm-capsule` with links to
+  `lab/capsule-identity` and `elastos`. Named tests in `tests/lab_cid.rs`:
+  `lab_manifest_passes_runtime_validate`,
+  `this_capsule_bundle_has_the_pinned_lab_cid` (pin recomputed with Python
+  `hashlib` from capsule-identity's README encoding) and
+  `the_lane_keeps_no_bundle_name_rule_of_its_own`. Falsifiers F-WC3-LABCID-SCHEMA,
+  -ENTRYPOINT, -VERSION, -PIN, F-WC3-SECOND-RULE, F-WC3-SECOND-IMPORT and
+  F-WC3-COPY-DEPS: hand-proven, pending R1 (runner-caught: none);
+  F-WC1-SPACED-PATH still caught by hand with the new layout. `capsule.wasm`
+  unchanged (`6dd9af1a…`). Finding C4: a copy of `lab/wasm-capsule/` alone no
+  longer builds (cc-redteam's probe; its fix).

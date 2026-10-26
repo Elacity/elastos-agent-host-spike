@@ -18,6 +18,7 @@ pub fn lane_dir() -> PathBuf {
 /// The source entries `tools/build` needs, never a `target/` directory.
 /// `audit` is a workspace member: Cargo loads every member's manifest, so the
 /// build fails without it even though `tools/build` compiles only `capsule`.
+/// `capsule` carries the guest's source and its `capsule.json`.
 const LANE_SOURCE_ENTRIES: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
@@ -61,8 +62,29 @@ impl Drop for TempDir {
     }
 }
 
-/// Copy the lane's source (not its `target/`) into `dst`, which must exist.
-pub fn copy_lane_source(src: &Path, dst: &Path) {
+/// Where the lane sits under the repository root, and so under a copy's root.
+const LANE_PATH: &str = "lab/wasm-capsule";
+
+/// The folders outside the lane, relative to the repository root, that hold
+/// the workspace's path dependencies: cc-capsule-identity's crate (from
+/// `tools/`) and the Runtime's `elastos/` (from that crate and from the root
+/// package's dev-dependency; Cargo also reads `elastos/Cargo.toml` for the
+/// inherited `version.workspace`). Cargo loads each of their manifests to
+/// resolve the one lockfile under `--locked`, even though `tools/build`
+/// compiles only `capsule`.
+const OUT_OF_LANE_PATH_DEPS: &[&str] = &["lab/capsule-identity", "elastos"];
+
+/// Lay out a copy of the lane under `root`, which must exist, and return the
+/// copied lane's folder, `root/lab/wasm-capsule`.
+///
+/// The lane's source (not its `target/`) is copied. Each folder in
+/// [`OUT_OF_LANE_PATH_DEPS`] is reached through a symbolic link at the same
+/// place under `root`, pointing at the real folder, so the copy's relative
+/// path dependencies resolve. Cargo writes into neither folder: `tools/build`
+/// sets its own `CARGO_TARGET_DIR`, and `--locked` writes no lockfile.
+pub fn copy_lane_source(src: &Path, root: &Path) -> PathBuf {
+    let lane = root.join(LANE_PATH);
+    fs::create_dir_all(&lane).expect("create the lane folder in the copy");
     for entry in LANE_SOURCE_ENTRIES {
         let from = src.join(entry);
         if !from.exists() {
@@ -71,11 +93,23 @@ pub fn copy_lane_source(src: &Path, dst: &Path) {
         let status = Command::new("cp")
             .arg("-R")
             .arg(&from)
-            .arg(dst.join(entry))
+            .arg(lane.join(entry))
             .status()
             .expect("spawn cp");
         assert!(status.success(), "cp -R {} failed", from.display());
     }
+    let repo = src.join("../..");
+    for dep in OUT_OF_LANE_PATH_DEPS {
+        let link = root.join(dep);
+        let parent = link.parent().expect("a path dependency has a parent");
+        fs::create_dir_all(parent).expect("create a path dependency's parent in the copy");
+        let target = fs::canonicalize(repo.join(dep))
+            .unwrap_or_else(|error| panic!("find the path dependency {dep}: {error}"));
+        std::os::unix::fs::symlink(&target, &link).unwrap_or_else(|error| {
+            panic!("link {} to {}: {error}", link.display(), target.display())
+        });
+    }
+    lane
 }
 
 /// Run `tools/build` for `lane`, writing the artifact and receipt into
@@ -106,8 +140,8 @@ pub fn run_build_with_env(lane: &Path, out_dir: &Path, env: &[(&str, &str)]) {
 
 /// The lowercase hex sha256 of a file, from the system tool: the same one
 /// `tools/build` hashes the receipt's files with, so a receipt check compares
-/// like with like. (The lab name uses no system tool: the tools crate hashes it
-/// in-process with `sha2`.)
+/// like with like. (The lab CID uses no system tool: cc-capsule-identity's
+/// crate, which the tools crate re-exports, hashes it in-process.)
 pub fn sha256_file(path: &Path) -> String {
     for (bin, args) in [("sha256sum", &[][..]), ("shasum", &["-a", "256"][..])] {
         let Ok(output) = Command::new(bin).args(args).arg(path).output() else {

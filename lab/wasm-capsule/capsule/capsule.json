@@ -1,0 +1,9 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "capsule",
+  "version": "0.1.0",
+  "description": "wasm-capsule lab: the wc-001 core Wasm module (not a Component); lab tooling only, never admitted or launched",
+  "role": "app",
+  "type": "wasm",
+  "entrypoint": "capsule.wasm"
+}

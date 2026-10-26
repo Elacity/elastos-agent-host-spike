@@ -14,13 +14,15 @@ fn two_clean_builds_in_different_paths_are_byte_identical() {
 
     // Two copies of the lane source at two different absolute paths, each under
     // a directory whose name has a space, so the build must not split that path
-    // on whitespace when it passes --remap-path-prefix to rustc.
-    let lane_a = a.path().join("capsule lab");
-    let lane_b = b.path().join("capsule lab");
-    fs::create_dir_all(&lane_a).expect("create lane_a");
-    fs::create_dir_all(&lane_b).expect("create lane_b");
-    copy_lane_source(&lane, &lane_a);
-    copy_lane_source(&lane, &lane_b);
+    // on whitespace when it passes --remap-path-prefix to rustc. Each copy is
+    // laid out as `<root>/lab/wasm-capsule`, with the out-of-lane path
+    // dependencies reachable from it (`copy_lane_source`).
+    let root_a = a.path().join("capsule lab");
+    let root_b = b.path().join("capsule lab");
+    fs::create_dir_all(&root_a).expect("create root_a");
+    fs::create_dir_all(&root_b).expect("create root_b");
+    let lane_a = copy_lane_source(&lane, &root_a);
+    let lane_b = copy_lane_source(&lane, &root_b);
     assert_ne!(lane_a, lane_b, "the two copies must be at different paths");
 
     // Build each from its own empty out dir; tools/build uses a fresh target.

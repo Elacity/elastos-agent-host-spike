@@ -57,16 +57,20 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 # Each provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
-# One table for the three provider crates and the lab's capsule-identity
-# crate. Each entry is a crate that is its own workspace with its own
-# lockfile, and its command exists only with the manifest its spec builds and
-# tests: a second branch per crate would be a second copy of the same rule
-# (P10).
+# One table for the three provider crates, the lab's capsule-identity crate
+# and the lab's wasm-capsule workspace. Each row is a crate's manifest plus
+# the optional Cargo arguments its command adds; each entry is its own
+# workspace with its own lockfile, and its command exists only with that
+# manifest and those arguments: a second branch per crate would be a second
+# copy of the same rule (P10). The lab workspace needs `--workspace`, because
+# its root package `capsule` is the default selection and its audit member's
+# tests live behind that flag.
 PROVIDER_CRATES = {
-    "provider": PROVIDER_MANIFEST,
-    "did": REPO / "capsules" / "did-provider" / "Cargo.toml",
-    "wallet": REPO / "capsules" / "wallet-provider" / "Cargo.toml",
-    "capsule-identity": REPO / "lab" / "capsule-identity" / "Cargo.toml",
+    "provider": (PROVIDER_MANIFEST, ()),
+    "did": (REPO / "capsules" / "did-provider" / "Cargo.toml", ()),
+    "wallet": (REPO / "capsules" / "wallet-provider" / "Cargo.toml", ()),
+    "capsule-identity": (REPO / "lab" / "capsule-identity" / "Cargo.toml", ()),
+    "lab": (REPO / "lab" / "wasm-capsule" / "Cargo.toml", ("--workspace",)),
 }
 BACKUP_SUFFIX = ".falsify-original"
 # Capture ancestor ownership once. The environment then publishes that set
@@ -270,6 +274,10 @@ def load(path=DATA):
 #   confine.sb.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's src/lib.rs,
 #   tests/common/mod.rs and fixtures/wc001-core/capsule.json.
+# - lab/wasm-capsule/falsifiers.json and lab/wasm-capsule/audit/falsifiers.json:
+#   the lab capsule's capsule/src/lib.rs, tools/build and
+#   tools/src/lab_name.rs, and the audit crate's Cargo.toml, INTERFACE.md and
+#   src/lib.rs.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -288,6 +296,12 @@ PROVIDER_TARGETS = (
     "lab/capsule-identity/src/lib.rs",
     "lab/capsule-identity/tests/common/mod.rs",
     "lab/capsule-identity/fixtures/wc001-core/capsule.json",
+    "lab/wasm-capsule/capsule/src/lib.rs",
+    "lab/wasm-capsule/tools/build",
+    "lab/wasm-capsule/tools/src/lab_name.rs",
+    "lab/wasm-capsule/audit/Cargo.toml",
+    "lab/wasm-capsule/audit/INTERFACE.md",
+    "lab/wasm-capsule/audit/src/lib.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
 )
@@ -468,12 +482,15 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
     if command in PROVIDER_CRATES:
         # Each crate in the table is its own workspace with its own lockfile,
         # so its test command names --locked and that crate's manifest
-        # directly.
+        # directly. A row's optional Cargo arguments follow the manifest and
+        # stay before the libtest separator: the lab workspace's --workspace
+        # selects its audit member, and an existing row adds none.
+        crate_manifest, cargo_args = PROVIDER_CRATES[command]
         cargo = ["cargo", "test", "--locked",
-                 "--manifest-path", str(manifest or PROVIDER_CRATES[command])]
+                 "--manifest-path", str(manifest or crate_manifest)]
         return {
-            "build": [(cargo + ["--no-run"], REPO)],
-            "one": (cargo + ["--"], REPO, []),
+            "build": [(cargo + list(cargo_args) + ["--no-run"], REPO)],
+            "one": (cargo + list(cargo_args) + ["--"], REPO, []),
         }
     if command == "selftest":
         # A change to this runner is checked by its own self-test. A fresh
@@ -1417,22 +1434,25 @@ def a_killed_provider_edit_is_recovered():
     through main(), and repeat the edit. This lane's model-provider targets,
     the model provider's confinement test harness, the confine lane's five
     did/wallet targets plus its did confinement test harness and wallet's
-    falsifier honesty test, and capsule-identity's src/lib.rs,
-    tests/common/mod.rs and fixtures/wc001-core/capsule.json all come back in
-    either startup mode (PV51-PV53). Foreign backups, including both
-    providers' confinement documents, each harness's support neighbour,
-    wallet's test support neighbour and the lab's README and web-app fixture,
-    stay with their owners."""
+    falsifier honesty test, capsule-identity's src/lib.rs,
+    tests/common/mod.rs and fixtures/wc001-core/capsule.json, and the wasm
+    lab's capsule/src/lib.rs, tools/build, tools/src/lab_name.rs and audit
+    Cargo.toml, INTERFACE.md and src/lib.rs all come back in either startup
+    mode (PV51-PV53, PV69-PV74). Foreign backups, including both providers'
+    confinement documents, each harness's support neighbour, wallet's test
+    support neighbour and the labs' README and web-app fixture, stay with
+    their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
              if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
     profile = "../../capsules/model-provider/confine.sb"
     # The did and wallet targets, both confinement test harnesses, wallet's
-    # falsifier honesty test, and capsule-identity's src/lib.rs,
-    # tests/common/mod.rs and fixtures/wc001-core/capsule.json are named here,
-    # not read from the table, so a target dropped from PROVIDER_TARGETS is
-    # caught (PV44, PV45, PV47-PV49, PV51-PV53). Their original bytes are
-    # written in the isolated tree, never read from the real lab or crates.
+    # falsifier honesty test, capsule-identity's src/lib.rs,
+    # tests/common/mod.rs and fixtures/wc001-core/capsule.json, and the wasm
+    # lab's six edit files are named here, not read from the table, so a
+    # target dropped from PROVIDER_TARGETS is caught (PV44, PV45, PV47-PV49,
+    # PV51-PV53, PV69-PV74). Their original bytes are written in the isolated
+    # tree, never read from the real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/did-provider/src/main.rs",
                  "../../capsules/did-provider/confine.sb",
@@ -1443,7 +1463,13 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/src/tests/falsifiers.rs",
                  "../../lab/capsule-identity/src/lib.rs",
                  "../../lab/capsule-identity/tests/common/mod.rs",
-                 "../../lab/capsule-identity/fixtures/wc001-core/capsule.json")
+                 "../../lab/capsule-identity/fixtures/wc001-core/capsule.json",
+                 "../../lab/wasm-capsule/capsule/src/lib.rs",
+                 "../../lab/wasm-capsule/tools/build",
+                 "../../lab/wasm-capsule/tools/src/lab_name.rs",
+                 "../../lab/wasm-capsule/audit/Cargo.toml",
+                 "../../lab/wasm-capsule/audit/INTERFACE.md",
+                 "../../lab/wasm-capsule/audit/src/lib.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -1487,7 +1513,9 @@ os.kill(os.getpid(), signal.SIGKILL)
                                repo / "capsules/did-provider/tests/support.rs",
                                repo / "capsules/wallet-provider/src/tests/support.rs",
                                repo / "lab/capsule-identity/README.md",
-                               repo / "lab/capsule-identity/fixtures/web-app/capsule.json"]
+                               repo / "lab/capsule-identity/fixtures/web-app/capsule.json",
+                               repo / "lab/wasm-capsule/README.md",
+                               repo / "lab/wasm-capsule/tools/Cargo.toml"]
             for target in foreign_targets:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"foreign mutation\n")
@@ -1967,19 +1995,24 @@ def argv_refusal_precedes_work():
 
 
 def provider_spec_uses_locked_manifest():
-    """Every crate in the table, the three provider crates and the lab's
-    capsule-identity crate, is a registered command, and both its build and
-    run argv name --locked and the manifest that follows --manifest-path.
-    The expected manifests are written here, so a table that maps one crate
-    to another crate's manifest is caught (PV43, PV50)."""
+    """Every crate in the table — the three provider crates, the lab's
+    capsule-identity crate and the lab's wasm-capsule workspace — is a
+    registered command, and both its build and run argv name --locked and the
+    manifest that follows --manifest-path. The lab workspace adds --workspace
+    before the libtest separator; every other row adds no argument. The
+    expected manifests and arguments are written here, so a table that maps
+    one crate to another crate's manifest is caught (PV43, PV50); lab
+    registration, its manifest, its omitted workspace flag and a flag that
+    leaks into a provider row are caught (PV65-PV68)."""
     ok = True
     expected = {
-        "provider": str(REPO / "capsules" / "model-provider" / "Cargo.toml"),
-        "did": str(REPO / "capsules" / "did-provider" / "Cargo.toml"),
-        "wallet": str(REPO / "capsules" / "wallet-provider" / "Cargo.toml"),
-        "capsule-identity": str(REPO / "lab" / "capsule-identity" / "Cargo.toml"),
+        "provider": (str(REPO / "capsules" / "model-provider" / "Cargo.toml"), ()),
+        "did": (str(REPO / "capsules" / "did-provider" / "Cargo.toml"), ()),
+        "wallet": (str(REPO / "capsules" / "wallet-provider" / "Cargo.toml"), ()),
+        "capsule-identity": (str(REPO / "lab" / "capsule-identity" / "Cargo.toml"), ()),
+        "lab": (str(REPO / "lab" / "wasm-capsule" / "Cargo.toml"), ("--workspace",)),
     }
-    for command, manifest in expected.items():
+    for command, (manifest, extra) in expected.items():
         if command not in COMMANDS:
             print(f"self-test: {command} is not a registered command")
             ok = False
@@ -1989,25 +2022,12 @@ def provider_spec_uses_locked_manifest():
         one, cwd, _extra = how["one"]
         print(f"self-test: {command} build {[argv for argv, _cwd in build]}")
         print(f"self-test: {command} run {one}")
-        if cwd != REPO:
+        base = ["cargo", "test", "--locked", "--manifest-path", manifest]
+        if cwd != REPO or len(build) != 1 or build[0][1] != REPO:
             ok = False
-        if len(build) != 1 or build[0][1] != REPO:
+        elif build[0][0] != base + list(extra) + ["--no-run"]:
             ok = False
-        else:
-            argv = build[0][0]
-            if (argv[:2] != ["cargo", "test"] or "--locked" not in argv
-                    or "--no-run" not in argv):
-                ok = False
-            if ("--manifest-path" not in argv
-                    or argv[argv.index("--manifest-path") + 1:argv.index("--manifest-path") + 2]
-                    != [manifest]):
-                ok = False
-        if (one[:2] != ["cargo", "test"] or "--locked" not in one
-                or "--" not in one or "--no-run" in one):
-            ok = False
-        if ("--manifest-path" not in one
-                or one[one.index("--manifest-path") + 1:one.index("--manifest-path") + 2]
-                != [manifest]):
+        if one != base + list(extra) + ["--"]:
             ok = False
     return ok
 
