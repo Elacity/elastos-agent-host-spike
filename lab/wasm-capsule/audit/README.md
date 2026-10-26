@@ -37,7 +37,7 @@ refusal order and API v1. The two retained `skeleton` tests pin the manifest
 and workspace boundary. The nine `component_imports` tests cover exact names
 and versions (including same-major, pre-release and build-metadata versions;
 a declared pre-release or build version does not match the release;
-names that differ only in letter case are refused on either side),
+interface names that differ only in letter case are refused on either side),
 more than one import section, section order, unused declarations, core-module
 refusal, full Component validation,
 internal imports, import names with options, and custom-section content in
@@ -117,6 +117,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA16b | Lowercase only the declared interface before matching | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA17a | Match the name by a declared suffix while the module matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA17b | Match the module by a declared suffix while the name matches exactly | `declared_import_passes_and_only_that_one` |
+| F-CWA18a | Match an interface name that ends with a declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -131,7 +132,8 @@ Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
 the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, F-CWA5a/F-CWA5b,
 F-CWA6a, F-CWA7a/F-CWA7b, F-CWA8a (`component_refusals_follow_the_documented_order`),
-F-CWA9a/F-CWA9b, F-CWA10a, F-CWA11a, F-CWA13a/F-CWA13b, and F-CWA16a/F-CWA16b:
+F-CWA9a/F-CWA9b, F-CWA10a, F-CWA11a, F-CWA13a/F-CWA13b, F-CWA16a/F-CWA16b,
+and F-CWA18a:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -396,3 +398,30 @@ with all 20 tests passing offline under `RUST_TEST_THREADS=2` and
 `CARGO_INCREMENTAL=0`. The implementation, API document, other tests, audit
 manifest, workspace manifest and workspace lockfile stayed unchanged, and
 `audit/Cargo.lock` stayed absent.
+
+The cwa-018 in-tree run first applied F-CWA18a alone to the base; all 20 tests
+passed before the new pair. With the pair added, the clean code returned
+`UndeclaredInterface` naming `my-elastos:bus/runtime@1.0.0` and the exact string
+`undeclared interface my-elastos:bus/runtime@1.0.0`. F-CWA18a built and failed
+`a_different_version_of_a_declared_interface_is_refused` at the new pair:
+the panic named declaration `["elastos:bus/runtime@1.0.0"]` and import
+`my-elastos:bus/runtime@1.0.0`, with `audit_component` returning
+`Ok(["my-elastos:bus/runtime@1.0.0"])`. The earlier cases passed before that
+failure. The eight earlier entries were run again separately; their panics
+named these declarations and imports: F-CWA2b,
+`["elastos:bus/runtime@1.0.0"]` and `elastos:bus/runtime@2.0.0`; F-CWA5a,
+`["elastos:bus/runtime@1.0.0"]` and `elastos:bus/runtime@1.1.0`; F-CWA9a,
+`["elastos:bus/runtime@1.0.0"]` and `elastos:bus/runtime@1.0.0+b1`; F-CWA9b,
+`["elastos:bus/runtime@1.0.0"]` and `elastos:bus/runtime@1.0.0-rc.1`; F-CWA13a,
+`["elastos:bus/runtime@1.0.0+b1"]` and `elastos:bus/runtime@1.0.0`; F-CWA13b,
+`["elastos:bus/runtime@1.0.0-rc.1"]` and `elastos:bus/runtime@1.0.0`; F-CWA16a,
+`["elastos:bus/runtime@1.0.0"]` and `elastos:bus/RUNTIME@1.0.0`; F-CWA16b,
+`["elastos:bus/RUNTIME@1.0.0"]` and `elastos:bus/runtime@1.0.0`. Each returned
+`Ok` holding the named import. All nine checked entries built and failed their
+named test at an assertion, each run separately with `--exact`. Every temporary
+source edit restored byte-identical, checked by SHA-256, all 54 `old` anchors
+occurred exactly once, and `audit/Cargo.lock` stayed absent. The clean format
+and locked-test checks passed before the first mutation and after the catches,
+with all 20 tests passing offline under `RUST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0`. The implementation, API document, other tests, audit
+manifest, workspace manifest and workspace lockfile stayed unchanged.
