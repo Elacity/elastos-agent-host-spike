@@ -42,6 +42,16 @@ that comparing test, and there is no separate Runtime proposal for the model
 provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
 (see "Tests"), not the Runtime's.
 
+`allow_rules_trace_to_declared_rights` traces every allow rule in this oracle
+to exactly one approved declared right in the `rights` array of
+`tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
+rule in that file. `startup-root-directory` and `startup-sysctl` are on the
+platform-baseline list, not in the `rights` array. Each justification names
+the model-provider executable and macOS. They are Runtime platform baseline,
+technical OS permissions with no user approval prompt, not approved rights.
+The file is a lab stand-in for the Runtime generator's input, not a manifest
+field. The generator itself stays the Runtime's (Anders).
+
 ## What the profile allows
 
 Each rule is load-bearing: removing it alone makes
@@ -505,6 +515,12 @@ profile does not grant".
   start that passes the recorded digest panics with `PROVIDER_EXECUTABLE
   digest mismatch` before `spawn`. The panic names the path and both
   digests. It needs no sandbox.
+- `allow_rules_trace_to_declared_rights`: every allow rule in this oracle
+  traces to exactly one approved declared right in the `rights` array of
+  `tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
+  rule in that file. `startup-root-directory` and `startup-sysctl` are on
+  the platform-baseline list. The test reads the profile and the fixture
+  from disk. It starts no process and needs no sandbox.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
@@ -572,7 +588,7 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the thirteen
+uses command `provider`. Each mutates `confine.sb` only, except the seventeen
 entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
@@ -582,7 +598,9 @@ part of how the hosted run's wait loop holds its deadline, F-cc17a returns
 returns `false` from the error arm of `sandbox_available`, F-cc19a starts
 the program directly when the profile file does not exist, and F-cc19b
 keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
-the digest compare in refuse_changed_provider_executable.
+the digest compare in refuse_changed_provider_executable, and F-cc30b,
+F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
+allow_rules_trace_to_declared_rights.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -618,21 +636,29 @@ the digest compare in refuse_changed_provider_executable.
 | F-cc19a | When the profile file does not exist, `sandboxed` starts the program directly, without `sandbox-exec` | `startup_is_refused_when_the_profile_cannot_be_applied` | Case (a)'s launch starts the provider unconfined, it answers `init`, and the test fails at its first check. |
 | F-cc19b | `Provider::ended` keeps none of the stderr lines it reads | `startup_is_refused_when_the_profile_cannot_be_applied` | Case (a) still exits 65, but no line gives `sandbox-exec`'s reason. |
 | F-cc29a | In the test, `refuse_changed_provider_executable` skips the digest compare | `bound_executable_digest_mismatch_refuses_start` | The changed file starts. |
+| F-cc30a | One line, `(allow file-read-data (literal "/tmp/cc-declared-rights-extra"))`, is added after the `STORAGE_ROOT` allow | `allow_rules_trace_to_declared_rights` | The extra allow has no declared right and no platform baseline. |
+| F-cc30b | The declared-rights path points at a fixture that drops the `bound-executable` right | `allow_rules_trace_to_declared_rights` | The exec allow has no declared right and no platform baseline. |
+| F-cc30c | The declared-rights path points at a fixture whose `storage` right has no rule | `allow_rules_trace_to_declared_rights` | The storage right has no rule. |
+| F-cc30d | The declared-rights path points at a fixture where `storage` and `bound-executable` both claim the exec rule | `allow_rules_trace_to_declared_rights` | The exec allow is claimed by `storage` and `bound-executable`. |
+| F-cc30e | The declared-rights path points at a fixture rule `(allow file-read-data (literal "/tmp/cc-declared-rights-absent"))` | `allow_rules_trace_to_declared_rights` | That rule is not an allow line. |
+| F-cc30f | The `STORAGE_ROOT` allow is repeated on the next line | `allow_rules_trace_to_declared_rights` | That rule matches more than one allow line. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
-for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries. Its startup
-recovery restores `tests/confine/main.rs` after a killed run (provider task
-015), as it restores
+for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
+F-cc30c, F-cc30d and F-cc30e. F-cc30a and F-cc30f need no rebuild: the test
+reads confine.sb at runtime. Its startup recovery restores
+`tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
 `sandbox-exec` is missing, the confined tests skip and pass, so each sandbox
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
-F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b and F-cc29a) are
+F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
+F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e and F-cc30f) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
