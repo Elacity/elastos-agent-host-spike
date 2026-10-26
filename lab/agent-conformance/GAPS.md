@@ -789,6 +789,11 @@ bytes in separate granted Home directories. Both first reads receive separate
 `session` grants; both sibling reads reach new pending requests in their
 original sessions while the clients remain alive, then receive the fixture
 denial. Two timed barriers require measured overlap.
+Both rows run one shared journey. The sibling request arriving while the
+other instance's `session` grant is live is shown only indirectly: the
+controller records the earlier session grant and the later sibling request,
+and both clients remain alive at the barrier. It has no direct cross-session
+live-grant census (AC-021-GRANTS).
 
 AC-006-STORAGE above covers both clients' shared `/tmp/elastos/storage`. This
 journey proves separation of granted Home directories; the client-storage

@@ -4964,3 +4964,323 @@ owners outside this lane.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `src/build.rs:18` keeps the checked source copy; this round changes only census handling and its documents. |
 | 7. Named tests and caught falsifiers prove every new rule? | No for task 028 | `tests/agent_host.rs:118` still needs the two real requests; `falsifiers.json:1314` awaits a passing baseline. The default gate also failed as recorded above. |
 | 8. Identity, admission and allowance remain separate? | Yes | `src/report.rs:202` requires identity separately from `tests/agent_host.rs:148`'s decision tally. |
+
+
+## 029 — overlap barrier rules caught by planted bugs
+
+Task 029 moves request-shape checks to `barrier_decision`, requires both recorded
+barrier decisions in `Controller::check_overlap`, refuses seed `..` segments in
+`Fixture::parse`, and labels both instance rows as one shared journey.
+`Overlap::ready` retains the time and child-liveness checks. The request rules
+have one implementation. The five new tests use synthetic requests; the second
+barrier test also checks the controller wiring with bounded system children.
+The exited-client test uses `true` and `sleep` through `RunningInstances::start`
+and the existing fixed system PATH. Both tests collect the children before
+checking the result. The Runtime, probe, dependencies, grader, cancel journey
+and kill journey keep their existing source.
+
+### Manual falsifier evidence
+
+Each entry below ran its exact edits separately, with the shared heavy-build
+lease held. Every command used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, lane-owned Cargo target/build directories and a
+600-second deadline. All new `old` anchors match once in the unmutated candidate;
+earlier falsifier anchor counts are unchanged. Source bytes were restored after
+each mutation. Every named test failed planted and passed before and after it.
+These results describe the working candidate, rather than a committed head.
+
+Command for each named test below:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects TEST_NAME -- --exact --show-output
+```
+
+### F-overlap-second-barrier — CAUGHT
+
+`grants::tests::overlap_second_barrier_waits_for_both_requests`:
+
+```text
+baseline: exit 0, wall 1.160s
+test grants::tests::overlap_second_barrier_waits_for_both_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 1.07s
+planted: exit 101, wall 2.234s
+test grants::tests::overlap_second_barrier_waits_for_both_requests ... FAILED
+assertion `left == right` failed: second barrier must wait for both requests
+ right: Ok(false)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 1.06s
+restored: exit 0, wall 1.910s
+test grants::tests::overlap_second_barrier_waits_for_both_requests ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 1.07s
+```
+
+`two_instances_overlap_with_separate_grants`:
+
+```text
+baseline: exit 0, wall 13.246s
+test two_instances_overlap_with_separate_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 13.12s
+planted: exit 101, wall 11.518s
+test two_instances_overlap_with_separate_grants ... FAILED
+required instance settlement evidence: "overlap: both barriers require two requests from distinct sessions"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 11.42s
+restored: exit 0, wall 11.178s
+test two_instances_overlap_with_separate_grants ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 11.06s
+```
+
+### F-overlap-sessions — CAUGHT
+
+`grants::tests::overlap_barrier_refuses_one_session_for_both`:
+
+```text
+baseline: exit 0, wall 0.882s
+test grants::tests::overlap_barrier_refuses_one_session_for_both ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+planted: exit 101, wall 1.198s
+test grants::tests::overlap_barrier_refuses_one_session_for_both ... FAILED
+assertion `left == right` failed
+ right: Err("overlap: two distinct client sessions required")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+restored: exit 0, wall 1.002s
+test grants::tests::overlap_barrier_refuses_one_session_for_both ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+```
+
+### F-overlap-sibling-new — CAUGHT
+
+`grants::tests::overlap_sibling_read_must_be_new_in_its_session`:
+
+```text
+baseline: exit 0, wall 0.783s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+planted: exit 101, wall 1.372s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... FAILED
+assertion `left == right` failed: sibling rule must check request_id
+ right: Err("overlap: sibling read must be new in its original session")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+restored: exit 0, wall 0.943s
+test grants::tests::overlap_sibling_read_must_be_new_in_its_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+```
+
+### F-overlap-alive — CAUGHT
+
+`grants::tests::overlap_barrier_refuses_when_a_client_has_exited`:
+
+```text
+baseline: exit 0, wall 3.043s
+test grants::tests::overlap_barrier_refuses_when_a_client_has_exited ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 2.05s
+planted: exit 101, wall 3.286s
+test grants::tests::overlap_barrier_refuses_when_a_client_has_exited ... FAILED
+assertion `left == right` failed
+ right: Err("overlap: both clients must remain alive through both barriers")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 2.04s
+restored: exit 0, wall 3.361s
+test grants::tests::overlap_barrier_refuses_when_a_client_has_exited ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 2.04s
+```
+
+### F-seed-dotdot — CAUGHT
+
+`grants::tests::seed_fixture_refuses_dot_dot`:
+
+```text
+baseline: exit 0, wall 0.950s
+test grants::tests::seed_fixture_refuses_dot_dot ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+planted: exit 101, wall 1.224s
+test grants::tests::seed_fixture_refuses_dot_dot ... FAILED
+assertion `left == right` failed
+ right: Some("seed fixture refuses a parent-directory segment")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+restored: exit 0, wall 0.948s
+test grants::tests::seed_fixture_refuses_dot_dot ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+```
+
+F-overlap-second-barrier plants exactly
+`if self.stage == 1 { return Ok(!pending.is_empty()); }` in `Overlap::ready`.
+The live journey now fails with the fixed missing-barrier-evidence reason,
+while the synthetic wiring test fails because a lone sibling was accepted.
+F-overlap-sibling-new removes the request-ID clause; its test also checks a
+changed session, swapped sessions and a wrong resource with the existing reason.
+F-overlap-alive removes both `all_alive(2)` observations in `ready`; the test
+then gets `Ok(true)` instead of the required both-alive refusal.
+
+### Verification environment
+
+The first restricted run reached 12 passing unit tests and two failures in
+process-group inspection (`could not inspect child process group`). The same
+14 tests passed with local process inspection allowed, in 2.178 seconds.
+This was a sandbox limit. Test assertions and cleanup rules stayed fixed.
+The full lane gates use that same local access. The volume had 48.41 GiB free
+before builds, above the runbook's 12 GiB estimate plus 2 GiB reserve.
+The earlier task-029 proof directory was preserved; this run's local,
+uncommitted evidence is under `target/task-029-current/`.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name or URL where code/content needs a hash? | No | `src/identity.rs:79` retains bundle checking; `tests/common/grants.rs:188` checks resource requests, rather than code identity. |
+| 2. New ambient capsule or UI authority? | No | `tests/common/grants.rs:225` still requires an exact fixture grant for each own read. |
+| 3. Second path or copy of an operation rule? | No | `tests/common/grants.rs:188` owns request-shape validation and `:308` calls it from the existing controller. |
+| 4. Does the Runtime core grow? | No | `tests/common/grants.rs:285` is the existing lab controller; implementation edits stay in this test module. |
+| 5. Refusals deny by default with clear reasons? | Yes | `tests/common/grants.rs:96` refuses parent segments; `:636` refuses missing barrier evidence with a fixed reason. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:138` and `:146` retain the capability request followed by the provider call; probe source is unchanged. |
+| 7. Named tests and caught falsifiers prove each new rule? | Yes | `tests/common/grants.rs:1360` through the five named tests and `falsifiers.json:1330` onward have baseline/planted/restored evidence above; both second-barrier tests failed. |
+| 8. Identity, admission and allowance remain separate? | Yes | `src/identity.rs:79` owns bundle identity, `tests/common/grants.rs:225` checks grants, and `:300` retains the time bound. |
+
+### Final gates and handoff
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  PASS, exit 0, 0.175 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`:
+  PASS, exit 0, 258.287 seconds within the unchanged 600-second
+  bound; 75 passed, 0 failed, 10 ignored with their existing blockers.
+  Both instance rows, the cancel/kill rows and the earlier active rows passed.
+- `git diff --check`, `bash -n lab/agent-conformance/run.sh`,
+  `node scripts/check-product-data.mjs` (42 capsules, two profiles,
+  28 method contracts), `node --test scripts/check-product-data.test.mjs`
+  (99 passed), `(cd elastos && cargo fmt --all -- --check)` and
+  `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`:
+  PASS. The workspace formatting check ran from `elastos/`.
+- All five new mutation anchors are restored and unique. Falsifier IDs are
+  unique, and earlier anchor counts retain their pre-task values.
+  Cargo.toml and Cargo.lock match HEAD byte for byte.
+
+The shared heavy-build lease is released. The local lifecycle inventory at
+`target/task-029-current/lifecycle.json` records this task worktree, proof files
+and seven retained expected-failure/sandbox roots. Their test processes have
+ended; the supervisor owns review and removal of retained test data. The
+existing build cache remains lane-owned reproducible state. Earlier task-029
+proof was preserved separately. Branch/worktree metadata was inspected with
+read-only Git commands. The candidate has six changed lane files. Cached
+`spike/spike/agent-host` is six commits ahead of the local task branch; this run
+performed zero fetches or Git-state changes. The supervisor owns the next
+review, current-base compatibility check and publication.
+
+## 029 — round 2: preserve the cleanup failure; gate blocked by build lease
+
+029 round 2: Rechecked the candidate and recorded the supervisor's cleanup
+failure; the full test rerun waits for the shared heavy-build lease.
+
+The supervisor's required test command exited 101. Its effects target reported
+31 passed, one failed and nine ignored in 208.04 seconds. The failed test was
+`cancelled_instance_settles_with_reason_sibling_completes`. Both clients exited,
+then the cleanup census reported one process holding
+`home/Library/Application Support/elastos/host-process.lock`, zero API sockets,
+zero temporary entries and zero pending requests. The assertion was:
+
+```text
+test cancelled_instance_settles_with_reason_sibling_completes ... FAILED
+cleanup census refused leftovers; see checked reason
+test result: FAILED. 31 passed; 1 failed; 9 ignored; 0 measured; 0 filtered out; finished in 208.04s
+```
+
+The earlier lane records include cleanup-census failures after collection
+(022 and 028). This result is consistent with that intermittent failure class;
+its cause remains unproven. Task 029 acceptance 7 directs the builder to report
+a known flake and preserve its code. The cancel journey and cleanup assertions
+therefore retain their existing requirements. The failed supervisor run remains
+FAIL; the earlier passing gate is separate evidence.
+
+All six task files matched the saved SHA-256 values from this candidate's
+previous verification before this log append. The five new falsifiers retain
+unique, restored anchors and unique IDs. Their recorded baseline/planted/restored
+results above still describe the current Rust source and falsifier definitions;
+this round adds zero rules, tests or falsifiers and repeats zero mutation runs.
+Cargo.toml and Cargo.lock also retain their pre-round bytes.
+
+### Round-2 checks
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  PASS, exit 0, 0.045 seconds, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+  CARGO_NET_OFFLINE=true`.
+- The full `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`
+  rerun is NOT RUN. The first exclusive lease attempt was busy; a subsequent
+  bounded wait remained busy for 180 seconds and exited 3 before starting Cargo
+  or test children. Each gate command retains its 600-second deadline. The
+  volume had 48.38 GiB free, above the 12 GiB build estimate plus 2 GiB reserve.
+- `bash -n lab/agent-conformance/run.sh`: PASS.
+- `node scripts/check-product-data.mjs`: PASS (42 capsules, two profiles,
+  28 method contracts); `node --test scripts/check-product-data.test.mjs`:
+  PASS (99 tests).
+- `(cd elastos && cargo fmt --all -- --check)` and
+  `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`:
+  PASS.
+
+Local round-2 evidence and its lifecycle inventory are under
+`target/task-029-round-2/`, retained until supervisor review. This round acquired
+zero build leases and started zero fixture Homes. Existing retained roots stay
+with their recorded owners. Git state is unchanged; the cached upstream is six
+commits ahead, and current remote state needs the supervisor's permitted check.
+The supervisor owns the next full gate when the build lease is free, followed
+by review and publication. Task acceptance remains open until that gate passes.
+The eight principles answers and file-line evidence above remain applicable.
+
+## 029 — round 3: unchanged candidate passes the full gate
+
+029 round 3: Preserved the supervisor's cleanup-census failure and reran the
+unchanged candidate under the shared heavy-build lease; the full locked gate passed.
+
+The supervisor run failed in
+`process_isolation::parallel_instances_complete_independently`. Its final
+census reported one process holding
+`home/Library/Application Support/elastos/host-process.lock`, zero API sockets
+and zero temporary entries. Its effects target reported:
+
+```text
+test process_isolation::parallel_instances_complete_independently ... FAILED
+final census and operator group stop: "cleanup census: FAIL retained:target/home-68129-1793019599652132000-152; process leftover; processes:1 paths:[\"home/Library/Application Support/elastos/host-process.lock\"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
+test result: FAILED. 31 passed; 1 failed; 9 ignored; 0 measured; 0 filtered out; finished in 183.64s
+```
+
+This matches the previously recorded intermittent cleanup-failure class; its
+cause remains unproven. Acceptance item 7 directs the builder to preserve the
+code for a known flake and report it. This round changes this log only. The
+controller, cleanup paths, assertions, dependencies and earlier row grades
+retain their requirements. The failed supervisor run remains separate evidence.
+
+### Round-3 checks
+
+Both lane commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, the runbook's lane-local target directories and the
+unchanged 600-second deadline. The volume had 48.25 GiB free before the gate,
+above the 12 GiB build estimate plus 2 GiB reserve. The existing shared lease
+was acquired for the test command and released after it completed.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  PASS, exit 0, 0.120 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`:
+  PASS, exit 0, 248.300 seconds; 75 passed, zero failed, ten ignored with their
+  existing blockers. The effects target passed in 191.42 seconds:
+
+```text
+test process_isolation::parallel_instances_complete_independently ... ok
+test two_instances_overlap_with_separate_grants ... ok
+test instance_grant_does_not_authorise_sibling ... ok
+test result: ok. 32 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 191.42s
+```
+
+- All five task-029 named tests passed. Their source and the five falsifier
+  definitions match the earlier verified SHA-256 values. Each restored edit
+  anchor occurs exactly once, and falsifier IDs remain unique. The recorded
+  baseline/planted/restored runs still cover these exact bytes; this round
+  adds zero tests or falsifiers and repeats zero mutation runs.
+- `bash -n lab/agent-conformance/run.sh`, product-data validation (42 capsules,
+  two profiles, 28 method contracts), its 99 Node tests, Runtime formatting
+  from `elastos/`, and chain-provider formatting: PASS.
+- Cargo.toml and Cargo.lock retain their pre-round bytes. The builder ran zero
+  Git commands; remote divergence was therefore left for the supervisor to
+  check before publication.
+
+Local evidence and its lifecycle inventory are in
+`target/task-029-round-3/`, retained until supervisor review. The gate left zero
+new retained test Homes. Earlier retained roots remain with their recorded
+owners. The eight principles answers and file-line evidence above still apply
+to the unchanged implementation. The repository has no humanizer skill; this
+record uses direct statements of behavior and ownership. The supervisor owns
+review and publication.
