@@ -2321,6 +2321,22 @@
       "tests": [
         "a killed provider edit is recovered"
       ]
+    },
+    {
+      "id": "MP24",
+      "title": "a Runtime-forwarded answer is read as a failure",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        return Err(map_effect_http_status(&response, runtime_socket));",
+          "new": "        return Err(map_effect_http_status(&response, runtime_socket));\n    }\n    if runtime_socket.is_some() {\n        return Err(map_effect_http_status(&response, runtime_socket));"
+        }
+      ],
+      "tests": [
+        "hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usage"
+      ]
     }
   ]
 }

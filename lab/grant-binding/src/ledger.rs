@@ -891,3 +891,24 @@ fn model_one_release_returns_only_that_hold() {
     assert!(!after.open.contains_key(&first.id));
     assert_eq!(after.open.get(&second.id), Some(&4));
 }
+
+#[test]
+fn model_one_settle_drops_only_that_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let first = verifier.reserve(&call, &request, 6).expect("reserve");
+    let second = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(
+        verifier.settle(&call, &request, first, SettleOutcome::Known(6)),
+        Ok(6)
+    );
+    let after = books(&verifier);
+    assert_eq!(after.charged, 6);
+    assert_eq!(after.held, 4);
+    assert!(!after.open.contains_key(&first.id));
+    assert_eq!(after.open.get(&second.id), Some(&4));
+}

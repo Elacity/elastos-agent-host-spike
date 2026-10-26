@@ -1360,6 +1360,86 @@ hosting cannot be claimed for wasmer.
   is the only result they share. wc-009b's wasmer hosting test must report
   SKIPPED with this reason, never PASS.
 
+## Cleanup census (M1 A12)
+
+Task 040, the lab half of M1 A12, step 2 of 2 (task 039 is step 1: `run_engine`
+removes its run folder on every outcome). After a normal, a trapped and a
+killed run, on each real engine, one census in `tests/run.rs`, `census(work_root)`,
+lists everything the lab runner started or made that is still under the work
+root it was given, each line with its kind. It returns an empty list only when
+all its counts are zero. Every census tool is started by its absolute path; a
+tool that does not start fails the test with that path, it never skips.
+
+The four counts, and how each is read:
+
+- Entries (`entry: <name>`): `fs::read_dir` of the work root. None is zero
+  entries.
+- Processes (`process: <pid> <argv>`): `/usr/bin/pgrep -f <work root>`, so any
+  live process whose argv holds the work root, which an engine's does through
+  its module path. None is exit 1 with nothing on stdout or stderr. Exit 0
+  lists pids; `/bin/ps -o args= -p <pid>` gives each one's argv for the line.
+  The pattern is a regular expression, so a `.` in the path matches any
+  character: it can only match more, never less.
+- Open files (`open file: <lsof line>`): `/usr/sbin/lsof +D <work root>`. None
+  is exit 1 with nothing on stdout or stderr. This Mac's `lsof` exits 1 even
+  when it lists an open file (measured by `census_reports_each_kind_of_leftover`,
+  LOG.md, task 040), so a listing with exit 0 or 1 is read as open files.
+- Preopened folders: checked on the live engine in the killed run, from its own
+  argv (`/bin/ps -o args= -p <pid>`): no `--dir`, `--mapdir`, `--env`, `--net`
+  or `-S` flag (a prefix match, so `--dir=x` or `-Sinherit-network` too), no
+  path under the work root but the module file, and the module file exactly
+  once. The argv is fixed (task 014); this records what a real process got.
+
+Any other answer from a census tool (another exit status, or anything on
+stderr) is a leftover line, `census failed: <tool, args, status, stdout,
+stderr>`, never a pass.
+
+The three runs, each on wasmtime 45.0.1 and wasmer 7.5.0 (`/opt/homebrew/bin`,
+the pinned versions, task 038), each followed by an empty census:
+
+- Normal (`normal_run_leaves_nothing_under_the_scratch_root`): one two-engine
+  `run` of the signed capsule `tools/build` makes; both engines print
+  `FIXED_OUTPUT`, equal.
+- Trapped (`trapped_run_leaves_nothing_under_the_scratch_root`): `run_engine`
+  per engine on a hand-written module whose `digest` runs `unreachable`.
+  Refused as `EngineFailed`: wasmtime with exit status 134 and ``wasm trap:
+  wasm `unreachable` instruction executed`` on stderr, wasmer with exit status
+  1 and `error: RuntimeError: unreachable`.
+- Killed (`killed_run_leaves_nothing_under_the_scratch_root`): `run_engine` per
+  engine on a thread, on a module whose `digest` loops forever. The test polls
+  `pgrep -f <work root>` (at most 10 s) until the one engine process is up,
+  reads its argv, sends it `SIGKILL` with `/bin/kill -KILL <pid>` and joins the
+  thread: refused as `EngineFailed`, stopped by signal 9. Every check waits
+  until the engine is killed, so a failed check never leaves an engine looping.
+  The argv seen: `<wasmtime> run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
+  root>/wasmtime/module.wasm 1592590337` and `<wasmer> run --invoke digest
+  <work root>/wasmer/module.wasm 1592590337`.
+
+`census_reports_each_kind_of_leftover` proves the census sees what it counts,
+with no engine: a file left in a work root, a live `/bin/sleep 30` whose
+`argv[0]` is a path under it (`sleep` takes only time intervals) and a file
+handle this test process holds open under it are each reported once, by kind;
+once the handle is closed, the process stopped and the file removed, the
+census is empty.
+
+Falsifier F-WC-A12-TEMP-LEAK (runner-caught, "## Falsifiers"): `run_engine`
+makes one extra folder `<work root>/<engine>.scratch` before its run folder and
+never removes it; all three run tests fail at their census assertion.
+
+Limits, not claimed:
+
+- A runner process that is itself killed is not covered: the run folder it
+  made stays (task 039's known limit). Only a killed engine is tested.
+- The census sees only the scratch root. An engine's own caches or files
+  elsewhere (for example wasmtime's compile cache, or anything an engine keeps
+  under the user's home folder) are outside it and are not counted.
+- A process is seen only through its argv or an open file under the scratch
+  root; a process an engine started with neither would not be seen. Neither
+  engine was seen to start one (the killed run found exactly one process).
+- The census is a snapshot taken after `run` or `run_engine` returned, on this
+  one Mac.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -1830,25 +1910,45 @@ it apart from the real lines.
 `built_capsule_runs_under_the_declared_cap_on_wasmtime` pass on this Mac's
 pinned engines with no change to their assertions.
 
+Task 040, the cleanup census (`tests/run.rs`; README "Cleanup census (M1
+A12)"). Each run test needs both real engines; if either is not on PATH it
+prints `SKIPPED` and gives no result, never a PASS.
+
+- `census_reports_each_kind_of_leftover` — no engine: a left file, a live
+  `/bin/sleep` with a work-root path as its `argv[0]` and an open handle are
+  each reported once by kind (`entry: left.txt`, `process: <pid> <argv>`, an
+  `open file:` line naming this process and the file); after they are removed,
+  stopped and closed, the census is empty.
+- `normal_run_leaves_nothing_under_the_scratch_root` — one two-engine `run` of
+  the signed built capsule: both outputs equal `FIXED_OUTPUT`, then the census
+  is empty.
+- `trapped_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
+  that runs `unreachable`: `EngineFailed` with a nonzero exit status and
+  `unreachable` on stderr, then the census is empty.
+- `killed_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
+  that loops forever, killed with `SIGKILL` once `pgrep` sees it: its live argv
+  held no preopen, env or network flag and no work-root path but the module
+  file; `EngineFailed` stopped by signal 9; then the census is empty.
+
 ## Falsifiers
 
-`falsifiers.json` holds 173 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 174 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032, one task 035, three task 036, five task 038 and three task
-039.
+031, two task 032, one task 035, three task 036, five task 038, three task
+039 and one task 040.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 109, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 110, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038 and 039: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2
-+ 2 + 2 + 2 + 1 + 3 + 5 + 3), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039 and 040: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
@@ -2434,3 +2534,18 @@ folder (`run_dir.with_file_name("bundle")`, since the write now sits in
 `write_and_start`, which has no work root), the same bug as before with its
 anchor unchanged, and re-anchors F-WC-README-COUNT to the new total, the same
 bug as before. Each keeps its own evidence label above.
+
+Task 040's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 040). Its anchor is `run_engine`'s `make_run_dir` line in
+`tools/src/run.rs`, a recovery target, on a line no other entry anchors; each
+named test fails at its census assertion:
+
+- F-WC-A12-TEMP-LEAK — `run_engine` makes one extra folder `<work
+  root>/<engine>.scratch` before its run folder and never removes it
+  (`normal_run_leaves_nothing_under_the_scratch_root`,
+  `trapped_run_leaves_nothing_under_the_scratch_root` and
+  `killed_run_leaves_nothing_under_the_scratch_root`, each at "the census
+  found leftovers", naming `entry: <engine>.scratch`).
+
+Task 040 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
