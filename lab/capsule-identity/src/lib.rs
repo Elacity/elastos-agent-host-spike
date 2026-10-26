@@ -130,6 +130,27 @@ impl fmt::Debug for LabCid {
     }
 }
 
+/// Read a printed lab CID back into its value.
+///
+/// It runs the claim check both name checks run, `lab_cid_digits`, and
+/// then decodes the digits it gives, so a printed value is read in one
+/// place and a consumer never copies the printed form. Text that is not a
+/// lab CID is refused with [`Refusal::NotALabCid`], the same refusal and
+/// text a name check gives. Parsing is not a name check: the value names no
+/// bytes until [`check_name`] or [`CheckedBundle::check_name`] compares it.
+impl std::str::FromStr for LabCid {
+    type Err = Refusal;
+
+    fn from_str(printed: &str) -> Result<Self, Refusal> {
+        let digits = lab_cid_digits(printed)?;
+        let mut bytes = [0; 32];
+        hex::decode_to_slice(digits, &mut bytes).map_err(|_| Refusal::NotALabCid {
+            claimed: printed.to_owned(),
+        })?;
+        Ok(LabCid(bytes))
+    }
+}
+
 /// One regular file of a bundle: its bundle-relative, `/`-separated path and
 /// its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,7 +215,8 @@ pub enum Moment {
 }
 
 /// Why a bundle gets no lab CID, why a name check ([`check_name`] or
-/// [`CheckedBundle::check_name`]) refuses a claimed name, or why a test-key
+/// [`CheckedBundle::check_name`]) refuses a claimed name, why a printed lab
+/// CID does not parse ([`LabCid`]'s `FromStr`), or why a test-key
 /// signature check refuses. Each refusal has its own reason. A refused bundle
 /// gets no name and no signature. A refused signature check returns no trust,
 /// admission or launch value.
@@ -223,9 +245,9 @@ pub enum Refusal {
     /// takes that word with a colon in test output for a harness error, so a
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
-    /// A name check was given a claim that is not a lab CID: it lacks the
-    /// `lab-cid:sha256:` label, or 64 lowercase hex characters after it. The
-    /// claim is kept only to say what was refused.
+    /// A name check, or [`LabCid`]'s parse, was given a claim that is not a
+    /// lab CID: it lacks the `lab-cid:sha256:` label, or 64 lowercase hex
+    /// characters after it. The claim is kept only to say what was refused.
     NotALabCid { claimed: String },
     /// A name check was given a lab CID the bundle's bytes do not give.
     /// `actual` is the lab CID of the bytes; the claim is kept only to say

@@ -1,0 +1,1 @@
+localhost://UsersAI/self/.AppData/ElastOS/AgentHost/tasks/conformance/memory

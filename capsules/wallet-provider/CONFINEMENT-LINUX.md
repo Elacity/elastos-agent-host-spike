@@ -44,9 +44,9 @@ confined on Linux.
 | Oracle rule | Linux primitive that would carry it | How exact the match is | Linux test that would prove it |
 | --- | --- | --- | --- |
 | `(version 1)` | The generator's policy version; no kernel primitive carries it. | Exact: the generator emits one version, and the contract check refuses any other head. | `both_file_profiles_bind_one_storage_parameter_contract` |
-| `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE`) and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock's [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) report no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so the ruleset does not restrict them. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the provider owns with ordinary permissions beneath searchable parents, so the mapping is wider than the oracle for those six; the kernel's ordinary permission check still applies, so the design claims no such success for a host-owned file or a file whose permissions deny the call. The capability drop removes `CAP_CHOWN`, so `chown` to a different owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`; an owner that keeps `uid` `-1` may still change its file's group to a group of which it is a member ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)), so the drop does not refuse every `chown`. Landlock checks a new data open against the rules for its path, so a data open outside every grant fails; the rules are checked at open time, so a descriptor opened before enforcement is not checked, and an `O_PATH` open asks for no content right and is not restricted ([filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)). The launch passes no descriptor to a real provider, and future Runtime work proves that precondition. One `fcntl(F_DUPFD)` duplicates an outside `O_PATH` descriptor that the probe obtains with `openat` ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)) and gives no content read; the design claims that one call only, not every `fcntl` or `flock`, whose departures stay unclaimed. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
+| `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE`) and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock's [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) report no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so the ruleset does not restrict them. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the provider owns with ordinary permissions, in a searchable fixture directory beneath searchable parents, so the mapping is wider than the oracle for those six; the kernel's ordinary permission check still applies, so the design claims no such success for a host-owned file or a file whose permissions deny the call. The capability drop removes `CAP_CHOWN`, so `chown` to a different owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`; an owner that keeps `uid` `-1` may still change its file's group to a group of which it is a member ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)), so the drop does not refuse every `chown`; the probe requires that group call to succeed and the resulting group to be the chosen mapped gid, and the policy run checks its own fixture directory's mode and owner before its `chdir`, as the positive control checks its copy, so a mismatch is missing evidence with its cause, not a kernel change. A seccomp rule that refuses every `chown` by syscall number is the group-call falsifier only when the test reports the failing call as the group `chown` itself and every earlier call as a success; a failure at an earlier call is missing evidence. Landlock checks a new data open against the rules for its path, so a data open outside every grant fails; the rules are checked at open time, so a descriptor opened before enforcement is not checked: the [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) section states that "Files or directories opened before the sandboxing are not subject to these restrictions", and an `O_PATH` open does not open the file itself for reading or writing ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)); whether Landlock restricts it is open and unclaimed, and the probe's required success decides the row. The launch precondition is that a provider inherits no descriptor other than its stdin, stdout and stderr protocol streams, which are the harness pipes (`Stdio::piped()` in `ConfinedProvider::spawn` in `capsules/wallet-provider/tests/confine.rs`); future Runtime work proves it, for example by listing `/proc/self/fd` at provider start and allowing exactly 0, 1 and 2, and the design claims no falsifier for it. One raw `fcntl` call with the `F_DUPFD` command duplicates an outside `O_PATH` descriptor that the probe obtains with `openat` ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)) and gives no content read; the probe issues that raw command itself, not a library duplicate that may use another command such as `F_DUPFD_CLOEXEC`, so the `F_DUPFD`-only falsifier reaches the probe's call. The design claims that one raw call only, not every `fcntl` or `flock`, whose departures stay unclaimed. Falsifier for the duplication: add a seccomp rule that refuses `fcntl` only when its command argument is `F_DUPFD` ([fcntl(2)](https://man7.org/linux/man-pages/man2/fcntl.2.html)); the duplication fails and the test fails. The probe and the Rust runtime make other `fcntl` calls, so a rule that refuses every `fcntl` could stop the probe before its `F_DUPFD` call. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
 | `(deny default)`, processes and signals | A PID namespace; the empty capability set; a seccomp filter that refuses process creation other than the provider's own threads and every cross-process operation (`ptrace`, `process_vm_*`, `pidfd_getfd`). Landlock `EXECUTE` on `PROVIDER_EXECUTABLE` alone carries exec of any other file. | Exact for signals: a PID namespace contains no PID outside itself, so a signal to a host process cannot be expressed. Narrower for process creation because the provider's threads must start: the filter admits the thread form of `clone` and refuses a new process. The filter adds no exec rule: it sees only the syscall number and cannot read the path behind `execve`'s pointer, so it cannot separate the granted binary from another file, and a refusal by number would also refuse the provider's own launch, which the oracle permits. The Linux test decides the exact flag set. | `confined_provider_denies_process_and_signal_boundaries` |
-| `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, and the one SysV creation rule refuses every form including the private key. The `mq_open` rule refuses the `O_CREAT` form of the call, while the create also passes through the message queue filesystem ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)) that the ruleset does not grant; Landlock's default denial is the layer that would refuse it if the ruleset reaches that internal mount, and the documents do not settle that reach, so the design claims no falsifier for the `mq_open` rule. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
+| `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, and the one SysV creation rule refuses every form including the private key. The `mq_open` rule refuses the `O_CREAT` form of the call, and the create also passes through the message queue filesystem ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)). Landlock's default denial would refuse that create only if the ruleset reaches the queue's internal mount; [Landlock's documentation](https://docs.kernel.org/userspace-api/landlock.html) does not settle that reach, and if it does not, no other layer refuses the create. The outcome is open, so the design leaves the `mq_open` falsifier unclaimed: a future isolated probe that drops only the `mq_open` `O_CREAT` refusal and records the outcome would settle it. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
 | `(deny default)`, kernel facts | A private, read-only `/proc` mount limited to the provider's own PID namespace and a hidden host `/sys`; Landlock denying reads outside the granted paths, with no `/proc` or `/sys` rule; seccomp refusing syscalls that read host kernel state (`bpf`, `perf_event_open`). | No exact match: the oracle denies every kernel-fact operation except `sysctl-read`, and Linux splits kernel facts across `/proc`, `/sys` and syscalls, so the map is wider in one place and narrower in another. The Linux test decides. | `confined_provider_denies_kernel_fact_boundaries` |
 | `(deny network*)`, with no network allow | A network namespace with no interface and no route; the empty capability set; seccomp refusing every `socket` and `socketpair` call by syscall number, with no family list, and refusing `connect`, `sendmsg`, `recvmsg`, `pidfd_getfd` and `process_vm_*` so no descriptor can arrive from outside. | Exact for every family the oracle refuses: the filter refuses the whole call instead of naming families, so no family is left out, Unix-domain included, and the namespace removes every interface. macOS puts a Unix-domain connect under `network*` (cc-model-confine 010, macOS 26.5.2), so this row covers it too. | `profile_denies_network` (the oracle text) and `linux_profile_denies_every_socket_family` (the policy) |
 | no `(allow default)` | The generator emits only the rights the oracle grants; the launch adds no permissive rule. | Exact: the Linux policy has no permissive term, and the one contract check refuses one in the oracle. | `both_file_profiles_bind_one_storage_parameter_contract` and `file_profile_contract_rejects_an_allow_default` |
@@ -73,22 +73,33 @@ departs from the oracle, and the Linux test decides the row.
   ([filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)).
   Each departs the oracle in one stated way. No layer of the design refuses
   `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the
-  provider owns with ordinary permissions beneath searchable parents, so the
-  mapping is wider than the oracle's `(deny default)` for those six; the
+  provider owns with ordinary permissions, in a searchable fixture directory
+  beneath searchable parents, so the mapping is wider than the oracle's
+  `(deny default)` for those six; the
   kernel's ordinary permission check still applies, so the design claims no
   such success for a host-owned file or a file whose permissions deny the
   call. `linux_file_operations_landlock_cannot_restrict` probes them on
   isolated file and directory fixtures outside every grant, under the probe's
-  mapped uid and gids, with that uid as the fixture owner and the search bit
-  set on every parent. A positive control under the same uid/gid mappings and
-  namespaces, without the proposed Landlock ruleset, capability drop and
+  mapped uid and gids, with that uid as the fixture owner, the fixture
+  directory searchable by that uid (owned by it, mode `0700`), and the search
+  bit set on every parent. A positive control under the same uid/gid mappings
+  and namespaces, without the proposed Landlock ruleset, capability drop and
   seccomp filter, requires each intended call to succeed first; a fixture the
   host cannot supply or a call the control already refuses is reported with
-  its cause as missing evidence. Under the policy the probe requires each
+  its cause as missing evidence. The policy run checks its own fixture
+  directory's mode and owner before its `chdir`, the same check the positive
+  control makes on its copy, and reports a mismatch as missing evidence with
+  its cause, not as a kernel change. Under the policy the probe requires each
   call to succeed, so the widening is recorded rather than claimed as
   confinement; a later kernel that refuses one of them fails the test and the
-  row is rewritten. Falsifier: add a seccomp rule that refuses `chmod` and
-  `stat` by syscall number; the probe's calls fail and the test fails.
+  row is rewritten. Falsifier for the metadata calls: add a seccomp rule that
+  refuses `chmod` and `stat` by syscall number
+  ([seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html)); a
+  filter reads syscall arguments as integers, not paths, so the rule cannot
+  select only the probe's calls, and the probe and the Rust runtime make
+  other `stat` calls.
+  The rule can stop the probe before its own calls, so the design leaves this
+  falsifier unclaimed.
   `chown` separates two cases. Changing the owner to a different mapped uid
   is refused because the capability drop removes `CAP_CHOWN`, so the mapping
   is narrower than the oracle inside `STORAGE_ROOT`;
@@ -100,24 +111,42 @@ departs from the oracle, and the Linux test decides the row.
   [chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html) lets the
   owner set a group it belongs to; the same probe requires that call to
   succeed and the resulting group to change. Falsifier: add a seccomp rule
-  that refuses every `chown` by syscall number; the group call fails and the
-  test fails. A fixture without the required mapped uid or gid supplies a
+  that refuses every `chown` by syscall number; this falsifier counts only
+  when the test reports the failing call as the group `chown` itself and every
+  earlier call as a success. A failure at an earlier call is reported as
+  missing evidence, so the group call is not inferred from it. A fixture
+  without the required mapped uid or gid supplies a
   clear reason for missing evidence. `flock` and `fcntl` act only on a
   descriptor, so the descriptor conditions decide them. Landlock refuses a
   new data open outside every grant. A descriptor opened before enforcement
-  is not checked: the Runtime launch passes none to a real provider, and
-  future Runtime work proves that precondition. An `O_PATH` open asks for no
-  content right, so it is not restricted; the same probe obtains an outside
-  `O_PATH` descriptor with `openat` and duplicates it with `fcntl(F_DUPFD)`
-  ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)), requires
-  both descriptors and closes both. The duplication gives no proof of a
-  content read, because `open(2)` gives `EBADF` for a read on an `O_PATH`
-  descriptor. The design claims this one `fcntl(F_DUPFD)` call and no other
-  `fcntl` command and no `flock` operation, so those departures stay
-  unclaimed. Falsifier for the `O_PATH` open:
+  is not checked: the [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)
+  section states that "Files or directories opened before the sandboxing are
+  not subject to these restrictions".
+  The launch precondition is that a provider inherits no descriptor other
+  than its stdin, stdout and stderr protocol streams, which are the harness
+  pipes (`Stdio::piped()` in `ConfinedProvider::spawn` in
+  `capsules/wallet-provider/tests/confine.rs`); future Runtime work proves
+  it, for example by listing `/proc/self/fd` at provider start and allowing
+  exactly 0, 1 and 2, and the design claims no falsifier for it. An `O_PATH`
+  open does not open the file itself for reading or writing
+  ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)); whether
+  Landlock restricts it is open and unclaimed, and the probe's required
+  success decides the row. The same probe obtains an outside `O_PATH`
+  descriptor with `openat` and duplicates it by calling `fcntl` with the raw
+  `F_DUPFD` command ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)),
+  not through a library duplicate that may use another command such as
+  `F_DUPFD_CLOEXEC`; it requires both descriptors and closes both. The
+  duplication gives no proof of a content read, because `open(2)` gives
+  `EBADF` for a read on an `O_PATH` descriptor. The design claims this one
+  raw `fcntl(F_DUPFD)` call and no other `fcntl` command and no `flock`
+  operation, so those departures stay unclaimed. Falsifier for the `O_PATH` open:
   add a seccomp rule that refuses `openat` when its flags carry `O_PATH`; the
   open fails and the test fails. Falsifier for the duplication: add a seccomp
-  rule that refuses `fcntl`; the duplication fails and the test fails.
+  rule that refuses `fcntl` only when its command argument is `F_DUPFD`
+  ([fcntl(2)](https://man7.org/linux/man-pages/man2/fcntl.2.html)); the
+  duplication fails and the test fails. The probe and the Rust runtime make
+  other `fcntl` calls, so a rule that refuses every `fcntl` could stop the
+  probe before its `F_DUPFD` call.
 - The literal read of `STORAGE_PARENT` alone. Landlock has no right that names
   a directory without its tree, so the nearest rule is wider than the oracle
   and would let a read beneath the parent succeed. The design's mapping is
@@ -245,11 +274,14 @@ no macOS counterpart is named here for the first time.
 - `confined_provider_serves_did_operations_under_its_root` (Linux counterpart)
   drives `Init`, `get_did`, `get_persona_did`, `get_nickname`, `set_nickname`
   and `resolve` under the Linux policy and requires each answer and each file
-  under `STORAGE_ROOT`. Its exec probe copies `PROVIDER_EXECUTABLE` into
-  `STORAGE_ROOT`, where the read is granted, under a name other than the
-  original, and requires the exec of the copy to fail; a copy outside every
-  grant would also fail its read, so that probe would not decide the exec
-  rule. It fails
+  under `STORAGE_ROOT`. The test harness places a copy of
+  `PROVIDER_EXECUTABLE` in `STORAGE_ROOT`, under a name other than the
+  original, before the confined probe starts and outside the policy. Under the
+  policy the probe first shows the copy is present and readable under the
+  `STORAGE_ROOT` grant, and only then requires the exec of the copy to fail; a
+  failure before the exec is reported as missing evidence with its cause, not
+  as the exec rule's refusal. A copy outside every grant would also fail its
+  read, so that probe would not decide the exec rule. It fails
   without the `EXECUTE` rule (the start is refused), without the `STORAGE_ROOT`
   read and write rights (the identity write is denied) and without the rule
   that carries the loader's start reads. Falsifier for the exec row: add a
@@ -262,10 +294,14 @@ no macOS counterpart is named here for the first time.
 - `confined_provider_serves_wallet_operations_under_its_root` (Linux
   counterpart) drives `Init`, `status`, `CreateManagedAccount` and
   `ListAccounts`, and requires the account and the storage key under the wallet
-  root. Its exec probe copies `PROVIDER_EXECUTABLE` into `STORAGE_ROOT`, where
-  the read is granted, under a name other than the original, and requires the
-  exec of the copy to fail; a copy outside every grant would also fail its
-  read, so that probe would not decide the exec rule. Falsifier for the exec
+  root. The test harness places a copy of `PROVIDER_EXECUTABLE` in
+  `STORAGE_ROOT`, under a name other than the original, before the confined
+  probe starts and outside the policy. Under the policy the probe first shows
+  the copy is present and readable under the `STORAGE_ROOT` grant, and only
+  then requires the exec of the copy to fail; a failure before the exec is
+  reported as missing evidence with its cause, not as the exec rule's
+  refusal. A copy outside every grant would also fail its read, so that probe
+  would not decide the exec rule. Falsifier for the exec
   row: add a Landlock `EXECUTE` rule for the copy under `STORAGE_ROOT`; the
   copy is readable and runs, and the test fails. Falsifier for the state row:
   drop the `STORAGE_ROOT` write right; the test fails on the denied account
@@ -326,38 +362,66 @@ no macOS counterpart is named here for the first time.
 - `linux_file_operations_landlock_cannot_restrict` (new) uses an isolated
   fixture file and an isolated fixture directory outside every path grant.
   The probe runs under the mapped uid and mapped gids of the policy; the
-  fixture file and directory are owned by that uid, every parent directory
-  carries the search bit for that uid, and the file has ordinary `0644`
-  permissions so its owner may `chmod`, `utime` and `setxattr` it. One mapped
-  supplementary gid differs from the file's group and is the target of the
-  group `chown`. The file's filesystem supports the chosen `user.*` xattr.
+  fixture file and directory are owned by that uid, the fixture directory
+  carries the search bit for that uid (mode `0700`, owned by that uid), every
+  parent directory carries the search bit for that uid
+  ([chdir(2)](https://man7.org/linux/man-pages/man2/chdir.2.html)), the
+  positive control checks its copy of the fixture directory's mode and owner
+  before its `chdir`, and the policy run checks its own fixture directory's
+  mode and owner before its `chdir`; a mismatch in either copy is reported as
+  missing evidence with its cause, not as a kernel change. The file has
+  ordinary `0644` permissions so its owner
+  may `chmod`, `utime` and `setxattr` it. One mapped supplementary gid
+  differs from the file's group and is the target of the group `chown`. The
+  file's filesystem supports the chosen `user.*` xattr.
   The calls use the fixture file for `stat`, `chmod`, `access`, `utime`,
   `setxattr` and `chown(path, -1, gid)`, the fixture directory for `chdir`,
   and the fixture file for `openat(AT_FDCWD, path, O_PATH)`, whose descriptor
-  the probe duplicates with `fcntl(fd, F_DUPFD, 3)` and closes twice. A
+  the probe duplicates by calling `fcntl(fd, F_DUPFD, 3)` itself with the raw
+  `F_DUPFD` command, not through a library duplicate that may use another
+  command such as `F_DUPFD_CLOEXEC`, and closes twice. A
   positive control runs the same calls on its own copies of the fixture,
   under the same uid/gid mappings and the same user, mount, PID and IPC
   namespaces without the proposed Landlock ruleset, capability drop or
   seccomp filter, and requires each call to succeed; a fixture the host
-  cannot supply, a missing uid or gid mapping, a filesystem without the
+  cannot supply, a fixture directory whose mode or owner does not give that
+  uid the search bit, a missing uid or gid mapping, a filesystem without the
   xattr, or a call the positive control already refuses is reported with its
   cause as missing evidence, and the probe claims no widening from it. The
   control is a precondition check and claims no policy falsifier. Under the
   policy each call must succeed, the group `chown` must return success and
   the resulting group must be the chosen mapped gid, and the `O_PATH`
-  descriptor and its duplicate must both be obtained. The probe reads no file
+  descriptor and its duplicate must both be obtained; a refusal of any of
+  these calls under the policy fails the test. The probe reads no file
   content, because `open(2)` gives `EBADF` for a read on an `O_PATH`
   descriptor. Falsifier for the metadata calls: add a seccomp rule that
-  refuses `chmod` and `stat` by syscall number; those calls fail and the test
-  fails. Falsifier for the group case: add a seccomp rule that refuses every
-  `chown` by syscall number; the group call fails and the test fails.
+  refuses `chmod` and `stat` by syscall number
+  ([seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html)); a
+  filter reads syscall arguments as integers, not paths, so the rule cannot
+  select only the probe's calls, and the probe and the Rust runtime make
+  other `stat` calls.
+  The rule can stop the probe before its own calls, so the design leaves this
+  falsifier unclaimed. Falsifier for the group case: add a seccomp rule that
+  refuses every `chown` by syscall number; the test reports the failing call,
+  and the falsifier counts only when that call is the group `chown` itself and
+  every earlier call is reported as a success; a failure at an earlier call
+  is missing evidence.
   Falsifier for the `O_PATH` open: add a seccomp rule that refuses `openat`
   when its flags carry `O_PATH`; the open fails and the test fails. Falsifier
-  for the duplication: add a seccomp rule that refuses `fcntl`; the
-  duplication fails and the test fails. A descriptor opened before
-  enforcement is a launch precondition: the Runtime passes none to a real
-  provider, and future Runtime work proves it; this probe claims no falsifier
-  for it.
+  for the duplication: add a seccomp rule that refuses `fcntl` only when its
+  command argument is `F_DUPFD` ([fcntl(2)](https://man7.org/linux/man-pages/man2/fcntl.2.html));
+  the duplication fails and the test fails. The probe and the Rust runtime
+  make other `fcntl` calls, so a rule that refuses every `fcntl` could stop
+  the probe before its `F_DUPFD` call. A descriptor opened before
+  enforcement is not checked: the [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)
+  section states that "Files or directories opened before the sandboxing are
+  not subject to these restrictions".
+  The launch precondition is that a provider inherits no descriptor other
+  than its stdin, stdout and stderr protocol streams, which are the harness
+  pipes (`Stdio::piped()` in `ConfinedProvider::spawn` in
+  `capsules/wallet-provider/tests/confine.rs`); future Runtime work proves
+  it, for example by listing `/proc/self/fd` at provider start and allowing
+  exactly 0, 1 and 2, and this probe claims no falsifier for it.
 - `linux_capability_drop_refuses_chown` (new) probes
   `chown(path, other_uid, -1)` on a file under `STORAGE_ROOT` that the probe's
   mapped uid owns, under the same policy, and requires `EPERM` with the owner
@@ -371,13 +435,18 @@ no macOS counterpart is named here for the first time.
   Falsifier: keep `CAP_CHOWN` in the capability set; the chown succeeds and
   the test fails.
 - `confined_provider_denies_process_and_signal_boundaries` (new) requires a
-  probe under the same policy to fail to exec the copy of `PROVIDER_EXECUTABLE`
-  that the serve probes place in `STORAGE_ROOT`, under a name other than the
-  original, where the read is granted; a copy outside every grant would also
-  fail its read, so it would not decide the exec rule. The same probe must fail
-  to fork a new process and to signal a host PID, and must fail
-  `ptrace(PTRACE_TRACEME)`, `process_vm_readv` and `pidfd_getfd` on its own
-  process; the seccomp rule refuses those three calls by number, so a
+  probe under the same policy to fail to exec a copy of `PROVIDER_EXECUTABLE`.
+  The test harness places a copy of `PROVIDER_EXECUTABLE` in `STORAGE_ROOT`,
+  under a name other than the original, before the confined probe starts and
+  outside the policy. Under the policy the probe first shows the copy is
+  present and readable under the `STORAGE_ROOT` grant, and only then requires
+  the exec of the copy to fail; a failure before the exec is reported as
+  missing evidence with its cause, not as the exec rule's refusal. A copy
+  outside every grant would also fail its read, so that probe would not decide
+  the exec rule.
+  The same probe must fail to fork a new process and to signal a host PID, and
+  must fail `ptrace(PTRACE_TRACEME)`, `process_vm_readv` and `pidfd_getfd` on
+  its own process; the seccomp rule refuses those three calls by number, so a
   self-target probe observes it without the PID namespace or a Landlock scope.
   Falsifier: remove the PID namespace; the signal to the host PID succeeds and
   the test fails on that assertion. Falsifier for the creation refusal: admit
@@ -402,12 +471,14 @@ no macOS counterpart is named here for the first time.
   namespace permits a new object inside itself and Landlock's
   [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)
   restrict files and directories, not SysV objects. The POSIX queue create
-  passes through the message queue filesystem
-  ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html))
-  that the ruleset does not grant, so dropping the `mq_open` `O_CREAT` refusal
-  alone leaves the create refused; Landlock's default denial is the layer that
-  would refuse it if the ruleset reaches that internal mount, and the documents
-  do not settle that reach, so the design leaves that falsifier unclaimed.
+  also passes through the message queue filesystem
+  ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)).
+  Landlock's default denial would refuse that create only if the ruleset
+  reaches the queue's internal mount; the cited documents do not settle that
+  reach, and if it does not, no other layer refuses the create. The outcome is
+  open, so the design leaves the `mq_open` falsifier unclaimed: a future
+  isolated probe that drops only the `mq_open` `O_CREAT` refusal and records
+  the outcome would settle it.
 - `confined_provider_denies_kernel_fact_boundaries` (new) requires a probe to
   fail to read `/proc/kallsyms`, host `/proc/sys` entries outside the grant or
   `/sys` kernel state, and to fail `bpf` and `perf_event_open`. The design adds
@@ -426,17 +497,25 @@ no macOS counterpart is named here for the first time.
   it is an experiment that shows the assertion can fail, not proof of either
   rule; the design leaves a falsifier for the `/sys` read unclaimed. It claims
   no falsifier for either mount, because a mount change alone leaves Landlock's
-  default denial in place. Falsifier for the `bpf` refusal, read only after its
-  positive control passes: allow `bpf`; the probe's call succeeds and the test
-  fails. The control runs with `kernel.unprivileged_bpf_disabled` at 0
+  default denial in place. Falsifier for the `bpf` refusal, read only when
+  the host precondition check passes: allow `bpf`; the probe's call succeeds
+  and the test fails. This precondition check is a check of the host and the
+  probe's launch, read before the mutation, and it passes only when
+  `kernel.unprivileged_bpf_disabled` reads 0
   ([unprivileged_bpf_disabled](https://docs.kernel.org/admin-guide/sysctl/kernel.html#unprivileged-bpf-disabled)),
-  the empty capability set the design drops, the same namespaces and no seccomp
-  refusal of `bpf`, and requires the probe's `bpf(BPF_MAP_CREATE, ...)` call
-  ([bpf(2)](https://man7.org/linux/man-pages/man2/bpf.2.html)) for a map an
-  unprivileged caller may create to return a valid descriptor. A value of 1 or
-  2 makes the kernel refuse the call with `EPERM` without `CAP_SYS_ADMIN` or
-  `CAP_BPF`, so the mutation is masked and the design leaves it unclaimed. The
-  design claims no falsifier for `perf_event_open`, because a
+  the probe's `bpf(BPF_MAP_CREATE, ...)` request
+  ([bpf(2)](https://man7.org/linux/man-pages/man2/bpf.2.html)) names a map
+  type an unprivileged caller may create, and the process holds a memlock or
+  memory-cgroup budget for that map; no primary documentation states which
+  budget the kernel charges that map to, so the design treats this condition
+  as an open precondition the check reads, not a settled kernel fact. The
+  design's empty capability set leaves
+  the probe without `CAP_BPF` or `CAP_SYS_ADMIN`, so the kernel treats it as
+  unprivileged. A value of 1 or 2 makes the kernel refuse the call with
+  `EPERM` without `CAP_SYS_ADMIN` or `CAP_BPF`, and a request outside those
+  other conditions is refused by the kernel even when the filter permits it;
+  those cases are masked, so the design leaves them unclaimed. The design
+  claims no falsifier for `perf_event_open`, because a
   `perf_event_paranoid` value that refuses the probe's event to an unprivileged
   caller can keep the refusal after the filter permits the call
   ([perf_event_paranoid](https://docs.kernel.org/admin-guide/sysctl/kernel.html#perf-event-paranoid)).

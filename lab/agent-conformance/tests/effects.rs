@@ -122,14 +122,39 @@ fn operator_storage_is_under_throwaway_home() {
 #[path = "common/grants.rs"]
 mod grants;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadOutcome {
+    Granted,
+    Denied,
+    NoPolicy,
+}
+
 fn exercise_fixture_read(effect: Effect, granted: bool) {
+    exercise_read(
+        effect,
+        if granted {
+            ReadOutcome::Granted
+        } else {
+            ReadOutcome::Denied
+        },
+    );
+}
+
+fn exercise_read(effect: Effect, outcome: ReadOutcome) {
     use agent_conformance::harness::{Launch, RunningInstances};
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let bytes = build_probe(effect, 1);
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
     let capsule = stage_probe(&home, &bytes, effect);
-    let fixture = grants::Fixture::committed().expect("valid committed grant fixture");
+    let (fixture, apply_policy) = if outcome == ReadOutcome::NoPolicy {
+        grants::Fixture::no_policy().expect("valid optional fixture policy")
+    } else {
+        (
+            grants::Fixture::committed().expect("valid committed grant fixture"),
+            true,
+        )
+    };
     let mut operator = common::operator::Operator::start(&home)
         .unwrap_or_else(|reason| probe::skipped(&format!("operator prerequisite: {reason}")));
     // A refusal from the Runtime under test remains FAIL, even before run.
@@ -154,7 +179,20 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
         probe: capsule.identity.clone(),
     }
     .emit();
-    let collected = running.collect_with(Duration::from_secs(10), || controller.poll());
+    let bound = if outcome == ReadOutcome::NoPolicy {
+        40
+    } else {
+        10
+    };
+    let collected = running.collect_with(Duration::from_secs(bound), || {
+        if apply_policy {
+            controller.poll()
+        } else {
+            // Seeding uses the shell fixture. This client receives no approval
+            // or denial from it; only Runtime can settle the pending request.
+            Ok(())
+        }
+    });
     operator
         .finish_check(sampled)
         .expect("final census and operator group stop");
@@ -174,15 +212,31 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
         assert!(!stderr.contains(reason), "{reason}");
     }
     let content_error = stderr.contains("granted file bytes differ from guest expectation");
-    println!(
-        "fixture read: exit:{:?} matched:{} granted:{} denied:{} content_error:{content_error}",
-        output.status.code(),
-        controller.decisions.matched,
-        controller.decisions.granted,
-        controller.decisions.denied
-    );
+    controller
+        .print_checked(&format!(
+            "fixture read: exit:{:?} matched:{} granted:{} denied:{} content_error:{content_error}",
+            output.status.code(),
+            controller.decisions.matched,
+            controller.decisions.granted,
+            controller.decisions.denied
+        ))
+        .expect("printed result excludes fixture credentials");
     // A denial or a content error is never reported as an environmental skip.
-    if granted {
+    if outcome == ReadOutcome::NoPolicy {
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "no-policy acceptance failed; private triage required"
+        );
+        assert_output_refusal(
+            output,
+            effect,
+            "Internal(\"capability request still pending after 30s\")",
+        );
+        assert_eq!(controller.decisions.granted, 0);
+        assert_eq!(controller.decisions.denied, 0);
+        assert_eq!(controller.decisions.matched, 0);
+    } else if outcome == ReadOutcome::Granted {
         assert_eq!(controller.decisions.matched, 1);
         assert_eq!(controller.decisions.granted, 1);
         assert_eq!(controller.decisions.denied, 0);
@@ -237,10 +291,10 @@ fn exercise_fixture_read(effect: Effect, granted: bool) {
     ];
     controller
         .check_report(
-            if granted {
-                "granted_read_succeeds"
-            } else {
-                "ungranted_sibling_read_is_refused"
+            match outcome {
+                ReadOutcome::Granted => "granted_read_succeeds",
+                ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
+                ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
             },
             &observations,
         )
@@ -263,4 +317,49 @@ fn granted_read_succeeds() {
 #[test]
 fn ungranted_sibling_read_is_refused() {
     exercise_fixture_read(Effect::SiblingRead, false);
+}
+
+#[test]
+fn no_policy_file_does_not_mean_allow() {
+    // One activation attempts one read. A natural Runtime refusal is required;
+    // the harness timeout is an error, never refusal evidence.
+    exercise_read(Effect::GrantedRead, ReadOutcome::NoPolicy);
+}
+
+#[test]
+fn agent_cannot_read_human_space_without_grant() {
+    assert_refusal(
+        Effect::HumanRead,
+        "Internal(\"localhost://Users/self requires a principal-scoped launch context\")",
+    );
+}
+
+#[test]
+fn ungranted_memory_write_is_refused() {
+    let resource = include_str!("../fixtures/memory-write.txt").trim();
+    assert_refusal(
+        Effect::MemoryWrite,
+        &format!("Internal(\"capsule manifest does not declare authority for {resource}\")"),
+    );
+}
+
+// The fixture describes intended principals only. Runtime must verify and bind
+// them before the launch primitive can exercise these journeys. A fixture label
+// or a second Home is never treated as a verified principal.
+#[test]
+#[ignore = "blocked: UsersAI binding; AC-002-ARGS"]
+fn agent_memory_under_own_principal() {
+    panic!("blocked: UsersAI binding; AC-002-ARGS — Runtime must bind verified agent principals and return resolved object ownership");
+}
+
+#[test]
+#[ignore = "blocked: UsersAI binding; AC-002-ARGS"]
+fn agent_cannot_read_other_agent_memory() {
+    panic!("blocked: UsersAI binding; AC-002-ARGS — Runtime must enforce agent roots and carry the target selector and result");
+}
+
+#[test]
+#[ignore = "blocked: UsersAI binding; AC-002-ARGS"]
+fn agent_can_read_human_space_with_grant() {
+    panic!("blocked: UsersAI binding; AC-002-ARGS — Runtime must bind the agent launch; reuse the fixture Controller for its human-space grant");
 }

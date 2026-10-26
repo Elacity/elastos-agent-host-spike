@@ -279,6 +279,8 @@ The public API another lab may call:
 | `CheckedBundle::entries(&self) -> &[BundleEntry]` | every regular file the walk read, as `path` and `content` |
 | `CheckedBundle::check_name(&self, claimed: &str) -> Result<(), Refusal>` | `Ok(())` when `claimed` is this lab CID; otherwise `NotALabCid` or `NameMismatch` |
 
+| `str::parse::<LabCid>(printed)` | the `LabCid` a printed lab CID names; otherwise `NotALabCid` (see [Reading a printed lab CID](#reading-a-printed-lab-cid)) |
+
 `checked_bundle_observed(bundle, observe)` is the tests' seam, as
 `lab_cid_observed` is. `lab_cid`, `lab_cid_observed` and `check_name` reach the
 walk only through it.
@@ -298,6 +300,32 @@ The tests are in `tests/checked_bundle.rs` unless the table names another
 file. F-CI3g skips the one compare, so it lists the checked form's two tests
 too: a checked form with a compare of its own would leave
 `checked_name_check_refuses_a_mismatch` passing, and F-CI3g would not count.
+
+## Reading a printed lab CID
+
+`str::parse::<LabCid>()` is the one way to check a printed value's form and
+read it back (`impl FromStr for LabCid`, task 013). It runs the same claim
+check the two name checks make, `lab_cid_digits`, and then decodes the digits.
+Text the name checks refuse as not a lab CID gets the same
+`Refusal::NotALabCid { claimed }`, with the same text. A consumer calls it and
+never copies the label or the 64-hex rule.
+
+- Parsing is not a name check. A parsed value names no bytes until
+  `check_name` or `CheckedBundle::check_name` compares it with a bundle.
+- A consumer that needs a well-formed synthetic value names synthetic entries
+  with `encode_entries(&[BundleEntry { .. }])` and prints the result. It never
+  writes the printed form by hand.
+- The printed form changes when task 010's swap lands. Code that reads a
+  printed value with this parse, and makes values with `encode_entries`, keeps
+  working unchanged.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| A printed lab CID parses back to the same value and prints the pin; two values never parse to one | `printed_lab_cid_parses_back_to_the_same_value` | F-CI13b (bytes reversed), F-CI13c (all zero) |
+| The parse refuses each claim the name check refuses, with the same refusal and text | `parse_refuses_what_the_name_check_refuses` | F-CI13a |
+| The parse calls the one claim check once and holds no copy of it | `parse_shares_the_one_claim_check` | F-CI13a |
+
+The tests are in `tests/parse.rs`.
 
 ## Test-key publisher signature (lab proposal)
 
@@ -538,6 +566,7 @@ tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
 tests/name_signature.rs  a test key signs the printed lab CID; verification only
 tests/not_admission.rs   verify is not admit: a valid signature grants nothing
+tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -545,15 +574,16 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 86 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 89 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
 to F-CI9j (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers)),
 task 004's F-CI4a to F-CI4z (see
 [the test-key signature](#test-key-publisher-signature-lab-proposal)),
-and task 007's F-CI7a to F-CI7d (see
-[verify is not admit](#verify-is-not-admit-m1-check-b1)).
+task 007's F-CI7a to F-CI7d (see
+[verify is not admit](#verify-is-not-admit-m1-check-b1)), and task 013's
+F-CI13a to F-CI13c (see [reading a printed lab CID](#reading-a-printed-lab-cid)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h, F-CI4i and F-CI4z edits a file the runner
@@ -582,7 +612,8 @@ python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers
 At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
 46 of 46). At task 004 it reported `summary: 81 CAUGHT of 81`. At task 007
 it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
-The runner does not print why a test failed. Tasks 003, 009, 004 and 007
+At task 013 it reported `summary: 89 CAUGHT of 89`.
+The runner does not print why a test failed. Tasks 003, 009, 004, 007 and 013
 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

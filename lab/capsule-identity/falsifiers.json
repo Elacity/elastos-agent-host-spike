@@ -1448,6 +1448,55 @@
       "tests": [
         "the_harness_exports_only_identity_checks"
       ]
+    },
+    {
+      "id": "F-CI13a",
+      "title": "the parse strips the label itself and decodes with hex, without the one claim check, so an uppercase claim parses",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let digits = lab_cid_digits(printed)?;\n",
+          "new": "        let digits = printed\n            .strip_prefix(LAB_CID_PREFIX)\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
+        }
+      ],
+      "tests": [
+        "parse_refuses_what_the_name_check_refuses",
+        "parse_shares_the_one_claim_check"
+      ]
+    },
+    {
+      "id": "F-CI13b",
+      "title": "the parse reverses the 32 decoded bytes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        Ok(LabCid(bytes))\n",
+          "new": "        bytes.reverse();\n        Ok(LabCid(bytes))\n"
+        }
+      ],
+      "tests": [
+        "printed_lab_cid_parses_back_to_the_same_value"
+      ]
+    },
+    {
+      "id": "F-CI13c",
+      "title": "the parse returns all-zero bytes for every well-formed claim",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        Ok(LabCid(bytes))\n",
+          "new": "        Ok(LabCid([0; 32]))\n"
+        }
+      ],
+      "tests": [
+        "printed_lab_cid_parses_back_to_the_same_value"
+      ]
     }
   ]
 }
