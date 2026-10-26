@@ -1,0 +1,28 @@
+--- a/lab/demo-a14/RUNBOOK.md
++++ b/lab/demo-a14/RUNBOOK.md
+@@ -9,7 +9,9 @@
+ - Apple's command line tools. In Terminal, type `xcode-select --install` and
+   follow the window. If it says they are already installed, that is fine. They
+   include `git`, `python3` and `ssh-keygen`, which signs the receipts.
+-- Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
++- Rust. If `rustup --version` already works, skip this. If not, go to
++  <https://rustup.rs> and run the command it shows. Today that command is
++  `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`. Then close
+   Terminal and open it again.
+ - The Rust pin and wasm target the demo builds for. These two commands install
+   the pin in `rust-toolchain.toml` and put the wasm target on that pin. The
+@@ -20,10 +22,10 @@
+ rustup target add wasm32-unknown-unknown --toolchain 1.91.0
+ ```
+ 
+-- A brand-new clone made by the morning block (`git clone --branch`). Do not
+-  run `git checkout` in a tree you already have. A zip from a browser can make
+-  macOS refuse to run the built programs. Preflight reports
+-  `com.apple.quarantine` and does not strip it.
++- Do not clone by hand and do not run `git checkout` in a tree you already
++  have. The morning paste makes `$HOME/a14-run-<time>` with `git clone
++  --branch`. A zip from a browser can make macOS refuse to run the built
++  programs. Preflight reports `com.apple.quarantine` and does not strip it.
+ 
+ ## Sash's morning steps
+ 

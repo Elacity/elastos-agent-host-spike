@@ -1,0 +1,5 @@
+exit: 127
+seconds: 0.0
+started: 2026-10-26T23:24:39Z
+
+[Errno 2] No such file or directory: 'xcode-select'

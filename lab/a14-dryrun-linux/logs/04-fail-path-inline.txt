@@ -1,0 +1,9 @@
+exit: 0
+seconds: 0.093
+started: 2026-10-26T23:24:46Z
+
+exit 1
+stdout_has_PASS False
+summary_has_PASS False
+summary_has_FAIL True
+pointer /tmp/demo-a14-test-200lebtz/home/runs/20261026T232446Z-3jso2m6h/summary.txt
