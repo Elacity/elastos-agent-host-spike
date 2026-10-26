@@ -103,6 +103,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA8b | Remove `Eq` from `DeclaredImport`'s derive in the API document | `public_api_is_v1` |
 | F-CWA9a | Match versions while ignoring build metadata | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA9b | Match versions while ignoring the pre-release | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA10a | Add only `cm-implements` to the default features, accepting the `implements` import | `component_import_names_with_options_are_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -117,7 +118,7 @@ Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
 the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, F-CWA5a/F-CWA5b,
 F-CWA6a, F-CWA7a/F-CWA7b, F-CWA8a (`component_refusals_follow_the_documented_order`),
-and F-CWA9a/F-CWA9b:
+F-CWA9a/F-CWA9b, and F-CWA10a:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -218,3 +219,12 @@ the fixture, restored byte-identical, checked by SHA-256. The clean format and
 locked-test checks passed all 20 tests offline with `RUST_TEST_THREADS=2` and
 `CARGO_INCREMENTAL=0`. The implementation, API document, audit manifest,
 workspace manifest and workspace lockfile stayed unchanged.
+
+The cwa-010 in-tree run caught F-CWA10a with the default features plus
+`cm-implements` alone. `component_import_names_with_options_are_refused`
+built and failed at case (b)'s option assertion: the message named
+`(component (import "cache" (implements "wasi:filesystem/types@0.2.0") (instance)))`,
+and the result was `Ok(["cache"])` instead of `Err(NotAComponent)`. Case (a),
+`versionsuffix`, still returned `NotAComponent` and passed its checks first.
+Case (c), `external-id`, is not reached: it needs the same feature as case (b),
+where the test stops. The source restored byte-identical, checked by SHA-256.

@@ -625,6 +625,22 @@
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA10a",
+      "title": "Validation adds cm-implements to the default features",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::default() | wasmparser::WasmFeatures::CM_IMPLEMENTS)"
+        }
+      ],
+      "tests": [
+        "component_import_names_with_options_are_refused"
+      ]
     }
   ]
 }
