@@ -212,9 +212,10 @@ programs", means the profile applied and refused the exec.
 
 The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
-For the Runtime's refusal of such a start, see "The Runtime half". That
-bridge change is not built: the Runtime half that generates and enforces the
-profile is future work in `elastos/`, outside this lane.
+For the Runtime's refusal of such a start, see "The Runtime bridge change"
+in `../did-provider/CONFINEMENT.md`. That bridge change is not built: the
+Runtime half that generates and enforces the profile is future work in
+`elastos/`, outside this lane.
 
 ## What the profile does not grant
 
@@ -361,6 +362,13 @@ gate; it never passes by skipping. The caller that fails the test is
 `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls it with
 `macos` and a missing path. On any other host OS, when `sandbox-exec` is
 missing, the confined tests print a skip reason and return.
+
+Future Linux enforcement tests for this lab contract are designed in
+`../wallet-provider/CONFINEMENT-LINUX.md`: it is the one Linux mapping, its
+tests do not exist yet, and it claims no current behaviour. The existing
+source-only check `both_file_profiles_bind_one_storage_parameter_contract`,
+in `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
+contract evidence, not Linux execution evidence.
 
 ## Tests
 

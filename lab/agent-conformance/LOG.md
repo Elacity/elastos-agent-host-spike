@@ -2053,8 +2053,8 @@ environment dumps. Exclusive creation preserves a prior receipt and symlink
 target; any write error fails A14 and the command with a named reason.
 `run.sh` builds the current report first, reports Cargo listing/test failures
 through it, and retains the small receipt on success. RUNBOOK records removal
-after review and the existing failed-run retention rule. The lab CID label
-stays `lab-cid:sha256:...`; Runtime CID launch and the existing blockers retain
+after review and the existing failed-run retention rule. The identity library
+owns the lab CID label; Runtime CID launch and the existing blockers retain
 their separate acceptance gates. Task 019's SKIPPED grading is absent on this
 base; the existing grader is preserved.
 
@@ -2676,8 +2676,8 @@ candidate. Their SHA-256 values are:
 
 Both name component SHA-256
 `d056c5a2d45201d334f5db1028a6a445600d695dafe9021d87883959f9086653`
-and the planted manifest's bundle
-`lab-cid:sha256:3cacbd3abf0c56ab9a92f63ae33821c67b061d4bbbadb54536e7df0df48166b9`.
+and the planted manifest's bundle lab CID, whose historical digest was
+`3cacbd3abf0c56ab9a92f63ae33821c67b061d4bbbadb54536e7df0df48166b9`.
 The unchanged component and changed bundle identity reflect the exact manifest
 mutation. The build selector, import and exclusivity checks use the same probe;
 F-probe-exclusive's edit was refreshed to include the additional selector.
@@ -2731,8 +2731,8 @@ The local, ignored final receipt is
 SHA-256 `e3dd9c8e450ff7aa2e36d9db17994dea577944930ccf0200dd61e741b19ed114`.
 Its host component is
 `d056c5a2d45201d334f5db1028a6a445600d695dafe9021d87883959f9086653`;
-its restored complete bundle is
-`lab-cid:sha256:e0d8fb9541df4f6bef27eb5fdcfcd8f8820224832abb20ec987518f32ab7fc27`.
+its restored complete bundle lab CID had the historical digest
+`e0d8fb9541df4f6bef27eb5fdcfcd8f8820224832abb20ec987518f32ab7fc27`.
 The Runtime and provider SHA-256 values match the built binaries. Every
 launched entry matches this invocation's printed observations and build-only
 entry. The receipt's table equals stdout, and its table digest matches.
@@ -3716,3 +3716,229 @@ The supervisor owns commit, current-base compatibility and review. The builder
 ran zero Git mutations and used zero remote network requests. At this check,
 the cached spike base was 21 commits ahead of this checkout (0 ahead, 21 behind);
 other workers advanced that fetched ref during the task.
+
+## 024 — receipt uses the identity owner's parser
+
+`Identities::observe_probe` now parses the bundle lab CID as
+`capsule_identity::LabCid`; synthetic receipt values use `encode_entries`, and
+the runbook and historical notes leave the printed form to that library.
+The historical notes retain their recorded digest bytes. This follows
+cc-capsule-identity's ninth-run request (26 Oct): "please replace that check
+with `probe.bundle_lab_cid.parse::<capsule_identity::LabCid>().is_ok()` (the one
+claim check, and it adds no new dependency or lock change; 013 has merged,
+PR #170)." The `malformed bundle lab CID: <effect>` refusal stays the same.
+
+The existing `versions_receipt_rejects_incomplete_identity` test now also
+changes the last character of an encoder-produced CID to `X` and requires
+`malformed bundle lab CID: default`. Its existing `sha256:wrong` case stays.
+The synthetic seeds and the report-wiring-only evidence comment stay intact.
+The newer instance receipt fixture also uses the same synthetic bundle helper.
+
+### Falsifier proof
+
+All ten report tests passed before the mutation. The new
+`F-versions-lab-cid` has `command: lab` and names only
+`versions_receipt_rejects_incomplete_identity`. Its edit replaces the parser's
+success check with `!probe.bundle_lab_cid.is_empty()`. Applied by hand, this
+command failed with exit 101:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_rejects_incomplete_identity -- --exact
+```
+
+The assertion at `tests/report.rs:291` failed with:
+
+```text
+expected malformed bundle lab CID: default; got ["conflicting probe identity: default"]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out
+```
+
+The source was restored byte for byte in a `finally` block. The identical
+command then passed: one passed, zero failed, nine filtered out. The new
+falsifier's anchor matches the restored source exactly once. Its failed-test
+root was removed after an empty open-holder check.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/report.rs:165` obtains synthetic bundle identity from the owner's encoder. |
+| 2. New ambient capsule or UI authority? | No | `src/report.rs:254` parses receipt data; the capsule and grant paths retain their behavior. |
+| 3. Second path or copy of a rule? | No | `src/report.rs:256` delegates the printed-value check to `LabCid`. |
+| 4. Runtime core grows? | No | `src/report.rs:241` contains the only production logic change, inside this lab lane. |
+| 5. Refusal fails closed with a clear reason? | Yes | `src/report.rs:259` returns the existing malformed-bundle reason on parse failure. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:138` and `:146` retain the grant request followed by provider invocation. |
+| 7. Named test and caught falsifier prove the rule? | Yes | `tests/report.rs:281` passes after restoration and fails for `falsifiers.json:491`'s planted check. |
+| 8. Identity, admission and allowance remain separate? | Yes | `src/report.rs:389` preserves the receipt's version-evidence boundary; `RUNBOOK.md:216` keeps allowance separate. |
+
+### Final checks and handoff
+
+The required lane formatting check and complete `cargo test --locked
+--manifest-path lab/agent-conformance/Cargo.toml` passed under the shared
+heavy-build lease in 241.13 seconds: 60 passed, zero failed, nine existing
+blocked tests ignored. This includes all four named receipt acceptance tests,
+`instance_receipt_requires_both_launches_and_scope`, and
+`attach_secret_stays_in_memory`, which uses the shared grant fixture value.
+The commands used `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`,
+`CARGO_NET_OFFLINE=true`, and the existing lane-local `target/host` and
+`target/host-build` directories. Free space exceeded the documented 12 GiB
+build allowance plus 2 GiB reserve.
+
+The first full-gate attempt stopped at `earlier_run_check_refuses_live_owner`
+because the sandbox denied child process-group inspection. A rerun with local
+process inspection and loopback fixture access passed that test and the full
+gate above. The first attempt's disposable root was removed after an empty
+open-holder check. This environment refusal supplies zero Runtime evidence.
+
+Additional checks passed: `git diff --check`,
+`node scripts/check-product-data.mjs` (42 capsules, two profiles, 28 method
+contracts), `node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+The task's exact search for the old printed form returned empty output
+(exit 1). JSON validation confirmed a unique new falsifier ID and its restored
+anchor. Both `Cargo.toml` and `Cargo.lock` are byte-identical to the base `HEAD`.
+
+The candidate changes six files, all inside this lane. The local, ignored
+`target/task-024-current/lifecycle.json` records the branch/worktree inventory,
+source identity, disposable-root cleanup and retention decisions. The
+supervisor owns commit, current-base compatibility, review and publication;
+the builder performed zero Git mutations. The cached upstream had advanced
+three commits at the handoff check (zero ahead, three behind). The required
+remote refresh stays with the supervisor under this builder's offline scope.
+The existing `target/host/debug/report --check-earlier-runs` then exited 0
+with empty output. Fixture processes have ended and the heavy-build lease is
+released. Build caches remain reusable lane artifacts with supervisor-owned
+cleanup conditions in the local inventory.
+
+## 025 — CID launch requires a verified content provider
+
+Added the two bounded CID-refusal tests and the ignored `capsule_named_by_hash`
+journey in `tests/runtime.rs`. The synthetic CID comes from the identity
+owner's encoder. Both refusals precede CID validation and give zero evidence
+that the CID itself was checked. `tests/common::write_component_home` now owns
+the single repository-entry copy, executable-byte install and manifest stamp;
+`write_operator_home` calls it and retains its config writer and F-ac1i anchor.
+The source-backed verdict in GAPS.md is `AC-025-CID`; RUNBOOK.md names all
+three rows. The full journey needs the directory CID integration, an offline
+content fixture, and cleanup of the kept materialized directory.
+
+### F-cid-provider — caught by hand
+
+All commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, the lane-local `target/host` and `target/host-build`
+directories, and the exclusive shared `local-ai-heavy-build.lock` lease.
+The same command ran in each step:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash -- --exact --show-output
+```
+
+Unmutated, exit 0:
+
+```text
+test run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.86s
+```
+
+Planted, exit 101: F-cid-provider replaced the fixed byte string's digest with
+`Sha256::digest(script)`. Runtime then executed the inert script. Its marker
+existed, and the assertion at `tests/runtime.rs:120` failed:
+
+```text
+test run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash ... FAILED
+checksum refusal must happen before the content provider script is spawned
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.14s
+```
+
+Restored byte for byte in a `finally` block, exit 0:
+
+```text
+test run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.73s
+```
+
+The test named by this falsifier failed, so the result is **CAUGHT**. The
+restored F-cid-provider anchor and F-ac1i's original `old` text each occur
+exactly once. The two new refusal tests also passed together with
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test
+runtime run_by_cid -- --show-output`: two passed, zero failed, nine filtered
+out, 2.46 seconds in libtest. The real IPFS provider and Kubo were neither
+installed nor run. The planted provider was a mode-0755 shell script that
+created one in-root marker and exited 1.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/runtime.rs:67` gets the printed CID from `encode_entries`; line 114 stamps a SHA-256. |
+| 2. New ambient capsule or UI access? | No | `tests/runtime.rs:74` uses the existing guarded launch; `tests/common/mod.rs:51` guards the fixture Home. |
+| 3. Second operation path or copy of a rule? | No | `tests/common/mod.rs:44` owns the shared entry copy and stamp; both callers use it. |
+| 4. Runtime core grows? | No | `tests/runtime.rs:63` adds only lab evidence; all changed files stay inside this lane. |
+| 5. Refusals fail closed with a clear reason? | Yes | `tests/runtime.rs:80,101,128` require failure and the specific missing-provider or complete checksum reason. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/runtime.rs:65` stops at provider resolution; the probe and its existing Bus calls retain their bytes. |
+| 7. Named tests and caught falsifiers prove the new rule? | Yes | `tests/runtime.rs:109` passed, failed on the script marker for F-cid-provider, and passed restored; the full journey stays ignored at line 142. |
+| 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:140` separates lab identity from content resolution; line 158 keeps admission, grants and budgets separate. |
+
+### Final checks and writer parity
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed.
+`bash lab/agent-conformance/run.sh` passed with exit 0 in 254.09 seconds under
+the same environment and build lease. Its full lane command was:
+
+```sh
+cargo test --locked --no-fail-fast --manifest-path lab/agent-conformance/Cargo.toml -- --format pretty --color never --show-output
+```
+
+Cargo's table contains 62 passing tests and ten BLOCKED tests, plus a passing
+A14 receipt. The new rows and the required operator regressions are:
+
+```text
+run_by_cid_without_content_provider_is_refused | PASS
+run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash | PASS
+capsule_named_by_hash | BLOCKED (AC-025-CID)
+serve_refuses_provider_whose_bytes_differ_from_its_hash | PASS
+fixture_operator_starts_ready_and_stops_cleanly | PASS
+```
+
+The same-run receipt reports `identity_status: complete`, `cargo_success:
+true`, and `suite_outcome: BLOCKED`. Its SHA-256 is
+`191ae847015501a9d065c95faa9249d2437495c9281b9ddbd5433cfb88bc0f83`.
+The receipt describes the uncommitted builder candidate, with a dirty tree;
+its source identity is separate from the future reviewed commit. The full
+CID journey remains open and receives zero passing credit.
+
+The original operator writer produced its manifest and config before the
+sandbox denied the baseline test's loopback bind (`Operation not permitted`).
+That environment refusal supplied zero Runtime acceptance evidence. The full
+run with local fixture access passed both required operator tests above.
+The refactored writer's operator outputs matched the saved original bytes;
+every newly observed operator manifest in the full run had SHA-256
+`3431d423c615464533087b49d332fc6b555859a21d0f3a21c7adb611334010f1`,
+and each config had
+`49a48bd70178471d63248e71095fa2e3a3f32da5262be82681b454c5f64df437`.
+The executable-byte/hash assertions in the existing provider-refusal test
+also passed. Both `Cargo.toml` and `Cargo.lock` remain byte-identical to HEAD.
+
+Additional checks passed: `git diff --check`, `bash -n
+lab/agent-conformance/run.sh`, `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 method contracts),
+`node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+JSON validation found unique falsifier IDs; both required mutation anchors
+were restored and each matched once.
+
+The two task-owned failed roots were removed after their results were reviewed
+and `lsof -nP +D <root> -Fpf` returned exit 1 with empty output. The full run
+retained zero new Home roots. The final existing `report --check-earlier-runs`
+command returned exit 0 with empty output. The build lease is released.
+The local ignored lifecycle inventory records the worktree, source identity,
+fixture cleanup, and review-bound retention of the proof and build caches.
+Other owners' roots and worktrees retain their ownership.
+
+All six changed files are inside `lab/agent-conformance/`. The branch/worktree
+inventory was refreshed at handoff. Cached upstream divergence was zero
+commits ahead and nine behind; this offline builder made zero network
+requests and zero Git mutations. The supervisor owns the remote refresh,
+base compatibility, commit, review and publication.
