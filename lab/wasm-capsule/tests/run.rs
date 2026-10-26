@@ -32,6 +32,7 @@ use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
 use common::grants::{env_f, grants_file, importing_env, IMPORTING_MODULE};
+use common::wasm_shape;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
@@ -2374,6 +2375,45 @@ fn second_memory_cannot_double_the_declared_cap_on_wasmtime() {
         _ => panic!("not an engine failure: {refusal}"),
     }
     eprintln!("PASS: wasmtime refused a second memory under the declared 2 MB cap");
+}
+
+/// Task 032 (M1 C0 step ii): the capsule `tools/build` makes declares its own
+/// memory maximum, which both engines apply with no flag (README, wc-010d0).
+/// It defines exactly one memory and imports none, and that memory's maximum
+/// in bytes is the declared `memory_mb` × 2^20 from the verifier's one
+/// manifest read: 1024 pages for this capsule's 64. Its minimum is unchanged.
+#[test]
+fn built_capsule_declares_the_manifest_memory_as_its_maximum() {
+    const WASM_PAGE_BYTES: u64 = 65536;
+    let tmp = TempDir::new("run32-max");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+    let (_bundle, value) = verified_bundle(&root, "bundle", &built);
+    let shape = wasm_shape::read(&value.entrypoint().content).expect("read the module's shape");
+
+    assert_eq!(shape.import_count, 0, "the capsule imports nothing");
+    assert_eq!(
+        shape.imported_memory_count, 0,
+        "the capsule imports no memory"
+    );
+    assert_eq!(
+        shape.memories.len(),
+        1,
+        "the capsule defines exactly one memory: {:?}",
+        shape.memories
+    );
+    let memory = shape.memories[0];
+    assert_eq!(memory.minimum, 16, "the minimum is unchanged");
+    let maximum = memory
+        .maximum
+        .expect("the capsule declares no memory maximum");
+    assert_eq!(
+        u64::from(maximum) * WASM_PAGE_BYTES,
+        u64::from(value.memory_mb()) << 20,
+        "the maximum ({maximum} pages) is not the declared memory_mb ({} MB)",
+        value.memory_mb()
+    );
+    assert_eq!(maximum, 1024, "64 MB is 1024 pages of 64 KiB");
 }
 
 /// wc-010b, real engines: the capsule `tools/build` makes, through `run` on

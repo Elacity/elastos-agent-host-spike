@@ -1,6 +1,9 @@
 //! A minimal reader for the three shape facts wc-001 pins: that the artifact is
 //! a core Wasm module, that it imports nothing, and that its `digest` export has
-//! the signature `(param i32) -> (result i64)`.
+//! the signature `(param i32) -> (result i64)`. Task 032 adds a fourth: the
+//! memories the module defines, with their limits in pages, so a test can tie
+//! the declared maximum to the manifest's `memory_mb`. It stays under `tests/`:
+//! nothing in `tools/` reads module bytes.
 //!
 //! It is deliberately tiny and dependency-free, and it is NOT a validator: it
 //! reads only the sections those facts need and fails closed with a named
@@ -27,6 +30,14 @@ pub struct FuncType {
     pub results: Vec<ValType>,
 }
 
+/// One memory's limits, in 64 KiB pages: its minimum, and its maximum when it
+/// declares one (`None` when it does not).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MemoryLimits {
+    pub minimum: u32,
+    pub maximum: Option<u32>,
+}
+
 /// The shape facts read from one module.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -37,6 +48,10 @@ pub struct Shape {
     pub import_count: usize,
     /// The signature of the exported function named `digest`, if present.
     pub digest: Option<FuncType>,
+    /// How many of the imports are memories.
+    pub imported_memory_count: usize,
+    /// The memories the module defines (memory section, id 5), in order.
+    pub memories: Vec<MemoryLimits>,
 }
 
 impl Shape {
@@ -139,6 +154,8 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
             is_core_wasm: false,
             import_count: 0,
             digest: None,
+            imported_memory_count: 0,
+            memories: Vec::new(),
         });
     }
 
@@ -149,6 +166,8 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
     let mut import_count: usize = 0;
     // (export name, is a function, index in the function index space)
     let mut exports: Vec<(Vec<u8>, bool, u32)> = Vec::new();
+    let mut imported_memory_count: usize = 0;
+    let mut memories: Option<Vec<MemoryLimits>> = None;
 
     let mut cursor = Cursor::new(bytes);
     cursor.at = 8;
@@ -198,6 +217,7 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
                         0x02 => {
                             // Memory: limits.
                             read_limits(&mut sec)?;
+                            imported_memory_count += 1;
                         }
                         0x03 => {
                             // Global: value type then a mutability flag.
@@ -216,6 +236,15 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
                 for _ in 0..count {
                     function_type_indices.push(sec.uleb()?);
                 }
+            }
+            // Memory section: the memories the module defines, each a limits
+            // flag then its minimum and, when the flag says so, its maximum.
+            5 => {
+                if memories.is_some() {
+                    return Err("memory section: a second memory section".to_string());
+                }
+                memories =
+                    Some(read_memories(&mut sec).map_err(|e| format!("memory section: {e}"))?);
             }
             // Export section: name, kind, index.
             7 => {
@@ -244,7 +273,37 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
         is_core_wasm: true,
         import_count,
         digest,
+        imported_memory_count,
+        memories: memories.unwrap_or_default(),
     })
+}
+
+/// The memory section's body: a count, then each memory's limits. Only the
+/// two wasm32 forms are read, flag 0x00 (minimum only) and 0x01 (minimum and
+/// maximum); a shared or 64-bit memory, any other flag, a short body or bytes
+/// left after the last memory fail closed with a named reason.
+fn read_memories(sec: &mut Cursor) -> Result<Vec<MemoryLimits>, String> {
+    let count = sec.uleb()?;
+    let mut memories = Vec::new();
+    for index in 0..count {
+        let flag = sec.byte()?;
+        if flag > 0x01 {
+            return Err(format!(
+                "memory {index} has limits flag 0x{flag:02x}, which this reader does not read"
+            ));
+        }
+        let minimum = sec.uleb()?;
+        let maximum = if flag == 0x01 {
+            Some(sec.uleb()?)
+        } else {
+            None
+        };
+        memories.push(MemoryLimits { minimum, maximum });
+    }
+    if sec.remaining() != 0 {
+        return Err("bytes left after the last memory".to_string());
+    }
+    Ok(memories)
 }
 
 /// Limits are a flag byte then one or two LEB128 values. wc-001 only needs to

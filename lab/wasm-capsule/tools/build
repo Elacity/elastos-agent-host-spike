@@ -54,6 +54,12 @@ SYSROOT="$("$RUSTC_BIN" --print sysroot)"
 # space is not torn in two the way Cargo splits RUSTFLAGS on whitespace.
 us=$'\x1f'
 export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule${us}--remap-path-prefix=${CARGO_HOME_DIR}=/cargo${us}--remap-path-prefix=${SYSROOT}=/rustc"
+# The capsule declares its own memory maximum, so every engine applies the cap
+# with no flag (task 032). 67108864 is this capsule's declared memory_mb, 64
+# (capsule/capsule.json has no resources key, so the Runtime's default_memory(),
+# elastos/crates/elastos-common/src/manifest.rs:1188-1190), times 2^20, as
+# wc-010a reads MB: 1024 pages of 64 KiB. Removing this line is F-WC10D-NO-MODULE-MAX.
+export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${us}-Clink-arg=--max-memory=67108864"
 
 cargo build \
   --locked \

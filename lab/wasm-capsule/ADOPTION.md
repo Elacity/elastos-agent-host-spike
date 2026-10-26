@@ -77,6 +77,7 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   an engine upgrade shows in the receipt, and none is part of the lab CID
   (README.md, "Run receipt (wc-005c)").
   wc-010b (task 027): the memory cap comes from `resources.memory_mb`, kept by the verifier's one manifest read (`VerifiedBundle::memory_mb()`, MB read as 2^20 bytes) and given to `wasmtime` as `-W max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y` (one linear memory, so the cap is the capsule's whole linear memory); wasmer cannot enforce it on its CLI (no cap flag), so no cap is claimed for wasmer (README.md, "Memory cap (wc-010b)").
+  Task 032 (M1 C0 step ii): `tools/build` also passes `-Clink-arg=--max-memory=67108864`, so `capsule.wasm` declares its own memory maximum, 1024 pages (the declared 64 MB); both engines apply a module's own maximum with no flag (README.md, "Module memory maximum discovery (wc-010d0)"), wasmer by returning -1 to a grow past it. `run` does not check a module's maximum yet (C0 step iii waits for the audit crate's reader), and the receipt's cap lines are unchanged. The claim is only "a self-contained capsule in a fixed flat space with a host-enforced cap", on this one Mac: not the ~4 GB DigitCapsule and not any-RTOS loading; the end state is [Proposal].
   The two-engine result is a behaviour proof on one **core module** on this
   Mac, not the Component ABI. Rong's ruling (26 Oct):
   Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
@@ -191,8 +192,10 @@ with a `python3 -I` script written from that README's rules (quoted in LOG),
 and pinned only where they equal `bundle_identity`'s output:
 `bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy` (the manifest
 beside the 8-byte empty module) and
-`bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse` (the manifest
-beside `tools/bundle`'s `capsule.wasm` on this Mac). The discovery's facts above still hold. This is a proposal to
+`bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm` (the manifest
+beside `tools/bundle`'s `capsule.wasm` on this Mac; re-pinned by task 032 on
+27 Oct, when `capsule.wasm` gained its memory maximum, with the same script and
+the same rule; it was `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse`). The discovery's facts above still hold. This is a proposal to
 Anders, not a contract. The value is labelled a lab CID in code and docs, never
 the Runtime's CID, and it is never a package identity.
 

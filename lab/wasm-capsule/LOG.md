@@ -709,3 +709,67 @@
   left. Gates, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (94 passed, 2 ignored, 0
   failed) and `cargo fmt --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 032 (M1 C0 step ii, the capsule declares its 64 MB memory maximum; base
+  `3639b0357f588c74a2a233cf6aa3c1e78bca99a0`, which holds 031): `tools/build` gets one new line after the
+  `CARGO_ENCODED_RUSTFLAGS` export, appending `${us}-Clink-arg=--max-memory=67108864`, with a comment (64 = the
+  declared `memory_mb`, the Runtime's `default_memory()`, `elastos/crates/elastos-common/src/manifest.rs:1188-1190`,
+  × 2^20). `tests/common/wasm_shape.rs` now reports `imported_memory_count` and `memories` (the memory section, id
+  5: minimum and maximum or none, in pages; flags other than 0x00/0x01, a short body, bytes after the last memory
+  and a second memory section each fail closed with a reason starting `memory section: `). One
+  `PINNED_ARTIFACT_SHA256` in `tests/common/mod.rs` (the copies in `tests/bundle.rs` and `tests/verify.rs`
+  removed). Builds, from `lab/wasm-capsule/`: `tools/build target/recompute-032/build-a` (exit 0, `Compiling capsule
+  v0.1.0`), `.../build-b` and `.../build-c` (exit 0, each reported a cached build, `Finished` with no `Compiling`
+  line, as task 030 saw): each `capsule.wasm` 180 bytes, sha256
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1` (the receipt's `artifact_sha256`, from
+  `shasum -a 256`), `cmp` a b identical; `rustc 1.91.0 (f8297e351 2025-10-28)`. `python3 -I -c` with `hashlib.sha256`
+  over build-a's and build-b's file: the same sha256 and 180 bytes for each. The paths-differ, clean-copy proof is
+  `two_clean_builds_in_different_paths_are_byte_identical`, green in the gate. The two never-committed scripts
+  were re-created byte for byte from this LOG's text (task 024's `outside_cid.py`, 84 lines, and task 030's
+  `memsec.py`, 70 lines; LOG's two-space indent removed, nothing else) under `target/recompute-032/`. First check,
+  from the repo root: `python3 -I lab/wasm-capsule/target/recompute-032/outside_cid.py
+  lab/capsule-identity/fixtures/content-sample` printed `bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi`
+  (exit 0), that lane's pin (`lab/capsule-identity/tests/common/mod.rs:32`). From `lab/wasm-capsule/`:
+  `tools/bundle target/recompute-032/reference-out` (exit 0) printed
+  `bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm`; its `bundle/capsule.json` equals
+  `capsule/capsule.json` (`cmp`) and its `bundle/capsule.wasm` has sha256 `2002429e…` (`shasum -a 256` and
+  `hashlib`, 180 bytes); `python3 -I target/recompute-032/outside_cid.py target/recompute-032/reference-out/bundle`
+  printed `bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm` (exit 0) and `tools/bundle --name
+  target/recompute-032/reference-out/bundle` printed the same (exit 0). All agree, so no mismatch finding.
+  `python3 -I target/recompute-032/memsec.py target/recompute-032/reference-out/bundle/capsule.wasm` (exit 0):
+  `sha256 2002429e…  180 bytes`, `memory section: 1 memory`, `memory 0: minimum 16 pages, maximum 1024 pages`. Pins:
+  `PINNED_ARTIFACT_SHA256` `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13` →
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`; `REFERENCE_LAB_CID`
+  `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse` →
+  `bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm`; `MODULE_BUNDLE_LAB_CID` unchanged
+  (`bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy`, `capsule.json` unchanged). Tests:
+  `reads_a_memory_maximum_from_a_crafted_module`, `reads_a_memory_with_no_maximum_from_a_crafted_module`,
+  `fails_closed_on_a_truncated_memory_section` (`tests/wasm_shape.rs`) and
+  `built_capsule_declares_the_manifest_memory_as_its_maximum` (`tests/run.rs`, through `built_capsule`,
+  `verified_bundle` and `memory_mb()`). Finding (not fixed, out of scope: "nothing else in it changes"):
+  `tools/build` exits 0 when a `set -u` error happens after its `trap ... EXIT` line, on this Mac's `/bin/bash`
+  3.2.57: the EXIT trap's `rm -rf` status becomes the exit status. Seen by hand with F-WC1-SPACED-PATH's old single
+  edit, which leaves the new line reading an unset `CARGO_ENCODED_RUSTFLAGS`: `bash tools/build
+  target/recompute-032/spaced-out` printed `tools/build: line 61: CARGO_ENCODED_RUSTFLAGS: unbound variable`, exit 0,
+  no `capsule.wasm` and no receipt (a two-line probe, `set -euo pipefail`, `trap "true" EXIT`, then an unbound
+  expansion, also exits 0; with `false` in place of the expansion it exits 1); the named test then failed at
+  `sha256_file` ("no sha256 tool"), not at the build. So F-WC1-SPACED-PATH is re-anchored with a second edit that
+  turns the new line into `export RUSTFLAGS="${RUSTFLAGS} -Clink-arg=--max-memory=67108864"`, the same bug as
+  before; by hand with both edits, `cargo test --locked --test reproducible` failed at `tests/common/build.rs:132`
+  ("tools/build failed (exit status: 101)", rustc's "--remap-path-prefix must contain '=' between FROM and TO");
+  `tools/build` restored byte for byte (`cmp`). Canonical runner, from the repo root, `python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json` with F-WC1 (a prefix: every F-WC1*
+  entry, so also F-WC1-*, F-WC10-*, F-WC10C-* and F-WC10D-*), every other entry that edits `tools/build` or names a
+  test that holds a pin or builds the capsule (F-WC3-COPY-DEPS, -CMD-BYPASS, -REUSE-OUT, -ARGS-UNKNOWN,
+  -BUILD-STDOUT, -CMD-REASON, -CMD-STATUS, -CMD-STDOUT, -ARTIFACT-PIN) and F-WC-README-COUNT: "baseline: 20 named
+  tests pass without an edit, 0 do not", "summary: 29 CAUGHT, 1 NOT RUN of 30", "not as expected:
+  F-WC1-SPACED-PATH" ("did not run: two_clean_builds_in_different_paths_are_byte_identical": the child cargo's
+  `process didn't exit successfully` line is the runner's Cargo failure marker, so it stays hand-proven, as before),
+  exit 0, no `*.falsify-original` backup left. F-WC10D-NO-MODULE-MAX and F-WC10D-MAX-WRONG CAUGHT (runner-caught);
+  every existing `tools/build` anchor is found once (each entry ran). README: totals 161 (two task 032), 97
+  runner-caught; new "### The capsule declares its maximum (task 032)"; pins in "Claim scope", "Reference lab CID
+  on this Mac", the receipt sample's `bundle` line and the named-test lists. ADOPTION: the lab CID pin and one
+  task 032 line. Consumer check, from the repo root: `cargo test --locked --manifest-path
+  lab/capsule-identity/Cargo.toml` exit 0, 117 passed, 0 failed (`wc001_capsule_bundle_gets_a_stable_lab_cid` ok).
+  Gates, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (98 passed, 2 ignored, 0 failed) and
+  `cargo fmt --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/`
+  and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
