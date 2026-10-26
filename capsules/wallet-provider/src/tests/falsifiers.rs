@@ -75,9 +75,14 @@ use std::process::Command;
 /// inside a nested filter as an operation, so the passing
 /// `(process-exec "/x")` fixture is refused, and WP75, which counts text
 /// inside a string as an operation, so the passing `(allow "process-exec")`
-/// fixture is refused; `file_profile_contract_rejects_a_second_exec_allow`
-/// catches each.
-const EXPECTED_FALSIFIERS: usize = 73;
+/// fixture is refused, and task 067's second round's WP76, which drops the
+/// escape flag in `profile_characters`, so the escaped-string fixture parses
+/// differently and `file_profile_contract_rejects_a_second_exec_allow` and
+/// `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+/// both fail, and WP77, which requires a space after `allow`, so the
+/// flush-head form passes and
+/// `file_profile_contract_rejects_a_second_exec_allow` fails.
+const EXPECTED_FALSIFIERS: usize = 75;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

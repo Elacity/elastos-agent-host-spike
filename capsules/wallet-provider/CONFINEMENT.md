@@ -267,15 +267,22 @@ binding is the only difference between the two runs.
   with both rules quoted. The profile that appends
   `(allow file-read* (literal "/x") process-exec)` is refused with that rule
   quoted, because an operation name after a filter still names an operation.
+  The profile that appends `(allow(literal "/x") process-exec)` is refused the
+  same way, because the first filter may sit directly after `allow`. The
+  profile that appends `(allow file-read* (literal "a\"b)") process-exec)` is
+  refused with that rule quoted, because the escaped quote and the parenthesis
+  inside the string leave the operation outside the string.
   `/usr/bin/sandbox-exec` loads `(version 1)(deny default)(allow file-read*
-  (literal "/x") process-exec)`; it starts `/usr/bin/true`, which fails with
-  `execvp() of '/usr/bin/true' failed: Operation not permitted` and exit 71,
-  and the check refuses that form either way. Fixtures that append
+  (literal "/x") process-exec)`; it attempts to start `/usr/bin/true`, whose
+  exec fails with `execvp() of '/usr/bin/true' failed: Operation not permitted`
+  and exit 71, and the check refuses that form either way. Fixtures that append
   `(allow file-read* (literal "/process-exec"))`,
   `(allow file-read* (process-exec "/x"))`,
-  `(allow file-read* (require-all (process*)))` and
-  `(allow "process-exec")` still pass, because a token inside a string or a
-  nested filter names text or a filter argument, not an operation. The
+  `(allow file-read* (require-all (process*)))`,
+  `(allow "process-exec")` and
+  `(allow file-read* (literal "a\" process-exec "))` still pass, because a
+  token inside a string or a nested filter names text or a filter argument,
+  not an operation, and an escaped quote stays inside its string. The
   unfiltered forms put the operation name directly before the closing
   parenthesis, so the predicate reads `)` as a token boundary. The narrower
   exec rule keeps its own removal for the 055 removal check, and the 056 and
@@ -563,6 +570,14 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   fixture is refused.
 - Count text inside a string as an operation name (WP75): the same test fails
   because the passing `(allow "process-exec")` fixture is refused.
+- Drop the escape flag in `profile_characters` (WP76):
+  `file_profile_contract_rejects_a_second_exec_allow` fails on its
+  escaped-string case, and
+  `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  fails on its escaped-quote case.
+- Require a space after `allow` (WP77): `file_profile_contract_rejects_a_second_exec_allow`
+  fails on its `(allow(literal "/x") process-exec)` case because that profile
+  passes the check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
