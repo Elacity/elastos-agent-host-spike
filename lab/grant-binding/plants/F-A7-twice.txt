@@ -1,0 +1,11 @@
+id: F-A7-twice
+file: src/ledger.rs
+test: ledger::model_settle_twice_is_refused
+--- old
+            None => return Err(SettleRefuse::NotOutstanding),
+--- new
+            None => {
+                self.ledger.charged += measured;
+                return Ok(measured);
+            }
+--- end
