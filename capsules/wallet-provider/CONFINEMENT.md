@@ -169,6 +169,26 @@ oracles and supplies contract evidence, not Linux execution evidence.
   and a missing or unreadable profile fails the check with a reason that names
   its path. The test runs on every platform because it reads files and starts
   no process.
+- `every_did_and_wallet_allow_rule_has_a_registered_removal` runs one removal
+  check over the did and wallet profiles and over both of their committed
+  falsifier lists. A top-level allow form counts as removed only when an entry
+  expects a catch, names that profile's `confine.sb` by the runner's path rule,
+  holds the form in its edit `old` and not in its `new`. A form that no entry
+  removes fails the test by name, with the instruction to register a removal
+  falsifier or delete the rule. The model profile is not read here; its
+  allow-rule removals live in `../model-provider/confine-falsifiers.json` under
+  that lane's own list. The test reads files and starts no process.
+- `allow_rule_removal_check_reports_an_unremoved_rule` builds a fixture
+  profile and fixture entries in the test. An entry whose `new` still holds the
+  form, whose `expect` is not `caught`, whose edit names the other provider's
+  `confine.sb`, or whose `old` does not hold the form removes nothing, so only
+  the process-exec rule comes back; one complete entry for each form leaves
+  nothing. The test reads no file.
+- `allow_rule_removal_check_rejects_bad_inputs` checks the one source reader.
+  A missing profile, a profile that does not parse, a missing list, a list that
+  is not JSON and a document without a `falsifiers` list each fail with a
+  reason that names that path, and there is no skip path. The fixtures are
+  built in the test and no process starts.
 - `file_profile_contract_rejects_a_profile_without_deny_network` builds a
   minimal profile from the contract's own head forms and shared rules inside
   the test. The check accepts it, then refuses the same profile without
@@ -352,6 +372,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Return the shared unanswered message from the invalid-JSON branch (WP43):
   `invalid_json_answer_names_the_request_and_the_parse_error` fails because the
   answer loses its parse error and says the provider did not answer.
+- Append `(allow file-read* (literal "/etc"))` to the did profile (WP44):
+  `every_did_and_wallet_allow_rule_has_a_registered_removal` fails because no
+  entry removes that form.
+- Drop the `expect`, profile-path, `old` or `new` condition from the removal
+  check (WP45 to WP48):
+  `allow_rule_removal_check_reports_an_unremoved_rule` fails because the
+  bypassing entry then counts as a removal.
+- Turn the unreadable-profile, unparsable-profile, unreadable-list, not-JSON or
+  missing-list refusal into a skip (WP49 to WP53):
+  `allow_rule_removal_check_rejects_bad_inputs` fails because the refusal does
+  not come.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

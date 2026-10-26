@@ -90,7 +90,10 @@ contract evidence, not Linux execution evidence.
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the
-  binary the launch named.
+  binary the launch named. `unbound_copy_is_refused_under_profile` shows that a
+  byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71
+  and the `execvp()` `Operation not permitted` line, and
+  `bound_copy_serves_under_profile` is its control.
 - `(allow file-read* (literal "/"))`: resolve the absolute program path through
   the root directory.
 - `(allow sysctl-read)`: the loader and the allocator read kernel facts at
@@ -176,6 +179,17 @@ root. The failure never names `execvp`, so the exec was never attempted. The
 case skips with its printed reason when `sandbox-exec` is absent on a host OS
 other than macOS.
 
+`unbound_copy_is_refused_under_profile` and `bound_copy_serves_under_profile`
+split the exec rule into its two halves under the real profile, with no fixture
+rule. The first binds the real binary as `PROVIDER_EXECUTABLE` and starts a
+byte-identical copy stored under `STORAGE_ROOT`; `sandbox-exec` applies the
+profile before the exec, so the copy is refused with exit 71 and the `execvp()`
+`Operation not permitted` line, the `init` request gets no answer, and the
+storage root keeps only the copy with its bytes unchanged. The second is its
+control: the same fixture with `PROVIDER_EXECUTABLE` bound to the copy and the
+copy started answers `init` and `get_did` and exits 0 after `shutdown`, so the
+binding is the only difference between the two runs.
+
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
 no default grant. It runs on every platform, and removing `(deny network*)`
@@ -194,6 +208,10 @@ and `capsules/model-provider/confine.sb`. All three profiles are required,
 and a missing or unreadable profile fails the check with a reason that names
 its path. The test runs on every platform because it reads files and starts
 no process.
+
+`every_did_and_wallet_allow_rule_has_a_registered_removal` in the same file
+requires a registered removal falsifier for every top-level allow rule of did's
+profile.
 
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
 itself without starting a process: a missing `sandbox-exec` on `macos` is an
@@ -306,6 +324,9 @@ argument.
 - Return the shared unanswered message from the invalid-JSON branch (DID25):
   `invalid_json_answer_names_the_request_and_the_parse_error` fails because the
   answer loses its parse error and says the provider did not answer.
+- Append a second, unpinned `(allow process-exec)` after the exec rule (DID26):
+  `unbound_copy_is_refused_under_profile` fails on its deadline assertion
+  because the copy under `STORAGE_ROOT` starts instead of being refused.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

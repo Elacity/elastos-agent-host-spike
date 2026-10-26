@@ -32,8 +32,13 @@ use std::process::Command;
 /// WP41, which starts the stderr drainer only after the wait, WP42, which makes
 /// `unanswered` use a fixed `Operation not permitted` instead of the child's
 /// standard error, and WP43, which returns the shared unanswered message from
-/// the invalid-JSON branch.
-const EXPECTED_FALSIFIERS: usize = 41;
+/// the invalid-JSON branch, and task 055's WP44, which appends
+/// `(allow file-read* (literal "/etc"))` to the did profile, WP45 to WP48,
+/// which drop the removal check's `expect`, profile-path, `old` and `new`
+/// conditions, and WP49 to WP53, which turn its unreadable-profile,
+/// unparsable-profile, unreadable-list, not-JSON and missing-list refusals
+/// into skips.
+const EXPECTED_FALSIFIERS: usize = 51;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

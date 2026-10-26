@@ -253,8 +253,8 @@ impl Identities {
         }
         if !probe
             .bundle_lab_cid
-            .strip_prefix(capsule_identity::LAB_CID_PREFIX)
-            .is_some_and(|value| hex(value, 64))
+            .parse::<capsule_identity::LabCid>()
+            .is_ok()
         {
             return Err(format!("malformed bundle lab CID: {}", probe.effect));
         }
