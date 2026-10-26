@@ -422,11 +422,15 @@ class RunBinding(TempCase):
         """Pins A14: PASS. to summary.txt. Removing write_summary on the PASS path fails this."""
         code, out, _ = self.run_demo()
         self.assertEqual(code, demo.EXIT_PASS, out)
+        self.assertTrue(
+            demo.this_run_pointer(self.fx.layout).is_file(),
+            "this-run pointer missing; the PASS path must name this run",
+        )
         pointer = demo.this_run_pointer(self.fx.layout).read_text(encoding="utf-8").strip()
         summary = Path(pointer) / "summary.txt"
+        self.assertTrue(summary.is_file(), f"summary.txt missing at {summary}")
         text = summary.read_text(encoding="utf-8")
         self.assertIn("A14: PASS.", text)
-        self.assertTrue(text.strip().endswith("A14: PASS.") or "A14: PASS." in text)
         self.assertEqual(summary.name, "summary.txt")
 
     def test_run_executes_the_recorded_files(self):
