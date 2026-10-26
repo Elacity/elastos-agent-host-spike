@@ -714,20 +714,43 @@ fn verified_bundle_is_sealed() {
     );
 }
 
-/// What a key-material scan reports for one file: its lane-relative `path`
-/// and its `bytes`.
+/// What a key-material scan reports for one listed file, `path` relative to
+/// `root`. The name is checked before any read, and a file that cannot be read
+/// is itself a finding, so a file git lists but the scan cannot see fails.
+fn scan_lane_file(root: &Path, path: &str) -> Vec<String> {
+    let mut findings = key_name_findings(path);
+    match fs::read(root.join(path)) {
+        Ok(bytes) => findings.extend(key_content_findings(path, &bytes)),
+        Err(error) => findings.push(format!("{path}: cannot read ({error})")),
+    }
+    findings
+}
+
+/// What a key-material scan reports for one file held in memory.
 fn key_material_findings(path: &str, bytes: &[u8]) -> Vec<String> {
+    let mut findings = key_name_findings(path);
+    findings.extend(key_content_findings(path, bytes));
+    findings
+}
+
+fn key_name_findings(path: &str) -> Vec<String> {
     // Built at run time, so this file does not match itself.
     let key_suffix = [".", "key"].concat();
     let seed_suffix = [".", "seed"].concat();
-    let pem_head = ["-----", "BEGIN "].concat();
-    let pem_tail = ["PRIVATE", " KEY-----"].concat();
     let mut findings = Vec::new();
     for suffix in [&key_suffix, &seed_suffix] {
         if path.ends_with(suffix.as_str()) {
             findings.push(format!("{path}: a {suffix} file"));
         }
     }
+    findings
+}
+
+fn key_content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
+    // Built at run time, so this file does not match itself.
+    let pem_head = ["-----", "BEGIN "].concat();
+    let pem_tail = ["PRIVATE", " KEY-----"].concat();
+    let mut findings = Vec::new();
     let text = String::from_utf8_lossy(bytes);
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -764,6 +787,26 @@ fn no_key_material_is_tracked_in_the_lane() {
             "the scan misses the planted {path}"
         );
     }
+    // A listed file that is gone from the worktree (still in git's index) is
+    // reported by name and as unreadable, never skipped.
+    let empty = TempDir::new("key-scan");
+    let seed_name = ["gone", ".", "seed"].concat();
+    let cause = fs::read(empty.path().join(&seed_name)).expect_err("the file is absent");
+    assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        scan_lane_file(empty.path(), &seed_name),
+        [
+            format!("{seed_name}: a .seed file"),
+            format!("{seed_name}: cannot read ({cause})"),
+        ],
+        "the scan skips a listed key file it cannot read"
+    );
+    let gone = scan_lane_file(empty.path(), "gone.txt");
+    assert_eq!(gone.len(), 1, "the scan skips an unreadable file: {gone:?}");
+    assert!(
+        gone[0].starts_with("gone.txt: cannot read ("),
+        "the unreadable file has no path and cause: {gone:?}"
+    );
 
     let lane = lane_dir();
     let output = Command::new("git")
@@ -784,19 +827,15 @@ fn no_key_material_is_tracked_in_the_lane() {
         String::from_utf8_lossy(&output.stderr)
     );
     let listing = String::from_utf8(output.stdout).expect("git lists UTF-8 paths");
-    let mut scanned = 0;
-    let mut findings = Vec::new();
-    for path in listing.split('\0').filter(|path| !path.is_empty()) {
-        match fs::read(lane.join(path)) {
-            Ok(bytes) => {
-                scanned += 1;
-                findings.extend(key_material_findings(path, &bytes));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("read {path}: {error}"),
-        }
-    }
-    assert!(scanned > 0, "git listed no lane file");
+    let listed: Vec<&str> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    assert!(!listed.is_empty(), "git listed no lane file");
+    let findings: Vec<String> = listed
+        .iter()
+        .flat_map(|path| scan_lane_file(&lane, path))
+        .collect();
     assert!(
         findings.is_empty(),
         "key material in the lane: {findings:?}"

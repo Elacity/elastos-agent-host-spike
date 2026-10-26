@@ -753,6 +753,38 @@
       ]
     },
     {
+      "id": "F-WC4-SCAN-SKIP-MISSING",
+      "title": "the key scan skips a listed file that is gone from the worktree but still in git's index",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tests/verify.rs",
+          "old": "        Err(error) => findings.push(format!(\"{path}: cannot read ({error})\")),\n",
+          "new": "        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}\n        Err(error) => findings.push(format!(\"{path}: cannot read ({error})\")),\n"
+        }
+      ],
+      "tests": [
+        "no_key_material_is_tracked_in_the_lane"
+      ]
+    },
+    {
+      "id": "F-WC4-SCAN-NAME-AFTER-READ",
+      "title": "the key scan checks a listed name only after the file reads",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tests/verify.rs",
+          "old": "    let mut findings = key_name_findings(path);\n    match fs::read(root.join(path)) {\n        Ok(bytes) => findings.extend(key_content_findings(path, &bytes)),\n",
+          "new": "    let mut findings = Vec::new();\n    match fs::read(root.join(path)) {\n        Ok(bytes) => findings.extend(key_material_findings(path, &bytes)),\n"
+        }
+      ],
+      "tests": [
+        "no_key_material_is_tracked_in_the_lane"
+      ]
+    },
+    {
       "id": "F-WC4-ENTRY-SUBSTITUTE",
       "title": "a missing entrypoint falls back to another bundled .wasm module",
       "command": "lab",

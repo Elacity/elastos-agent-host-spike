@@ -494,8 +494,11 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 - `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
   --cached --others --exclude-standard -z` lists in the lane: no `.key` or
   `.seed` name, no PEM private-key line, no 32-byte file that is not UTF-8.
-  Four planted items, in memory, are each reported. If git cannot run, it
-  fails.
+  The name is checked before any read, and a listed file that cannot be read
+  is a finding with its path and cause, never skipped: a key file still in
+  git's index but gone from the worktree fails the scan. Four planted items, in
+  memory, are each reported, and so is a listed file that is absent (a `.seed`
+  by name and as unreadable). If git cannot run, it fails.
 - `key_and_seed_files_are_ignored_by_git` — `git check-ignore` reports
   `x.key`, `tools/x.key`, `x.seed` and `tools/x.seed`. `*.key` is the root
   `.gitignore`'s rule; `*.seed` is this lane's (`.gitignore`). If git cannot
@@ -503,7 +506,7 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009 and 19
+`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009 and 21
 wc-004 planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
@@ -555,7 +558,7 @@ assertion with the bug in, and passed again after the revert):
 - F-WC3-ARTIFACT-PIN — the capsule source changes, so `tools/build` makes
   another module with a matching receipt; only the pinned sha256 catches it.
 
-wc-004's 19, each hand-proven, pending R1 (every named test failed at its
+wc-004's 21, each hand-proven, pending R1 (every named test failed at its
 assertion with the bug in, and passed again after the revert). Task 010's
 F-WC3-SECOND-IMPORT and F-WC3-SECOND-RULE were proved again against the
 updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
@@ -570,6 +573,10 @@ updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
   grants.
 - F-WC4f — `*.seed` is removed from the lane's `.gitignore`.
 - F-WC4g — a PEM private-key header line is appended to this README.
+- F-WC4-SCAN-SKIP-MISSING — the key scan skips a listed file that is gone
+  from the worktree but still in git's index.
+- F-WC4-SCAN-NAME-AFTER-READ — the key scan checks a listed name only after
+  the file reads.
 - F-WC4-ENTRY-SUBSTITUTE — a missing entrypoint falls back to another bundled
   module.
 - F-WC4-ENTRY-HARDCODED — the verifier audits `capsule.wasm`, not the
