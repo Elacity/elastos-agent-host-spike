@@ -270,6 +270,9 @@ the bytes it hands out are the bytes its lab CID names.
   `encode_entries(entries())` gives `cid()`.
 - It holds a name and bytes, never a decision. It is no trust, admission or
   launch value. Holding one means only "these bytes give this lab CID".
+- Since task 016 it also keeps, in a private field, whether the one manifest
+  check found the manifest's `type` to be `wasm`. Only the variant binding's
+  check (e2) reads it, and no accessor hands it out.
 - The entries come in the walk's order. The encoder sorts them; a caller that
   needs an order sorts them by path.
 - It lives in memory only. It has no file or serialized form, and nothing
@@ -755,11 +758,22 @@ a platform label, so 012's `a_wasm_app_has_one_closure` still passes as it
 was. (The stand-ins' bytes hold the words, only so the two CIDs differ: that
 is payload content, not platform metadata.) The labels are the three the
 Runtime's release script uses, `aarch64-darwin`, `aarch64-linux` and
-`x86_64-linux` (`scripts/publish-release.sh:1629-1631`); the Runtime's own
-record keeps one `platform` per archive
-(`elastos/crates/elastos-server/src/capsule_record.rs:27`). The lab reads
+`x86_64-linux` (`scripts/publish-release.sh:1629-1631`), and, since task 016,
+the portable label `*` (`PORTABLE_PLATFORM`); the Runtime's own record keeps
+one `platform` per archive
+(`elastos/crates/elastos-server/src/capsule_record.rs:27`) and writes `"*"` for
+a capsule that is not per platform (`capsule_record.rs:582`). The lab reads
 both, edits neither, and does not use the Runtime's schema name. A label is
 not identity: each variant is named by its complete bundle CID (PRINCIPLES 13).
+
+**A label is the signer's claim.** The lab does not check that a variant's
+bytes were built for its label. It never reads a label from a manifest, path
+or payload: the signer asserts it, and the pinned recipe (issue 285,
+https://github.com/Elacity/elastos-runtime/issues/285) stands in for the
+build that would back it. So `provider-variant-a`, whose payload says
+`aarch64-darwin`, verifies under `x86_64-linux` if the signer bound it there
+(`a_variant_label_is_the_signers_claim`, task 017). That test pins a limit,
+not a feature.
 
 **The recipe.** `recipes/provider-variant.recipe` is a few lines of ASCII
 that say which fixture files make each variant. It is a lab stand-in, not a
@@ -802,11 +816,14 @@ never passes as a binding.
 
 **Sign.** `sign_variant_binding(key, variants, recipe)` takes the bundles as
 `(platform, path)` pairs and the recipe's bytes. It first refuses the shapes
-verification refuses (check (c) below, for the `given` list). Then it names
-each bundle with `lab_cid`; a refusal from that walk passes through
-unchanged, and a refused bundle gets no binding. It names the recipe as
-above, sets `signer_did` with the one DID encoder and signs the digest. It
-writes no file and changes no bundle byte.
+verification refuses (check (c) below, for the `given` list). Then it checks
+each bundle with `checked_bundle`, the one walk, which gives both the
+bundle's lab CID and whether its manifest `type` is `wasm`; a refusal from
+that walk passes through unchanged, and a refused bundle gets no binding.
+Then it refuses what check (e2) below refuses, with the same function
+(`require_portable_wasm`). It names the recipe as above, sets `signer_did`
+with the one DID encoder and signs the digest. It writes no file and changes
+no bundle byte.
 
 **Verify.** `verify_checked_variant_binding(binding, variants, recipe,
 accepted)` takes `(platform, &CheckedBundle)` pairs. It checks in this order;
@@ -818,18 +835,25 @@ the first refusal is the answer, and it reads nothing from disk:
 3. (c) The shape of the binding's own pairs (`binding`), then of the pairs
    given (`given`). Each list holds at least one variant: `the <list>
    variant list is empty: a binding holds at least one variant`. Every label
-   is one of the three: `the <list> variant list holds the platform
-   "<label>", which is not one of aarch64-darwin, aarch64-linux,
+   is one of the four: `the <list> variant list holds the platform
+   "<label>", which is not one of *, aarch64-darwin, aarch64-linux,
    x86_64-linux`. No label is there twice: `the <list> variant list holds
-   the platform <label> twice: one CID per platform`.
+   the platform <label> twice: one CID per platform`. The portable label
+   stands alone: a list that holds `*` and another label is refused naming
+   all its labels, sorted: `the <list> variant list holds the labels
+   [<sorted labels>]: the portable label * stands alone`.
 4. (d) The given platforms are the binding's: `the binding holds the
    platforms [<sorted labels>]; the given variants are [<sorted labels>]`.
 5. (e) Each given bundle, taken in label byte order, has the printed CID the
    binding names for its label: `the binding names <binding cid> for
    <label>; the bundle given for <label> names <bundle cid>`.
-6. (f) The recipe bytes' lab CID is the binding's: `the binding names the
+6. (e2) A given bundle whose manifest `type` is `wasm` is bound only under
+   `*`. Of the bundles under another label, the first in label byte order is
+   refused: `the bundle <bundle cid> is a WASM app bound under <label>: a
+   WASM app has one portable variant, bound under *`.
+7. (f) The recipe bytes' lab CID is the binding's: `the binding names the
    recipe <binding cid>; the recipe bytes name <recipe cid>`.
-7. (g) Ed25519 over the digest of the binding domain and the payload, with
+8. (g) Ed25519 over the digest of the binding domain and the payload, with
    the key from step 1: `signature by <did> does not verify over <payload>`.
    The signed name in this shared reason is the whole payload, as text.
 
@@ -844,11 +868,25 @@ given, and then the checked form. It holds no check of its own, so a bundle
 the walk refuses is refused first, with the walk's reason. `Ok(())` grants
 nothing: it is no trust, admission or launch value.
 
+**A WASM app has one variant (task 016).** Rong's 26 Oct note says a WASM
+app gets exactly one variant. `*` is the portable label, and it stands alone
+in a binding (check (c)). A bundle whose manifest `type` is `wasm` is bound
+only under `*` (check (e2), and signing refuses the same with the same
+function). So a WASM app has one variant and one CID, and can never get a
+second, platform-specific CID through a binding (PRINCIPLES 13). The rule
+keys on the manifest type, not on the label: a `type: data` bundle such as
+`content-sample` binds under `*` or under a platform label. Whether a bundle
+is `wasm` comes from the one manifest check: `check_manifest` returns it
+from its one `CapsuleManifest` parse, and the walk keeps it in the
+`CheckedBundle` it makes. Nothing else parses `capsule.json` (P10). The
+payload bytes, the schema and the domain are 015's: `*` is written into the
+payload like any other label. Only "`*` for `wasm`" is a rule; other capsule
+types get no rule here.
+
 **What it does not do.** The binding groups CIDs. It defines no shared
 capsule identity: Rong's 26 Oct note says that phrase is still undefined, so
 the lab does not define it. It holds no group name, and no grant, token,
-admission, launch, rotation or delegation. It runs no build. The rule that
-a WASM app has one variant is task 016's.
+admission, launch, rotation or delegation. It runs no build.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -866,7 +904,14 @@ a WASM app has one variant is task 016's.
 | Signing and the path verifier keep the walk's refusal, whatever the binding, the list or the recipe | `variant_binding_paths_preserve_walk_refusals` | F-CI15v, F-CI15w, F-CI15x |
 | Signing and both verifiers leave each bundle's lab CID, `capsule.json`, its listing and the parent folder as they were | `variant_binding_stays_outside_the_bundles` | F-CI15j |
 | The payload's keys are `recipe`, `schema`, `signer_did` and `variants`, each variant's `cid` and `platform`, and nothing names a group | `variant_binding_has_no_group_name` | F-CI15i |
-| One payload builder, one sort, one shape rule, one recipe naming call, the shared digest, DID encoder and decoder and Ed25519 check; the path form holds no check of its own | `variant_binding_paths_share_one_implementation` | F-CI15y, F-CI15z, F-CI15aa, F-CI15ab, F-CI15ac, F-CI15af |
+| One payload builder, one sort, one shape rule, one recipe naming call, the shared digest, DID encoder and decoder and Ed25519 check; the path form holds no check of its own; signing walks each bundle once with `checked_bundle` and runs check (e2) with the one shared function | `variant_binding_paths_share_one_implementation` | F-CI15y, F-CI15z, F-CI15aa, F-CI15ab, F-CI15ac, F-CI15af, F-CI16e |
+| `agent-host` (`type: wasm`) alone under `*`: signing and both verifiers pass, and its CID is the pin | `a_wasm_app_binds_one_portable_variant` | F-CI16i |
+| `agent-host` under `aarch64-darwin` is refused with reason (e2), at signing and in both verifiers | `a_wasm_app_under_a_platform_label_is_refused` | F-CI16a, F-CI16h |
+| `*` with `x86_64-linux` is refused with reason (c), at signing, in the given list and in the binding's list; `*` alone passes | `the_portable_label_stands_alone` | F-CI16b, F-CI16i |
+| `content-sample` (`type: data`) binds under `*` and under `aarch64-darwin`: the rule keys on the manifest type | `a_portable_data_capsule_binds_under_the_portable_label` | F-CI16c |
+| The WASM type comes from the one `CapsuleManifest` parse in `check_manifest`, kept by the seam | `wasm_type_comes_from_the_one_manifest_check` | F-CI16d |
+| Two faults at once, at (e2) and each check next to it ((e), (f), (g)): the earlier check answers | `wasm_variant_refusal_order_is_stable` | F-CI16f, F-CI16g |
+| A limit, not a feature: a signed under `x86_64-linux` and b under `aarch64-darwin`, against the words in their payloads, pass both verifiers with the pinned CIDs | `a_variant_label_is_the_signers_claim` | F-CI17a |
 
 The tests are in `tests/variant_binding.rs`. Every refusal test runs both
 verifiers and checks the refusal's value and its exact text. Every expected
@@ -885,6 +930,16 @@ encoder and Ed25519 check, each in its one place; 007's export list gains the
 binding's payload, signer and two verifiers (24 identity functions).
 F-CI15y, F-CI15z, F-CI15aa, F-CI15ab and F-CI15af also fail those older
 tests.
+
+Task 016 changed two of 015's tests, as its spec check allowed. The
+unknown-label text now lists `*` too, so `variant_binding_shape_is_refused`'s
+expected text gains it. `variant_binding_paths_share_one_implementation` now
+asks signing for one `checked_bundle(` call (it asked for one `lab_cid(` and
+forbade `checked_bundle`) and one `require_portable_wasm(` call, and asks the
+checked form for that call between check (e) and check (f).
+`a_portable_data_capsule_binds_under_the_portable_label` uses the committed
+provider recipe only as recipe bytes: the binding checks their CID, nothing
+else.
 
 Claim scope: one Mac, these two variant fixtures and this recipe, test keys
 only. It is not a claim about real binaries, real builds or the Runtime's
@@ -967,7 +1022,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 152 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 162 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -983,7 +1038,8 @@ and task 014's F-CI14a to F-CI14e (see
 F-CI11a to F-CI11x (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task 012's
 F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)), and task 015's
-F-CI15a to F-CI15z and F-CI15aa to F-CI15af (see
+F-CI15a to F-CI15z and F-CI15aa to F-CI15af, task 016's F-CI16a to
+F-CI16i, and task 017's F-CI17a (all three: see
 [the variant binding](#lab-variant-binding-outside-the-bundles)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
@@ -995,6 +1051,18 @@ The runner still runs them. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged.
+
+Task 016 moved seventeen older edits, each with its same bug and the same
+tests. The seam now keeps `check_manifest`'s answer
+(`let wasm = check_manifest(&manifest.content)?;`), so F-CI1k, F-CI1l,
+F-CI3a, F-CI3b, F-CI3i and F-CI12a anchor on that line, F-CI1f keeps the flag
+`false` when it skips a missing manifest, and F-CI9c's seam keeps no flag.
+`check_manifest` now ends `validate()...?;` and `Ok(wasm)`, so F-CI1h drops
+the `validate()` line and F-CI1g's fallback returns `Ok(false)`.
+`CheckedBundle` gained its `wasm` field, so F-CI9a, F-CI9b, F-CI9d, F-CI9e and
+F-CI9j build or define it with that field. Check (e2) sits between (e) and
+(f), so F-CI15t swaps (e) and (f) with (e2) after them. Signing now walks with
+`checked_bundle`, so F-CI15x replaces that walk's refusal.
 
 Task 011 moved three of 004's edits. The body of `name_signature_message`
 moved into `domain_separated_digest`, so F-CI4a and F-CI4b now plant their
@@ -1029,8 +1097,11 @@ At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
 `summary: 94 CAUGHT of 94`. At task 011 it reported
 `summary: 118 CAUGHT of 118` (with the id prefix `F-CI11`: 24 of 24).
 At task 012 it reported `summary: 120 CAUGHT of 120`. At task 015 it reported
-`summary: 152 CAUGHT of 152` (with the id prefix `F-CI15`: 32 of 32).
+`summary: 152 CAUGHT of 152` (with the id prefix `F-CI15`: 32 of 32). At
+task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
+`F-CI16`: 9 of 9). At task 017, with the id prefix `F-CI17`, it reported
+`summary: 1 CAUGHT of 1`.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012 and 015 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016 and 017 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

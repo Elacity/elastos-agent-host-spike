@@ -682,6 +682,7 @@ fn instance_receipt_requires_both_launches_and_scope() {
     for name in [
         "two_instances_overlap_with_separate_grants",
         "instance_grant_does_not_authorise_sibling",
+        "cancelled_instance_settles_with_reason_sibling_completes",
     ] {
         let render = |observations: &[Observation]| {
             render_run(
@@ -693,10 +694,18 @@ fn instance_receipt_requires_both_launches_and_scope() {
         };
         let complete = render(&observations);
         assert!(complete.passed);
-        let scope = "process-isolation lab half of A3, A6 and A9";
+        let scope = if name == "cancelled_instance_settles_with_reason_sibling_completes" {
+            "cancel at the pending-request point, lab half of A10 (A12 census)"
+        } else {
+            "process-isolation lab half of A3, A6 and A9"
+        };
         assert!(complete.table.contains(&format!("{name} | PASS | {scope}")));
         let receipt: Value = serde_json::from_slice(&complete.receipt_bytes).unwrap();
-        assert_eq!(receipt["instance_grants_scope"], scope);
+        assert_eq!(
+            receipt["instance_grants_scope"],
+            "process-isolation lab half of A3, A6 and A9"
+        );
+        assert!(receipt["report"]["table"].as_str().unwrap().contains(scope));
         for missing in ["instance-1", "instance-2"] {
             let changed: Vec<_> = observations.iter().filter(|observation| {
                 !matches!(observation, Observation::Launched { probe } if probe.effect == missing)

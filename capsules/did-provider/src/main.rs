@@ -756,10 +756,10 @@ mod tests {
     /// the drainer that starts only after the wait, a fixed denial in the
     /// shared failure message, and the invalid-JSON branch reporting that
     /// shared message.
-    const EXPECTED_FALSIFIER_IDS: [&str; 26] = [
+    const EXPECTED_FALSIFIER_IDS: [&str; 28] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
         "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
-        "DID21", "DID22", "DID23", "DID24", "DID25", "DID26",
+        "DID21", "DID22", "DID23", "DID24", "DID25", "DID26", "DID27", "DID28",
     ];
 
     /// The repository root; this crate, its test targets and the one runner's

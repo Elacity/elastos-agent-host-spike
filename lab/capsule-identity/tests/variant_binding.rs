@@ -33,8 +33,9 @@ const LINUX: &str = "x86_64-linux";
 /// capsule platform.
 const UNKNOWN: &str = "darwin-arm64";
 
-/// The text every unknown-label refusal ends with.
-const KNOWN: &str = "aarch64-darwin, aarch64-linux, x86_64-linux";
+/// The text every unknown-label refusal ends with: the portable label, then
+/// the three platform labels.
+const KNOWN: &str = "*, aarch64-darwin, aarch64-linux, x86_64-linux";
 
 /// The two variant bundles, assembled side by side in one fresh parent.
 struct Variants {
@@ -818,6 +819,11 @@ fn variant_binding_paths_share_one_implementation() {
         ("require_variant_cids(", 2),
         ("fn require_recipe_cid(", 1),
         ("require_recipe_cid(", 2),
+        // Check (e2): one function, called by signing and the checked form.
+        ("fn require_portable_wasm<'a>(", 1),
+        ("require_portable_wasm(", 2),
+        ("Refusal::WasmNotPortable", 2),
+        ("Refusal::PortableNotAlone", 2),
     ] {
         assert_eq!(code.matches(text).count(), count, "{text}");
     }
@@ -840,11 +846,28 @@ fn variant_binding_paths_share_one_implementation() {
     for call in ["encode_entries(", "VARIANT_RECIPE_ENTRY"] {
         assert_eq!(recipe.matches(call).count(), 1, "{call}:\n{recipe}");
     }
+    // Check (e2) is the one place that reads the WASM flag and refuses with
+    // its reason; check (c) is the one place that keeps `*` alone.
+    let portable = library_item(&code, "fn require_portable_wasm<'a>(");
+    for text in [".wasm", "PORTABLE_PLATFORM", "Refusal::WasmNotPortable"] {
+        assert_eq!(portable.matches(text).count(), 1, "{text}:\n{portable}");
+    }
+    assert_eq!(code.matches(".wasm").count(), 1, ".wasm");
+    let shape = library_item(&code, "fn require_variant_shape<'a>(");
+    assert_eq!(
+        shape.matches("Refusal::PortableNotAlone").count(),
+        1,
+        "{shape}"
+    );
 
+    // Signing walks each bundle once, with checked_bundle, the one walk that
+    // gives both its CID and its manifest type, and runs check (e2) with the
+    // shared function.
     let sign = library_item(&code, "pub fn sign_variant_binding(");
     for call in [
         "require_variant_shape(\"given\"",
-        "lab_cid(",
+        "checked_bundle(",
+        "require_portable_wasm(",
         "recipe_cid(",
         "signer_did_of(",
         "variant_binding_payload(",
@@ -857,7 +880,13 @@ fn variant_binding_paths_share_one_implementation() {
         "domain_separated_digest(",
         "encode_entries(",
         "format!",
-        "checked_bundle",
+        "lab_cid(",
+        "check_manifest(",
+        "CapsuleManifest",
+        "CapsuleType",
+        ".wasm",
+        "PORTABLE_PLATFORM",
+        "WasmNotPortable",
         "encode_signing_key_did(",
         "VARIANT_PLATFORMS",
         "fs::",
@@ -878,6 +907,7 @@ fn variant_binding_paths_share_one_implementation() {
         "\"given\"",
         "require_same_platforms(",
         "require_variant_cids(",
+        "require_portable_wasm(",
         "require_recipe_cid(",
         "variant_binding_payload(",
         "variant_binding_message(",
@@ -912,6 +942,12 @@ fn variant_binding_paths_share_one_implementation() {
         "checked_bundle(",
         "lab_cid(",
         "fs::",
+        "check_manifest(",
+        "CapsuleManifest",
+        "CapsuleType",
+        ".wasm",
+        "PORTABLE_PLATFORM",
+        "WasmNotPortable",
     ] {
         assert!(
             !checked.contains(own),
@@ -933,6 +969,7 @@ fn variant_binding_paths_share_one_implementation() {
         "require_same_platforms(",
         "require_variant_cids(",
         "require_recipe_cid(",
+        "require_portable_wasm(",
         "recipe_cid(",
         "variant_binding_payload(",
         "variant_binding_message(",
@@ -973,4 +1010,304 @@ fn variant_binding_paths_share_one_implementation() {
             "VariantBinding derives {maker}: {attributes:?}"
         );
     }
+}
+
+/// The portable label, written out here.
+const PORTABLE: &str = "*";
+
+/// The (c) refusal for a list that holds `*` with other labels: all of the
+/// list's labels, sorted.
+fn portable_not_alone(list: &'static str, labels: &[&str]) -> (Refusal, String) {
+    let labels: Vec<String> = labels.iter().map(|label| label.to_string()).collect();
+    (
+        Refusal::PortableNotAlone {
+            list,
+            labels: labels.clone(),
+        },
+        format!("the {list} variant list holds the labels {labels:?}: the portable label * stands alone"),
+    )
+}
+
+/// The (e2) refusal: a WASM app's `bundle` CID given under `platform`.
+fn wasm_not_portable(platform: &str, bundle: &str) -> (Refusal, String) {
+    (
+        Refusal::WasmNotPortable {
+            platform: platform.to_owned(),
+            bundle: bundle.parse().expect("a pin is a printed lab CID"),
+        },
+        format!(
+            "the bundle {bundle} is a WASM app bound under {platform}: a WASM app has one portable variant, bound under *"
+        ),
+    )
+}
+
+/// `binding` with its first label set to `platform` and signed again by
+/// `key`, with the test's own digest under the literal domain, so the label
+/// is the only change and the signature still verifies.
+fn relabeled(key: &SigningKey, binding: &VariantBinding, platform: &str) -> VariantBinding {
+    let mut moved = binding.clone();
+    moved.variants[0].0 = platform.to_owned();
+    moved.signature = key
+        .sign(&domain_separated_digest(
+            BINDING_DOMAIN,
+            &moved.variant_binding_payload(),
+        ))
+        .to_bytes();
+    moved
+}
+
+#[test]
+fn a_wasm_app_binds_one_portable_variant() {
+    let bundle = assemble(&AGENT_HOST);
+    assert_eq!(named(bundle.path()).to_string(), AGENT_HOST_LAB_CID);
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let pairs = [(PORTABLE, bundle.path())];
+    let binding = sign(&key, &pairs, &recipe);
+    assert_eq!(
+        binding.variants,
+        [(PORTABLE.to_owned(), AGENT_HOST_LAB_CID.to_owned())]
+    );
+    assert_eq!(
+        String::from_utf8(binding.variant_binding_payload()).expect("UTF-8 JSON"),
+        expected_payload(
+            PROVIDER_VARIANT_RECIPE_LAB_CID,
+            &did,
+            &[(PORTABLE, AGENT_HOST_LAB_CID)]
+        )
+    );
+    both_pass(&binding, &pairs, &recipe, &[did]);
+}
+
+#[test]
+fn a_wasm_app_under_a_platform_label_is_refused() {
+    let bundle = assemble(&AGENT_HOST);
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let (expected, text) = wasm_not_portable(DARWIN, AGENT_HOST_LAB_CID);
+
+    // At signing, alone and under two labels: the first in byte order is
+    // named.
+    signing_refuses(&[(DARWIN, bundle.path())], &expected, &text);
+    signing_refuses(
+        &[(LINUX, bundle.path()), (DARWIN, bundle.path())],
+        &expected,
+        &text,
+    );
+
+    // At verifying: a binding signed under `*`, then moved to
+    // aarch64-darwin and signed again, so (e2) is its only fault.
+    let portable = sign(&key, &[(PORTABLE, bundle.path())], &recipe);
+    let moved = relabeled(&key, &portable, DARWIN);
+    both_refuse(
+        &moved,
+        &[(DARWIN, bundle.path())],
+        &recipe,
+        &[did],
+        &expected,
+        &text,
+    );
+}
+
+#[test]
+fn the_portable_label_stands_alone() {
+    let v = variants();
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let binding = sign(&key, &v.pairs(), &recipe);
+    let accepted = [binding.signer_did.clone()];
+    let mixed: [(&str, &Path); 2] = [(PORTABLE, &v.a), (LINUX, &v.b)];
+
+    // At signing, and in the given list at verifying a valid binding.
+    let (expected, text) = portable_not_alone("given", &[PORTABLE, LINUX]);
+    signing_refuses(&mixed, &expected, &text);
+    both_refuse(&binding, &mixed, &recipe, &accepted, &expected, &text);
+
+    // The binding's own list, signed again so its labels are its only fault.
+    let moved = relabeled(&key, &binding, PORTABLE);
+    let (expected, text) = portable_not_alone("binding", &[PORTABLE, LINUX]);
+    both_refuse(&moved, &v.pairs(), &recipe, &accepted, &expected, &text);
+
+    // `*` alone is a known label.
+    let alone = sign(&key, &[(PORTABLE, &v.a)], &recipe);
+    both_pass(&alone, &[(PORTABLE, &v.a)], &recipe, &accepted);
+}
+
+#[test]
+fn a_portable_data_capsule_binds_under_the_portable_label() {
+    // content-sample is `type: data`. It binds under `*` and under a
+    // platform label alike, so the rule keys on the manifest type, not on
+    // the label.
+    let bundle = assemble(&CONTENT_SAMPLE);
+    assert_eq!(named(bundle.path()).to_string(), CONTENT_SAMPLE_LAB_CID);
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    for platform in [PORTABLE, DARWIN] {
+        let pairs = [(platform, bundle.path())];
+        let binding = sign(&key, &pairs, &recipe);
+        assert_eq!(
+            binding.variants,
+            [(platform.to_owned(), CONTENT_SAMPLE_LAB_CID.to_owned())]
+        );
+        assert_eq!(
+            String::from_utf8(binding.variant_binding_payload()).expect("UTF-8 JSON"),
+            expected_payload(
+                PROVIDER_VARIANT_RECIPE_LAB_CID,
+                &did,
+                &[(platform, CONTENT_SAMPLE_LAB_CID)]
+            )
+        );
+        both_pass(&binding, &pairs, &recipe, &[did.clone()]);
+    }
+}
+
+#[test]
+fn wasm_type_comes_from_the_one_manifest_check() {
+    // P10: the WASM type is read from the one parse in check_manifest, and
+    // the seam keeps what that one call returns. Nothing else parses
+    // capsule.json or names the manifest type.
+    let code = library_code();
+    let parse = ": CapsuleManifest = serde_json::from_slice";
+    assert_eq!(code.matches(parse).count(), 1, "{parse}");
+    let check = library_item(&code, "fn check_manifest(");
+    assert_eq!(check.matches(parse).count(), 1, "{check}");
+    assert_eq!(
+        check
+            .matches("manifest.capsule_type == CapsuleType::Wasm")
+            .count(),
+        1,
+        "{check}"
+    );
+    // The `use` line, then check_manifest: nowhere else, apart from the two
+    // refusal texts that name the Runtime's checks.
+    for (text, count) in [
+        ("CapsuleManifest", 4),
+        ("CapsuleType", 2),
+        ("capsule_type", 1),
+        ("serde_json::", 1),
+    ] {
+        assert_eq!(code.matches(text).count(), count, "{text}");
+    }
+    assert_eq!(
+        code.matches("use elastos_common::{CapsuleManifest, CapsuleType};")
+            .count(),
+        1
+    );
+    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    for text in [
+        "let wasm = check_manifest(",
+        "CheckedBundle { cid, entries, wasm }",
+    ] {
+        assert_eq!(seam.matches(text).count(), 1, "{text}:\n{seam}");
+    }
+}
+
+#[test]
+fn wasm_variant_refusal_order_is_stable() {
+    // Each input has two faults, at (e2) and a check next to it. The earlier
+    // check answers, in both verifiers.
+    let bundle = assemble(&AGENT_HOST);
+    let other = assemble(&AGENT_HOST);
+    let mut asks = read_fixture(&AGENT_HOST, "asks.json");
+    asks[0] ^= 1;
+    write_file(other.path(), "asks.json", &asks);
+    let other_cid = named(other.path()).to_string();
+    assert_ne!(other_cid, AGENT_HOST_LAB_CID);
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let accepted = [did_of(&key)];
+    let portable = sign(&key, &[(PORTABLE, bundle.path())], &recipe);
+    let moved = relabeled(&key, &portable, DARWIN);
+
+    // (e) before (e2): another WASM app given under aarch64-darwin, so its
+    // CID is wrong too.
+    let (expected, text) = another_cid(DARWIN, AGENT_HOST_LAB_CID, &other_cid);
+    both_refuse(
+        &moved,
+        &[(DARWIN, other.path())],
+        &recipe,
+        &accepted,
+        &expected,
+        &text,
+    );
+
+    // (e2) before (f): the WASM app under aarch64-darwin, and the recipe
+    // changed.
+    let (expected, text) = wasm_not_portable(DARWIN, AGENT_HOST_LAB_CID);
+    both_refuse(
+        &moved,
+        &[(DARWIN, bundle.path())],
+        &changed_recipe(),
+        &accepted,
+        &expected,
+        &text,
+    );
+
+    // (e2) before (g): the label moved without signing again.
+    let mut unsigned = portable.clone();
+    unsigned.variants[0].0 = DARWIN.to_owned();
+    both_refuse(
+        &unsigned,
+        &[(DARWIN, bundle.path())],
+        &recipe,
+        &accepted,
+        &expected,
+        &text,
+    );
+}
+
+/// The stand-in payload of `bundle` as the one walk read it.
+fn walked_payload(bundle: &Path) -> Vec<u8> {
+    let held = checked(bundle);
+    let entry = held
+        .entries()
+        .iter()
+        .find(|entry| entry.path == "ipfs-provider")
+        .expect("a variant holds ipfs-provider");
+    entry.content.clone()
+}
+
+/// This test pins a limit, not a feature. A label is the signer's claim: the
+/// lab never reads a label from a manifest, path or payload, so it does not
+/// check that a variant's bytes were built for its label. Here a's payload
+/// says `aarch64-darwin` and b's says `x86_64-linux`, a fresh test key binds
+/// them the other way round, and both verifiers pass. The pinned recipe
+/// stands in for the build that would back the claim
+/// (https://github.com/Elacity/elastos-runtime/issues/285). If the lab ever
+/// checks bytes against labels, this test must change with that rule.
+#[test]
+fn a_variant_label_is_the_signers_claim() {
+    let v = variants();
+    // The words are in the bytes the verifiers hold.
+    assert_eq!(walked_payload(&v.a), b"lab fixture aarch64-darwin\n");
+    assert_eq!(walked_payload(&v.b), b"lab fixture x86_64-linux\n");
+
+    let recipe = variant_recipe();
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let swapped: [(&str, &Path); 2] = [(LINUX, &v.a), (DARWIN, &v.b)];
+    let binding = sign(&key, &swapped, &recipe);
+    assert_eq!(binding.recipe, PROVIDER_VARIANT_RECIPE_LAB_CID);
+    assert_eq!(
+        binding.variants,
+        [
+            (LINUX.to_owned(), PROVIDER_VARIANT_A_LAB_CID.to_owned()),
+            (DARWIN.to_owned(), PROVIDER_VARIANT_B_LAB_CID.to_owned()),
+        ]
+    );
+    assert_eq!(
+        String::from_utf8(binding.variant_binding_payload()).expect("UTF-8 JSON"),
+        expected_payload(
+            PROVIDER_VARIANT_RECIPE_LAB_CID,
+            &did,
+            &[
+                (DARWIN, PROVIDER_VARIANT_B_LAB_CID),
+                (LINUX, PROVIDER_VARIANT_A_LAB_CID),
+            ]
+        )
+    );
+    both_pass(&binding, &swapped, &recipe, &[did]);
 }
