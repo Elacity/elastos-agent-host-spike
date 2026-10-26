@@ -268,18 +268,28 @@ pub fn cleanup_with_runtime_temps(
     )
 }
 
+/// Hold the process lock, set `ELASTOS_TMP_ROOT`, run `f`, then restore.
+pub fn with_tmp_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+    let _lock = lock_real_root();
+    let previous = std::env::var_os("ELASTOS_TMP_ROOT");
+    std::env::set_var("ELASTOS_TMP_ROOT", root);
+    let result = f();
+    match previous {
+        Some(value) => std::env::set_var("ELASTOS_TMP_ROOT", value),
+        None => std::env::remove_var("ELASTOS_TMP_ROOT"),
+    }
+    result
+}
+
 /// Plant a leftover under the current `ELASTOS_TMP_ROOT` storage path.
+/// Callers that change the env must already hold `with_tmp_root`.
 pub struct StoragePlant {
     path: PathBuf,
     created: Vec<PathBuf>,
-    _lock: MutexGuard<'static, ()>,
 }
 
 impl StoragePlant {
     pub fn place() -> Result<Self, String> {
-        let lock = REAL_ROOT
-            .lock()
-            .map_err(|_| "Runtime storage plant lock is poisoned")?;
         let tmp = elastos_tmp_root();
         let storage = storage_root();
         let path = storage.join(PLANTED_NAME);
@@ -300,11 +310,7 @@ impl StoragePlant {
         }
         fs::write(&path, LEFTOVER_MARKER)
             .map_err(|_| format!("could not plant {}", path.display()))?;
-        Ok(Self {
-            path,
-            created,
-            _lock: lock,
-        })
+        Ok(Self { path, created })
     }
 
     pub fn path(&self) -> &Path {

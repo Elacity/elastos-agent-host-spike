@@ -158,19 +158,15 @@ mod tests {
     #[test]
     fn a12_planted_storage_file_is_caught() {
         let isolated = a12::isolated_dir("plant-storage");
-        let _lock = a12::lock_real_root();
-        let previous = std::env::var_os("ELASTOS_TMP_ROOT");
-        std::env::set_var("ELASTOS_TMP_ROOT", &isolated);
-        let plant = a12::StoragePlant::place().expect("plant storage");
-        let err = a12::runtime_temp_census().expect_err("planted storage leftover must fail A12");
-        assert!(err.contains(plant.path().to_str().unwrap()), "{err}");
-        assert!(err.contains("runtime-temp census: FAIL"), "{err}");
-        println!("A12 planted-file falsifier: {err}");
-        drop(plant);
-        match previous {
-            Some(value) => std::env::set_var("ELASTOS_TMP_ROOT", value),
-            None => std::env::remove_var("ELASTOS_TMP_ROOT"),
-        }
+        a12::with_tmp_root(&isolated, || {
+            let plant = a12::StoragePlant::place().expect("plant storage");
+            let err =
+                a12::runtime_temp_census().expect_err("planted storage leftover must fail A12");
+            assert!(err.contains(plant.path().to_str().unwrap()), "{err}");
+            assert!(err.contains("runtime-temp census: FAIL"), "{err}");
+            println!("A12 planted-file falsifier: {err}");
+            drop(plant);
+        });
         a12::remove_isolated(&isolated);
     }
 
@@ -179,42 +175,37 @@ mod tests {
         let isolated = a12::isolated_dir("env-redirect");
         let shared = Path::new("/tmp/elastos");
         let existed_before = shared.exists();
-        let _lock = a12::lock_real_root();
-        let previous = std::env::var_os("ELASTOS_TMP_ROOT");
-        std::env::set_var("ELASTOS_TMP_ROOT", &isolated);
-        let leftover = a12::create_runtime_storage_leftover(&a12::elastos_tmp_root())
-            .expect("create storage under isolated root");
-        let _ = a12::runtime_temp_census();
-        let plant = a12::StoragePlant::place().expect("plant under isolated root");
-        assert!(
-            leftover.starts_with(&isolated),
-            "leftover must stay under ELASTOS_TMP_ROOT: {}",
-            leftover.display()
-        );
-        assert!(
-            plant.path().starts_with(&isolated),
-            "plant must stay under ELASTOS_TMP_ROOT: {}",
-            plant.path().display()
-        );
-        if existed_before {
-            let planted_shared = shared.join("storage").join("a6-a12-evidence-fix-planted");
+        a12::with_tmp_root(&isolated, || {
+            let leftover = a12::create_runtime_storage_leftover(&a12::elastos_tmp_root())
+                .expect("create storage under isolated root");
+            let _ = a12::runtime_temp_census();
+            let plant = a12::StoragePlant::place().expect("plant under isolated root");
             assert!(
-                !planted_shared.exists(),
-                "ELASTOS_TMP_ROOT set, but shared leftover exists: {}",
-                planted_shared.display()
+                leftover.starts_with(&isolated),
+                "leftover must stay under ELASTOS_TMP_ROOT: {}",
+                leftover.display()
             );
-        } else {
             assert!(
-                !shared.exists(),
-                "ELASTOS_TMP_ROOT set, but {} was created",
-                shared.display()
+                plant.path().starts_with(&isolated),
+                "plant must stay under ELASTOS_TMP_ROOT: {}",
+                plant.path().display()
             );
-        }
-        drop(plant);
-        match previous {
-            Some(value) => std::env::set_var("ELASTOS_TMP_ROOT", value),
-            None => std::env::remove_var("ELASTOS_TMP_ROOT"),
-        }
+            if existed_before {
+                let planted_shared = shared.join("storage").join("a6-a12-evidence-fix-planted");
+                assert!(
+                    !planted_shared.exists(),
+                    "ELASTOS_TMP_ROOT set, but shared leftover exists: {}",
+                    planted_shared.display()
+                );
+            } else {
+                assert!(
+                    !shared.exists(),
+                    "ELASTOS_TMP_ROOT set, but {} was created",
+                    shared.display()
+                );
+            }
+            drop(plant);
+        });
         a12::remove_isolated(&isolated);
         println!("A12 ELASTOS_TMP_ROOT kept leftovers out of /tmp/elastos");
     }
