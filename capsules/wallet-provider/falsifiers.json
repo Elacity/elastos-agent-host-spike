@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Task 054 registers WP31, which restores the plain cut at every `;` and the parenthesis count inside strings, and WP32 to WP37, which disable escaping, whitespace inside a string, whitespace collapse outside strings, a comment's end at its newline, and the two parser refusals; `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP31 to WP35, `profile_forms_rejects_unclosed_string` catches WP36, and `profile_forms_rejects_unclosed_form` catches WP37. WP38 drops the newline that ends a comment, so the tokens around it glue together and pass the check; `a_comment_inside_a_form_keeps_its_tokens_apart` catches it. WP39 drops the split outside every form, so a bare value such as `1` glues onto the next form and hides an `(allow default)` from the check; `a_bare_top_level_value_is_its_own_form` catches it. WP40 adds the separator space after an opening parenthesis, so `( allow default)` escapes both allow predicates and passes the check; `a_space_after_the_opening_parenthesis_still_names_its_rule` catches it. Task 053 adds WP41, which starts the stderr drainer only after the wait, so the fixture blocks on a full pipe and `stderr_is_drained_before_wait` fails on its exit assertion; WP42, which makes `unanswered` use a fixed `Operation not permitted` instead of the child's standard error, so `startup_denial_reports_its_reason` fails on its `execvp()` assertion; and WP43, which returns the shared unanswered message from the invalid-JSON branch, so `invalid_json_answer_names_the_request_and_the_parse_error` fails. Run the whole listfrom the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Task 054 registers WP31, which restores the plain cut at every `;` and the parenthesis count inside strings, and WP32 to WP37, which disable escaping, whitespace inside a string, whitespace collapse outside strings, a comment's end at its newline, and the two parser refusals; `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP31 to WP35, `profile_forms_rejects_unclosed_string` catches WP36, and `profile_forms_rejects_unclosed_form` catches WP37. WP38 drops the newline that ends a comment, so the tokens around it glue together and pass the check; `a_comment_inside_a_form_keeps_its_tokens_apart` catches it. WP39 drops the split outside every form, so a bare value such as `1` glues onto the next form and hides an `(allow default)` from the check; `a_bare_top_level_value_is_its_own_form` catches it. WP40 adds the separator space after an opening parenthesis, so `( allow default)` escapes both allow predicates and passes the check; `a_space_after_the_opening_parenthesis_still_names_its_rule` catches it. Task 053 adds WP41, which starts the stderr drainer only after the wait, so the fixture blocks on a full pipe and `stderr_is_drained_before_wait` fails on its exit assertion; WP42, which makes `unanswered` use a fixed `Operation not permitted` instead of the child's standard error, so `startup_denial_reports_its_reason` fails on its `execvp()` assertion; and WP43, which returns the shared unanswered message from the invalid-JSON branch, so `invalid_json_answer_names_the_request_and_the_parse_error` fails. Task 055 registers WP44, which appends `(allow file-read* (literal \"/etc\"))` to the did profile, WP45 to WP48, which drop the removal check's `expect`, profile-path, `old` and `new` conditions, and WP49 to WP53, which turn its profile-read, profile-parse, list-read, not-JSON and missing-list refusals into skips. Run the whole listfrom the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -694,6 +694,166 @@
       ],
       "tests": [
         "invalid_json_answer_names_the_request_and_the_parse_error"
+      ]
+    },
+    {
+      "id": "WP44",
+      "title": "the did profile appends a file-read grant that no falsifier removes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal \"/etc\"))"
+        }
+      ],
+      "tests": [
+        "every_did_and_wallet_allow_rule_has_a_registered_removal"
+      ]
+    },
+    {
+      "id": "WP45",
+      "title": "the removal check no longer requires a caught expectation",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    entry[\"expect\"].as_str() == Some(\"caught\")\n        && entry[\"edits\"]\n            .as_array()\n            .is_some_and(|edits| edits.iter().any(|edit| edit_removes(edit, target, form)))",
+          "new": "    entry[\"edits\"]\n        .as_array()\n        .is_some_and(|edits| edits.iter().any(|edit| edit_removes(edit, target, form)))"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP46",
+      "title": "the removal check counts an edit that names the other provider's profile",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(file) = edit[\"file\"].as_str() else {\n        return false;\n    };\n    if runner_edit_path(file).as_deref() != Some(target) {\n        return false;\n    }",
+          "new": "    if edit[\"file\"].as_str().is_none() {\n        return false;\n    }"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP47",
+      "title": "the removal check counts an edit whose old forms do not hold the rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let old = edit[\"old\"].as_str().unwrap_or_default();\n    let new = edit[\"new\"].as_str().unwrap_or_default();\n    profile_forms(old).iter().any(|candidate| candidate == form)\n        && !profile_forms(new).iter().any(|candidate| candidate == form)",
+          "new": "    let _old = edit[\"old\"].as_str().unwrap_or_default();\n    let new = edit[\"new\"].as_str().unwrap_or_default();\n    !profile_forms(new).iter().any(|candidate| candidate == form)"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP48",
+      "title": "the removal check counts an edit whose new forms still hold the rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let old = edit[\"old\"].as_str().unwrap_or_default();\n    let new = edit[\"new\"].as_str().unwrap_or_default();\n    profile_forms(old).iter().any(|candidate| candidate == form)\n        && !profile_forms(new).iter().any(|candidate| candidate == form)",
+          "new": "    let old = edit[\"old\"].as_str().unwrap_or_default();\n    let _new = edit[\"new\"].as_str().unwrap_or_default();\n    profile_forms(old).iter().any(|candidate| candidate == form)"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP49",
+      "title": "an unreadable profile is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let profile = fs::read_to_string(path).map_err(|err| {\n        format!(\n            \"{name} allow-rule profile {} must be readable: {err}\",\n            path.display()\n        )\n    })?;",
+          "new": "    let profile = fs::read_to_string(path).unwrap_or_default();"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP50",
+      "title": "an unreadable falsifier list is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Err(err) => {\n                return Err(format!(\n                    \"{name} falsifier list {} must be readable: {err}\",\n                    path.display()\n                ))\n            }",
+          "new": "            Err(_err) => continue,"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP51",
+      "title": "a falsifier list that is not JSON is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let doc: Value = match serde_json::from_str(&text) {\n            Ok(doc) => doc,\n            Err(err) => {\n                return Err(format!(\n                    \"{name} falsifier list {} must be valid JSON: {err}\",\n                    path.display()\n                ))\n            }\n        };",
+          "new": "        let doc: Value = match serde_json::from_str(&text) {\n            Ok(doc) => doc,\n            Err(_err) => continue,\n        };"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP52",
+      "title": "a falsifier list without a falsifiers list is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(list) = doc.get(\"falsifiers\").and_then(Value::as_array) else {\n            return Err(format!(\n                \"{name} falsifier list {} must hold a falsifiers list\",\n                path.display()\n            ));\n        };",
+          "new": "        let Some(list) = doc.get(\"falsifiers\").and_then(Value::as_array) else {\n            continue;\n        };"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP53",
+      "title": "a profile that does not parse is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    std::panic::catch_unwind(|| profile_forms(&profile))\n        .map_err(|reason| {\n            let detail = reason\n                .downcast_ref::<String>()\n                .map(String::as_str)\n                .unwrap_or(\"the profile does not parse\");\n            format!(\n                \"{name} allow-rule profile {} must parse: {detail}\",\n                path.display()\n            )\n        })\n        .map(|_forms| profile)",
+          "new": "    Ok(profile)"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
       ]
     }
   ]

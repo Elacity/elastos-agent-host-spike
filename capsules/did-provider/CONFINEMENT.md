@@ -195,6 +195,10 @@ and a missing or unreadable profile fails the check with a reason that names
 its path. The test runs on every platform because it reads files and starts
 no process.
 
+`every_did_and_wallet_allow_rule_has_a_registered_removal` in the same file
+requires a registered removal falsifier for every top-level allow rule of did's
+profile.
+
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
 itself without starting a process: a missing `sandbox-exec` on `macos` is an
 error that names the OS and the path, a missing one on `linux` is a skip, and
