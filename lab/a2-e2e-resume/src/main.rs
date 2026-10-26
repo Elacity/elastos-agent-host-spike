@@ -217,8 +217,7 @@ async fn second(store: &Path) -> Result<()> {
                 is_format2(&after),
                 format_invokes(&invokes)
             );
-            let loaded =
-                invokes.iter().any(|(op, out)| op == "read" && out == "ok") && is_format2(&after);
+            let loaded = guest_loaded_journal(&invokes) && is_format2(&after);
             if loaded {
                 row(
                     "RESUME",
@@ -276,8 +275,7 @@ async fn second(store: &Path) -> Result<()> {
                 format_invokes(&invokes)
             );
             let kept = sha256_hex(&after) == expected_sha && after_rev == expected_rev;
-            let loaded = invokes.iter().any(|(op, out)| op == "read" && out == "ok")
-                && (kept || is_format2(&after));
+            let loaded = guest_loaded_journal(&invokes) && (kept || is_format2(&after));
             if loaded {
                 row(
                     "RESUME",
@@ -462,6 +460,20 @@ fn invoke_outcomes(audit: &AuditLog) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// Audit events are newest first. A load is a guest read that happens
+/// before a later write. A create_only conflict that then rereads the
+/// store is write-then-read, so it is not a resume.
+fn guest_loaded_journal(invokes: &[(String, String)]) -> bool {
+    let chrono: Vec<&(String, String)> = invokes.iter().rev().collect();
+    let Some(read_at) = chrono
+        .iter()
+        .position(|(op, out)| op == "read" && out == "ok")
+    else {
+        return false;
+    };
+    chrono[read_at + 1..].iter().any(|(op, _)| op == "write")
 }
 
 fn format_invokes(invokes: &[(String, String)]) -> String {
