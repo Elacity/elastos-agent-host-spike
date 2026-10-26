@@ -7,6 +7,7 @@ live evidence for A14; the real run is RUNBOOK.md on the Mac.
 import contextlib
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -385,6 +386,19 @@ class NeverPassWithoutARun(TempCase):
         for check in checks:
             self.assertTrue(any(step.check == check for step in steps), check)
         self.assertIn("launched:host-key-read", suites["agent-conformance"]["identities"])
+
+    def test_every_named_test_exists_in_its_suite(self):
+        _, suites, steps = demo.load_journeys()
+        for step in steps:
+            with self.subTest(step.id):
+                name = step.test.rsplit("::", 1)[-1]
+                pattern = re.compile(rf"^\s*(?:async\s+)?fn {re.escape(name)}\(\)", re.MULTILINE)
+                found = [
+                    path
+                    for path in (demo.REPO / suites[step.suite]["source"]).rglob("*.rs")
+                    if pattern.search(path.read_text(encoding="utf-8", errors="replace"))
+                ]
+                self.assertTrue(found, f"{step.id}: no fn {name}() under {suites[step.suite]['source']}")
 
 
 class InstallBinding(TempCase):

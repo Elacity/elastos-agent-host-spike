@@ -1,5 +1,5 @@
 {
-  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -I -m unittest discover -s lab/demo-a14/tests -k <test>, require FAILED, restore, require OK.",
+  "about": "demo-a14 falsifiers. Each one plants one bug in lab/demo-a14/demo.py or journeys.json and requires every named test to FAIL at an assertion, never from an import or syntax error; then the exact bytes are restored and the same tests pass. File paths are relative to the repository root. The shared runner examples/agent-host/falsify.py has no demo-a14 command, so these run by hand: apply the edit, run python3 -I -m unittest discover -s lab/demo-a14/tests -k <test>, require FAILED, restore, require OK.",
   "falsifiers": [
     {
       "id": "F-A14a",
@@ -200,6 +200,20 @@
         }
       ],
       "tests": ["test_install_refuses_a_receipt_that_does_not_match_the_build"]
+    },
+    {
+      "id": "F-A14o",
+      "title": "the journey list names a test that does not exist",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/journeys.json",
+          "old": "      \"test\": \"host_key_read_is_refused\",\n",
+          "new": "      \"test\": \"host_key_read_is_refused_by_name\",\n"
+        }
+      ],
+      "tests": ["test_every_named_test_exists_in_its_suite"]
     }
   ]
 }

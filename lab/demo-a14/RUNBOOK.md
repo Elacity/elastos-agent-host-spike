@@ -194,6 +194,6 @@ the receipt. The A8 journey must print the Runtime, the provider and its
 python3 -I -m unittest discover -s lab/demo-a14/tests -v
 ```
 
-`falsifiers.json` lists 14 planted bugs, each with the tests that must fail.
+`falsifiers.json` lists 15 planted bugs, each with the tests that must fail.
 The shared falsifier runner has no command for this folder, so apply each edit
 by hand, require its tests to fail, restore the bytes, and require them to pass.
