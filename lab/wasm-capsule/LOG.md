@@ -183,3 +183,18 @@
   runner, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`:
   "summary: 55 CAUGHT of 55", exit 0, no backup left (runner-caught; baseline: 34 named tests pass without an edit).
   Both retired-label merge-gate greps: empty, exit 1. `run.rs` is still not a recovery target (R2).
+- wc-005c (task 016): `run` now asks each engine `--version` after `verify_bundle` and before any module run (one
+  process each, by the same absolute path, through the new `engine_command`: empty environment, stdin null), keeps
+  the first stdout line as printed, and refuses a query that does not start, exits nonzero or prints an empty first
+  line, each with its own reason (`TwoEngineRefusal::Version`). `run_engine` returns an `EngineRun` (status and
+  stdout); `TwoEngineRun` adds `version()`, `status()`, `stdout()`. New `tools/src/receipt.rs`: `render` (schema
+  `wc-005.run-receipt/v1`) and `write_receipt` (through `bundle::write_new_file`, refusal unchanged). Real receipt on
+  this Mac: `bundle: lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930`, `function:
+  digest`, `argument: 1592590337`, `wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"`, `wasmer_version:
+  "wasmer 7.5.0"`, both `exit status: 0`, both stdouts `"230101071268130872\n"`. Claim scope unchanged from 015 (one
+  core module, this Mac, both engines test-only, neither endorsed, not the Component ABI). Five new tests in
+  `tests/run.rs`; 015's stand-ins answer `--version` apart from the module run, and the missing-program case moved
+  to `version_query_failures_keep_their_cause`. 20 new falsifiers, four re-anchored. Canonical runner,
+  `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5`: "summary: 52 CAUGHT of
+  52", exit 0, no backup left (runner-caught; baseline: 22 named tests pass without an edit). Both retired-label
+  merge-gate greps: empty, exit 1. `run.rs` and `receipt.rs` are not recovery targets (R2).
