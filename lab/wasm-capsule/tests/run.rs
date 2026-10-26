@@ -520,7 +520,9 @@ fn runner_passes_no_directory_env_or_network_flags() {
         let module = root.join(engine_kind.name()).join("module.wasm");
         let argv = String::from_utf8(stdout).expect("the argv is UTF-8");
         let cap = match engine_kind {
-            Engine::Wasmtime => "-W\nmax-memory-size=67108864,trap-on-grow-failure=y\n",
+            Engine::Wasmtime => {
+                "-W\nmax-memory-size=67108864,max-memories=1,trap-on-grow-failure=y\n"
+            }
             Engine::Wasmer => "",
         };
         assert_eq!(
@@ -2075,6 +2077,31 @@ fn manifest_with_memory_mb(memory_mb: u32) -> Vec<u8> {
         .into_bytes()
 }
 
+/// A new folder `name` in `root` holding [`manifest_with_memory_mb`] and
+/// `module` as `capsule.wasm`, signed with a fresh key and verified; the
+/// verified value keeps the declared `memory_mb`.
+fn verified_bundle_declaring(
+    root: &Path,
+    name: &str,
+    module: &[u8],
+    memory_mb: u32,
+) -> VerifiedBundle {
+    let bundle = root.join(name);
+    fs::create_dir(&bundle).expect("create the bundle folder");
+    fs::write(
+        bundle.join("capsule.json"),
+        manifest_with_memory_mb(memory_mb),
+    )
+    .expect("write capsule.json");
+    fs::write(bundle.join("capsule.wasm"), module).expect("write capsule.wasm");
+    let key = fresh_key();
+    let sig = sign_bundle(&key, &bundle).expect("sign the bundle");
+    let value = verify_bundle(&bundle, Some(&sig), &[did(&key)], &[])
+        .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"));
+    assert_eq!(value.memory_mb(), memory_mb, "the declared memory_mb");
+    value
+}
+
 /// wc-010b: the cap on `wasmtime`'s argv is the manifest's declared
 /// `resources.memory_mb` × 2^20, read, not fixed: a bundle that declares 2 MB
 /// gives `max-memory-size=2097152`, and one that declares `u32::MAX` gives
@@ -2088,19 +2115,8 @@ fn declared_memory_cap_comes_from_the_manifest() {
     let root = canonical(&tmp);
 
     for (memory_mb, bytes) in [(2, "2097152"), (u32::MAX, "4503599626321920")] {
-        let bundle = root.join(format!("bundle-{memory_mb}"));
-        fs::create_dir(&bundle).expect("create the bundle folder");
-        fs::write(
-            bundle.join("capsule.json"),
-            manifest_with_memory_mb(memory_mb),
-        )
-        .expect("write capsule.json");
-        fs::write(bundle.join("capsule.wasm"), MODULE).expect("write capsule.wasm");
-        let key = fresh_key();
-        let sig = sign_bundle(&key, &bundle).expect("sign the bundle");
-        let value = verify_bundle(&bundle, Some(&sig), &[did(&key)], &[])
-            .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"));
-        assert_eq!(value.memory_mb(), memory_mb, "the declared memory_mb");
+        let value =
+            verified_bundle_declaring(&root, &format!("bundle-{memory_mb}"), MODULE, memory_mb);
 
         let work = work_root(&root, &format!("work-{memory_mb}"));
         for engine_kind in ENGINES {
@@ -2108,7 +2124,7 @@ fn declared_memory_cap_comes_from_the_manifest() {
             let module = work.join(engine_kind.name()).join("module.wasm");
             let cap = match engine_kind {
                 Engine::Wasmtime => {
-                    format!("-W\nmax-memory-size={bytes},trap-on-grow-failure=y\n")
+                    format!("-W\nmax-memory-size={bytes},max-memories=1,trap-on-grow-failure=y\n")
                 }
                 Engine::Wasmer => String::new(),
             };
@@ -2192,6 +2208,56 @@ fn memory_grow_past_the_declared_cap_traps_on_wasmtime() {
     eprintln!("PASS: wasmtime trapped on the grow past the declared 64 MB cap");
 }
 
+/// wc-010b: a hand-written core module, as bytes: two memories of 32 pages
+/// (2 MB) each with no maximum, no import, and one export, `digest (i32) ->
+/// i32`, that ignores its argument and returns `memory.size 0 + memory.size
+/// 1`, 64 pages. Each memory alone fits a 2 MB cap; together they are twice
+/// it.
+const TWO_MEMORY_MODULE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type: (i32) -> (i32)
+    0x03, 0x02, 0x01, 0x00, // function: one, of type 0
+    0x05, 0x05, 0x02, 0x00, 0x20, 0x00, 0x20, // memory: two, minimum 32 pages, no maximum
+    0x07, 0x0a, 0x01, 0x06, b'd', b'i', b'g', b'e', b's', b't', 0x00, 0x00, // export "digest"
+    0x0a, 0x09, 0x01, 0x07, 0x00, // code: one body, no locals
+    0x3f, 0x00, 0x3f, 0x01, 0x6a, 0x0b, // memory.size 0; memory.size 1; i32.add; end
+];
+
+/// wc-010b, real engine: the declared cap is the capsule's whole linear
+/// memory. `max-memory-size` caps each memory on its own, so a signed,
+/// verified module that declares 2 MB and has two 2 MB memories would get
+/// 4 MB; on `wasmtime` it is refused at start, with `max-memories=1`'s own
+/// reason on stderr, and never runs.
+#[test]
+fn second_memory_cannot_double_the_declared_cap_on_wasmtime() {
+    let Some(program) = real_wasmtime("the two-memory run") else {
+        return;
+    };
+    let tmp = TempDir::new("run10-two-memories");
+    let root = canonical(&tmp);
+    let value = verified_bundle_declaring(&root, "bundle", TWO_MEMORY_MODULE, 2);
+    let work = work_root(&root, "work");
+
+    let refusal = refused(run_engine(&value, Engine::Wasmtime, &program, &work));
+    match &refusal.reason {
+        Reason::EngineFailed {
+            engine,
+            status,
+            stderr,
+        } => {
+            assert_eq!(*engine, Engine::Wasmtime);
+            assert!(!status.success(), "a failed run exited 0");
+            assert!(
+                stderr.contains("resource limit exceeded: memory count too high at 2"),
+                "wasmtime ({}) did not refuse the second memory: {stderr}",
+                program.display()
+            );
+        }
+        _ => panic!("not an engine failure: {refusal}"),
+    }
+    eprintln!("PASS: wasmtime refused a second memory under the declared 2 MB cap");
+}
+
 /// wc-010b, real engines: the capsule `tools/build` makes, through `run` on
 /// the real `wasmtime` and `wasmer`, still prints `FIXED_OUTPUT` on both, with
 /// the cap on `wasmtime`'s argv. The cap is seen by a recording program at
@@ -2256,7 +2322,7 @@ fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
     assert_eq!(
         fs::read_to_string(&argv_log).expect("read wasmtime's recorded argv"),
         format!(
-            "--version\nrun\n--invoke\ndigest\n-W\nmax-memory-size=67108864,trap-on-grow-failure=y\n{}\n1592590337\n",
+            "--version\nrun\n--invoke\ndigest\n-W\nmax-memory-size=67108864,max-memories=1,trap-on-grow-failure=y\n{}\n1592590337\n",
             module.display()
         ),
         "wasmtime's argv: its version query, then its capped module run"

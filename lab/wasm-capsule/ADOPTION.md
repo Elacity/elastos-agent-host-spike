@@ -70,7 +70,7 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   the first line the engine printed for `--version` before the module ran, so
   an engine upgrade shows in the receipt, and none is part of the lab CID
   (README.md, "Run receipt (wc-005c)").
-  wc-010b (task 027): the memory cap comes from `resources.memory_mb`, kept by the verifier's one manifest read (`VerifiedBundle::memory_mb()`, MB read as 2^20 bytes) and given to `wasmtime` as `-W max-memory-size=<bytes>,trap-on-grow-failure=y`; wasmer cannot enforce it on its CLI (no cap flag), so no cap is claimed for wasmer (README.md, "Memory cap (wc-010b)").
+  wc-010b (task 027): the memory cap comes from `resources.memory_mb`, kept by the verifier's one manifest read (`VerifiedBundle::memory_mb()`, MB read as 2^20 bytes) and given to `wasmtime` as `-W max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y` (one linear memory, so the cap is the capsule's whole linear memory); wasmer cannot enforce it on its CLI (no cap flag), so no cap is claimed for wasmer (README.md, "Memory cap (wc-010b)").
   The two-engine result is a behaviour proof on one **core module** on this
   Mac, not the Component ABI. Rong's ruling (26 Oct):
   Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.

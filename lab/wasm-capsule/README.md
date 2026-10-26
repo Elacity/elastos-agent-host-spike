@@ -877,14 +877,23 @@ never decides.
 
 **wasmtime 45.0.1: ENFORCED.** Its module run gets exactly one more argument
 pair, after `run --invoke digest` and before the module path: `-W` and
-`max-memory-size=<bytes>,trap-on-grow-failure=y`. The unit is bytes
-(`wasmtime -W help`, wc-010a). With `trap-on-grow-failure=y` a `memory.grow`
+`max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y`. The unit is
+bytes (`wasmtime -W help`, wc-010a). `max-memory-size` caps each linear
+memory on its own, so the declared size is the capsule's whole linear memory
+only with `max-memories=1` ("Maximum number of WebAssembly linear memories
+allowed to be created", `wasmtime -W help`): a module with a second memory is
+refused at start with "resource limit exceeded: memory count too high at 2"
+(task 027 round 2, from the Codex review; the verifier's import audit accepts
+such a module). With `trap-on-grow-failure=y` a `memory.grow`
 past the cap traps (exit 1, "forcing trap when growing memory to 67174400
 bytes") instead of returning -1, so the runner refuses the run with
 `EngineFailed` and wasmtime's stderr. The `--version` query is unchanged.
 Checked once by hand in this order before the code (LOG.md, task 027): `run
 --invoke grow -W max-memory-size=67108864,trap-on-grow-failure=y grow.wat 1024`
-exits 1 with that trap line, and `... 1023` exits 0 and prints `1`.
+exits 1 with that trap line, and `... 1023` exits 0 and prints `1`. Round 2,
+by hand with `max-memories=1` added: the same two results, and the two-memory
+module under a 2 MB cap exits 1 with the memory count line (exit 0 and `64`
+without it).
 
 **wasmer 7.5.0: SKIPPED.** No memory cap flag in `wasmer run --help` or
 `wasmer --help` (wc-010a), so its argv is unchanged and no cap is claimed for
@@ -1211,7 +1220,7 @@ puts it under the `/var` link):
   `run`, `--invoke`, `digest`, the absolute module path and `1592590337`
   (`FIXED_INPUT`), with no `--dir`, `--mapdir`, `--env` or `--net`. From task
   027 `wasmtime`'s argv also has `-W` and
-  `max-memory-size=67108864,trap-on-grow-failure=y` (this capsule's declared 64
+  `max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y` (this capsule's declared 64
   MB) before the module path; `wasmer`'s is unchanged. Stand-ins that read the
   module path take their second-to-last argument.
 - `engine_starts_with_an_empty_environment` — a stand-in sees no `HOME`,
@@ -1371,6 +1380,12 @@ engine not found prints SKIPPED and gives no result, never PASS:
 - `memory_grow_past_the_declared_cap_traps_on_wasmtime` — the real `wasmtime`:
   a grow by 1024 pages is refused with `EngineFailed`, and its stderr holds
   `forcing trap when growing memory to 67174400 bytes`.
+- `second_memory_cannot_double_the_declared_cap_on_wasmtime` — the real
+  `wasmtime`: a hand-written module with two memories of 32 pages (2 MB) each,
+  no maximum and no import, whose `digest` returns the two sizes added, in a
+  bundle that declares `"memory_mb": 2`, is verified and then refused with
+  `EngineFailed`, and its stderr holds `resource limit exceeded: memory count
+  too high at 2`. Without `max-memories=1` it runs and prints `64` pages, 4 MB.
 - `built_capsule_runs_under_the_declared_cap_on_wasmtime` — the real
   `tools/build` capsule through `run` on both real engines prints
   `FIXED_OUTPUT` on both. A recording program at `wasmtime`'s path appends its
@@ -1385,20 +1400,20 @@ engine not found prints SKIPPED and gives no result, never PASS:
 
 ## Falsifiers
 
-`falsifiers.json` holds 152 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 153 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026 and
-six wc-010b (task 027).
+seven wc-010b (task 027).
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 88, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 89, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026 and 027: 1 +
-1 + 23 + 11 + 20 + 2 + 17 + 7 + 6), each run by the canonical runner with its
+1 + 23 + 11 + 20 + 2 + 17 + 7 + 7), each run by the canonical runner with its
 summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
@@ -1770,7 +1785,7 @@ Task 026's five planted bugs outside `README.md`, each hand-proven, pending R1
 - F-WC9B0-ADOPTION — ADOPTION loses the discovery-only ruling
   (`hosting_discovery_is_not_the_import_path`, at its ADOPTION assertion).
 
-wc-010b's six (task 027), runner-caught (the canonical runner's summary line is
+wc-010b's seven (task 027), runner-caught (the canonical runner's summary line is
 in LOG.md, task 027). Every anchor is in `tools/src/run.rs` or
 `tools/src/verify.rs`, both recovery targets, and each named test fails at its
 assertion:
@@ -1780,7 +1795,9 @@ assertion:
   (`runner_passes_no_directory_env_or_network_flags` and
   `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
   `memory_grow_past_the_declared_cap_traps_on_wasmtime`, where wasmtime is
-  present, because the grow past 64 MB succeeds and the run is not refused).
+  present, because the grow past 64 MB succeeds and the run is not refused;
+  `second_memory_cannot_double_the_declared_cap_on_wasmtime`, because the
+  two-memory module runs).
 - F-WC10-CAP-FIXED — the runner caps at a fixed 64 MB, not the declared
   `memory_mb` (`declared_memory_cap_comes_from_the_manifest`, at its 2 MB argv
   comparison).
@@ -1788,6 +1805,12 @@ assertion:
   returns -1 and the run exits 0 (the argv test and
   `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
   `memory_grow_past_the_declared_cap_traps_on_wasmtime`, not refused).
+- F-WC10-TWO-MEMORIES — `max-memories=1` is dropped, so the cap holds each
+  linear memory on its own and a module with a second memory gets twice its
+  declared size (round 2 of task 027, from the Codex review) (the argv test
+  and `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
+  `second_memory_cannot_double_the_declared_cap_on_wasmtime`, where wasmtime
+  is present, because the module runs and is not refused).
 - F-WC10-CAP-OVERFLOW — the MB to bytes product is taken in `u32`
   (`wrapping_mul`), so `u32::MAX` MB wraps
   (`declared_memory_cap_comes_from_the_manifest`, at its `u32::MAX` argv

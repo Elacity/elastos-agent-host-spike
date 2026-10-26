@@ -23,8 +23,10 @@
 //! manifest read; the runner reads it from no file and no environment. MB is
 //! read as 2^20 bytes, so the cap is `memory_mb × 1048576` bytes, in `u64`
 //! (no overflow for any `u32`). `wasmtime` gets one argument pair, `-W
-//! max-memory-size=<bytes>,trap-on-grow-failure=y`: a `memory.grow` past the
-//! cap traps. `wasmer` gets none: its CLI has no memory cap flag (wc-010a), so
+//! max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y`: the cap is
+//! per linear memory, so a module with a second memory, which would get a
+//! second cap, is refused at start ("memory count too high"); a `memory.grow`
+//! past the cap traps. `wasmer` gets none: its CLI has no memory cap flag (wc-010a), so
 //! no cap is claimed for it. The flag is a test-only limit, never an engine
 //! choice; the engine choice is Anders's.
 //!
@@ -309,14 +311,16 @@ fn memory_cap_bytes(memory_mb: u32) -> u64 {
 
 /// `engine`'s module-run arguments that cap its linear memory at the
 /// declared `memory_mb`. `wasmtime`: `-W max-memory-size=<bytes>` with
-/// `trap-on-grow-failure=y`, so a grow past the cap traps instead of returning
-/// -1. `wasmer`: none, since its CLI has no memory cap flag.
+/// `max-memories=1`, so the cap is the capsule's whole linear memory, not one
+/// of several, and `trap-on-grow-failure=y`, so a grow past the cap traps
+/// instead of returning -1. `wasmer`: none, since its CLI has no memory cap
+/// flag.
 fn memory_cap_args(engine: Engine, memory_mb: u32) -> Vec<String> {
     match engine {
         Engine::Wasmtime => vec![
             "-W".to_owned(),
             format!(
-                "max-memory-size={},trap-on-grow-failure=y",
+                "max-memory-size={},max-memories=1,trap-on-grow-failure=y",
                 memory_cap_bytes(memory_mb)
             ),
         ],
