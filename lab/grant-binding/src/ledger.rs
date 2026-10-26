@@ -6,7 +6,8 @@
 //! records the hold on this ledger. `settle` and `release` are the only ways a
 //! hold ends, and both take that same binding decision first. The guest's
 //! `reported_usage` claim is not read: a known settle charges the figure the
-//! verifier passes in, and an unknown outcome keeps the hold. The ledger value
+//! verifier passes in when it stays at or under the stored hold, refuses a
+//! larger one, and an unknown outcome keeps the hold. The ledger value
 //! sits behind one mutex, and admit, reserve, settle, and release lock it for
 //! the check and the write.
 
@@ -74,6 +75,7 @@ pub enum SettleOutcome {
 pub enum SettleRefuse {
     UnknownOutcome,
     NotOutstanding,
+    AboveReservation,
     Binding(Refuse),
 }
 
@@ -82,6 +84,9 @@ impl std::fmt::Display for SettleRefuse {
         match self {
             SettleRefuse::UnknownOutcome => formatter.write_str("unknown outcome keeps the hold"),
             SettleRefuse::NotOutstanding => formatter.write_str("reservation is not outstanding"),
+            SettleRefuse::AboveReservation => {
+                formatter.write_str("measured figure exceeds the reservation")
+            }
             SettleRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -144,9 +149,11 @@ impl Verifier {
 
     /// Ends one hold with the figure the host measured. A binding refusal
     /// records nothing, an unknown outcome keeps the hold as it is, and a
-    /// reservation that is not outstanding is refused. A known outcome charges
-    /// the measured figure, gives back the stored hold and returns the charge;
-    /// the request's reported usage does not lower it.
+    /// reservation that is not outstanding is refused. A known outcome
+    /// charges the measured figure when it stays at or under the stored hold,
+    /// gives back the stored hold and returns the charge; a larger figure is
+    /// refused and records nothing. The request's reported usage does not
+    /// lower it.
     pub fn settle(
         &self,
         call: &Call,
@@ -168,6 +175,9 @@ impl Verifier {
             Some(stored) => *stored,
             None => return Err(SettleRefuse::NotOutstanding),
         };
+        if measured > stored {
+            return Err(SettleRefuse::AboveReservation);
+        }
         let charge = measured;
         ledger.charged += charge;
         ledger.held -= stored;
@@ -581,4 +591,37 @@ fn model_concurrent_reserves_keep_one_ceiling() {
     assert_eq!(books.held, 3);
     assert_eq!(books.charged, 0);
     assert_eq!(books.open.len(), 1);
+}
+
+#[test]
+fn model_settle_above_the_reservation_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 100,
+        ..guest(handle)
+    };
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let refusal = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(9))
+        .expect_err("above the reservation");
+    assert_eq!(refusal, SettleRefuse::AboveReservation);
+    assert_eq!(
+        refusal.to_string(),
+        "measured figure exceeds the reservation"
+    );
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 4);
+    assert_eq!(after_refusal.charged, 0);
+    assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("settle at the reservation");
+    assert_eq!(charge, 4);
+    let after_settle = books(&verifier);
+    assert_eq!(after_settle.charged, 4);
+    assert_eq!(after_settle.held, 0);
+    assert!(!after_settle.open.contains_key(&reservation.id));
 }
