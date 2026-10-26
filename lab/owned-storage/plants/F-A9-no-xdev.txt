@@ -1,0 +1,13 @@
+id: F-A9-no-xdev
+file: src/walk.rs
+test: tests::live_walk_flags_are_pinned
+test: tests::bind_mount_of_another_agent_tree_is_refused
+--- old
+pub(crate) fn resolve_no_xdev() -> bool {
+    true
+}
+--- new
+pub(crate) fn resolve_no_xdev() -> bool {
+    false
+}
+--- end

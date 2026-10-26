@@ -1,9 +1,12 @@
 id: F-A9-nofollow
-file: src/lib.rs
-test: tests::last_component_nofollow_is_required
+file: src/walk.rs
+test: tests::live_walk_flags_are_pinned
 --- old
-    opts.custom_flags(O_NOFOLLOW);
-    opts.open(path).map_err(|error| map_open_error(path, error))
+pub(crate) fn nofollow_flag() -> OFlags {
+    OFlags::NOFOLLOW
+}
 --- new
-    opts.open(path).map_err(|error| map_open_error(path, error))
+pub(crate) fn nofollow_flag() -> OFlags {
+    OFlags::empty()
+}
 --- end

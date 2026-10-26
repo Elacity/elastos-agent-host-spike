@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay the eight r2 mutants against this crate. Every mutant must be caught."""
+"""Replay the r2/r3 mutants against this crate. Every mutant must be caught."""
 
 from __future__ import annotations
 
@@ -47,24 +47,52 @@ LIB_MUTANTS = [
     },
     {
         "id": "M-inode-noop",
-        "old": """fn inode_in_owner_tree(root: &Path, path: &Path) -> Result<(), Refuse> {
-    let meta = fs::symlink_metadata(path).map_err(|_| Refuse::NotFound)?;
-    let owned = tree_inodes(root)?;
-    if !owned.contains(&(meta.dev(), meta.ino())) {
-        return Err(Refuse::HardLink);
-    }
-    Ok(())
+        "old": """fn require_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    refuse_hard_link(meta)?;
+    require_in_agent_record(agent_root, meta)
 }""",
-        "new": """fn inode_in_owner_tree(_root: &Path, _path: &Path) -> Result<(), Refuse> {
+        "new": """fn require_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    refuse_hard_link(meta)?;
+    let _ = (agent_root, meta);
     Ok(())
 }""",
         "tests": ["tests::agent_b_is_denied_a_hard_linked_inode"],
     },
     {
+        "id": "M-unowned-allow",
+        "old": "fn require_positive_ownership() -> bool {\n    true\n}",
+        "new": "fn require_positive_ownership() -> bool {\n    false\n}",
+        "tests": ["tests::host_rename_into_b_is_refused"],
+    },
+]
+
+WALK_MUTANTS = [
+    {
         "id": "M-no-nofollow",
-        "old": "    opts.custom_flags(O_NOFOLLOW);\n    opts.open(path).map_err(|error| map_open_error(path, error))",
-        "new": "    opts.open(path).map_err(|error| map_open_error(path, error))",
-        "tests": ["tests::last_component_nofollow_is_required"],
+        "old": "pub(crate) fn nofollow_flag() -> OFlags {\n    OFlags::NOFOLLOW\n}",
+        "new": "pub(crate) fn nofollow_flag() -> OFlags {\n    OFlags::empty()\n}",
+        "tests": ["tests::live_walk_flags_are_pinned"],
+    },
+    {
+        "id": "M-walk-no-symlinks",
+        "old": """    let mut flags = ResolveFlags::BENEATH
+        .union(ResolveFlags::NO_SYMLINKS)
+        .union(ResolveFlags::NO_MAGICLINKS);""",
+        "new": """    let mut flags = ResolveFlags::BENEATH
+        .union(ResolveFlags::NO_MAGICLINKS);""",
+        "tests": ["tests::live_walk_flags_are_pinned"],
+    },
+    {
+        "id": "M-walk-force-openat",
+        "old": "pub(crate) fn openat2_first() -> bool {\n    true\n}",
+        "new": "pub(crate) fn openat2_first() -> bool {\n    false\n}",
+        "tests": ["tests::live_walk_flags_are_pinned"],
+    },
+    {
+        "id": "M-walk-no-xdev",
+        "old": "pub(crate) fn resolve_no_xdev() -> bool {\n    true\n}",
+        "new": "pub(crate) fn resolve_no_xdev() -> bool {\n    false\n}",
+        "tests": ["tests::live_walk_flags_are_pinned"],
     },
 ]
 
@@ -129,6 +157,7 @@ def apply_one(target: Path, old: str, new: str) -> None:
 
 def main() -> int:
     lib = HERE / "src" / "lib.rs"
+    walk = HERE / "src" / "walk.rs"
     launch = HERE / "src" / "launch.rs"
     rows = []
     failed = 0
@@ -151,6 +180,8 @@ def main() -> int:
 
     for mutant in LIB_MUTANTS:
         run(mutant["id"], lib, mutant["old"], mutant["new"], mutant["tests"])
+    for mutant in WALK_MUTANTS:
+        run(mutant["id"], walk, mutant["old"], mutant["new"], mutant["tests"])
     for mutant in LAUNCH_MUTANTS:
         run(mutant["id"], launch, mutant["old"], mutant["new"], mutant["tests"])
 

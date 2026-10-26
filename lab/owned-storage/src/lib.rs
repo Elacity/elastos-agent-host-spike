@@ -18,23 +18,17 @@
 //! root. The real-Runtime rows stay BLOCKED. The exact change is in
 //! `PROPOSED-LAUNCHER-CHANGE.md`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod walk;
-
-/// Linux `O_NOFOLLOW`. Open the last component only; do not follow a link.
-/// Kept as a named hook so plant `F-A9-nofollow` / mutant `M-no-nofollow` can drop it.
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-const O_NOFOLLOW: i32 = 0o400000;
 
 pub mod launch;
 
@@ -90,8 +84,10 @@ pub enum Refuse {
     Traversal,
     /// A symlink resolves outside the caller's root.
     Symlink,
-    /// The file is hard-linked, or its inode is owned by another agent.
+    /// The file is hard-linked, or this agent did not create its inode.
     HardLink,
+    /// The path crosses a mount point, including a bind-mount of another tree.
+    CrossMount,
     /// The path leaves the caller's root some other way.
     OutsideRoot,
     /// The name is empty, absolute, or not a plain segment.
@@ -114,6 +110,7 @@ impl std::fmt::Display for Refuse {
             Refuse::Traversal => "path traversal is refused",
             Refuse::Symlink => "symlink leaves the owned root",
             Refuse::HardLink => "hard-linked inode is refused",
+            Refuse::CrossMount => "path crosses a mount point",
             Refuse::OutsideRoot => "path leaves the owned root",
             Refuse::HostPath => "storage name is a host path",
             Refuse::Removed => "storage was removed",
@@ -148,8 +145,6 @@ pub struct Store {
     agents: Vec<OpenAgent>,
     next_instance: u64,
     life: Life,
-    /// Inodes this store created through `write`, keyed to the agent index.
-    created: Mutex<HashMap<(u64, u64), usize>>,
 }
 
 impl Store {
@@ -175,7 +170,6 @@ impl Store {
             agents: Vec::new(),
             next_instance: 0,
             life: Life::Open,
-            created: Mutex::new(HashMap::new()),
         })
     }
 
@@ -208,6 +202,8 @@ impl Store {
         }
         let owned_root = a5_owned_root(identity, &format!("{session}/{instance}"))?;
         let root = walk::open_root(&canon)?;
+        let root_meta = fs::symlink_metadata(&canon).map_err(|_| Refuse::OutsideRoot)?;
+        record_owned(&canon, &root_meta)?;
         self.agents.push(OpenAgent {
             identity: identity.to_owned(),
             session: session.to_owned(),
@@ -240,10 +236,7 @@ impl Store {
         if meta.file_type().is_symlink() || !meta.is_file() {
             return Err(Refuse::OutsideRoot);
         }
-        refuse_hard_link(&meta)?;
-        created_inode_is_foreign(self, grant, &meta)?;
-        inode_in_owner_tree(root, &full)?;
-        refuse_foreign_file(root, &full)?;
+        require_owned(root, &meta)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|_| Refuse::OutsideRoot)?;
@@ -262,9 +255,11 @@ impl Store {
             if !meta.is_file() {
                 return Err(Refuse::OutsideRoot);
             }
-            refuse_foreign_file(root, &full)?;
+            require_owned(root, &meta)?;
         }
-        let mut file = walk::open_or_create_file(&self.agent(grant)?.root, &parts)?;
+        let opened = walk::open_or_create_file(&self.agent(grant)?.root, &parts)?;
+        let created = matches!(opened, walk::OpenedFile::Created(_));
+        let mut file = opened.file();
         let meta = file.metadata().map_err(|_| Refuse::OutsideRoot)?;
         if meta.file_type().is_symlink() {
             return Err(Refuse::Symlink);
@@ -272,9 +267,13 @@ impl Store {
         if !meta.is_file() {
             return Err(Refuse::OutsideRoot);
         }
-        refuse_hard_link(&meta)?;
-        created_inode_is_foreign(self, grant, &meta)?;
-        record_created_inode(self, grant, &meta)?;
+        if created {
+            refuse_hard_link(&meta)?;
+            record_owned(root, &meta)?;
+            record_path_components(root, &parts)?;
+        } else {
+            require_owned(root, &meta)?;
+        }
         file.set_len(0).map_err(|_| Refuse::OutsideRoot)?;
         file.write_all(bytes).map_err(|_| Refuse::OutsideRoot)
     }
@@ -304,12 +303,25 @@ impl Store {
         if !meta.is_dir() {
             return Err(Refuse::OutsideRoot);
         }
+        require_owned(&root, &meta)?;
         let parts = if path.is_empty() {
             Vec::new()
         } else {
             io_components(path, &root, &confirmed)?
         };
-        walk::list_names(&walk::open_dir(&self.agent(grant)?.root, &parts)?)
+        let names = walk::list_names(&walk::open_dir(&self.agent(grant)?.root, &parts)?)?;
+        let mut owned_names = Vec::new();
+        for name in names {
+            let child = confirmed.join(&name);
+            let child_meta = match fs::symlink_metadata(&child) {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            if require_in_agent_record(&root, &child_meta).is_ok() {
+                owned_names.push(name);
+            }
+        }
+        Ok(owned_names)
     }
 
     /// Renames one name to another inside the grant's root.
@@ -317,19 +329,17 @@ impl Store {
         let root = self.live_root_for(grant)?.to_path_buf();
         let src = confirm_resolved(&root, &self.resolve(grant, from)?)?;
         let dst = self.resolve(grant, to)?;
-        refuse_foreign_file(&root, &src)?;
+        let src_meta = fs::symlink_metadata(&src).map_err(|_| Refuse::NotFound)?;
+        require_owned(&root, &src_meta)?;
         if let Some(parent) = dst.parent() {
             if parent != root.as_path() && !contained(&root, parent) {
                 return Err(Refuse::OutsideRoot);
             }
-            if parent != root.as_path() {
-                fs::create_dir_all(parent).map_err(|_| Refuse::OutsideRoot)?;
-            }
             confirm_resolved(&root, parent)?;
         }
         confirm_resolved(&root, &dst)?;
-        if dst.exists() {
-            refuse_foreign_file(&root, &dst)?;
+        if let Ok(dst_meta) = fs::symlink_metadata(&dst) {
+            require_owned(&root, &dst_meta)?;
         }
         let from_parts = io_components(from, &root, &src)?;
         let to_parts = io_components(to, &root, &dst)?;
@@ -348,9 +358,6 @@ impl Store {
             Life::Open => {}
         }
         self.agents.clear();
-        if let Ok(mut created) = self.created.lock() {
-            created.clear();
-        }
         if self.yard.exists() && fs::remove_dir_all(&self.yard).is_err() {
             seal_tree(&self.yard);
             self.life = Life::Sealed;
@@ -387,19 +394,6 @@ impl Store {
         let agent = self.agent(grant)?;
         assert_root_is_real_dir(&agent.path)?;
         Ok(&agent.path)
-    }
-
-    fn agent_index(&self, grant: &Grant) -> Result<usize, Refuse> {
-        self.require_open()?;
-        self.agents
-            .iter()
-            .position(|agent| {
-                agent.identity == grant.identity
-                    && agent.session == grant.session
-                    && agent.instance == grant.instance
-                    && agent.owned_root == grant.owned_root
-            })
-            .ok_or(Refuse::UnknownGrant)
     }
 
     fn resolve(&self, grant: &Grant, path: &str) -> Result<PathBuf, Refuse> {
@@ -658,31 +652,6 @@ fn confirm_resolved(root: &Path, full: &Path) -> Result<PathBuf, Refuse> {
     }
 }
 
-fn tree_inodes(root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
-    let mut out = HashSet::new();
-    fn walk(path: &Path, out: &mut HashSet<(u64, u64)>) -> Result<(), Refuse> {
-        let meta = fs::symlink_metadata(path).map_err(|_| Refuse::OutsideRoot)?;
-        out.insert((meta.dev(), meta.ino()));
-        if meta.is_dir() && !meta.file_type().is_symlink() {
-            for entry in fs::read_dir(path).map_err(|_| Refuse::OutsideRoot)? {
-                walk(&entry.map_err(|_| Refuse::OutsideRoot)?.path(), out)?;
-            }
-        }
-        Ok(())
-    }
-    walk(root, &mut out)?;
-    Ok(out)
-}
-
-fn inode_in_owner_tree(root: &Path, path: &Path) -> Result<(), Refuse> {
-    let meta = fs::symlink_metadata(path).map_err(|_| Refuse::NotFound)?;
-    let owned = tree_inodes(root)?;
-    if !owned.contains(&(meta.dev(), meta.ino())) {
-        return Err(Refuse::HardLink);
-    }
-    Ok(())
-}
-
 fn refuse_hard_link(meta: &fs::Metadata) -> Result<(), Refuse> {
     if meta.is_file() && meta.nlink() > 1 {
         return Err(Refuse::HardLink);
@@ -690,31 +659,98 @@ fn refuse_hard_link(meta: &fs::Metadata) -> Result<(), Refuse> {
     Ok(())
 }
 
-fn created_inode_is_foreign(
-    store: &Store,
-    grant: &Grant,
-    meta: &fs::Metadata,
-) -> Result<(), Refuse> {
-    let idx = store.agent_index(grant)?;
-    let key = (meta.dev(), meta.ino());
-    let created = store.created.lock().map_err(|_| Refuse::OutsideRoot)?;
-    if let Some(&owner) = created.get(&key) {
-        if owner != idx {
-            return Err(Refuse::HardLink);
+/// Sibling of the agent root. Two Store handles share this file.
+fn ownership_path(agent_root: &Path) -> PathBuf {
+    let mut name = agent_root.as_os_str().to_os_string();
+    name.push(".owned");
+    PathBuf::from(name)
+}
+
+fn ownership_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn load_owned(agent_root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
+    let _guard = ownership_lock();
+    load_owned_locked(agent_root)
+}
+
+fn load_owned_locked(agent_root: &Path) -> Result<HashSet<(u64, u64)>, Refuse> {
+    let path = ownership_path(agent_root);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(_) => return Err(Refuse::OutsideRoot),
+    };
+    let mut set = HashSet::new();
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
         }
+        let mut parts = line.split_whitespace();
+        let Some(dev) = parts.next().and_then(|part| part.parse().ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        let Some(ino) = parts.next().and_then(|part| part.parse().ok()) else {
+            return Err(Refuse::OutsideRoot);
+        };
+        set.insert((dev, ino));
+    }
+    Ok(set)
+}
+
+fn save_owned_locked(agent_root: &Path, set: &HashSet<(u64, u64)>) -> Result<(), Refuse> {
+    let path = ownership_path(agent_root);
+    let mut out = String::from("# owned-storage v1\n");
+    let mut keys: Vec<(u64, u64)> = set.iter().copied().collect();
+    keys.sort_unstable();
+    for (dev, ino) in keys {
+        out.push_str(&format!("{dev} {ino}\n"));
+    }
+    fs::write(&path, out).map_err(|_| Refuse::OutsideRoot)
+}
+
+fn record_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    let _guard = ownership_lock();
+    let mut set = load_owned_locked(agent_root)?;
+    set.insert((meta.dev(), meta.ino()));
+    save_owned_locked(agent_root, &set)
+}
+
+fn record_path_components(agent_root: &Path, parts: &[OsString]) -> Result<(), Refuse> {
+    let mut acc = agent_root.to_path_buf();
+    for part in parts {
+        acc.push(part);
+        let meta = fs::symlink_metadata(&acc).map_err(|_| Refuse::OutsideRoot)?;
+        record_owned(agent_root, &meta)?;
     }
     Ok(())
 }
 
-fn record_created_inode(store: &Store, grant: &Grant, meta: &fs::Metadata) -> Result<(), Refuse> {
-    created_inode_is_foreign(store, grant, meta)?;
-    let idx = store.agent_index(grant)?;
-    store
-        .created
-        .lock()
-        .map_err(|_| Refuse::OutsideRoot)?
-        .insert((meta.dev(), meta.ino()), idx);
-    Ok(())
+fn require_positive_ownership() -> bool {
+    true
+}
+
+fn must_be_in_own_record(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    if !require_positive_ownership() {
+        return Ok(());
+    }
+    let set = load_owned(agent_root)?;
+    if set.contains(&(meta.dev(), meta.ino())) {
+        Ok(())
+    } else {
+        Err(Refuse::HardLink)
+    }
+}
+
+fn require_in_agent_record(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    must_be_in_own_record(agent_root, meta)
+}
+
+fn require_owned(agent_root: &Path, meta: &fs::Metadata) -> Result<(), Refuse> {
+    refuse_hard_link(meta)?;
+    require_in_agent_record(agent_root, meta)
 }
 
 fn io_components(path: &str, root: &Path, full: &Path) -> Result<Vec<OsString>, Refuse> {
@@ -736,48 +772,6 @@ fn io_components(path: &str, root: &Path, full: &Path) -> Result<Vec<OsString>, 
         return Err(Refuse::HostPath);
     }
     Ok(parts)
-}
-
-fn refuse_foreign_file(root: &Path, path: &Path) -> Result<(), Refuse> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(Refuse::OutsideRoot),
-    };
-    if meta.file_type().is_symlink() {
-        return Err(Refuse::Symlink);
-    }
-    refuse_hard_link(&meta)?;
-    if meta.is_file() {
-        inode_in_owner_tree(root, path)?;
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn map_open_error(path: &Path, error: std::io::Error) -> Refuse {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Refuse::Symlink;
-        }
-    }
-    if error.kind() == std::io::ErrorKind::NotFound {
-        Refuse::NotFound
-    } else {
-        Refuse::OutsideRoot
-    }
-}
-
-#[allow(dead_code)]
-fn open_nofollow(path: &Path, write: bool) -> Result<fs::File, Refuse> {
-    let mut opts = fs::OpenOptions::new();
-    if write {
-        opts.write(true).create(true).truncate(true);
-    } else {
-        opts.read(true);
-    }
-    opts.custom_flags(O_NOFOLLOW);
-    opts.open(path).map_err(|error| map_open_error(path, error))
 }
 
 fn seal_tree(path: &Path) {
@@ -1016,8 +1010,9 @@ mod tests {
         let outside = parent.path().join("foreign.txt");
         fs::write(&outside, b"foreign").unwrap();
         let a_root = store.host_root(&a).unwrap();
+        let foreign_meta = fs::symlink_metadata(&outside).unwrap();
         assert_eq!(
-            inode_in_owner_tree(a_root, &outside).expect_err("foreign inode"),
+            require_owned(a_root, &foreign_meta).expect_err("foreign inode"),
             Refuse::HardLink
         );
     }
@@ -1049,15 +1044,39 @@ mod tests {
     #[test]
     fn last_component_nofollow_is_required() {
         let parent = Parent::new();
-        let target = parent.path().join("target");
-        let link = parent.path().join("link");
+        let (store, a, _b) = pair(&parent);
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let host = store.host_root(&a).unwrap().to_path_buf();
+        let target = parent.path().join("outside-secret");
         fs::write(&target, b"secret").unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let denied = open_nofollow(&link, false).expect_err("must not follow");
+        fs::remove_file(host.join("note.txt")).unwrap();
+        std::os::unix::fs::symlink(&target, host.join("note.txt")).unwrap();
+        let denied = store.read(&a, "note.txt").expect_err("must not follow");
         assert_eq!(denied, Refuse::Symlink);
-        let denied = open_nofollow(&link, true).expect_err("must not create through a link");
+        let denied = store
+            .write(&a, "note.txt", b"pwned")
+            .expect_err("must not create through a link");
         assert_eq!(denied, Refuse::Symlink);
         assert_eq!(fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn live_walk_flags_are_pinned() {
+        assert!(
+            walk::nofollow_flag().contains(rustix::fs::OFlags::NOFOLLOW),
+            "live walk dropped O_NOFOLLOW"
+        );
+        let flags = walk::resolve_flags();
+        assert!(
+            flags.contains(rustix::fs::ResolveFlags::NO_SYMLINKS),
+            "live walk dropped RESOLVE_NO_SYMLINKS"
+        );
+        assert!(
+            flags.contains(rustix::fs::ResolveFlags::NO_XDEV),
+            "live walk dropped RESOLVE_NO_XDEV"
+        );
+        assert!(walk::openat2_first(), "live walk forced plain openat");
+        assert!(walk::resolve_no_xdev(), "live walk dropped NO_XDEV hook");
     }
 
     #[test]
@@ -1067,10 +1086,13 @@ mod tests {
 
         const ITERS: u32 = 5000;
         let parent = Parent::new();
-        let (store, a, b) = pair(&parent);
-        store.write(&b, "secret.txt", b"b-secret").unwrap();
-        let a_root = store.host_root(&a).unwrap().to_path_buf();
-        let b_root = store.host_root(&b).unwrap().to_path_buf();
+        let mut store_a = Store::open(parent.path()).unwrap();
+        let a = store_a.bind("agent-a", "session-a").unwrap();
+        let mut store_b = Store::open(parent.path()).unwrap();
+        let b = store_b.bind("agent-b", "session-b").unwrap();
+        store_b.write(&b, "secret.txt", b"b-secret").unwrap();
+        let a_root = store_a.host_root(&a).unwrap().to_path_buf();
+        let b_root = store_b.host_root(&b).unwrap().to_path_buf();
         let sub = a_root.join("sub");
         fs::create_dir(&sub).unwrap();
 
@@ -1094,7 +1116,7 @@ mod tests {
         let mut denied = 0u32;
         for i in 0..ITERS {
             let name = format!("sub/race-{i}.txt");
-            match store.write(&a, &name, b"from-a") {
+            match store_a.write(&a, &name, b"from-a") {
                 Ok(()) => {
                     if b_root.join(format!("race-{i}.txt")).exists() {
                         escaped += 1;
@@ -1108,6 +1130,7 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         let _ = swapper.join();
+        eprintln!("race two-store iters={ITERS} denied={denied} escaped={escaped}");
         assert_eq!(
             escaped, 0,
             "write landed in B's tree; denied={denied} iters={ITERS}"
@@ -1213,7 +1236,16 @@ mod tests {
             b"from-b",
         )
         .unwrap();
-        assert_eq!(store.read(&a, "planted-by-b.txt").unwrap(), b"from-b");
+        assert_eq!(
+            store
+                .read(&a, "planted-by-b.txt")
+                .expect_err("host-created file is not owned"),
+            Refuse::HardLink
+        );
+        assert_eq!(
+            fs::read(store.host_root(&a).unwrap().join("planted-by-b.txt")).unwrap(),
+            b"from-b"
+        );
         let denied = store
             .read(&b, a_file.to_str().unwrap())
             .expect_err("store still refuses");
@@ -1322,6 +1354,203 @@ mod tests {
             "dropping the store left the yard behind"
         );
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn host_rename_into_b_is_refused() {
+        let parent = Parent::new();
+        let (store, a, b) = pair(&parent);
+        let a_host = store.host_root(&a).unwrap().join("host-note.txt");
+        fs::write(&a_host, b"hello-a").unwrap();
+        let b_dst = store.host_root(&b).unwrap().join("from-a.txt");
+        fs::rename(&a_host, &b_dst).unwrap();
+        assert_eq!(fs::symlink_metadata(&b_dst).unwrap().nlink(), 1);
+        assert_eq!(
+            store.read(&b, "from-a.txt").expect_err("host rename read"),
+            Refuse::HardLink
+        );
+        assert_eq!(
+            store
+                .write(&b, "from-a.txt", b"from-b")
+                .expect_err("host rename write"),
+            Refuse::HardLink
+        );
+        assert_eq!(fs::read(&b_dst).unwrap(), b"hello-a");
+
+        store.write(&a, "note.txt", b"store-a").unwrap();
+        let a_note = store.host_root(&a).unwrap().join("note.txt");
+        let b_note = store.host_root(&b).unwrap().join("from-store-a.txt");
+        fs::rename(&a_note, &b_note).unwrap();
+        assert_eq!(
+            store
+                .read(&b, "from-store-a.txt")
+                .expect_err("store-created rename"),
+            Refuse::HardLink
+        );
+    }
+
+    #[test]
+    fn two_yards_link_unlink_is_refused() {
+        let parent = Parent::new();
+        let mut store_a = Store::open(parent.path()).unwrap();
+        let a = store_a.bind("agent-a", "session-a").unwrap();
+        let mut store_b = Store::open(parent.path()).unwrap();
+        let b = store_b.bind("agent-b", "session-b").unwrap();
+        store_a.write(&a, "note.txt", b"hello-a").unwrap();
+        let a_file = store_a.host_root(&a).unwrap().join("note.txt");
+        let b_hard = store_b.host_root(&b).unwrap().join("hard.txt");
+        fs::hard_link(&a_file, &b_hard).unwrap();
+        fs::remove_file(&a_file).unwrap();
+        assert_eq!(fs::symlink_metadata(&b_hard).unwrap().nlink(), 1);
+        assert_eq!(fs::read(&b_hard).unwrap(), b"hello-a");
+        assert_eq!(
+            store_b
+                .read(&b, "hard.txt")
+                .expect_err("two-yard unlink read"),
+            Refuse::HardLink
+        );
+        assert_eq!(
+            store_b
+                .write(&b, "hard.txt", b"from-b")
+                .expect_err("two-yard unlink write"),
+            Refuse::HardLink
+        );
+        assert_eq!(fs::read(&b_hard).unwrap(), b"hello-a");
+    }
+
+    #[test]
+    fn ownership_record_is_on_disk_and_shared() {
+        let parent = Parent::new();
+        let mut store = Store::open(parent.path()).unwrap();
+        let a = store.bind("agent-a", "session-a").unwrap();
+        store.write(&a, "note.txt", b"hello-a").unwrap();
+        let host = store.host_root(&a).unwrap().to_path_buf();
+        let file_meta = fs::symlink_metadata(host.join("note.txt")).unwrap();
+        let disk = fs::read_to_string(ownership_path(&host)).unwrap();
+        assert!(disk.contains(&format!("{} {}", file_meta.dev(), file_meta.ino())));
+
+        let yard = store.yard().to_path_buf();
+        let grant = Grant {
+            identity: a.identity().to_owned(),
+            session: a.session().to_owned(),
+            instance: a.instance(),
+            owned_root: a.owned_root().to_owned(),
+        };
+        store.life = Life::Removed;
+        store.agents.clear();
+        drop(store);
+
+        let mut again = Store {
+            yard,
+            agents: Vec::new(),
+            next_instance: 1,
+            life: Life::Open,
+        };
+        let root = walk::open_root(&host).unwrap();
+        again.agents.push(OpenAgent {
+            identity: grant.identity.clone(),
+            session: grant.session.clone(),
+            instance: grant.instance,
+            owned_root: grant.owned_root.clone(),
+            path: host,
+            root,
+        });
+        assert_eq!(again.read(&grant, "note.txt").unwrap(), b"hello-a");
+        again.cleanup().unwrap();
+    }
+
+    #[test]
+    fn bind_mount_of_another_agent_tree_is_refused() {
+        if std::env::var_os("OWNED_STORAGE_BIND_CHILD").is_some() {
+            run_bind_mount_journey();
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let output = std::process::Command::new("unshare")
+            .args(["-Urm", "--"])
+            .arg(&exe)
+            .arg("tests::bind_mount_of_another_agent_tree_is_refused")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("OWNED_STORAGE_BIND_CHILD", "1")
+            .env("OWNED_STORAGE_PLANT_CHILD", "1")
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(
+                    text.contains("bind-mount journey CAUGHT"),
+                    "unshare child did not report the journey:\n{text}"
+                );
+                eprintln!("bind-mount unshare child: CAUGHT");
+            }
+            Ok(out) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if unshare_unavailable(&text) {
+                    eprintln!("NOT RUN: unshare -Urm bind-mount not allowed on this kernel");
+                    return;
+                }
+                panic!("bind-mount child failed:\n{text}");
+            }
+            Err(error) => {
+                eprintln!("NOT RUN: unshare missing ({error})");
+            }
+        }
+    }
+
+    fn run_bind_mount_journey() {
+        let parent = Parent::new();
+        let mut store_a = Store::open(parent.path()).unwrap();
+        let a = store_a.bind("agent-a", "session-a").unwrap();
+        store_a.write(&a, "note.txt", b"hello-a").unwrap();
+        let mut store_b = Store::open(parent.path()).unwrap();
+        let b = store_b.bind("agent-b", "session-b").unwrap();
+        let a_root = store_a.host_root(&a).unwrap().to_path_buf();
+        let b_sub = store_b.host_root(&b).unwrap().join("sub");
+        fs::create_dir(&b_sub).unwrap();
+        let status = std::process::Command::new("mount")
+            .args(["--bind", a_root.to_str().unwrap(), b_sub.to_str().unwrap()])
+            .status()
+            .expect("mount --bind");
+        assert!(status.success(), "mount --bind failed: {status}");
+        let list = store_b.list(&b, "sub");
+        assert!(list.is_err(), "list through bind-mount: {list:?}");
+        let write = store_b.write(&b, "sub/planted.txt", b"pwned");
+        assert!(write.is_err(), "write through bind-mount: {write:?}");
+        assert!(
+            !a_root.join("planted.txt").exists(),
+            "bind-mount write landed in A"
+        );
+        println!("bind-mount journey CAUGHT");
+    }
+
+    fn unshare_unavailable(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("operation not permitted")
+            || lower.contains("permission denied")
+            || lower.contains("not allowed")
+            || lower.contains("unshare: failed")
+            || lower.contains("cannot unshare")
+    }
+
+    #[test]
+    fn apfs_case_and_unicode_not_run_off_macos() {
+        if cfg!(target_os = "macos") {
+            let parent = Parent::new();
+            let (store, a, _b) = pair(&parent);
+            store.write(&a, "NOTE.TXT", b"upper").unwrap();
+            let _ = store.read(&a, "note.txt");
+        } else {
+            eprintln!("NOT RUN: APFS case/Unicode (not a Mac)");
+        }
     }
 
     #[test]

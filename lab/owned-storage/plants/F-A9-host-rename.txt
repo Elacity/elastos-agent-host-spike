@@ -1,0 +1,12 @@
+id: F-A9-host-rename
+file: src/lib.rs
+test: tests::host_rename_into_b_is_refused
+--- old
+fn require_positive_ownership() -> bool {
+    true
+}
+--- new
+fn require_positive_ownership() -> bool {
+    false
+}
+--- end

@@ -1,0 +1,13 @@
+id: F-A9-bind-mount
+file: src/walk.rs
+test: tests::bind_mount_of_another_agent_tree_is_refused
+test: tests::live_walk_flags_are_pinned
+--- old
+    if resolve_no_xdev() {
+        flags = flags.union(ResolveFlags::NO_XDEV);
+    }
+--- new
+    if false && resolve_no_xdev() {
+        flags = flags.union(ResolveFlags::NO_XDEV);
+    }
+--- end
