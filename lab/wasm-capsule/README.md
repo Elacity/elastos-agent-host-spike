@@ -3,9 +3,10 @@
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
 byte for byte on this one Mac. A lab bundle of it is named by
 cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
-over that name and audits its module; wc-005a runs it on one engine and
-wc-005b (task 015) on two. This is lab tooling Anders may adopt; it is not
-a second Runtime.
+over that name and audits its module; wc-005a runs it on one engine,
+wc-005b (task 015) on two, and wc-005c (task 016) writes a receipt of that run
+with the engine versions as the engines printed them. This is lab tooling
+Anders may adopt; it is not a second Runtime.
 
 ## What the capsule is
 
@@ -37,7 +38,9 @@ tools/src/lib.rs      `bundle_identity` (the shared lab CID, one re-export) + th
 tools/src/bundle.rs   `tools/bundle`'s rules: `parse_args` and `run`
 tools/src/verify.rs   wc-004's one verify path: `verify_checked` and `verify_bundle`
 tools/src/run.rs      wc-005a's `run_engine` (one host engine on the verified entrypoint) and
-                      wc-005b's `run` (verify once, then wasmtime, then wasmer, same stdout)
+                      wc-005b's `run` (verify once, ask both `--version`, then wasmtime,
+                      then wasmer, same stdout)
+tools/src/receipt.rs  wc-005c's run receipt: `render` and `write_receipt`
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
@@ -228,6 +231,9 @@ falsifiers cover the walk and the encoding.
 Task 017: the retired name label is checked in every git-listed lane file,
 docs, `falsifiers.json` and `audit/` included (falsifier
 F-WC3-RETIRED-LABEL-DOC); the code names keep the docs exemption.
+Task 018: `lane_files_reads_names_git_would_quote` lists a temp git repo
+holding `review"note.md`; dropping `-z` fails it (hand-proven, pending R2; not
+in runner-caught totals).
 
 ### Why the tests live in the root package
 
@@ -399,12 +405,15 @@ name is a lab CID, not the Runtime's CID.
 
 ```rust
 wasm_capsule_tools::run::run_engine(bundle: &VerifiedBundle, engine: Engine, program: &Path,
-    work_root: &Path) -> Result<Vec<u8>, Refusal>
+    work_root: &Path) -> Result<EngineRun, Refusal>
+
+pub struct EngineRun { pub status: ExitStatus, pub stdout: Vec<u8> }
 ```
 
 A library function; there is no command and no binary. It runs one host
 engine (`Engine::Wasmtime` or `Engine::Wasmer`) once on the verified
-entrypoint and returns its stdout. In order, the first refusal is the answer:
+entrypoint and returns its exit status (as the OS reported it; only a success
+is returned) and its stdout. In order, the first refusal is the answer:
 
 1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
    so it is never looked up on PATH; the same path is the one started;
@@ -421,7 +430,8 @@ entrypoint and returns its stdout. In order, the first refusal is the answer:
 5. the engine starts as one process:
    `<program> run --invoke digest <absolute module path> 1592590337`
    (`1592590337` is `FIXED_INPUT`, `0x5EED_0001`), with stdin null and an
-   empty environment. The module argument is absolute, so it is never read as
+   empty environment (`engine_command`, the one place these two rules are
+   set, which task 016's version query uses too). The module argument is absolute, so it is never read as
    an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag.
 
 That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
@@ -466,7 +476,7 @@ defend against that. Binding launch to verified bytes is the Runtime's launch
 path, not lab tooling. The runner makes no admission or launch decision.
 
 The two-engine comparison with `verify_bundle` is the next section (task 015);
-the receipt with engine versions is task 016.
+the receipt with engine versions is the section after it (task 016).
 
 ## Same output on two engines (wc-005b)
 
@@ -491,11 +501,14 @@ first refusal is the answer:
    is called once, with no grants. A refusal comes back unchanged as
    `TwoEngineRefusal::Verify`, printing exactly as the verifier prints it;
    nothing is written and no engine is started;
-2. `run_engine` (above) runs `wasmtime` on the verified value and returns;
-3. only then `run_engine` runs `wasmer` on the same value. The two are separate
-   processes, one after the other, never nested or overlapping. `run` starts no
-   process of its own; `run_engine` is the one run path;
-4. both stdouts must be byte-identical (never trimmed).
+2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
+   (the next section). A refusal comes back as `TwoEngineRefusal::Version`, and
+   no module run starts;
+3. `run_engine` (above) runs `wasmtime` on the verified value and returns;
+4. only then `run_engine` runs `wasmer` on the same value. The two are separate
+   processes, one after the other, never nested or overlapping. `run_engine` is
+   the one module run path;
+5. both stdouts must be byte-identical (never trimmed).
 
 **Wasmer is not started after Wasmtime is refused.** A refusal of either engine
 (a failed exit, a program that does not start, a run folder already there, any
@@ -508,8 +521,10 @@ outputs. Two successful runs with different stdout are refused with
 
 On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
 was checked against, taken from the verified value, never by naming the folder
-again) and both raw stdouts, `wasmtime()` and `wasmer()`. Its fields are
-private, so only `run` makes one. Task 016 adds the receipt; `run` writes none.
+again), both raw stdouts, `wasmtime()` and `wasmer()` (or `stdout(engine)`), and
+from task 016 each engine's observed `version(engine)` and `status(engine)`.
+Its fields are private, so only `run` makes one. `run` writes no receipt; the
+caller writes one with `receipt::write_receipt` (next section).
 
 **The claim.** On this Mac, the capsule `tools/build` makes, bundled, signed
 with a fresh test key and verified, printed `230101071268130872`
@@ -520,6 +535,69 @@ Component ABI. Both engines are test-only host engines; neither is endorsed.
 This is separate from Wasmer's role inside a capsule as the POSIX RTOS PoC. The
 run makes no admission or launch decision, and its lab CID is not the Runtime's
 CID. The known limit of `run_engine` above holds for both runs.
+
+## Run receipt (wc-005c)
+
+```rust
+wasm_capsule_tools::receipt::render(run: &TwoEngineRun) -> String
+wasm_capsule_tools::receipt::write_receipt(run: &TwoEngineRun, path: &Path) -> Result<(), bundle::RunRefusal>
+```
+
+**The versions are observed, not configured.** After verification and before
+any module run, `run` asks each engine `--version`: one process each, by the
+same absolute program path the module run starts, through the same
+`engine_command` (an empty environment, stdin null), `wasmtime` first. It keeps
+the first line of stdout as printed, without its newline. An engine upgrade
+therefore changes the receipt with no code change; nothing in the lane names
+a version it expects. A version query is refused, with its own reason after
+`<path>: `, and no module run starts:
+
+- a relative program: the module run's own reason, `the engine program path is not absolute: ...`;
+- `<engine> --version did not start: <OS error>` (for example a missing program);
+- `<engine> --version failed (exit status: <n>): <its stderr>`;
+- `<engine> --version printed no version: its first stdout line is empty`.
+
+**The receipt.** `render` gives `key: value` lines in the shape of wc-001's
+build receipt (`tools/build:82`), under its own schema line. Every value comes
+from the run. The real receipt from this Mac, from
+`real_receipt_names_both_installed_engines` on 26 Oct 2026 (the capsule
+`tools/build` makes, bundled, signed with a fresh test key, verified and run
+on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`):
+
+```
+schema: wc-005.run-receipt/v1
+bundle: lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930
+function: digest
+argument: 1592590337
+wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"
+wasmtime_status: exit status: 0
+wasmtime_stdout: "230101071268130872\n"
+wasmer_version: "wasmer 7.5.0"
+wasmer_status: exit status: 0
+wasmer_stdout: "230101071268130872\n"
+```
+
+`bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
+pinned lab CID of this capsule's bundle. The engine versions sit beside it and
+are no part of it: the same bundle run under other versions has the same name
+(P15: the hash names the content; versions are provenance beside it).
+`function` and `argument` are the runner's own `DIGEST_EXPORT` and
+`DIGEST_ARGUMENT`, the values its argv passes. Quoted values are the printed
+bytes through `escape_ascii`, so every byte is kept and no value can add a
+line. The status is the module run's `ExitStatus` as the OS reported it; a
+passing run always exited 0, because `run_engine` refuses any other status.
+
+**Writing it.** `write_receipt` writes `render`'s text to a caller-given path
+with the shared `bundle::write_new_file` (`create_new`). An existing file, a
+live link or a dangling link at that path is refused with that writer's own
+reason and cause, unchanged, and nothing at or behind the path changes. The
+writer's text names `capsule.json`, its first use (`<path>: capsule.json cannot
+be created: File exists (os error 17)`); the path before it is the receipt's.
+
+**The claim, unchanged from task 015.** One core module, on this one Mac,
+with both engines test-only and neither endorsed; not the Component ABI. The
+receipt is lab text: it is not signed, it is no admission or launch value,
+and its lab CID is not the Runtime's CID.
 
 ## Runtime ABI for a bare capsule (wc-008)
 
@@ -708,7 +786,7 @@ puts it under the `/var` link):
   which the test process has.
 - `engine_failures_keep_their_cause` — a stand-in that exits 3 with a stderr
   line gives the engine, the status and that line; a missing program gives the
-  OS error. Two different reasons, for each engine.
+  OS error. Two different reasons, for each engine, through `run_engine`.
 - `each_engine_prints_the_fixed_output` — the capsule `tools/build` makes,
   bundled, signed and verified, run on the real `wasmtime` and `wasmer` found
   on PATH: each prints `230101071268130872` (`FIXED_OUTPUT`) for `1592590337`.
@@ -722,7 +800,10 @@ puts it under the `/var` link):
   `fs::write`, `create_new` and the like).
 
 The two-engine runner (task 015), in `tests/run.rs`. Each test signs its bundle
-in memory with a fresh key; stand-in engines are shell scripts as above:
+in memory with a fresh key; stand-in engines are shell scripts as above, and
+from task 016 each one `run` starts answers `--version` on its own branch,
+apart from its module run (a marking stand-in leaves one marker for a version
+query and another for a module run):
 
 - `same_name_same_output_on_wasmtime_and_wasmer` — the capsule `tools/build`
   makes, bundled, signed and run through `run` on the real `wasmtime` and
@@ -733,19 +814,21 @@ in memory with a fresh key; stand-in engines are shell scripts as above:
 - `runner_refuses_an_unverified_bundle` — an unsigned bundle and a bundle
   signed by a key not on the accepted list: each is refused with exactly the
   verifier's own refusal and text, the work root stays empty, and marking
-  stand-ins prove no engine started.
+  stand-ins prove no engine started, not even for `--version` (task 016).
 - `differing_engine_outputs_are_reported_as_a_failure` — `1\n` against `2\n`,
   and `7\n` against `7`: each is refused, naming both outputs, with both raw
   outputs kept.
 - `matching_engine_failures_are_refused` — both stand-ins fail the same way
   (exit 3, the same stderr, empty stdout): the run is refused with
   `wasmtime`'s own failure, path and cause, and `wasmer` is not started.
-- `runner_preserves_engine_refusals` — `wasmtime` fails, `wasmtime` is missing,
-  `wasmer` fails, `wasmer` is missing, and a folder planted at `wasmer`'s run
-  folder name: each comes back as `run_engine`'s refusal, unchanged, and
-  nothing starts after it.
-- `runner_calls_engines_in_order` — recording stand-ins log their start (with
-  the module path they were given), wait, and log their end: the log is
+- `runner_preserves_engine_refusals` — `wasmtime`'s module run fails,
+  `wasmer`'s fails, and a folder planted at `wasmer`'s run folder name: each
+  comes back as `run_engine`'s refusal, unchanged, and nothing starts after it.
+  A missing program is now refused at its version query, before any module
+  run (`version_query_failures_keep_their_cause`, task 016).
+- `runner_calls_engines_in_order` — recording stand-ins log their version
+  query, and their start (with the module path they were given), wait, and log
+  their end: the log is both version queries, `wasmtime` then `wasmer`, then
   `wasmtime` start and end, then `wasmer` start and end, each with its own
   `<work root>/<engine>/module.wasm`, and both run folders hold the verified
   bytes.
@@ -753,11 +836,40 @@ in memory with a fresh key; stand-in engines are shell scripts as above:
   changes the bundle's `capsule.wasm` while it runs; `run` still returns the
   lab CID it verified, not the changed folder's, and both raw outputs.
 
+The run receipt (task 016), in `tests/run.rs`:
+
+- `receipt_records_observed_engine_versions` — two runs of one bundle by
+  stand-ins that print made-up versions (each with a second line): the run
+  holds exactly those first lines, never 45.0.1 or 7.5.0, and `render` gives
+  the whole receipt exactly (schema, the verified lab CID, `digest`,
+  `1592590337`, both versions, both `exit status: 0` and both stdouts). Both
+  runs have the same lab CID, which holds no version number.
+- `version_query_failures_keep_their_cause` — for each engine, a version
+  query that exits 4 with a stderr line, prints nothing, prints an empty first
+  line, or whose program is missing: each is refused with its own reason,
+  engine and cause (exact text), no module run starts, nothing is written,
+  `wasmtime` is asked first and `wasmer` is not asked after it is refused.
+- `version_queries_use_explicit_inputs` — each stand-in's version answer is
+  its `$0`, `HOME` and whether its stdin is `/dev/null`: the run keeps
+  `<absolute program> unset null` for both. A relative program for either
+  engine is refused with the module run's own reason, and no module run starts.
+- `receipt_write_refuses_an_existing_path` — the receipt is written once,
+  byte for byte; then the same path, a planted file, a live link and a
+  dangling link are each refused with `write_new_file`'s own reason and cause
+  (equal to the writer's own refusal for that path), the bytes and links stay
+  unchanged, and nothing is written through the dangling link.
+- `real_receipt_names_both_installed_engines` — the real `wasmtime` and
+  `wasmer` found on PATH: the versions start with `wasmtime ` and `wasmer `,
+  each is the first line the engine prints for `--version`, both stdouts are
+  `FIXED_OUTPUT`, and the receipt written to a new file is `render`'s text. It
+  prints the receipt. If either engine is not found it prints `SKIPPED` and
+  gives no result, never a PASS.
+
 ## Falsifiers
 
 `falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, one task-012,
-one task-017, 21 wc-004, four wc-008, 20 wc-005a (task 014) and 11 wc-005b
-(task 015) planted bugs in the provider format (`command: "lab"`). Each requires
+one task-017, 21 wc-004, four wc-008, 20 wc-005a (task 014), 11 wc-005b
+(task 015) and 20 wc-005c (task 016) planted bugs in the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -968,3 +1080,46 @@ NOT RUN. `tools/src/run.rs` is still not a recovery target (ask R2):
   bundle's module path without `run_engine` (`runner_calls_engines_in_order`).
 - F-WC5-OTHER-CID — the returned name is the folder named again after the run,
   not the verified value's (`run_returns_the_verified_name_and_both_outputs`).
+
+wc-005c's 20 (task 016), runner-caught. The canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5`
+reported `summary: 52 CAUGHT of 52` (these 20, wc-005a's 21 F-WC5 entries and
+wc-005b's 11, re-run because `tools/src/run.rs` changed), exit 0, with its
+baseline line `baseline: 22 named tests pass without an edit, 0 do not` and no
+backup left. Both engines were found on PATH, so F-WC5-BOTH-ARGS ran.
+Neither `tools/src/run.rs` nor `tools/src/receipt.rs` is a recovery target, so
+a killed run cannot restore them (ask R2):
+
+- F-WC5-HARDCODED-VERSIONS — the receipt prints this Mac's installed versions,
+  not what the engines printed (`receipt_records_observed_engine_versions`).
+- F-WC5-VERSION-CAUSE, -VERSION-START-CAUSE and -VERSION-STDERR — a nonzero
+  query becomes the generic empty-version reason, a start failure loses its OS
+  error, or the stderr is dropped (`version_query_failures_keep_their_cause`).
+- F-WC5-VERSION-EMPTY-ACCEPTED — an empty first line is taken as the version
+  (`version_query_failures_keep_their_cause`).
+- F-WC5-VERSION-WHOLE-STDOUT — the whole stdout is kept, not its first line
+  (`receipt_records_observed_engine_versions` and
+  `version_query_failures_keep_their_cause`).
+- F-WC5-QUERY-BEFORE-VERIFY — the queries run before `verify_bundle`
+  (`runner_refuses_an_unverified_bundle` sees a version marker).
+- F-WC5-VERSION-AFTER-RUN — the queries run after both module runs
+  (`version_query_failures_keep_their_cause` and `runner_calls_engines_in_order`).
+- F-WC5-VERSION-RELATIVE, -VERSION-ENV and -VERSION-STDIN — the query skips
+  the absolute-path check, is started without `engine_command` and inherits the
+  environment, or gets a piped stdin (`version_queries_use_explicit_inputs`).
+- F-WC5-RECEIPT-OVERWRITE — the receipt is written with `fs::write` (create +
+  truncate) (`receipt_write_refuses_an_existing_path`).
+- F-WC5-RECEIPT-CAUSE — the writer's refusal is replaced by another reason
+  (`receipt_write_refuses_an_existing_path`).
+- F-WC5-RECEIPT-SCHEMA, -CID, -FUNCTION, -ARGUMENT, -VERSION-SWAP, -STATUS and
+  -STDOUT — one receipt field is tampered with
+  (`receipt_records_observed_engine_versions`).
+
+Task 016 also re-anchored four entries, each the same bug as before, all in the
+52 above: F-WC5-ENGINE-ENV and F-WC5-STDIN-PIPED (the empty environment and
+null stdin moved into `engine_command`, shared by the module run and the
+version query), F-WC5a (the queries now sit between verification and the
+module runs, so its one edit became two) and F-WC5-EQUAL-FAILURES (`run_engine`
+returns an `EngineRun`, so the planted empty result is `EngineRun::default()`).
+No falsifier plants a fixed exit status: a passing run always exited 0, so a
+hard-coded 0 would print the same text and no test could tell them apart.
