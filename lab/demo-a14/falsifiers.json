@@ -472,6 +472,168 @@
       "tests": [
         "test_signing_key_is_private_and_outside_the_repository"
       ]
+    },
+    {
+      "id": "F-A14ad",
+      "title": "install skips the machine check and starts cargo fetch",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    problems = ready(layout, host_os)\n    if problems:\n        refuse(say, \"this machine is not ready.\", problems, again)\n",
+          "new": "    problems = ready(layout, host_os)\n    if False:\n        refuse(say, \"this machine is not ready.\", problems, again)\n"
+        }
+      ],
+      "tests": [
+        "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+      ]
+    },
+    {
+      "id": "F-A14ae",
+      "title": "install.sh --sign writes the key before it knows the install can finish",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        return EXIT_REFUSED\n    problems = ready(layout, host_os)\n",
+          "new": "        return EXIT_REFUSED\n    if sign:\n        make_signing_key(layout)\n    problems = ready(layout, host_os)\n"
+        }
+      ],
+      "tests": [
+        "test_install_sign_on_linux_without_receipt_does_not_write_the_key",
+        "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+      ]
+    },
+    {
+      "id": "F-A14af",
+      "title": "a refusal before any journey writes no summary.txt",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        say(f\"Saved: {run_dir}\")\n        write_summary(run_dir, say)\n        return EXIT_REFUSED\n",
+          "new": "        say(f\"Saved: {run_dir}\")\n        return EXIT_REFUSED\n"
+        }
+      ],
+      "tests": [
+        "test_refused_run_starts_no_journey",
+        "test_run_without_install_names_it"
+      ]
+    },
+    {
+      "id": "F-A14ag",
+      "title": "suite_env keeps a parent CARGO_TERM_COLOR=always",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "    env[\"CARGO_TERM_COLOR\"] = \"never\"\n",
+          "new": "    pass\n"
+        }
+      ],
+      "tests": [
+        "test_suite_env_forces_cargo_term_color_never"
+      ]
+    },
+    {
+      "id": "F-A14ah",
+      "title": "a Rosetta shell is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        if translated == \"1\":\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "tests": [
+        "test_rosetta_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14ai",
+      "title": "a space in HOME is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        problem = space_problem(label, path)\n        if problem:\n            problems.append(problem)\n",
+          "new": "        problem = space_problem(label, path)\n        if False:\n            problems.append(problem)\n"
+        }
+      ],
+      "tests": [
+        "test_space_in_home_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14aj",
+      "title": "an absolute CARGO_TARGET_DIR outside the repository is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        if target.is_absolute() and not inside(layout.repo, str(target)):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "tests": [
+        "test_outside_cargo_target_dir_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14ak",
+      "title": "a missing wasm32-unknown-unknown target is accepted",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/demo.py",
+          "old": "        elif not wasm.is_dir():\n",
+          "new": "        elif False:\n"
+        }
+      ],
+      "tests": [
+        "test_missing_wasm_target_is_refused"
+      ]
+    },
+    {
+      "id": "F-A14al",
+      "title": "morning step 2 checks out spike/agent-host, which has no demo",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "git checkout cursor/demo-a14-installed-demo-83e1\n",
+          "new": "git checkout spike/agent-host\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_stays_on_the_demo_branch"
+      ]
+    },
+    {
+      "id": "F-A14am",
+      "title": "step 5 opens an empty path when no run folder exists",
+      "command": "demo-a14",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "lab/demo-a14/RUNBOOK.md",
+          "old": "test -n \"$run\" && test -d \"$run\" && open \"$run\"\n",
+          "new": "open \"$run\"\n"
+        }
+      ],
+      "tests": [
+        "test_runbook_step_5_opens_only_a_real_path"
+      ]
     }
   ]
 }

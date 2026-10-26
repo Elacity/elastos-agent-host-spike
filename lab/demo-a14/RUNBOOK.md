@@ -3,12 +3,32 @@
 ## Sash's morning steps
 
 ```bash
-cd ~/code/elastos-agent-host-spike                 # 1. go to your copy of the repository
-git checkout spike/agent-host && git pull --ff-only  # 2. get the version to test
-bash lab/demo-a14/install.sh --sign                # 3. install and sign (30 minutes or more the first time)
-bash lab/demo-a14/run.sh                           # 4. run every step against the installed versions
-open "$(ls -dt ~/Library/Application\ Support/elastos-demo-a14/runs/*/ | head -1)"  # 5. send summary.txt; book A14 only on "A14: PASS."
+# 1. Go to the clone you already have. Stop if lab/demo-a14/install.sh is missing.
+#    Examples: /Users/sash/code/wt-agent-host  or  ~/code/elastos-agent-host-spike
+cd /path/to/your/clone
+git fetch origin cursor/demo-a14-installed-demo-83e1
+git checkout cursor/demo-a14-installed-demo-83e1
+git pull --ff-only
+git status --porcelain=v1          # must print nothing
+test -f lab/demo-a14/install.sh
+
+# 2. Read-only check of this Mac. Stop on "preflight: FAIL".
+sh lab/demo-a14/preflight.sh
+
+# 3. Install and sign (30 minutes or more the first time)
+bash lab/demo-a14/install.sh --sign
+
+# 4. Run every step against the installed versions
+bash lab/demo-a14/run.sh
+
+# 5. Open the newest run folder and send its summary.txt. Book A14 only on "A14: PASS."
+run=$(ls -dt "$HOME/Library/Application Support/elastos-demo-a14/runs/"*/ | head -1)
+test -n "$run" && test -d "$run" && open "$run"
 ```
+
+Until this demo is on `spike/agent-host`, stay on
+`cursor/demo-a14-installed-demo-83e1`. That branch is the one that contains
+`lab/demo-a14`. `spike/agent-host` does not have these files yet.
 
 The rest of this file explains each line, and what to do if a line says
 `REFUSED`.
@@ -33,7 +53,9 @@ different, the demo stops and runs nothing.
   include `git`, `python3` and `ssh-keygen`, which signs the receipts.
 - Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
   Terminal and open it again.
-- A copy of this repository on your Mac.
+- A copy of this repository on your Mac, made with `git clone` or
+  `git checkout`. A zip from a browser can make macOS refuse to run the built
+  programs.
 
 The first time only, in the repository folder, add the Rust target the demo
 builds for:
@@ -44,13 +66,21 @@ rustup target add wasm32-unknown-unknown
 
 ## Lines 1 and 2: the version to test
 
-After line 2, `git status` must say `nothing to commit, working tree clean`. If it
-says something else, stop and ask an engineer. The demo refuses to install from a
-copy with local changes.
+Line 1 uses the clone you already have. The two paths above are examples only.
+After the checkout, `git status --porcelain=v1` must print nothing, and
+`lab/demo-a14/install.sh` must be present. If either check fails, stop and ask
+an engineer. The demo refuses to install from a copy with local changes.
+
+Line 2 is `preflight.sh`. It writes nothing. It names each gap on its own
+`missing:` line, then prints `preflight: OK` or `preflight: FAIL`. Stop on
+FAIL. The same checks run again at the start of `install.sh`, before any
+download or signing key.
 
 ## Line 3: install
 
-The install does five things and prints each one:
+The install first checks this Mac (the same list as preflight). A failure
+prints `REFUSED: this machine is not ready.` and writes no signing key. Then
+it does five things and prints each one:
 
 1. It downloads the Rust packages that the builds need. This needs the internet.
 2. It runs the full agent conformance check (`lab/agent-conformance/run.sh`).
@@ -63,9 +93,10 @@ The install does five things and prints each one:
    `~/Library/Application Support/elastos-demo-a14/current`, and writes
    `INSTALL.json` with every fingerprint.
 
-With `--sign`, the install also signs both receipt files (see "The signature"
-below). Keep the Mac awake and plugged in, and do not start other builds at the
-same time.
+With `--sign`, the install makes the signing key only when the builds have
+finished and it is about to write the receipts (see "The signature" below). A
+failed conformance run or a missing `VERSIONS.json` leaves no new key. Keep the
+Mac awake and plugged in, and do not start other builds at the same time.
 
 A good install ends like this:
 
@@ -106,9 +137,10 @@ At the end, a summary gives one line for each M1 check, then one final line:
 
 ## Line 5: what to send
 
-Line 5 opens the newest run folder. Send its `summary.txt` file. It holds the
-same text that the run printed. The folder also holds the full output of each
-test group.
+Line 5 opens the newest run folder only when that folder exists. A refusal
+before any journey still writes `summary.txt` there, and prints that path in
+the `Next:` line. Send that file. It holds the same text that the run printed.
+The folder also holds the full output of each test group when journeys ran.
 
 ## When the run says the versions do not match
 
@@ -235,8 +267,9 @@ receipt. The A8 journey must print the Runtime, the provider and its
 python3 -B -I -m unittest discover -s lab/demo-a14/tests -v
 ```
 
-The signing tests need `ssh-keygen`. `falsifiers.json` lists 29 planted bugs,
+The signing tests need `ssh-keygen`. `falsifiers.json` lists planted bugs,
 each with the tests that must fail. The shared falsifier runner has no command
 for this folder, so apply each edit by hand, require its tests to fail, restore
 the bytes, and require them to pass. Use `-B`: a same-size edit restored in the
-same second can otherwise leave the planted bytecode in use.
+same second can otherwise leave the planted bytecode in use. `falsify.sh`
+plants a missing `ssh-keygen` against `preflight.sh`.

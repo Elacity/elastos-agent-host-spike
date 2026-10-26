@@ -385,7 +385,10 @@ class RunBinding(TempCase):
         self.assertEqual(runner.calls, [])
         self.assertIn("REFUSED: the installed versions do not match VERSIONS.json. No journey was run.", out)
         self.assertIn("installed elastos differs from VERSIONS.json runtime_sha256", out)
-        self.assertFalse((self.fx.layout.install.parent / "runs").exists())
+        summaries = list((self.fx.layout.install.parent / "runs").glob("*/summary.txt"))
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertIn(str(summaries[0]), out)
+        self.assertIn("REFUSED:", summaries[0].read_text())
 
     def test_run_without_install_names_it(self):
         shutil.rmtree(self.fx.layout.install)
@@ -393,6 +396,10 @@ class RunBinding(TempCase):
         self.assertEqual(code, demo.EXIT_REFUSED)
         self.assertEqual(runner.calls, [])
         self.assertIn("REFUSED: the demo is not installed. No journey was run.", out)
+        summaries = list((self.fx.layout.install.parent / "runs").glob("*/summary.txt"))
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertIn(str(summaries[0]), out)
+        self.assertIn("the demo is not installed", summaries[0].read_text())
 
     def test_matching_run_walks_every_step(self):
         code, out, runner = self.run_demo()
@@ -565,7 +572,7 @@ class NeverPassWithoutARun(TempCase):
 
 
 class InstallBinding(TempCase):
-    def install(self, host_os="Darwin", receipt=None, artifacts=None, sign=False):
+    def install(self, host_os="Darwin", receipt=None, artifacts=None, sign=False, ready=None):
         calls, built = [], []
 
         def fake(args, cwd, env=None):
@@ -587,6 +594,7 @@ class InstallBinding(TempCase):
                 runner=fake,
                 builder=builder,
                 sign=sign,
+                ready=ready or (lambda layout, host_os: []),
             )
         return code, out.getvalue(), calls, built
 
@@ -626,7 +634,14 @@ class InstallBinding(TempCase):
         calls = []
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = demo.install(self.fx.layout, "Linux", None, read=lambda repo: CLEAN, runner=calls.append)
+            code = demo.install(
+                self.fx.layout,
+                "Linux",
+                None,
+                read=lambda repo: CLEAN,
+                runner=calls.append,
+                ready=lambda layout, host_os: [],
+            )
         self.assertEqual(code, demo.EXIT_REFUSED)
         self.assertEqual(calls, [])
         self.assertIn("runs on macOS only", out.getvalue())
@@ -656,6 +671,39 @@ class InstallBinding(TempCase):
             self.assertTrue(self.fx.installed(name + ".sig").is_file(), name)
         self.assertEqual(self.fx.gate(), [])
         self.assertIn("does not prove who published them", out)
+
+    def test_install_sign_on_linux_without_receipt_does_not_write_the_key(self):
+        calls = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = demo.install(
+                self.fx.layout,
+                "Linux",
+                None,
+                read=lambda repo: CLEAN,
+                runner=calls.append,
+                sign=True,
+                ready=lambda layout, host_os: [],
+            )
+        self.assertEqual(code, demo.EXIT_REFUSED)
+        self.assertEqual(calls, [])
+        self.assertFalse(self.fx.layout.signing_key.exists())
+        self.assertFalse(self.fx.layout.signing_key.parent.exists())
+        self.assertIn("no VERSIONS.json for this machine", out.getvalue())
+        self.assertNotIn("Signing is on", out.getvalue())
+
+    def test_install_refuses_before_fetch_when_the_machine_is_not_ready(self):
+        def ready(layout, host_os):
+            return ["this shell is Rosetta (sysctl.proc_translated=1); open a native arm64 Terminal"]
+
+        code, out, calls, built = self.install(sign=True, ready=ready)
+        self.assertEqual(code, demo.EXIT_REFUSED)
+        self.assertEqual(calls, [])
+        self.assertEqual(built, [])
+        self.assertFalse(self.fx.layout.signing_key.exists())
+        self.assertFalse(self.fx.layout.install.exists())
+        self.assertIn("REFUSED: this machine is not ready.", out)
+        self.assertIn("open a native arm64 Terminal", out)
 
 
 class Signing(TempCase):
@@ -733,6 +781,139 @@ class Signing(TempCase):
         with mock.patch.dict(os.environ, {"DEMO_A14_HOME": str(demo.REPO / "lab" / "demo-a14" / "home")}):
             with self.assertRaises(ValueError):
                 demo.demo_home("Darwin", demo.REPO)
+
+
+class MachineReady(TempCase):
+    """The install checks the Mac before cargo fetch and before it writes a key."""
+
+    def setUp(self):
+        super().setUp()
+        (self.fx.layout.repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.91.0"\n')
+        self.rustup = self.tmp / "rustup"
+        self.ready_env = {"RUSTUP_HOME": str(self.rustup), "CARGO_HOME": str(self.tmp / "cargo")}
+
+    def toolchain(self, host_os="Darwin", machine="arm64", wasm=True):
+        root = demo.toolchain_root(self.fx.layout.repo, host_os, machine, self.ready_env)
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "rustc").write_text("rustc\n")
+        (root / "bin" / "rustc").chmod(0o755)
+        if wasm:
+            (root / "lib" / "rustlib" / "wasm32-unknown-unknown").mkdir(parents=True)
+        return root
+
+    def problems(self, host_os="Darwin", machine="arm64", **kwargs):
+        kwargs.setdefault("env", self.ready_env)
+        kwargs.setdefault("disk_free", lambda path: demo.NEED_FREE)
+        kwargs.setdefault("translated", "0")
+        kwargs.setdefault("present", lambda path: True)
+        return demo.machine_problems(self.fx.layout, host_os, machine=machine, **kwargs)
+
+    def test_ready_mac_is_allowed(self):
+        self.toolchain()
+        self.assertEqual(self.problems(), [])
+
+    def test_rosetta_is_refused(self):
+        self.toolchain()
+        self.assertNamed(
+            self.problems(translated="1"),
+            "this shell is Rosetta (sysctl.proc_translated=1); open a native arm64 Terminal",
+        )
+
+    def test_non_arm64_mac_is_refused(self):
+        self.toolchain(machine="x86_64")
+        self.assertNamed(
+            self.problems(machine="x86_64"),
+            "architecture is x86_64",
+            "open a native arm64 Terminal",
+        )
+
+    def test_outside_cargo_target_dir_is_refused(self):
+        self.toolchain()
+        env = {**self.ready_env, "CARGO_TARGET_DIR": str(self.tmp / "elsewhere")}
+        self.assertNamed(self.problems(env=env), "CARGO_TARGET_DIR=", "outside the repository")
+
+    def test_relative_cargo_target_dir_is_allowed(self):
+        self.toolchain()
+        env = {**self.ready_env, "CARGO_TARGET_DIR": "target-outside-name-only"}
+        self.assertEqual(self.problems(env=env), [])
+
+    def test_space_in_home_is_refused(self):
+        self.toolchain()
+        self.assertNamed(self.problems(home=self.tmp / "User Name"), "HOME contains a space")
+
+    def test_missing_wasm_target_is_refused(self):
+        self.toolchain(wasm=False)
+        self.assertNamed(self.problems(), "wasm32-unknown-unknown is not installed for 1.91.0")
+
+    def test_missing_sandbox_exec_is_refused(self):
+        self.toolchain()
+        self.assertNamed(
+            self.problems(present=lambda path: path != "/usr/bin/sandbox-exec"),
+            "/usr/bin/sandbox-exec is missing",
+        )
+
+    def test_low_disk_is_refused(self):
+        self.toolchain()
+        self.assertNamed(
+            self.problems(disk_free=lambda path: demo.NEED_FREE - 1),
+            "free space for the checkout",
+            "the runbook asks for 40 GB",
+        )
+
+    def test_machine_problems_does_not_start_rustup(self):
+        self.toolchain(wasm=False)
+        started = []
+
+        def fake_run(*args, **kwargs):
+            started.append(args[0] if args else kwargs.get("args"))
+            raise AssertionError("machine_problems must not start a process to see if a toolchain exists")
+
+        with mock.patch.object(demo.subprocess, "run", fake_run):
+            problems = self.problems(translated="0")
+        self.assertNamed(problems, "wasm32-unknown-unknown")
+        self.assertEqual(started, [])
+
+
+class SuiteEnvironment(unittest.TestCase):
+    def test_suite_env_forces_cargo_term_color_never(self):
+        with mock.patch.dict(os.environ, {"CARGO_TERM_COLOR": "always"}, clear=False):
+            env = demo.suite_env({"env": {}, "env_paths": {}}, Path("/tmp/repo"))
+        self.assertEqual(env["CARGO_TERM_COLOR"], "never")
+
+
+class RunbookMorningSteps(unittest.TestCase):
+    def setUp(self):
+        self.text = (LANE / "RUNBOOK.md").read_text(encoding="utf-8")
+
+    def test_runbook_stays_on_the_demo_branch(self):
+        self.assertIn("cursor/demo-a14-installed-demo-83e1", self.text)
+        self.assertNotIn("git checkout spike/agent-host", self.text)
+        self.assertIn("/Users/sash/code/wt-agent-host", self.text)
+        self.assertIn("~/code/elastos-agent-host-spike", self.text)
+        self.assertIn("lab/demo-a14/preflight.sh", self.text)
+        self.assertIn("git clone", self.text)
+        self.assertIn("A zip from a browser", self.text)
+
+    def test_runbook_step_5_opens_only_a_real_path(self):
+        self.assertIn('test -n "$run" && test -d "$run" && open "$run"', self.text)
+        self.assertNotIn(
+            'open "$(ls -dt ~/Library/Application\\ Support/elastos-demo-a14/runs/*/',
+            self.text,
+        )
+
+
+class PreflightScript(unittest.TestCase):
+    def test_preflight_names_linux_on_this_machine(self):
+        done = subprocess.run(
+            ["sh", str(LANE / "preflight.sh"), str(demo.REPO)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("preflight: FAIL", done.stdout)
+        self.assertIn("operating system is Linux", done.stdout)
+        self.assertIn("architecture is", done.stdout)
+        self.assertNotIn("lab/demo-a14/install.sh is not in this checkout", done.stdout)
 
 
 class CheckoutIdentity(unittest.TestCase):

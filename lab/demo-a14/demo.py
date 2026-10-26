@@ -60,6 +60,22 @@ SIGNATURE_SCOPE = (
     "it does not prove who published them"
 )
 CARGO_RUNNING = re.compile(r"^\s+Running .*\((.+)\)$")
+NEED_FREE = 40 * 1024 ** 3
+MAC_TOOLS = (
+    ("/usr/bin/shasum", "/usr/bin/shasum is missing; the conformance run hashes binaries with this path"),
+    ("/usr/sbin/lsof", "/usr/sbin/lsof is missing; the conformance run checks earlier homes with this path"),
+    (
+        "/usr/bin/sandbox-exec",
+        "/usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program",
+    ),
+)
+RUSTC_TRIPLE = {
+    ("Darwin", "arm64"): "aarch64-apple-darwin",
+    ("Darwin", "x86_64"): "x86_64-apple-darwin",
+    ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+    ("Linux", "aarch64"): "aarch64-unknown-linux-gnu",
+    ("Linux", "arm64"): "aarch64-unknown-linux-gnu",
+}
 
 
 @dataclass(frozen=True)
@@ -135,6 +151,150 @@ def is_hex(value: object, length: int) -> bool:
         and len(value) == length
         and all(c in "0123456789abcdef" for c in value)
     )
+
+
+def pinned_channel(repo: Path) -> Optional[str]:
+    try:
+        text = (repo / "rust-toolchain.toml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("channel"):
+            _, _, value = stripped.partition("=")
+            return value.strip().strip("\"'") or None
+    return None
+
+
+def rustup_home(env: dict) -> Path:
+    return Path(env.get("RUSTUP_HOME") or Path.home() / ".rustup")
+
+
+def toolchain_root(repo: Path, host_os: str, machine: str, env: dict) -> Optional[Path]:
+    channel = pinned_channel(repo)
+    triple = RUSTC_TRIPLE.get((host_os, machine))
+    if not channel or not triple:
+        return None
+    return rustup_home(env) / "toolchains" / f"{channel}-{triple}"
+
+
+def space_problem(label: str, path: Path) -> Optional[str]:
+    if " " in str(path):
+        return (
+            f"{label} contains a space ({path}); the guest build puts that path in RUSTFLAGS, "
+            "and rustc splits RUSTFLAGS on spaces"
+        )
+    return None
+
+
+def proc_translated() -> str:
+    try:
+        done = subprocess.run(
+            ["sysctl", "-n", "sysctl.proc_translated"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return "0"
+    return done.stdout.strip() if done.returncode == 0 and done.stdout.strip() else "0"
+
+
+def machine_problems(
+    layout: Layout,
+    host_os: str,
+    env: Optional[dict] = None,
+    disk_free: Optional[Callable] = None,
+    machine: Optional[str] = None,
+    translated: Optional[str] = None,
+    present: Optional[Callable] = None,
+    home: Optional[Path] = None,
+) -> list:
+    """Why this machine cannot start the install. Empty when it can.
+
+    Looks at directories and `sysctl` only. It does not start rustup, rustc, or cargo.
+    """
+    env = dict(os.environ if env is None else env)
+    machine = platform.machine() if machine is None else machine
+    present = present or (lambda path: os.path.isfile(path) and os.access(path, os.X_OK))
+    free_of = disk_free or (lambda path: shutil.disk_usage(path).free)
+    problems = []
+    if host_os == "Darwin":
+        if machine != "arm64":
+            problems.append(
+                f"architecture is {machine}; A14 needs native Apple Silicon (arm64). "
+                "open a native arm64 Terminal"
+            )
+        if translated is None:
+            translated = proc_translated()
+        if translated == "1":
+            problems.append("this shell is Rosetta (sysctl.proc_translated=1); open a native arm64 Terminal")
+        for path, message in MAC_TOOLS:
+            if not present(path):
+                problems.append(message)
+    raw_target = env.get("CARGO_TARGET_DIR")
+    if raw_target:
+        target = Path(raw_target)
+        if target.is_absolute() and not inside(layout.repo, str(target)):
+            problems.append(
+                f"CARGO_TARGET_DIR={raw_target} is outside the repository; "
+                "install records test executables only from inside the checkout and refuses these"
+            )
+    channel = pinned_channel(layout.repo)
+    if not channel:
+        problems.append("rust-toolchain.toml has no channel pin")
+    root = toolchain_root(layout.repo, host_os, machine, env)
+    triple = RUSTC_TRIPLE.get((host_os, machine))
+    if channel and triple and root is not None:
+        rustc = root / "bin" / "rustc"
+        wasm = root / "lib" / "rustlib" / "wasm32-unknown-unknown"
+        if not rustc.is_file():
+            problems.append(
+                f"Rust toolchain {channel} for {triple} is not installed under {rustup_home(env)}; "
+                "preflight does not install it"
+            )
+        elif not wasm.is_dir():
+            problems.append(
+                f"wasm32-unknown-unknown is not installed for {channel}; "
+                "the guest build needs it, and the morning steps do not add it"
+            )
+    home = Path.home() if home is None else home
+    cargo_home = Path(env.get("CARGO_HOME") or (home / ".cargo"))
+    for label, path in (
+        ("HOME", home),
+        ("the checkout path", layout.repo),
+        ("CARGO_HOME", cargo_home),
+    ):
+        problem = space_problem(label, path)
+        if problem:
+            problems.append(problem)
+    if root is not None and root.is_dir():
+        problem = space_problem("the Rust sysroot", root)
+        if problem:
+            problems.append(problem)
+    for label, path in (("the checkout", layout.repo), ("the home directory", home)):
+        try:
+            free = free_of(path)
+        except OSError:
+            problems.append(f"free space for {label} ({path}) could not be read")
+            continue
+        if free < NEED_FREE:
+            problems.append(
+                f"free space for {label} ({path}) is {free / 1024 ** 3:.1f} GiB; the runbook asks for 40 GB"
+            )
+    return problems
+
+
+def new_run_dir(layout: Layout) -> Path:
+    runs = layout.install.parent / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%SZ-", time.gmtime()), dir=runs))
+
+
+def write_summary(run_dir: Path, say: "Say") -> Path:
+    path = run_dir / "summary.txt"
+    path.write_text("\n".join(say.lines) + "\n", encoding="utf-8")
+    return path
 
 
 def read_checkout(repo: Path) -> Checkout:
@@ -560,6 +720,7 @@ def suite_env(suite: dict, repo: Path) -> dict:
     env = dict(os.environ)
     env.update(suite.get("env", {}))
     env.update({key: str(repo / value) for key, value in suite.get("env_paths", {}).items()})
+    env["CARGO_TERM_COLOR"] = "never"
     return env
 
 
@@ -761,18 +922,22 @@ def run_demo(
 ) -> int:
     say = Say()
     say(f"A14 installed demo: {layout.install}")
+    run_dir = new_run_dir(layout)
     checks, suites, steps = load_journeys(journeys)
     here = suites_here(steps, host_os)
     problems = version_gate(layout, read(layout.repo), here)
     if problems:
         installed = (layout.install / "INSTALL.json").exists()
+        summary = run_dir / "summary.txt"
         refuse(
             say,
             ("the installed versions do not match VERSIONS.json" if installed else "the demo is not installed")
             + ". No journey was run.",
             problems,
-            "run `bash lab/demo-a14/install.sh`, then run this command again.",
+            f"read {summary}, then run `bash lab/demo-a14/install.sh`, then run this command again.",
         )
+        say(f"Saved: {run_dir}")
+        write_summary(run_dir, say)
         return EXIT_REFUSED
     receipt_bytes = (layout.install / "VERSIONS.json").read_bytes()
     receipt = json.loads(receipt_bytes)
@@ -788,9 +953,6 @@ def run_demo(
         say(f"  signature  valid for both receipt files; {SIGNATURE_SCOPE}")
     else:
         say("  signature  off (install with --sign to turn it on)")
-    runs = layout.install.parent / "runs"
-    runs.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%SZ-", time.gmtime()), dir=runs))
     outcomes, binding = [], []
     for name in suite_order(steps):
         suite = suites[name]
@@ -852,7 +1014,7 @@ def run_demo(
     else:
         say("A14: FAIL. See the failures above.")
     say(f"Saved: {run_dir}")
-    (run_dir / "summary.txt").write_text("\n".join(say.lines) + "\n", encoding="utf-8")
+    write_summary(run_dir, say)
     return {"PASS": EXIT_PASS, "NOT RUN": EXIT_NOT_RUN}.get(verdict, EXIT_FAIL)
 
 
@@ -916,9 +1078,11 @@ def install(
     journeys: Path = JOURNEYS,
     sign: bool = False,
     builder: Optional[Callable] = None,
+    ready: Optional[Callable] = None,
 ) -> int:
     say = Say()
     builder = builder or cargo_artifacts
+    ready = ready or machine_problems
     again = "fix the item above, then run `bash lab/demo-a14/install.sh` again."
     say(f"Installing the A14 demo into {layout.install}")
     checkout = read(layout.repo)
@@ -926,13 +1090,10 @@ def install(
         problems = [checkout.error or "this copy of the repository has local changes; commit or stash them"]
         refuse(say, "the repository is not ready.", problems, again)
         return EXIT_REFUSED
-    if sign:
-        problems = make_signing_key(layout)
-        if problems:
-            refuse(say, "signing cannot be turned on.", problems, again)
-            return EXIT_REFUSED
-    if layout.signing_key.exists():
-        say(f"Signing is on: this machine's key is {layout.signing_key} ({SIGNATURE_SCOPE}).")
+    problems = ready(layout, host_os)
+    if problems:
+        refuse(say, "this machine is not ready.", problems, again)
+        return EXIT_REFUSED
     if not receipt_arg and host_os != "Darwin":
         problems = [
             "VERSIONS.json comes from lab/agent-conformance/run.sh, which runs on macOS only; "
@@ -1000,6 +1161,13 @@ def install(
         if problems:
             refuse(say, f"the {suite['label']} executables cannot be recorded.", problems, again)
             return EXIT_REFUSED
+    if sign:
+        problems = make_signing_key(layout)
+        if problems:
+            refuse(say, "signing cannot be turned on.", problems, again)
+            return EXIT_REFUSED
+    if layout.signing_key.exists():
+        say(f"Signing is on: this machine's key is {layout.signing_key} ({SIGNATURE_SCOPE}).")
     say("Step 5 of 5: copying the pinned files")
     problems = write_install(layout, receipt_bytes, receipt_path, checkout, recorded)
     problems = problems or version_gate(layout, read(layout.repo), here)
