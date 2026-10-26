@@ -130,7 +130,7 @@ pub fn cleanup(home: &ThrowawayHome, port: u16) -> Result<String, String> {
 }
 
 /// Inspect only existing home-* trees, never the build tree or file contents.
-/// One bounded lsof invocation covers all roots and never signals their owners.
+/// Each bounded lsof snapshot covers all roots and never signals their owners.
 pub fn earlier_runs() -> Result<Vec<Holder>, String> {
     let started = Instant::now();
     let home = ThrowawayHome::new()?;

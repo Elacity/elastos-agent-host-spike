@@ -1309,6 +1309,22 @@
       "tests": [
         "instance_receipt_requires_both_launches_and_scope"
       ]
+    },
+    {
+      "id": "F-agent-host-grant",
+      "title": "grant the real capsule journal write instead of denying both requests",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/grants.json",
+          "old": "  \"grants\": [\n",
+          "new": "  \"grants\": [\n    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal\",\n      \"action\": \"write\",\n      \"reason\": \"Agent Host task journal\",\n      \"duration\": \"once\"\n    },\n"
+        }
+      ],
+      "tests": [
+        "real_agent_host_gets_no_ungranted_authority"
+      ]
     }
   ]
 }

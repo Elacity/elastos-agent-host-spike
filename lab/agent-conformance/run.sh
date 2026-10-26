@@ -1,6 +1,16 @@
 #!/bin/bash
 # Cargo supplies both the inventory and results; report owns table grading.
 set -eu
+features=()
+case "${1:-}" in
+    "") ;;
+    --agent-host) features=(--features agent-host); shift ;;
+    *) printf 'usage: run.sh [--agent-host]\n' >&2; exit 2 ;;
+esac
+if [ "$#" -ne 0 ]; then
+    printf 'usage: run.sh [--agent-host]\n' >&2
+    exit 2
+fi
 lane=$(cd -- "$(dirname -- "$0")" && pwd -P)
 cd "$lane/../.."
 if [ -L "$lane/target" ]; then
@@ -24,12 +34,12 @@ fi
 "$CARGO_TARGET_DIR/debug/report" --check-earlier-runs
 status=0
 : >"$run_dir/results"
-if cargo test --locked --manifest-path "$manifest" -- --list >"$run_dir/list" 2>"$run_dir/build"; then
-    cargo test --locked --no-fail-fast --manifest-path "$manifest" -- --format pretty --color never --show-output >"$run_dir/results" 2>>"$run_dir/build" || status=$?
+if cargo test --locked --manifest-path "$manifest" ${features[@]+"${features[@]}"} -- --list >"$run_dir/list" 2>"$run_dir/build"; then
+    cargo test --locked --no-fail-fast --manifest-path "$manifest" ${features[@]+"${features[@]}"} -- --format pretty --color never --show-output >"$run_dir/results" 2>>"$run_dir/build" || status=$?
 else
     status=$?
 fi
-sed -n '/^version identity:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^host key read:/p; /^SKIPPED /p' "$run_dir/results"
+sed -n '/^version identity:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^host key read:/p; /^agent-host /p; /^FAILURE /p; /^SKIPPED /p' "$run_dir/results"
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
 if "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"; then
     rm -- "$run_dir/list" "$run_dir/results" "$run_dir/build" "$run_dir/report-build"
