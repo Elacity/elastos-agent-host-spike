@@ -96,8 +96,14 @@ use std::process::Command;
 /// function is gone. Task 070's WP84 appends an allow rule to the did profile
 /// that no declared right names, and WP85 appends the same rule to this
 /// profile, so `every_did_and_wallet_allow_rule_traces_to_one_declared_right`
-/// fails on each form.
-const EXPECTED_FALSIFIERS: usize = 83;
+/// fails on each form. Task 073's WP86 renames the one platform-baseline key
+/// the declared-rights check reads to the old startup-needs key, so
+/// `every_did_and_wallet_allow_rule_traces_to_one_declared_right` and
+/// `model_declared_rights_read_on_the_did_and_wallet_template` fail because the
+/// did, wallet and model files no longer hold that key, and WP87 drops the
+/// justification refusal, so `declared_rights_trace_refuses_each_bad_input`
+/// fails on its missing-justification case.
+const EXPECTED_FALSIFIERS: usize = 85;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
