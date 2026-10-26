@@ -169,7 +169,8 @@ design whose Linux tests do not exist yet, and it claims no current behaviour.
   profile fails, naming did-provider.
 
 When a request goes unanswered, the harness failure names the request, the
-child's exit status and all the child wrote to standard error.
+child's exit status or the deadline that ended the wait, and all the child
+wrote to standard error.
 
 The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent on
 a host OS other than macOS.
