@@ -61,6 +61,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - zip 9.0.4 replaces zip 2.4.2 (RUSTSEC-2026-0367/0368/0369, #414); the
   cargo-audit exception file is removed. One entry-name rule refuses root,
   drive, UNC and `..` names in every Library archive reader (#417).
+- wasmtime is built without its `cache` feature, which the Runtime never
+  turned on, so zstd 0.13.3, zstd-safe 7.2.4 and zstd-sys 2.0.16 leave the
+  elastos and object-provider locks (RUSTSEC-2026-0391/0398/0403/0410).
 - `elastos serve --capsule` starts its initial MicroVM capsule with a VM-bound
   Capsule session instead of a Shell session, because the guest can read its
   boot token; capability approval stays with the shell (#387).
