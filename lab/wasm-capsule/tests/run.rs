@@ -10,6 +10,11 @@
 //! keeps the first line it printed; `wasm_capsule_tools::receipt` renders the
 //! run's receipt and writes it only through the shared new-file writer.
 //!
+//! wc-009a: `run` passes the caller's granted imports, read from a lab grants
+//! file by `read_grants`, to its one `verify_bundle` call, and reports the
+//! linked imports and the unused grants. A module with an import that is not
+//! granted never reaches an engine.
+//!
 //! The stand-in engines are small shell scripts written into each test's own
 //! temp dir. Every stand-in the two-engine runner starts answers `--version`
 //! on its own branch, apart from its module run. The real-engine tests start
@@ -23,12 +28,14 @@ mod common;
 use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
+use common::grants::{env_f, grants_file, IMPORTING_MODULE};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use wasm_capsule_audit::Refusal as AuditRefusal;
 use wasm_capsule_tools::bundle::{
     write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal,
 };
@@ -37,7 +44,7 @@ use wasm_capsule_tools::run::{
     module_refusal, run, run_engine, work_root_folder, Engine, EngineRun, Reason, Refusal,
     RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
 };
-use wasm_capsule_tools::verify::{verify_bundle, VerifiedBundle, VerifyRefusal};
+use wasm_capsule_tools::verify::{read_grants, verify_bundle, VerifiedBundle, VerifyRefusal};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
 /// The smallest core Wasm module: the magic and version 1, no sections.
@@ -675,6 +682,8 @@ fn runner_uses_only_explicit_inputs() {
         ["checked", "_bundle"].concat(),
         ["verify", "_checked("].concat(),
         ["entries", "()"].concat(),
+        ["read", "_grants"].concat(),
+        ["parse", "_grants"].concat(),
     ];
     for needle in &forbidden {
         assert!(
@@ -683,7 +692,8 @@ fn runner_uses_only_explicit_inputs() {
         );
     }
     // wc-005b: the two-engine runner verifies once, through wc-004's one
-    // verify path, with no grants. Nothing else in the module verifies.
+    // verify path. wc-009a: it passes the caller's granted imports unchanged,
+    // never an empty list of its own, and reads no grants itself.
     assert_eq!(
         code.matches(["verify", "_bundle("].concat().as_str())
             .count(),
@@ -694,14 +704,19 @@ fn runner_uses_only_explicit_inputs() {
         code.matches(
             [
                 "verify",
-                "_bundle(input.bundle, input.signature, input.accepted, &[])"
+                "_bundle(input.bundle, input.signature, input.accepted, input.granted)"
             ]
             .concat()
             .as_str()
         )
         .count(),
         1,
-        "the runner does not verify its own inputs with no grants"
+        "the runner does not verify its own inputs with the caller's grants"
+    );
+    assert_eq!(
+        code.matches("input.granted").count(),
+        1,
+        "the runner uses the granted imports somewhere other than its verify call"
     );
     assert_eq!(
         code.matches(".entrypoint()").count(),
@@ -772,6 +787,7 @@ fn input<'a>(
         bundle: &signed.bundle,
         signature: Some(&signed.sig),
         accepted: &signed.accepted,
+        granted: &[],
         wasmtime,
         wasmer,
         work_root,
@@ -894,6 +910,7 @@ fn same_name_same_output_on_wasmtime_and_wasmer() {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
+        granted: &[],
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
@@ -944,6 +961,7 @@ fn runner_refuses_an_unverified_bundle() {
             bundle: &bundle,
             signature,
             accepted,
+            granted: &[],
             wasmtime: &wasmtime,
             wasmer: &wasmer,
             work_root: &work,
@@ -1710,6 +1728,7 @@ fn real_receipt_names_both_installed_engines() {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
+        granted: &[],
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
@@ -1764,4 +1783,224 @@ fn real_receipt_names_both_installed_engines() {
     );
     eprintln!("RECEIPT (this machine):\n{receipt}");
     eprintln!("PASS: the receipt names both installed engines' versions as they printed them");
+}
+
+/// The folders of one wc-009a run made by [`run_with_grants`]: both
+/// [`counting`] stand-ins and the work root.
+struct GrantsRun {
+    wasmtime: PathBuf,
+    wasmer: PathBuf,
+    work: PathBuf,
+}
+
+/// One wc-009a run: `module`, bundled with this capsule's manifest in `root`,
+/// signed with a fresh key, run through `run` with the grants that
+/// `read_grants` reads from a new lab grants file beside the bundle, never
+/// inside it, on [`counting`] stand-ins. Each `case` gets its own folders.
+fn run_with_grants(
+    root: &Path,
+    case: &str,
+    module: &[u8],
+    grants: &[(&str, &str)],
+) -> (Result<TwoEngineRun, TwoEngineRefusal>, GrantsRun) {
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(root, &format!("bundle-{case}"), module, &key);
+    let accepted = [did(&key)];
+    let grants_path = grants_file(root, &format!("grants-{case}.json"), grants);
+    let granted = read_grants(&grants_path)
+        .unwrap_or_else(|refusal| panic!("{case}: the grants file was refused: {refusal}"));
+    let engines = work_root(root, &format!("engines-{case}"));
+    let folders = GrantsRun {
+        wasmtime: counting(&engines, "wasmtime"),
+        wasmer: counting(&engines, "wasmer"),
+        work: work_root(root, &format!("work-{case}")),
+    };
+    let result = run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &granted,
+        wasmtime: &folders.wasmtime,
+        wasmer: &folders.wasmer,
+        work_root: &folders.work,
+    });
+    (result, folders)
+}
+
+/// Each engine of `ran` was asked `--version` `count` times and started for a
+/// module run `count` times: one of each per engine when the run passed, none
+/// of either when it was refused.
+fn assert_engine_starts(ran: &GrantsRun, count: usize, case: &str) {
+    for (engine_kind, program) in [
+        (Engine::Wasmtime, &ran.wasmtime),
+        (Engine::Wasmer, &ran.wasmer),
+    ] {
+        assert_eq!(
+            starts(program, "version"),
+            count,
+            "{case}: {engine_kind}'s --version queries"
+        );
+        assert_eq!(
+            starts(program, "module"),
+            count,
+            "{case}: {engine_kind}'s module runs"
+        );
+    }
+}
+
+/// The capsule `tools/build` makes, built into a new OUT_DIR under `root`.
+fn built_capsule(root: &Path) -> Vec<u8> {
+    let out = root.join("out");
+    fs::create_dir(&out).expect("create OUT_DIR");
+    run_build(&lane_dir(), &out);
+    fs::read(out.join("capsule.wasm")).expect("read the built capsule.wasm")
+}
+
+/// wc-009a, Rong's test: the capsule `tools/build` makes, signed, with an
+/// empty grants file: each engine is asked its version once and runs the
+/// module once, nothing is linked and no grant is unused.
+#[test]
+fn zero_grants_zero_imports_runs() {
+    let tmp = TempDir::new("run9-zero");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+
+    let (result, ran) = run_with_grants(&root, "zero", &built, &[]);
+    let passed = two_ran(result);
+    assert!(passed.linked().is_empty(), "linked: {:?}", passed.linked());
+    assert!(
+        passed.unused_grants().is_empty(),
+        "unused: {:?}",
+        passed.unused_grants()
+    );
+    assert_engine_starts(&ran, 1, "zero");
+    assert_eq!(names(&ran.work), ["wasmer", "wasmtime"]);
+}
+
+/// wc-009a, the real-engine variant of `zero_grants_zero_imports_runs`: the
+/// real `wasmtime` and `wasmer` on PATH print `FIXED_OUTPUT`, with nothing
+/// linked. An engine not found prints SKIPPED and gives no result.
+#[test]
+fn zero_grants_zero_imports_runs_on_both_real_engines() {
+    let mut missing = Vec::new();
+    let mut programs = Vec::new();
+    for engine_kind in ENGINES {
+        match find_engine(engine_kind.name()) {
+            Some(program) => programs.push(program),
+            None => missing.push(engine_kind.name()),
+        }
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "SKIPPED: {} not found on PATH; the zero-grants real run needs both (no result, not a PASS)",
+            missing.join(" and ")
+        );
+        return;
+    }
+    let tmp = TempDir::new("run9-zero-real");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(&root, "bundle", &built, &key);
+    let accepted = [did(&key)];
+    let grants = grants_file(&root, "grants.json", &[]);
+    let granted = read_grants(&grants).expect("read the empty grants file");
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &granted,
+        wasmtime: &programs[0],
+        wasmer: &programs[1],
+        work_root: &work,
+    }));
+    let expected = format!("{FIXED_OUTPUT}\n");
+    for engine_kind in ENGINES {
+        assert_eq!(
+            passed.stdout(engine_kind),
+            expected.as_bytes(),
+            "{engine_kind}"
+        );
+    }
+    assert!(passed.linked().is_empty(), "linked: {:?}", passed.linked());
+    assert!(passed.unused_grants().is_empty());
+    eprintln!("PASS: zero grants, zero imports: both engines printed {FIXED_OUTPUT}");
+}
+
+/// wc-009a, Rong's test: the signed module that imports `env.f`, with an
+/// empty grants file, is refused by the verifier by the import's name; no run
+/// folder is made and no engine is started, not even for `--version`.
+#[test]
+fn declared_not_granted_import_refuses_instantiation_by_name() {
+    let tmp = TempDir::new("run9-not-granted");
+    let root = canonical(&tmp);
+
+    let (result, ran) = run_with_grants(&root, "not-granted", IMPORTING_MODULE, &[]);
+    let refusal = two_refused(result);
+    assert_eq!(refusal.to_string(), "undeclared import env.f");
+    match refusal {
+        TwoEngineRefusal::Verify(reason) => assert_eq!(
+            reason,
+            VerifyRefusal::Audit(AuditRefusal::Undeclared {
+                module: "env".into(),
+                name: "f".into(),
+            })
+        ),
+        other => panic!("not a verifier refusal: {other}"),
+    }
+    assert!(names(&ran.work).is_empty(), "a run folder was made");
+    assert_engine_starts(&ran, 0, "not-granted");
+}
+
+/// wc-009a, Rong's test: a validly signed zero-import bundle with an empty
+/// grants file links nothing.
+#[test]
+fn valid_signature_with_empty_grants_file_links_nothing() {
+    let tmp = TempDir::new("run9-empty");
+    let root = canonical(&tmp);
+
+    let (result, ran) = run_with_grants(&root, "empty", MODULE, &[]);
+    let passed = two_ran(result);
+    assert!(passed.linked().is_empty(), "linked: {:?}", passed.linked());
+    assert!(passed.unused_grants().is_empty());
+    assert_engine_starts(&ran, 1, "empty");
+}
+
+/// wc-009a, Rong's rename of `granted_but_undeclared_is_refused`: a grant for
+/// an import the module does not have links nothing and is reported.
+#[test]
+fn grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported() {
+    let tmp = TempDir::new("run9-unused");
+    let root = canonical(&tmp);
+
+    let (result, ran) = run_with_grants(&root, "unused", MODULE, &[("env", "f")]);
+    let passed = two_ran(result);
+    assert_eq!(passed.linked(), [], "a grant was linked with no import");
+    assert_eq!(passed.unused_grants(), [env_f()], "the unused grant");
+    assert_engine_starts(&ran, 1, "unused");
+}
+
+/// wc-009a: the signed module that imports `env.f`, with `env.f` granted,
+/// passes verification and `env.f` is linked; each engine is asked its
+/// version once and runs the module once. The stand-ins host nothing: the
+/// runner gives no engine a host function yet (wc-009b).
+#[test]
+fn granted_import_is_linked() {
+    let tmp = TempDir::new("run9-linked");
+    let root = canonical(&tmp);
+
+    let (result, ran) = run_with_grants(&root, "linked", IMPORTING_MODULE, &[("env", "f")]);
+    let passed = two_ran(result);
+    assert_eq!(passed.linked(), [env_f()], "the linked imports");
+    assert!(passed.unused_grants().is_empty());
+    assert_engine_starts(&ran, 1, "linked");
+    for engine_kind in ENGINES {
+        assert_eq!(
+            fs::read(ran.work.join(engine_kind.name()).join("module.wasm")).expect("read a module"),
+            IMPORTING_MODULE,
+            "{engine_kind}: not the verified importing module"
+        );
+    }
 }

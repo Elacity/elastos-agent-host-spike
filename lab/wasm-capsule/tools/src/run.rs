@@ -36,11 +36,15 @@
 //! launch path, not lab tooling. It is no admission or launch decision.
 //!
 //! wc-005b: [`run`] is the two-engine runner. It takes a [`RunInput`]: the
-//! bundle path, its in-memory name signature, the accepted signer DIDs, both
-//! engine program paths and a work root. In order:
+//! bundle path, its in-memory name signature, the accepted signer DIDs, the
+//! granted imports (wc-009a: the caller's list from the lab grants file, read
+//! by [`crate::verify::read_grants`]), both engine program paths and a work
+//! root. In order:
 //!
-//! 1. wc-004's [`verify_bundle`] is called once, with no grants. A refusal is
-//!    returned unchanged; nothing is written and no engine is started;
+//! 1. wc-004's [`verify_bundle`] is called once, with the granted imports
+//!    passed unchanged. A refusal is returned unchanged; nothing is written and
+//!    no engine is started, so a module with an import that is not granted
+//!    never reaches an engine;
 //! 2. wc-005c: each engine is asked `--version`, `wasmtime` and then `wasmer`,
 //!    by the same absolute program path a module run starts and with the same
 //!    no-ambient rules (one process each, an empty environment, stdin null).
@@ -57,16 +61,19 @@
 //! not started after `wasmtime` is refused. So two engines that fail the same
 //! way are refused with the first failure's own reason, never as equal
 //! outputs. Success returns the verified lab CID, both observed versions, both
-//! exit statuses and both stdouts; [`crate::receipt`] renders them. The
+//! exit statuses and both stdouts, plus the verifier's linked imports and
+//! unused grants; [`crate::receipt`] renders the first five. The
 //! versions are what the engines printed, never configured, so an engine
 //! upgrade shows in the receipt, and none of them is part of the lab CID.
 //!
 //! The two-engine result is a behaviour proof on one core module on this
 //! machine, not the Component ABI. Both engines are test-only; neither is
-//! endorsed.
+//! endorsed. The runner gives the engines no host function of its own, so a
+//! granted import is only let through verification, not hosted (wc-009b). The
+//! grants are a lab stand-in, not admission.
 
 use crate::bundle::{write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal};
-use crate::verify::{verify_bundle, VerifiedBundle, VerifyRefusal};
+use crate::verify::{verify_bundle, DeclaredImport, VerifiedBundle, VerifyRefusal};
 use capsule_identity::{LabCid, NameSignature};
 use std::error::Error;
 use std::fmt;
@@ -413,6 +420,9 @@ pub struct RunInput<'a> {
     pub signature: Option<&'a NameSignature>,
     /// The accepted signer DIDs.
     pub accepted: &'a [String],
+    /// The granted imports, from the lab grants file: a lab stand-in, not
+    /// admission.
+    pub granted: &'a [DeclaredImport],
     /// The absolute path of the `wasmtime` program.
     pub wasmtime: &'a Path,
     /// The absolute path of the `wasmer` program.
@@ -422,7 +432,8 @@ pub struct RunInput<'a> {
 }
 
 /// A two-engine run that passed: the verified lab CID, each engine's observed
-/// version and exit status, and both stdouts.
+/// version and exit status, both stdouts, the linked imports and the unused
+/// grants.
 ///
 /// Its fields are private and it has no public constructor, so a value exists
 /// only as [`run`] made it. It is no admission or launch value.
@@ -434,6 +445,8 @@ pub struct TwoEngineRun {
     statuses: [ExitStatus; 2],
     wasmtime: Vec<u8>,
     wasmer: Vec<u8>,
+    linked: Vec<DeclaredImport>,
+    unused_grants: Vec<DeclaredImport>,
 }
 
 impl TwoEngineRun {
@@ -475,6 +488,18 @@ impl TwoEngineRun {
             Engine::Wasmer => self.statuses[1],
         }
     }
+
+    /// The imports both in the signed module and granted: the verifier's
+    /// `imports()`, the audit's own list.
+    pub fn linked(&self) -> &[DeclaredImport] {
+        &self.linked
+    }
+
+    /// The grants the module does not import, in file order: the verifier's
+    /// `unused_grants()`.
+    pub fn unused_grants(&self) -> &[DeclaredImport] {
+        &self.unused_grants
+    }
 }
 
 /// Why a two-engine run was refused. Each reason has its own variant and its
@@ -515,7 +540,7 @@ impl Error for TwoEngineRefusal {}
 /// steps and their order are in the module docs; the first refusal is the
 /// answer.
 pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
-    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, &[])
+    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)
         .map_err(TwoEngineRefusal::Verify)?;
     let wasmtime_version =
         query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;
@@ -537,5 +562,7 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
         statuses,
         wasmtime,
         wasmer,
+        linked: bundle.imports().to_vec(),
+        unused_grants: bundle.unused_grants().to_vec(),
     })
 }
