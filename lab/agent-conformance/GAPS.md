@@ -820,3 +820,43 @@ physical census runs. F-cleanup-live-wiring bypasses that exact caller's check
 while the control remains pending. The control uses the one controller and
 gives zero resource allowance. The existing credential checker covers the
 captures, checked settlement line, report, receipt and lane sources.
+
+## AC-027-ORPHAN — Pending requests after a client exits
+
+The kill-worker journey measures the request after instance-1 exits on signal
+9 and instance-2 completes. On this candidate it remains pending: before 1,
+after 0, **settled by the fixture** with `fixture settlement: worker killed`.
+This is the lab half of A11 with the A12 census. It gives zero credit for
+Runtime-owned orphan settlement. The checked line and the same run's
+VERSIONS.json identify the exercised candidate; LOG.md holds the run evidence.
+
+The absent-policy journey also measured before 1 and after 0. The client
+reported its 30-second wait refusal; the request was then **settled by the
+fixture** with `fixture settlement: client wait ended`. Its shared pending
+read replaces the former `pending:unmeasured` label. Thus 021 FOLLOWUP 1 has a
+measured count and a fixture cleanup result, while automatic settlement remains
+this Runtime blocker.
+
+The component runs inside the `run` client at
+`elastos/crates/elastos-server/src/run_cmd.rs:225-269`. Its remote capability
+wait polls at `elastos/crates/elastos-server/src/resource_bridge.rs:1423-1454`
+and returns its 30-second refusal without removing the request. The pending
+store has a 300-second default timeout at
+`elastos/crates/elastos-runtime/src/capability/pending.rs:16-17`. The fixture
+reads the shell-visible list through the existing controller's pending path;
+it settles only the exact observed request after client exit.
+
+Runtime can close AC-027-ORPHAN by binding pending requests to a supervised
+client lifetime and settling them when that client detaches or dies. The
+30-second client wait also needs a terminal settlement at that boundary.
+The lab would then measure zero pending requests after exit and identify the
+Runtime as settlement owner, with the corresponding Runtime source evidence.
+This lane changes the fixture only.
+
+Instance-2's required sibling read names instance-1's resource. It remains the
+sole permitted new request for that resource, bound to instance-2's original
+session and a new request ID. Every other request from any session fails the
+retry check. The original orphan is matched in full and excluded only until
+its measured settlement. The two-second quiet window and existing root census
+supply bounded observation evidence, rather than a permanent retry guarantee.
+AC-021-GRANTS, AC-006-STORAGE and RT4 retain their separate scopes.
