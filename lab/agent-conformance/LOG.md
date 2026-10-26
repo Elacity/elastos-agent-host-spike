@@ -6488,3 +6488,245 @@ The restored checks pass 12 focused tests. A direct whitespace check of the
 five edited files passed. Both Cargo file hashes match the values recorded
 above. Edits stay in this lane; the supervisor retains approval after its
 fresh checks and review.
+
+
+## 038 round 2
+
+Restored the unconditional receipt refusal `missing launched probe identity`. A skipped probe row no longer lets A14 pass with no launched probe. The pending-session match stays only in `open_session_read`. A client attach failure names the client scope. Each refusal below has its own reason.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0. Then `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exited 0. `/usr/bin/time -p` for that sequence: real 266.21. `grant_refused_from_another_session` and `grant_refused_from_a_new_session` passed. No flake rerun.
+
+#### F-a14-skipped-launch
+
+Required failing test: `versions_receipt_fails_when_every_probe_row_is_skipped`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report -- versions_receipt_fails_when_every_probe_row_is_skipped --exact --test-threads=2
+```
+
+Unmutated: exit 0, 6.935 seconds.
+
+```text
+test versions_receipt_fails_when_every_probe_row_is_skipped ... ok
+```
+
+Planted: delete the unconditional `if self.identities.launched.is_empty()` refusal in `src/report.rs`. Exit 101, 1.189 seconds.
+
+```text
+test versions_receipt_fails_when_every_probe_row_is_skipped ... FAILED
+versions_receipt (A14) | PASS
+```
+
+Restored: exit 0, 1.063 seconds.
+
+```text
+test versions_receipt_fails_when_every_probe_row_is_skipped ... ok
+```
+
+#### F-a5-pending-session
+
+Required failing test: `grants::tests::open_session_read_refuses_a_mismatched_pending_session`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::open_session_read_refuses_a_mismatched_pending_session --exact --test-threads=2
+```
+
+Unmutated: exit 0, 1.514 seconds.
+
+```text
+test grants::tests::open_session_read_refuses_a_mismatched_pending_session ... ok
+```
+
+Planted: remove the pending-session match in `open_session_read`. Exit 101, 1.344 seconds.
+
+```text
+assertion `left == right` failed
+  left: None
+ right: Some("pending session is not the attached client session")
+```
+
+Restored: exit 0, 1.488 seconds.
+
+```text
+test grants::tests::open_session_read_refuses_a_mismatched_pending_session ... ok
+```
+
+#### F-pending-list
+
+Required failing test: `grants::tests::pending_session_refuses_a_bad_list`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::pending_session_refuses_a_bad_list --exact --test-threads=2
+```
+
+Unmutated: exit 0, 0.088 seconds.
+
+```text
+test grants::tests::pending_session_refuses_a_bad_list ... ok
+```
+
+Planted: `pending_session` uses `as_array().unwrap()` instead of `request_list`. Exit 101, 1.634 seconds.
+
+```text
+called `Option::unwrap()` on a `None` value
+```
+
+Restored: exit 0, 1.134 seconds.
+
+```text
+test grants::tests::pending_session_refuses_a_bad_list ... ok
+```
+
+#### F-attach-scope
+
+Required failing test: `grants::tests::attach_refusal_names_the_scope`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::attach_refusal_names_the_scope --exact --test-threads=2
+```
+
+Unmutated: exit 0, 0.107 seconds.
+
+```text
+test grants::tests::attach_refusal_names_the_scope ... ok
+```
+
+Planted: the client transport reason says `fixture shell attach failed`. Exit 101, 1.672 seconds.
+
+```text
+assertion `left == right` failed
+  left: Err("fixture shell attach failed")
+ right: Err("fixture client attach failed")
+```
+
+Restored: exit 0, 1.195 seconds.
+
+```text
+test grants::tests::attach_refusal_names_the_scope ... ok
+```
+
+#### F-attach-token
+
+Required failing test: `grants::tests::attach_refusal_names_the_scope`.
+
+Planted: the client missing-token reason says `fixture shell attach returned no token`. Exit 101.
+
+```text
+assertion `left == right` failed: client missing token
+  left: Err("fixture shell attach returned no token")
+ right: Err("fixture client attach returned no token")
+```
+
+Restored bytes match the pre-mutation file. The locked suite then ran this test and it passed.
+
+#### F-scan-launch
+
+Required failing test: `grants::tests::no_probe_receipt_is_scanned_and_other_gaps_are_refused`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::no_probe_receipt_is_scanned_and_other_gaps_are_refused --exact --test-threads=2
+```
+
+Unmutated: exit 0, 0.205 seconds.
+
+```text
+test grants::tests::no_probe_receipt_is_scanned_and_other_gaps_are_refused ... ok
+```
+
+Planted: `report_inventory` blocks every non-empty failure list, including a lone `missing launched probe identity`. Exit 101, 1.240 seconds.
+
+```text
+grant_refused_from_another_session scan: credential check requires a complete report
+```
+
+Restored: exit 0, 1.248 seconds.
+
+```text
+test grants::tests::no_probe_receipt_is_scanned_and_other_gaps_are_refused ... ok
+```
+
+#### F-expected-id
+
+Required failing test: `grants::tests::wrong_capsule_refusal_requires_expected_session`. The other wrong-capsule tests are not this falsifier's filter.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::wrong_capsule_refusal_requires_expected_session --exact --test-threads=2
+```
+
+Unmutated: exit 0, 0.065 seconds.
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+```
+
+Planted: `if false && expected != expected_session`. Exit 101, 1.046 seconds.
+
+```text
+assertion `left == right` failed: expected id mismatch keeps its own reason
+  left: Ok(CheckedWrongCapsule { expected: "session-a", got: "session-b" })
+ right: Err("grant refusal expected session is not the granting session")
+```
+
+Restored: exit 0, 1.057 seconds.
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_expected_session ... ok
+```
+
+#### F-got-id
+
+Required failing test: `grants::tests::wrong_capsule_refusal_requires_got_session`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::wrong_capsule_refusal_requires_got_session --exact --test-threads=2
+```
+
+Unmutated: exit 0, 0.082 seconds.
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+```
+
+Planted: `if false && got != got_session`. Exit 101, 1.181 seconds.
+
+```text
+assertion `left == right` failed: got id mismatch keeps its own reason
+  left: Ok(CheckedWrongCapsule { expected: "session-a", got: "session-b" })
+ right: Err("grant refusal got session is not the presenting session")
+```
+
+Restored: exit 0, 0.936 seconds.
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_got_session ... ok
+```
+
+#### F-refusal-text
+
+Required failing test: `grants::tests::wrong_capsule_refusal_requires_runtime_text`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grants::tests::wrong_capsule_refusal_requires_runtime_text --exact --test-threads=2
+```
+
+Unmutated: exit 0, 0.066 seconds.
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+Planted: a missing prefix becomes `session-a, got session-b`. Exit 101, 1.617 seconds.
+
+```text
+assertion `left == right` failed: refusal text mismatch keeps its own reason
+  left: Ok(CheckedWrongCapsule { expected: "session-a", got: "session-b" })
+ right: Err("grant refusal text is not the Runtime wrong-capsule reason")
+```
+
+Restored: exit 0, 1.631 seconds.
+
+```text
+test grants::tests::wrong_capsule_refusal_requires_runtime_text ... ok
+```
+
+F-a5-other-session's anchor is the full arm `SessionBinding::OtherSession => other.as_ref().unwrap(),`.

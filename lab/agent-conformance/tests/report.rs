@@ -1077,14 +1077,60 @@ test grant_record_names_agent_identity ... ignored, blocked: AC-038-GRANT-PRINCI
 }
 
 #[test]
-fn session_binding_rows_need_no_launched_probe() {
+fn versions_receipt_fails_when_every_probe_row_is_skipped() {
+    use agent_conformance::report::render_run;
+    let (observations, git) = synthetic(4, false);
+    let natives: Vec<_> = observations
+        .into_iter()
+        .filter(|observation| matches!(observation, Observation::Native { .. }))
+        .collect();
+    assert_eq!(
+        natives.len(),
+        2,
+        "the skipped case still has both native hashes"
+    );
+    let names = ["ungranted_effect_is_refused", "granted_read_succeeds"];
+    let mut listed = String::new();
+    let mut output = String::new();
+    for name in names {
+        listed.push_str(&format!("{name}: test\n"));
+        output.push_str(&format!(
+            "SKIPPED {name}: operator prerequisite: runtime unavailable\ntest {name} ... FAILED\n"
+        ));
+    }
+    listed.push_str("grant_refused_from_another_session: test\n");
+    output.push_str("test grant_refused_from_another_session ... ok\n");
+    for observation in &natives {
+        output.push_str(&observation.line());
+        output.push('\n');
+    }
+    let report = render_run(&listed, &output, true, Ok(git), Some(""));
+    assert!(
+        report.table.contains("versions_receipt (A14) | FAIL\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        report.failures,
+        ["missing launched probe identity".to_string()],
+        "a skipped probe row refuses a receipt that names no launched probe"
+    );
+    assert!(report.table.contains(
+        "ungranted_effect_is_refused | SKIPPED (operator prerequisite: runtime unavailable)\n"
+    ));
+    assert!(report
+        .table
+        .contains("grant_refused_from_another_session | PASS | session binding"));
+}
+
+#[test]
+fn session_binding_receipt_still_requires_a_launched_probe() {
     use agent_conformance::report::render_run;
     let (observations, git) = synthetic(9, false);
     let natives: Vec<_> = observations
         .into_iter()
         .filter(|observation| matches!(observation, Observation::Native { .. }))
         .collect();
-    assert_eq!(natives.len(), 2);
     let mut output = String::new();
     for name in [
         "grant_refused_from_another_session",
@@ -1103,10 +1149,10 @@ fn session_binding_rows_need_no_launched_probe() {
         Ok(git),
         Some(""),
     );
-    assert!(
-        report.failures.is_empty(),
-        "a session-binding row launches no probe: {:?}",
-        report.failures
+    assert!(!report.passed, "{}", report.table);
+    assert_eq!(
+        report.failures,
+        ["missing launched probe identity".to_string()],
+        "a session-binding row does not waive the launched-probe receipt"
     );
-    assert!(report.passed, "{}", report.table);
 }

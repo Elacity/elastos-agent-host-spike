@@ -274,10 +274,11 @@ impl Evidence {
             self.failures
                 .push("missing localhost-provider SHA-256".into());
         }
-        // A row that launches no probe has an empty required-effect list, so
-        // it does not demand a launched identity. A row that names effects
-        // still fails closed when that launch is missing.
-        let mut needs_launch = false;
+        // A skipped probe row does not waive this. A per-effect miss keeps
+        // its own reason below and does not replace it.
+        if self.identities.launched.is_empty() {
+            self.failures.push("missing launched probe identity".into());
+        }
         for (name, values) in &self.rows {
             // These are identity requirements of existing journeys, not a test
             // inventory or grader. Cargo still supplies both of those. Failed
@@ -290,16 +291,12 @@ impl Evidence {
             if effects.is_empty() {
                 continue;
             }
-            needs_launch = true;
             for effect in effects {
                 if !self.identities.launched.contains_key(*effect) {
                     self.failures
                         .push(format!("missing launched probe identity: {effect}"));
                 }
             }
-        }
-        if needs_launch && self.identities.launched.is_empty() {
-            self.failures.push("missing launched probe identity".into());
         }
     }
 }

@@ -889,9 +889,6 @@ fn bind_client_sessions(
                 grants::SIBLING_READ_RESOURCE,
                 "agent conformance: session binding sibling",
             )?;
-            if other_grant.session_id() != other.session_id() {
-                return Err("pending session is not the attached client session");
-            }
             controller.read_seeded(other, grants::SIBLING_READ_RESOURCE, &other_grant)?;
             controller.note_seeded_read(
                 grants::SIBLING_READ_RESOURCE,
@@ -915,8 +912,8 @@ fn bind_client_sessions(
         }
     };
     // The presented session is the only input to the Runtime refusal.
-    // F-a5-other-session replaces `other.as_ref().unwrap()` with `&owner`.
-    // F-a5-new-session replaces `renewed.as_ref().unwrap()` with `&owner`.
+    // F-a5-other-session replaces `SessionBinding::OtherSession => other.as_ref().unwrap(),` with `SessionBinding::OtherSession => &owner,`.
+    // F-a5-new-session replaces `SessionBinding::NewSession => renewed.as_ref().unwrap(),` with `SessionBinding::NewSession => &owner,`.
     let presenting = match binding {
         SessionBinding::OtherSession => other.as_ref().unwrap(),
         SessionBinding::NewSession => renewed.as_ref().unwrap(),
