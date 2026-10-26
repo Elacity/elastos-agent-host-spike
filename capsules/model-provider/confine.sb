@@ -1,7 +1,8 @@
-;; Seatbelt profile for model-provider: the one source of its confinement.
-;; Under the shared file-profile contract, a launch runs
-;; /usr/bin/sandbox-exec -f confine.sb and binds three resolved paths, the same
-;; names every file profile uses:
+;; Seatbelt profile for model-provider; this file is the test oracle the
+;; Runtime-generated profile must match. The generated profile binds three
+;; resolved paths as parameters, the same names every file profile uses, and
+;; the tests pass them with /usr/bin/sandbox-exec -f confine.sb -D. That
+;; Runtime half is not built.
 ;;   PROVIDER_EXECUTABLE  - the canonical provider binary
 ;;   STORAGE_ROOT         - the model journal root: Init.base_path/providers/model-provider,
 ;;                          or the configured absolute journal_dir

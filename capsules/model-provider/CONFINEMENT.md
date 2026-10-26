@@ -1,22 +1,27 @@
 # model-provider confinement
 
-`confine.sb` is the one source of the model provider's confinement profile
-(P10). It starts with `(version 1)`, then `(deny default)`, then
-`(deny network*)`. The provider reads line-delimited JSON on stdin and writes
-one JSON answer per line on stdout. The profile grants it no socket and no
-listener. Every operation that no rule grants is refused (P3, P11).
+`confine.sb` is the one oracle for the model provider's confinement profile
+(one file, P10): the profile the Runtime generates for this provider must match
+it. That Runtime half is not built. It starts with `(version 1)`, then
+`(deny default)`, then `(deny network*)`. The provider reads line-delimited
+JSON on stdin and writes one JSON answer per line on stdout. The profile
+grants it no socket and no listener. Every operation that no rule grants is
+refused (P3, P11).
 
 ## Parameters
 
-The profile uses only the three parameter tokens every file profile binds:
+This file uses only the three parameter tokens every file profile binds. The
+generated profile binds the same three, and the tests pass them with
+`sandbox-exec -D`. The Runtime half that binds them is not built.
 
 - `PROVIDER_EXECUTABLE`: the canonical path of the provider binary.
 - `STORAGE_ROOT`: the model journal root. That is
   `Init.base_path/providers/model-provider`, or the configured absolute
   `journal_dir`.
-- `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. Under the shared contract the
-  Runtime creates it before launch. The provider creates `STORAGE_ROOT` itself
-  at its first `init`.
+- `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. The tests create it before
+  launch. `model_provider_ops_under_profile` shows the provider then creates
+  `STORAGE_ROOT` itself at its first `init`. The Runtime half does the same
+  before launch and is not built.
 
 All three are resolved paths. The sandbox matches the resolved path, so a
 path through a link (macOS `/var` is `/private/var`) would match nothing.
@@ -24,12 +29,18 @@ path through a link (macOS `/var` is `/private/var`) would match nothing.
 ## The Runtime half
 
 The model provider presents the same file-profile contract as `did-provider`
-and `wallet-provider`: one profile file, the same head forms, the same three
-parameter tokens and the same three shared rules. The Runtime half of that
-contract is "The Runtime bridge change" in `../did-provider/CONFINEMENT.md` and
-`../wallet-provider/CONFINEMENT.md`. The model provider needs nothing from the
-Runtime beyond that one parameterized launch and that one profile check. There
-is no separate Runtime proposal for the model provider (P10).
+and `wallet-provider`, as an oracle: one profile file, the same head forms,
+the same three parameter tokens and the same three shared rules. Its Runtime
+half is "The Runtime bridge change" in `../did-provider/CONFINEMENT.md` and
+`../wallet-provider/CONFINEMENT.md`: the Runtime generates each provider's
+profile from its approved declared rights, one generator covers
+`model-provider` too, and the profile it generates for this provider must
+match this file, with the same three parameters bound to the same paths. The
+test that compares them is the Runtime's half. That half is not built. The
+model provider needs nothing from the Runtime beyond that one generator and
+that comparing test, and there is no separate Runtime proposal for the model
+provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
+(see "Tests"), not the Runtime's.
 
 ## What the profile allows
 
