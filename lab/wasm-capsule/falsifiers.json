@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 161 planted bugs",
-          "new": "`falsifiers.json` holds 160 planted bugs"
+          "old": "`falsifiers.json` holds 162 planted bugs",
+          "new": "`falsifiers.json` holds 161 planted bugs"
         }
       ],
       "tests": [
@@ -2653,6 +2653,22 @@
         "built_capsule_declares_the_manifest_memory_as_its_maximum",
         "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid",
         "the_real_capsule_passes_the_verifier"
+      ]
+    },
+    {
+      "id": "F-WC1-TRAP-STATUS",
+      "title": "the cleanup trap goes back to a plain rm -rf, so a set -u error after it exits 0 on /bin/bash 3.2.57",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/build",
+          "old": "trap 'status=$?; rm -rf \"$TARGET_DIR\"; exit \"$((status == 0 ? 1 : status))\"' EXIT\n",
+          "new": "trap 'rm -rf \"$TARGET_DIR\"' EXIT\n"
+        }
+      ],
+      "tests": [
+        "build_script_fails_closed_after_an_unbound_variable"
       ]
     }
   ]

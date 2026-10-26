@@ -96,7 +96,9 @@ fresh isolated target dir, and `--remap-path-prefix` for the source tree,
 `CARGO_HOME` and the toolchain sysroot. Since task 032 it also passes
 `-Clink-arg=--max-memory=67108864`, so the capsule declares its own memory
 maximum, 1024 pages ("Module memory maximum discovery (wc-010d0)", "The capsule
-declares its maximum (task 032)").
+declares its maximum (task 032)"). A failing build exits non-zero even after
+its cleanup trap, also for a `set -u` error on this Mac's `/bin/bash` 3.2.57
+(task 035, `build_script_fails_closed_after_an_unbound_variable`).
 
 ### Receipt
 
@@ -1292,6 +1294,11 @@ hosting cannot be claimed for wasmer.
 
 - `digest_returns_the_fixed_value` — the shared impl returns the pinned value.
 - `two_clean_builds_in_different_paths_are_byte_identical` — the foundation claim.
+- `build_script_fails_closed_after_an_unbound_variable` — task 035: a copy of
+  `tools/build` with `: "$WC_UNSET_PROBE"` right after its cleanup trap, run
+  with `/bin/bash` 3.2.57 and that variable unset, exits non-zero with bash's
+  `unbound variable` line, writes no capsule or receipt, and leaves its own
+  TMPDIR empty.
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
@@ -1690,21 +1697,22 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 
 ## Falsifiers
 
-`falsifiers.json` holds 161 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 162 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031 and two task 032.
+031, two task 032 and one task 035.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 97, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 98, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031 and 032: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2 + 2), each
+029, 031, 032 and 035: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2 + 2 +
+1), each
 run by the canonical runner with its summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
@@ -1726,8 +1734,8 @@ wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
   path has a space. Task 032 re-anchored it, the same bug as before: a second
   edit turns the new link-argument line into the same `RUSTFLAGS` form. Without
   it, the planted script stops at an unbound `CARGO_ENCODED_RUSTFLAGS`, and
-  `tools/build` then exits 0 with no capsule (LOG.md, task 032), so the test
-  would fail for another reason. By hand after the re-anchor, the named test
+  `tools/build` then exited 0 with no capsule (LOG.md, task 032; since task
+  035 it exits 1), so the test would fail for another reason. By hand after the re-anchor, the named test
   fails at its "tools/build failed" assertion with rustc's
   `--remap-path-prefix must contain '=' between FROM and TO`. The canonical
   runner reads it NOT RUN: the child cargo's `process didn't exit
@@ -2200,3 +2208,18 @@ and each named test fails at its assertion:
 
 Task 032 also re-anchors F-WC1-SPACED-PATH (above, still hand-proven) and
 F-WC-README-COUNT to the new total, each the same bug as before.
+
+Task 035's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 035). Its anchor is `tools/build`'s cleanup trap line, and its
+named test fails at its exit-status assertion:
+
+- F-WC1-TRAP-STATUS — the trap goes back to `trap 'rm -rf "$TARGET_DIR"'
+  EXIT`, so on `/bin/bash` 3.2.57 a `set -u` error after it exits 0
+  (`build_script_fails_closed_after_an_unbound_variable`, "tools/build exited
+  exit status: 0 after an unbound variable past its cleanup trap").
+
+The trap is armed to fail: `/bin/bash` 3.2.57 hands it `$?` 0 after a `set -u`
+error, the same as at the script's end (LOG.md, task 035, has the probes), so
+it turns 0 into 1 and keeps any other status. The script's last line re-arms
+a plain `rm -rf` trap, so a finished build exits 0. Task 035 also re-anchors
+F-WC-README-COUNT to the new total, the same bug as before.

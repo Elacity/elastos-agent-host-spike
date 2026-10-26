@@ -734,6 +734,26 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   that names another provider's executable prefix passes the check.
 - Drop the empty-reason refusal (WP94): the same test fails because a bare
   provider prefix passes the check.
+- Drop the role refusal (WP95): the same test fails because a file that gives
+  "approved rights" as its role passes the check, so its role case finds no
+  refusal.
+- Drop the provider refusal (WP96): the same test fails because the did file
+  that names "wallet-provider" passes the check, so its provider case finds no
+  refusal.
+- Drop the platform-baseline status refusal (WP97): the same test fails
+  because a baseline without ", not approved rights" in its status sentence
+  passes the check, so its status case finds no refusal.
+- Replace the missing rights-list refusal with an empty list (WP98): the same
+  test fails because the check goes on and refuses the process-exec form with
+  no claimant, so its rights case finds no "must hold a rights list" reason.
+- Replace the missing platform-baseline refusal with an empty map (WP99): the
+  same test fails because the check goes on and refuses the empty baseline with
+  the status reason, so its platform-baseline case finds no "must hold a
+  platform baseline" reason.
+- Replace the missing baseline rules-list refusal with an empty list (WP100):
+  the same test fails because the check goes on and refuses the startup-root
+  form with no claimant, so its rules-list case finds no "platform baseline
+  must hold a rules list" reason.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

@@ -4,6 +4,6 @@ test: ledger::model_unknown_outcome_keeps_the_hold
 --- old
                 return Err(SettleRefuse::UnknownOutcome);
 --- new
-                self.ledger.held = 0;
+                self.ledger.lock().expect("ledger lock").held = 0;
                 return Ok(0);
 --- end
