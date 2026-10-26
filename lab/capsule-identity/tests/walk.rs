@@ -30,6 +30,18 @@ impl Swap {
             moved: temp_dir(),
         }
     }
+
+    /// The change that moves browser/app.js out of the bundle and puts a
+    /// link to the outside app.js in its place.
+    fn app_js_for_an_outside_link(&self) -> impl FnOnce() + Send + 'static {
+        let entry = self.bundle.path().join("browser/app.js");
+        let target = self.outside.path().join("app.js");
+        let moved = self.moved.path().join("app.js");
+        move || {
+            fs::rename(&entry, &moved).expect("move browser/app.js out");
+            symlink(&target, &entry).expect("link browser/app.js outside");
+        }
+    }
 }
 
 /// Whether `path` itself is a link, so a test can show its swap ran.
@@ -130,15 +142,7 @@ fn entry_swapped_after_its_handle_is_checked_names_the_checked_bytes() {
     // walk reads the handle it checked, so the name is web-app's.
     let swap = Swap::new();
     let entry = swap.bundle.path().join("browser/app.js");
-    let change = {
-        let entry = entry.clone();
-        let target = swap.outside.path().join("app.js");
-        let moved = swap.moved.path().join("app.js");
-        move || {
-            fs::rename(&entry, &moved).expect("move browser/app.js out");
-            symlink(&target, &entry).expect("link browser/app.js outside");
-        }
-    };
+    let change = swap.app_js_for_an_outside_link();
     let named = lab_cid_bounded(
         swap.bundle.path(),
         at(Moment::AfterCheck, "browser/app.js", change),
@@ -146,6 +150,44 @@ fn entry_swapped_after_its_handle_is_checked_names_the_checked_bytes() {
     .unwrap_or_else(|refusal| panic!("a swap after the check must not stop the walk: {refusal}"));
     assert!(is_link(&entry), "the swap did not run during the walk");
     assert_eq!(named.to_string(), WEB_APP_LAB_CID);
+}
+
+#[test]
+fn checked_entries_are_the_bytes_the_walk_checked() {
+    // The same swap, on the checked bundle. The value keeps the bytes the
+    // checked handle held: its lab CID is web-app's, and its browser/app.js
+    // entry holds web-app's bytes, never the outside file's. A seam that read
+    // the entries again by path after the walk would follow the link.
+    let swap = Swap::new();
+    let entry = swap.bundle.path().join("browser/app.js");
+    let outside_app =
+        fs::read(swap.outside.path().join("app.js")).expect("read the outside app.js");
+    let web_app = read_fixture(&WEB_APP, "browser/app.js");
+    assert_ne!(
+        outside_app, web_app,
+        "the outside app.js must hold other bytes"
+    );
+    let change = swap.app_js_for_an_outside_link();
+    let value = checked_bundle_bounded(
+        swap.bundle.path(),
+        at(Moment::AfterCheck, "browser/app.js", change),
+    )
+    .unwrap_or_else(|refusal| panic!("a swap after the check must not stop the walk: {refusal}"));
+    assert!(is_link(&entry), "the swap did not run during the walk");
+    assert_eq!(value.cid().to_string(), WEB_APP_LAB_CID);
+    let app = value
+        .entries()
+        .iter()
+        .find(|entry| entry.path == "browser/app.js")
+        .expect("the checked bundle holds browser/app.js");
+    assert_ne!(
+        app.content, outside_app,
+        "browser/app.js holds the outside file's bytes, which its lab CID does not name"
+    );
+    assert_eq!(
+        app.content, web_app,
+        "browser/app.js does not hold the bytes its checked handle held"
+    );
 }
 
 #[test]
@@ -243,11 +285,7 @@ fn lab_cid_and_the_seam_run_one_walk() {
     // observer that does nothing, and the library lists a folder, opens an
     // entry and checks a handle in one place each. It reaches no file by a
     // path, so no second walk can hide beside the checked one.
-    let code: Vec<&str> = include_str!("../src/lib.rs")
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect();
-    let code = code.join("\n");
+    let code = library_code();
     assert!(
         code.contains(
             "pub fn lab_cid(bundle: &Path) -> Result<LabCid, Refusal> {\n    lab_cid_observed(bundle, |_, _| {})\n}"

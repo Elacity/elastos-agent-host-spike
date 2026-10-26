@@ -13,7 +13,10 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use capsule_identity::{check_name, lab_cid, lab_cid_observed, LabCid, Moment, Refusal};
+use capsule_identity::{
+    check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed, CheckedBundle,
+    LabCid, Moment, Refusal,
+};
 use tempfile::TempDir;
 
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
@@ -98,11 +101,21 @@ pub fn named(bundle: &Path) -> LabCid {
     lab_cid(bundle).unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.display()))
 }
 
+/// The checked bundle at `bundle`. A refusal fails the test with its reason.
+pub fn checked(bundle: &Path) -> CheckedBundle {
+    checked_bundle(bundle).unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.display()))
+}
+
 /// `check_name` refuses `claimed` for the bundle at `bundle`, whose bytes
 /// name `actual`, and the refusal names both values.
 pub fn assert_name_mismatch(bundle: &Path, claimed: &str, actual: LabCid) {
-    let refusal = check_name(bundle, claimed)
-        .expect_err("a lab CID the bundle's bytes do not give must be refused");
+    assert_mismatch(check_name(bundle, claimed), claimed, actual);
+}
+
+/// A name check's answer refuses `claimed` for bytes that name `actual`, and
+/// the refusal names both values. Both name checks are judged by this.
+pub fn assert_mismatch(answer: Result<(), Refusal>, claimed: &str, actual: LabCid) {
+    let refusal = answer.expect_err("a lab CID the bundle's bytes do not give must be refused");
     assert_eq!(
         refusal,
         Refusal::NameMismatch {
@@ -124,6 +137,20 @@ pub fn library_code() -> String {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// One item of `code` (from [`library_code`]): the text from `head`, which
+/// must be found exactly once, to the closing brace at `head`'s own indent.
+/// So `pub fn name(` gives a function and `pub fn name(&self` a method.
+pub fn library_item<'a>(code: &'a str, head: &str) -> &'a str {
+    assert_eq!(code.matches(head).count(), 1, "the library holds {head:?}");
+    let start = code.find(head).expect("found once");
+    let line_start = code[..start].rfind('\n').map_or(0, |at| at + 1);
+    let close = format!("\n{}}}", &code[line_start..start]);
+    let end = code[start..]
+        .find(&close)
+        .unwrap_or_else(|| panic!("{head:?} has no closing brace"));
+    &code[start..start + end + close.len()]
 }
 
 /// Write `bytes` at the bundle-relative `path` under `root`, making folders.
@@ -184,27 +211,49 @@ pub fn at(
 /// milliseconds.
 pub const BOUND: Duration = Duration::from_secs(10);
 
-/// `lab_cid_observed(bundle, observe)` on its own thread, waited for at most
-/// [`BOUND`]. Opening a FIFO to read blocks until a writer comes, so a walk
-/// that opens one before checking its type, or without the non-blocking
-/// flag, fails here instead of hanging the run. With [`unobserved`] it runs
-/// the walk `lab_cid` runs.
-pub fn lab_cid_bounded(
+/// `call(bundle)` on its own thread, waited for at most [`BOUND`]. Opening a
+/// FIFO to read blocks until a writer comes, so a walk that opens one before
+/// checking its type, or without the non-blocking flag, fails here instead
+/// of hanging the run. `what` names the call when it fails.
+pub fn bounded<T: Send + 'static>(
+    what: &str,
     bundle: &Path,
-    observe: impl FnMut(Moment, &str) + Send + 'static,
-) -> Result<LabCid, Refusal> {
+    call: impl FnOnce(&Path) -> Result<T, Refusal> + Send + 'static,
+) -> Result<T, Refusal> {
     let (sender, receiver) = mpsc::channel();
     let bundle = bundle.to_path_buf();
     thread::spawn(move || {
-        let _ = sender.send(lab_cid_observed(&bundle, observe));
+        let _ = sender.send(call(&bundle));
     });
     match receiver.recv_timeout(BOUND) {
         Ok(result) => result,
         Err(RecvTimeoutError::Timeout) => panic!(
-            "lab_cid did not return within {BOUND:?}: it opened an entry it should have refused"
+            "{what} did not return within {BOUND:?}: it opened an entry it should have refused"
         ),
-        Err(RecvTimeoutError::Disconnected) => panic!("lab_cid panicked"),
+        Err(RecvTimeoutError::Disconnected) => panic!("{what} panicked"),
     }
+}
+
+/// `lab_cid_observed(bundle, observe)`, [`bounded`]. With [`unobserved`] it
+/// runs the walk `lab_cid` runs.
+pub fn lab_cid_bounded(
+    bundle: &Path,
+    observe: impl FnMut(Moment, &str) + Send + 'static,
+) -> Result<LabCid, Refusal> {
+    bounded("lab_cid", bundle, move |bundle| {
+        lab_cid_observed(bundle, observe)
+    })
+}
+
+/// `checked_bundle_observed(bundle, observe)`, [`bounded`]. With
+/// [`unobserved`] it runs the walk `checked_bundle` runs.
+pub fn checked_bundle_bounded(
+    bundle: &Path,
+    observe: impl FnMut(Moment, &str) + Send + 'static,
+) -> Result<CheckedBundle, Refusal> {
+    bounded("checked_bundle", bundle, move |bundle| {
+        checked_bundle_observed(bundle, observe)
+    })
 }
 
 /// Build wc-001 with its own `tools/build` into `out_dir` (a temp dir; the

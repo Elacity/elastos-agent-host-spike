@@ -133,6 +133,17 @@ fn wallet_dir(root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
+/// The three parameter bindings the Runtime makes for one storage root.
+fn canonical_bindings(base: &Path) -> [(&'static str, PathBuf); 3] {
+    let wallet_root = wallet_dir(base);
+    let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
+    [
+        ("STORAGE_ROOT", wallet_root),
+        ("STORAGE_PARENT", parent),
+        ("PROVIDER_EXECUTABLE", resolved(Path::new(PROVIDER_BINARY))),
+    ]
+}
+
 fn runtime_invocation_envelope() -> Value {
     json!({
         "schema": "elastos.provider.invocation/v1",
@@ -262,12 +273,11 @@ impl ConfinedProvider {
         let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
         // Runtime prepares the shared ancestors; the provider creates Wallet.
         fs::create_dir_all(&parent).expect("prepare shared service directories");
-        let executable = resolved(Path::new(PROVIDER_BINARY));
-        let mut bindings: Vec<(&str, &Path)> = vec![
-            ("STORAGE_ROOT", wallet_root.as_path()),
-            ("STORAGE_PARENT", parent.as_path()),
-            ("PROVIDER_EXECUTABLE", executable.as_path()),
-        ];
+        let canonical = canonical_bindings(base);
+        let mut bindings: Vec<(&str, &Path)> = canonical
+            .iter()
+            .map(|(name, path)| (*name, path.as_path()))
+            .collect();
         bindings.extend_from_slice(parameters);
         Self::start_under(profile, &bindings)
     }
@@ -660,12 +670,12 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
     // Runtime prepares the shared ancestors before it launches the provider.
     fs::create_dir_all(&parent).expect("prepare shared service directories");
-    let executable = resolved(Path::new(PROVIDER_BINARY));
-    let canonical = vec![
-        ("STORAGE_ROOT", wallet_root.clone()),
-        ("STORAGE_PARENT", parent),
-        ("PROVIDER_EXECUTABLE", executable),
-    ];
+    let canonical = canonical_bindings(&base);
+    let unbound_root: Vec<(&str, PathBuf)> = canonical
+        .iter()
+        .filter(|(name, _)| *name != "STORAGE_ROOT")
+        .cloned()
+        .collect();
     let request = json!({
         "op": "init",
         "config": { "base_path": base.display().to_string() }
@@ -676,19 +686,19 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
         (
             "(a) the profile file does not exist",
             missing_profile.clone(),
-            canonical.clone(),
+            canonical.to_vec(),
             missing_profile.display().to_string(),
         ),
         (
             "(b) the profile does not parse",
             unclosed_profile,
-            canonical.clone(),
+            canonical.to_vec(),
             "syntax error: expecting ')'".to_string(),
         ),
         (
             "(c) the profile names an unbound parameter",
             PathBuf::from(PROFILE_PATH),
-            canonical[1..].to_vec(),
+            unbound_root,
             "invalid data type of path filter".to_string(),
         ),
     ];

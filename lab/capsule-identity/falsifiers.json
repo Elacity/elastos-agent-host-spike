@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005 and 003). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, or the wc-001 test driver, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003 and 009). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, or the wc-001 test driver, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -612,7 +612,9 @@
         "one_byte_change_in_the_manifest_changes_the_lab_cid",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid"
+        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "checked_name_check_judges_the_checked_bytes",
+        "checked_name_check_refuses_a_mismatch"
       ]
     },
     {
@@ -759,6 +761,187 @@
       ],
       "tests": [
         "claimed_name_is_checked_never_trusted"
+      ]
+    },
+    {
+      "id": "F-CI9a",
+      "title": "after the walk, the seam reads each entry again by its joined path, so the bytes it returns are not the bytes its lab CID names",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .map(|cid| CheckedBundle { cid, entries })\n",
+          "new": "        .and_then(|cid| {\n            let entries = entries\n                .into_iter()\n                .map(|entry| {\n                    let content = std::fs::read(bundle.join(&entry.path))\n                        .map_err(|error| unreadable(&entry.path, error))?;\n                    Ok(BundleEntry {\n                        path: entry.path,\n                        content,\n                    })\n                })\n                .collect::<Result<Vec<_>, Refusal>>()?;\n            Ok(CheckedBundle { cid, entries })\n        })\n"
+        }
+      ],
+      "tests": [
+        "checked_entries_are_the_bytes_the_walk_checked",
+        "lab_cid_and_the_seam_run_one_walk"
+      ]
+    },
+    {
+      "id": "F-CI9b",
+      "title": "the seam names every entry, then leaves capsule.json out of the entries it returns",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .map(|cid| CheckedBundle { cid, entries })\n",
+          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries: entries\n                .into_iter()\n                .filter(|entry| entry.path != MANIFEST_FILE)\n                .collect(),\n        })\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_returns_the_bytes_its_lab_cid_names"
+      ]
+    },
+    {
+      "id": "F-CI9c",
+      "title": "the root manifest check moves out of the seam into lab_cid_observed, so checked_bundle returns a value for a manifest the Runtime refuses",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    encode_entries(&entries)\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    Ok(checked_bundle_observed(bundle, observe)?.cid())\n",
+          "new": "    let checked = checked_bundle_observed(bundle, observe)?;\n    let manifest = checked\n        .entries()\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    Ok(checked.cid())\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_refuses_what_lab_cid_refuses",
+        "checked_bundle_checks_the_manifest_once"
+      ]
+    },
+    {
+      "id": "F-CI9d",
+      "title": "CheckedBundle's entries field is public",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n}\n",
+          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    pub entries: Vec<BundleEntry>,\n}\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_fields_are_private"
+      ]
+    },
+    {
+      "id": "F-CI9e",
+      "title": "a public constructor makes a CheckedBundle from any lab CID and any entries",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "impl CheckedBundle {\n",
+          "new": "impl CheckedBundle {\n    pub fn new(cid: LabCid, entries: Vec<BundleEntry>) -> Self {\n        Self { cid, entries }\n    }\n\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_fields_are_private"
+      ]
+    },
+    {
+      "id": "F-CI9f",
+      "title": "a public method hands out the lab CID to change",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "impl CheckedBundle {\n",
+          "new": "impl CheckedBundle {\n    pub fn cid_mut(&mut self) -> &mut LabCid {\n        &mut self.cid\n    }\n\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_fields_are_private"
+      ]
+    },
+    {
+      "id": "F-CI9g",
+      "title": "the checked name check checks the manifest a second time, from its entries",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n",
+          "new": "        let manifest = self\n            .entries\n            .iter()\n            .find(|entry| entry.path == MANIFEST_FILE)\n            .ok_or(Refusal::NoManifest)?;\n        check_manifest(&manifest.content)?;\n        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_checks_the_manifest_once"
+      ]
+    },
+    {
+      "id": "F-CI9h",
+      "title": "the checked name check accepts any lab CID without comparing",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        compare_name(self.cid, claimed_digits, claimed)\n",
+          "new": "        let _ = claimed_digits;\n        Ok(())\n"
+        }
+      ],
+      "tests": [
+        "checked_name_check_refuses_a_mismatch",
+        "checked_name_check_judges_the_checked_bytes",
+        "checked_name_check_shares_the_claim_check_and_the_compare"
+      ]
+    },
+    {
+      "id": "F-CI9i",
+      "title": "the checked name check reads the claim by itself and takes bare hex",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n",
+          "new": "        let claimed_digits = claimed.strip_prefix(LAB_CID_PREFIX).unwrap_or(claimed);\n        compare_name(self.cid, claimed_digits, claimed)\n"
+        }
+      ],
+      "tests": [
+        "checked_name_check_judges_the_checked_bytes",
+        "checked_name_check_shares_the_claim_check_and_the_compare"
+      ]
+    },
+    {
+      "id": "F-CI9j",
+      "title": "the checked name check keeps the bundle's path and walks the folder again",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n}\n",
+          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    bundle: std::path::PathBuf,\n}\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .map(|cid| CheckedBundle { cid, entries })\n",
+          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            bundle: bundle.to_path_buf(),\n        })\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        compare_name(self.cid, claimed_digits, claimed)\n",
+          "new": "        compare_name(lab_cid(&self.bundle)?, claimed_digits, claimed)\n"
+        }
+      ],
+      "tests": [
+        "checked_name_check_judges_the_checked_bytes",
+        "checked_name_check_shares_the_claim_check_and_the_compare"
       ]
     }
   ]
