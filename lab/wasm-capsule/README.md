@@ -865,21 +865,55 @@ The run receipt (task 016), in `tests/run.rs`:
   prints the receipt. If either engine is not found it prints `SKIPPED` and
   gives no result, never a PASS.
 
+Task 019's two:
+
+- `run_engine_starts_its_engine_exactly_once` (`tests/run.rs`) — counting
+  stand-ins append one line per start to `<their own path>.starts` (found from
+  `$0`; the engine has no environment). One `run_engine` call per engine
+  records exactly one module run and no `--version`; one `run` call records
+  exactly one module run per engine (two in all) and, counted apart, one
+  `--version` query each.
+- `readme_falsifier_total_matches_falsifiers_json` (`tests/docs.rs`) — counts
+  the `"falsifiers"` entries with `serde_json`, finds the total sentence that
+  opens "## Falsifiers" exactly once, and fails naming both numbers when they
+  differ.
+
 ## Falsifiers
 
-`falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, one task-012,
-one task-017, 21 wc-004, four wc-008, 20 wc-005a (task 014), 11 wc-005b
-(task 015) and 20 wc-005c (task 016) planted bugs in the provider format (`command: "lab"`). Each requires
-all its named tests to fail at an assertion. The canonical runner
-`examples/agent-host/falsify.py` now has a `lab` command (`cargo test
---workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
-still name the retired `tools/src/lab_name.rs` and none of `tools/src/lib.rs`,
-`tools/src/bundle.rs`, `tools/src/verify.rs`, `capsule/capsule.json`,
-`tests/common/build.rs`, `.gitignore` or `README.md`, so a killed run cannot
-restore those files (ask **R1**, pending). So each falsifier is proved by the
-repo's break → named test fails → revert method with `cargo test` in this
-workspace, and is listed as hand-proven, pending R1. Runner-caught: one,
-task 012's F-WC3-CREATE-NEW (below).
+`falsifiers.json` holds 122 planted bugs in the provider format (`command: "lab"`).
+By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
+21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
+wc-005c (task 016) and two task 019. Each requires all its named tests to fail
+at an assertion. `readme_falsifier_total_matches_falsifiers_json` holds the
+total to the file.
+
+Two kinds of evidence, kept apart. Runner-caught: 58, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016 and 019: 1 + 1 + 23 + 11 +
+20 + 2), each run by the canonical runner with its summary line quoted.
+Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
+wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
+named test fails → revert method with `cargo test` in this workspace. Their
+labels stay until each is run by the canonical runner and its summary line is
+quoted.
+
+R1 is done: the canonical runner `examples/agent-host/falsify.py` has a `lab`
+command (`cargo test --workspace` on this workspace). Its recovery targets
+(`PROVIDER_TARGETS`, the provider lane's) name every lane file a falsifier
+edits except `tools/src/run.rs` and `tools/src/receipt.rs`, so a killed run
+cannot restore those two (ask **R2**, open).
+
+wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
+
+- F-WC1 — an embedded `CARGO_MANIFEST_DIR` breaks the byte-identical build.
+- F-WC1-SPACED-PATH — whitespace-split `RUSTFLAGS` break the build when the
+  path has a space.
+- F-WC1-DIGEST — the digest result changes, so the fixed value no longer holds.
+- F-WC1-IMPORT — the capsule keeps a host import.
+- F-WC1-SIG — the `digest` export takes a second parameter.
+- F-WC1-TOOLCHAIN and F-WC1-RUSTC-OVERRIDE — the receipt records a compiler
+  the build did not use, or queries a bare `rustc`.
+- F-WC1-ARTIFACT-HASH and F-WC1-LOCK-HASH — the receipt swaps the artifact
+  and lockfile hashes.
 
 Task 010's seven, each hand-proven, pending R1:
 
@@ -925,8 +959,8 @@ Task 012's one, runner-caught (the canonical runner run
 `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-CREATE-NEW`
 reported `summary: 1 CAUGHT of 1` and restored `tools/src/bundle.rs`; by hand,
 the named test failed at its assertion with the bug in and passed after the
-revert). `tools/src/bundle.rs` is still not a recovery target, so a killed run
-cannot restore it:
+revert). `tools/src/bundle.rs` was not a recovery target at that run; it is
+one now:
 
 - F-WC3-CREATE-NEW — `capsule.json` is opened with `create` and `truncate`
   instead of `create_new`, so an existing file or a link at its path is written
@@ -977,8 +1011,9 @@ wc-008's four, and one reused entry, each hand-proven, pending R1 (every named
 test failed at its assertion with the bug in, and passed again after the
 revert). They are not in the runner-caught count. A canonical runner run,
 `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC8 F-WC3-LABCID-PIN`,
-reported `summary: 5 CAUGHT of 5`; it stays pending R1 (the recovery targets
-name neither `capsule/capsule.json` nor `tools/src/lib.rs`), not a PASS.
+reported `summary: 5 CAUGHT of 5`; it stays pending R1 (at that run the
+recovery targets named neither `capsule/capsule.json` nor `tools/src/lib.rs`;
+both are recovery targets now), not a PASS.
 
 - F-WC8-UNKNOWN-FIELD — hand-proven, pending R1. The committed manifest gains
   `"lab_imports": []`: `lab_manifest_passes_runtime_validate` fails with the
@@ -1123,3 +1158,14 @@ module runs, so its one edit became two) and F-WC5-EQUAL-FAILURES (`run_engine`
 returns an `EngineRun`, so the planted empty result is `EngineRun::default()`).
 No falsifier plants a fixed exit status: a passing run always exited 0, so a
 hard-coded 0 would print the same text and no test could tell them apart.
+
+Task 019's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 019). `tools/src/run.rs` is not a recovery target (ask R2), so a
+killed run cannot restore it for F-WC5-START-TWICE; `README.md` is one:
+
+- F-WC5-START-TWICE — `run_engine` starts the engine twice, drops the first
+  result and returns the second (`run_engine_starts_its_engine_exactly_once`,
+  at its count assertion).
+- F-WC-README-COUNT — the total in this section's first sentence becomes one
+  less than the file holds (`readme_falsifier_total_matches_falsifiers_json`,
+  at its comparison).
