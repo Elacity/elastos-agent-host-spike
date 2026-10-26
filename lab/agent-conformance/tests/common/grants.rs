@@ -28,6 +28,30 @@ fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 }
 
 impl Fixture {
+    /// Missing policy supplies zero entries. The caller leaves requests pending
+    /// so the Runtime's own default is observed, without a controller denial.
+    pub fn no_policy() -> Result<(Self, bool)> {
+        let path = repository().join("lab/agent-conformance/fixtures/no-policy.json");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((
+                Self {
+                    deny_reason: "fixture policy absent".into(),
+                    entries: Vec::new(),
+                },
+                false,
+            )),
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= 65536 =>
+            {
+                let text = fs::read_to_string(path).map_err(|_| "could not read fixture policy")?;
+                Ok((Self::parse(&text)?, true))
+            }
+            _ => Err("fixture policy must be a small regular file"),
+        }
+    }
+
     pub fn committed() -> Result<Self> {
         Self::parse(include_str!("../../fixtures/grants.json"))
     }
@@ -181,7 +205,7 @@ impl Controller {
                 self.credentials.push(field(&response, "token")?.to_owned());
                 self.used.insert(index);
                 self.decisions.granted += 1;
-                println!("fixture controller: matched, granted");
+                self.print_checked("fixture controller: matched, granted")?;
             } else {
                 let reason = self.fixture.deny_reason.clone();
                 self.deny(request, &reason)?;
@@ -200,7 +224,13 @@ impl Controller {
         )?;
         require_success(&response)?;
         self.decisions.denied += 1;
-        println!("fixture controller: denied");
+        self.print_checked("fixture controller: denied")?;
+        Ok(())
+    }
+
+    pub fn print_checked(&self, line: &str) -> Result<()> {
+        self.check_bytes(line.as_bytes(), Surface::Stdout)?;
+        println!("{line}");
         Ok(())
     }
 

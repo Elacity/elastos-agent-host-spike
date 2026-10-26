@@ -13,13 +13,15 @@ use wasmparser::{Encoding, Parser, Payload, Validator};
 
 static PROBE_BUILD: Mutex<()> = Mutex::new(());
 
-fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 10] {
-    static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 10]> = OnceLock::new();
+fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 12] {
+    static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 12]> = OnceLock::new();
     BUILDS.get_or_init(|| {
         let _serial = PROBE_BUILD.lock().unwrap();
         [
             Effect::Default,
             Effect::Read,
+            Effect::HumanRead,
+            Effect::MemoryWrite,
             Effect::Network,
             Effect::GrantedRead,
             Effect::SiblingRead,
@@ -188,6 +190,7 @@ fn probe_effects_are_exclusive() {
         "runaway",
         "granted-read",
         "sibling-read",
+        "memory-write",
     ];
     for (index, first) in features.iter().enumerate() {
         for second in &features[index + 1..] {

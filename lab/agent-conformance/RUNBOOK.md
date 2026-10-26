@@ -365,3 +365,31 @@ The granted and sibling checks observe that decision; F-ac1a changes only the
 explicit sibling grant entry. Resource budgets remain a separate Runtime rule.
 Tasks 016 and 017 must reuse these capture, source, report and receipt checks
 before claiming their M1 results.
+
+
+Task 004 adds the agent-memory rows to the same Cargo-derived table:
+
+- `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
+- `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
+- `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
+- `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
+
+F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
+instances the same principal. Run these only after the corresponding blocked
+journeys become live; forcing today's placeholders is zero falsifier evidence.
+F-ac2c adds the absent `fixtures/no-policy.json` file using its `new` text in
+`falsifiers.json` (`old: ""` denotes an absent file for this manual step).
+The entry allows every effect attempted by this instance: its one read.
+Run `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+--test effects no_policy_file_does_not_mean_allow -- --exact --nocapture` with
+the usual offline environment and heavy-build lease. Require a successful
+guest read, one observed grant, and the refusal test's FAIL. Remove only this
+added policy file and rerun the identical command; require PASS. A build
+failure, unrelated error, SKIPPED or BLOCKED result cannot catch a falsifier.
+
+F-ac2-human and F-ac2-write change the respective probe activation to succeed
+without its Bus refusal. Each named refusal test must fail, then pass when the
+original probe bytes are restored. All mutations remain inside fixtures or the
+one probe. The provider lane owns shared-runner support; these lab falsifiers
+continue to run by hand. The existing report records every launched variant's
+component SHA-256 and complete bundle lab CID.
