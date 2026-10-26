@@ -712,7 +712,14 @@ pub fn assert_memory_surfaces() {
             probe: agent_conformance::identity::ProbeIdentity {
                 effect: "default".into(),
                 component_sha256: "3".repeat(64),
-                bundle_lab_cid: format!("lab-cid:sha256:{}", "4".repeat(64)),
+                bundle_lab_cid: capsule_identity::encode_entries(&[
+                    capsule_identity::BundleEntry {
+                        path: "synthetic.bin".into(),
+                        content: "4".repeat(64).into_bytes(),
+                    },
+                ])
+                .unwrap()
+                .to_string(),
             },
         },
     ];
