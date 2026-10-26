@@ -46,8 +46,13 @@ use std::process::Command;
 /// exec rule, so `unbound_copy_is_refused_under_profile` fails on its deadline
 /// assertion, and task 060's WP57, which widens the parent read from `literal`
 /// to `subpath`, so `planted_key_beneath_storage_parent_is_not_read` fails on
-/// its refusal.
-const EXPECTED_FALSIFIERS: usize = 55;
+/// its refusal, and task 061's WP58, which drops the section check's own-id
+/// rule, WP59, which drops its unregistered-id rule, WP60, which matches an id
+/// as a substring instead of a whole token, WP61, which runs the section to the
+/// end of the file instead of the next `## ` heading, WP62 and WP63, which
+/// bypass the missing-heading and duplicate-heading refusals, and WP64, which
+/// skips an unreadable `CONFINEMENT.md` instead of refusing it.
+const EXPECTED_FALSIFIERS: usize = 62;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
