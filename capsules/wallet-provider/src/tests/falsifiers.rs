@@ -89,8 +89,12 @@ use std::process::Command;
 /// unresolved-file and no-citation refusals, so
 /// `operations_table_check_reports_each_missing_citation` fails. WP81 and WP82
 /// bypass its absolute-path and resolved-path containment refusals, so
-/// `operations_table_check_rejects_paths_outside_provider` fails.
-const EXPECTED_FALSIFIERS: usize = 80;
+/// `operations_table_check_rejects_paths_outside_provider` fails. Task 069's
+/// WP83 renames the wallet operations table's cited
+/// `confined_outside_write_is_denied` test in `tests/confine.rs`, so
+/// `every_operations_table_cites_existing_tests` fails because the cited
+/// function is gone.
+const EXPECTED_FALSIFIERS: usize = 81;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
