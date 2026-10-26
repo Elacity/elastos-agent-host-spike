@@ -1,0 +1,1 @@
+- 001: one verifier stand-in over a registry, grant store and ledger; the guest's handle decides, forged claims do not, and identity, session, instance, unknown handle and owned-root refusals each have a named test and a plant (`F-A5-*`); one link detector (`F-GB-link`); 15 tests, 7 plants caught.

@@ -1,0 +1,9 @@
+id: F-GB-link
+file: src/link.rs
+test: model_detects_a_path_dependency_on_this_crate
+--- old
+    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
+--- new
+    let _ = cargo_toml;
+    false
+--- end
