@@ -484,16 +484,19 @@ signs it:
   these bytes match this name" or "did this key sign this name". None takes
   or returns a grant, an admission or a launch value. A test keeps the list:
   a new public function fails it until someone lists it on purpose. The test
-  reads every `pub` function, also one declared with any of `async`,
-  `const`, `unsafe` or `extern` (with or without an ABI string) before
-  `fn`. A `pub(crate)` or `pub(super)` function is not exported, so it is not
-  read.
+  reads the declaration after every `pub` word token by token, across line
+  breaks, so it also reads a function declared with any of `async`, `const`,
+  `unsafe` or `extern` (with or without an ABI string) before `fn`, in any
+  order and split over any lines. A `pub(crate)` or `pub(super)` function is
+  not exported, so it is not counted. A `pub` declaration the test cannot read
+  fails it with its own reason; it is never skipped.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | A valid signature verifies, and signing and verifying change no covered byte, add no entry next to the bundle, and leave no lab signature in `capsule.json`; a success approves nothing for the next check | `valid_signature_grants_nothing_by_itself` | F-CI7a, F-CI7b, F-CI7c |
-| The library exports only identity checks | `the_harness_exports_only_identity_checks` | F-CI7d, F-CI14a, F-CI14b |
-| The export check reads `async`, `const`, `unsafe` and `extern` functions, and not `pub(crate)` or `pub(super)` ones | `every_exported_function_form_is_read` | by hand (see below) |
+| The library exports only identity checks | `the_harness_exports_only_identity_checks` | F-CI7d, F-CI14a, F-CI14b, F-CI14d, F-CI14e |
+| The export check reads `async`, `const`, `unsafe` and `extern` functions split over any lines, and not `pub(crate)` or `pub(super)` ones | `every_exported_function_form_is_read` | by hand (see below) |
+| The export check refuses a `pub` declaration it cannot read, each with its own reason | `an_unreadable_pub_declaration_is_refused_with_its_reason` | by hand (see below) |
 
 The tests are in `tests/not_admission.rs`. F-CI7a makes `sign_bundle` write
 the signature's hex into `capsule.json`'s `signature` field, the way the
@@ -502,11 +505,19 @@ successful verify write `<bundle>.admitted`. F-CI7c makes verify remember each
 name and signer it passed, and pass them again with no accepted-list check.
 F-CI7d adds a public `admit` step. F-CI14a adds `pub async fn admit() {}` and
 F-CI14b adds `pub const fn grant() {}`; before task 014 the export check read
-only lines that start with `pub fn `, so both passed it. The reader
-`exported_fn` sits in `tests/not_admission.rs`, which the runner does not
-restore, so its falsifier is proved by hand only: with `"unsafe "` dropped
-from its qualifier list, `every_exported_function_form_is_read` fails on
-`pub unsafe fn launch()`.
+only lines that start with `pub fn `, so both passed it. F-CI14d adds
+`pub async` and `fn admit() {}` on two lines (under `#[rustfmt::skip]`, so
+rustfmt keeps them split); a check that read one line at a time passed it.
+F-CI14e adds `pub struct Opaque(pub u8);`, whose `pub u8` the check cannot
+read, so the test fails with "`pub u8` is not a declaration this check
+reads" instead of skipping it. The reader (`token`, `declared_after_pub`,
+`exported_functions`) sits in `tests/not_admission.rs`, which the runner does
+not restore, so its falsifiers are proved by hand only. With `"unsafe"`
+dropped from its qualifiers, `every_exported_function_form_is_read` fails on
+`pub unsafe fn launch()`. With `token` skipping only spaces, not line breaks,
+it fails on `pub async` and `fn admit() {}` split over two lines. With the end
+of the code read as no item, `an_unreadable_pub_declaration_is_refused_with_its_reason`
+fails on `pub`.
 
 What the tests cannot show. Admission and grants are the Runtime's, not this
 lab's. PRINCIPLES.md 13 (lines 134-135): "admission is a separate decision
@@ -592,7 +603,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 92 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 94 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -602,7 +613,7 @@ task 004's F-CI4a to F-CI4z (see
 task 007's F-CI7a to F-CI7d (see
 [verify is not admit](#verify-is-not-admit-m1-check-b1)), task 013's
 F-CI13a to F-CI13c (see [reading a printed lab CID](#reading-a-printed-lab-cid)),
-and task 014's F-CI14a to F-CI14c (see
+and task 014's F-CI14a to F-CI14e (see
 [the test-key signature](#test-key-publisher-signature-lab-proposal) and
 [verify is not admit](#verify-is-not-admit-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
@@ -638,7 +649,7 @@ At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
 that followed added F-CI4z, so 004 merged 82 entries. At task 007
 it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
 At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
-`summary: 92 CAUGHT of 92`.
+`summary: 94 CAUGHT of 94`.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013
 and 014 prove each of their falsifiers by break, named test fails, revert.
 

@@ -146,33 +146,105 @@ fn counted<'a>(names: impl IntoIterator<Item = &'a str>) -> BTreeMap<&'a str, us
     counts
 }
 
-/// The name of the function `line` exports, if it declares one: `pub`, then
-/// any of `async`, `const`, `unsafe` and `extern` (with or without an ABI
-/// string) in any order, then `fn`. `pub(crate)` and `pub(super)` export
-/// nothing, so they are not read.
-fn exported_fn(line: &str) -> Option<&str> {
-    let mut rest = line.trim_start().strip_prefix("pub ")?.trim_start();
+/// The exported items, after a bare `pub`, that are not functions.
+const OTHER_ITEMS: [&str; 7] = ["struct", "enum", "type", "trait", "mod", "use", "static"];
+
+/// Whether `c` can be part of a name.
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The next token of `text`, after any white space, line breaks included: a
+/// run of name characters, or one other character ("" at the end). And the
+/// text after it.
+fn token(text: &str) -> (&str, &str) {
+    let text = text.trim_start();
+    let end = match text.find(|c: char| !is_name_char(c)) {
+        Some(0) => text.chars().next().map_or(0, char::len_utf8),
+        Some(end) => end,
+        None => text.len(),
+    };
+    text.split_at(end)
+}
+
+/// The name of the function the declaration after one `pub` exports, or
+/// `None` when it exports no function. The declaration is read token by
+/// token across line breaks: any of `async`, `const`, `unsafe` and `extern`
+/// (with or without an ABI string) in any order, then `fn` and its name.
+/// `pub(crate)` and `pub(super)` export nothing. A declaration this check
+/// cannot read is refused with its own reason, never skipped.
+fn declared_after_pub(after_pub: &str) -> Result<Option<&str>, String> {
+    if token(after_pub).0 == "(" {
+        return Ok(None);
+    }
+    let mut head = vec![String::from("pub")];
+    let mut rest = after_pub;
     loop {
-        if let Some(name) = rest.strip_prefix("fn ") {
-            let end = name
-                .find(|c: char| c == '(' || c == '<')
-                .unwrap_or(name.len());
-            return Some(name[..end].trim());
-        }
-        let qualifier = ["async ", "const ", "unsafe ", "extern "]
-            .into_iter()
-            .find(|word| rest.starts_with(word))?;
-        rest = rest[qualifier.len()..].trim_start();
-        if qualifier == "extern " && rest.starts_with('"') {
-            let close = rest[1..].find('"')? + 2;
-            rest = rest[close..].trim_start();
+        let (word, after) = token(rest);
+        rest = after;
+        let qualifiers: Vec<&str> = head[1..].iter().map(String::as_str).collect();
+        match word {
+            "" => return Err(format!("`{}` ends the code with no item", head.join(" "))),
+            "fn" => {
+                let name = token(after).0;
+                if name.starts_with(|c: char| is_name_char(c) && !c.is_ascii_digit()) {
+                    return Ok(Some(name));
+                }
+                return Err(format!(
+                    "`{} fn` is followed by {name:?}, not a name",
+                    head.join(" ")
+                ));
+            }
+            "async" | "const" | "unsafe" => head.push(word.to_owned()),
+            "extern" => match token(after) {
+                ("\"", abi) => {
+                    let close = abi
+                        .find('"')
+                        .ok_or("the ABI string after `extern` has no closing quote")?;
+                    head.push(format!("extern \"{}\"", &abi[..close]));
+                    rest = &abi[close + 1..];
+                }
+                _ => head.push(word.to_owned()),
+            },
+            _ => {
+                let not_a_function = match qualifiers.as_slice() {
+                    [] => OTHER_ITEMS.contains(&word) || token(after).0 == ":",
+                    ["const"] => word.starts_with(is_name_char),
+                    ["unsafe"] => word == "trait",
+                    ["extern"] => word == "crate",
+                    _ => false,
+                };
+                if not_a_function {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "`{} {word}` is not a declaration this check reads",
+                    head.join(" ")
+                ));
+            }
         }
     }
 }
 
+/// Every function `code` exports, by name: the declaration after each `pub`
+/// word, wherever it is and however its tokens are split across lines. The
+/// first declaration this check cannot read is refused with its reason.
+fn exported_functions(code: &str) -> Result<Vec<&str>, String> {
+    let mut names = Vec::new();
+    for (at, _) in code.match_indices("pub") {
+        let before = code[..at].chars().next_back();
+        let after = &code[at + "pub".len()..];
+        if before.is_some_and(is_name_char) || after.starts_with(is_name_char) {
+            continue;
+        }
+        names.extend(declared_after_pub(after)?);
+    }
+    Ok(names)
+}
+
 #[test]
 fn every_exported_function_form_is_read() {
-    for (line, name) in [
+    for (code, name) in [
         ("pub fn plain(", "plain"),
         ("    pub fn method(&self", "method"),
         ("pub async fn admit() {}", "admit"),
@@ -182,25 +254,72 @@ fn every_exported_function_form_is_read() {
         ("pub extern fn run_c()", "run_c"),
         ("pub const async unsafe extern \"C\" fn all<T>()", "all"),
         ("pub unsafe extern \"system\" fn sys()", "sys"),
+        ("#[rustfmt::skip]\npub async\nfn admit() {}", "admit"),
+        ("pub\n    const\n    fn\n    grant() {}", "grant"),
+        ("pub extern\n\"C\"\nfn run()", "run"),
+        ("pub fn\nsplit_name\n()", "split_name"),
     ] {
-        assert_eq!(exported_fn(line), Some(name), "{line}");
+        assert_eq!(exported_functions(code), Ok(vec![name]), "{code:?}");
     }
-    for line in [
+    for code in [
         "pub(crate) fn inner()",
         "pub(super) async fn inner()",
+        "pub (crate)\nfn inner()",
         "pub const MANIFEST_FILE: &str = \"capsule.json\";",
         "pub struct LabCid([u8; 32]);",
-        "fn private()",
+        "pub struct Entry {\n    pub path: String,\n}",
+        "pub enum Moment {}",
+        "pub unsafe trait Marker {}",
         "pub extern crate x;",
+        "fn private()",
+        "let publish = 1; fn pub_key() {}",
     ] {
-        assert_eq!(exported_fn(line), None, "{line}");
+        assert_eq!(exported_functions(code), Ok(vec![]), "{code:?}");
+    }
+}
+
+#[test]
+fn an_unreadable_pub_declaration_is_refused_with_its_reason() {
+    for (code, reason) in [
+        ("pub", "`pub` ends the code with no item"),
+        ("pub async\n", "`pub async` ends the code with no item"),
+        (
+            "pub extern \"C fn run()",
+            "the ABI string after `extern` has no closing quote",
+        ),
+        ("pub fn (", "`pub fn` is followed by \"(\", not a name"),
+        ("pub fn", "`pub fn` is followed by \"\", not a name"),
+        (
+            "pub async struct S;",
+            "`pub async struct` is not a declaration this check reads",
+        ),
+        (
+            "pub extern \"C\" crate x;",
+            "`pub extern \"C\" crate` is not a declaration this check reads",
+        ),
+        (
+            "pub struct Opaque(pub u8);",
+            "`pub u8` is not a declaration this check reads",
+        ),
+        (
+            "pub macro m() {}",
+            "`pub macro` is not a declaration this check reads",
+        ),
+        (
+            "pub fn first() {}\npub async move",
+            "`pub async move` is not a declaration this check reads",
+        ),
+    ] {
+        assert_eq!(exported_functions(code), Err(reason.to_owned()), "{code:?}");
     }
 }
 
 #[test]
 fn the_harness_exports_only_identity_checks() {
     let code = library_code();
-    let declared = counted(code.lines().filter_map(exported_fn));
+    let declared = exported_functions(&code)
+        .unwrap_or_else(|reason| panic!("the export check cannot read the library: {reason}"));
+    let declared = counted(declared);
     let expected = counted(IDENTITY_FUNCTIONS);
     let mut problems = Vec::new();
     for (name, &count) in &declared {

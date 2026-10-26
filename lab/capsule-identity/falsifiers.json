@@ -1545,6 +1545,38 @@
       "tests": [
         "test_keys_use_fresh_os_randomness"
       ]
+    },
+    {
+      "id": "F-CI14d",
+      "title": "the library gains a public async admit step split across lines, which a line-by-line export check missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const LAB_CID_PREFIX: &str = \"lab-cid:sha256:\";\n",
+          "new": "#[rustfmt::skip]\npub async\nfn admit() {}\n\npub const LAB_CID_PREFIX: &str = \"lab-cid:sha256:\";\n"
+        }
+      ],
+      "tests": [
+        "the_harness_exports_only_identity_checks"
+      ]
+    },
+    {
+      "id": "F-CI14e",
+      "title": "the library gains a pub declaration the export check cannot read, which it skipped instead of refusing",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "pub const FRAMING_TAG: &[u8] = b\"lab.capsule-identity.bundle/v1\\n\";\n",
+          "new": "/// Not read by the export check.\npub struct Opaque(pub u8);\n\npub const FRAMING_TAG: &[u8] = b\"lab.capsule-identity.bundle/v1\\n\";\n"
+        }
+      ],
+      "tests": [
+        "the_harness_exports_only_identity_checks"
+      ]
     }
   ]
 }
