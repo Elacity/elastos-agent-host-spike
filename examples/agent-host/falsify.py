@@ -393,8 +393,9 @@ def restore_interruptions(saved):
 
 
 class BackupCollision(Exception):
-    """A backup this run did not create is already there. The link decides
-    ownership: this run stops before it touches the caller's bytes."""
+    """A path this run did not create is already there, as the backup or the
+    temporary file. The link and the exclusive create decide ownership: this
+    run stops before it touches the caller's bytes."""
 
 
 class Mutation:
@@ -466,8 +467,19 @@ class Mutation:
                 finally:
                     restore_interruptions(saved)
                 tmp = path.with_name(path.name + ".falsify-tmp")
+                # The temporary file is this run's own destination: create it
+                # exclusively, so a path that already exists (including a hard
+                # link to a file outside REPO) is a refusal with its reason
+                # instead of a truncating write into that file's inode.
                 try:
-                    tmp.write_text(text, encoding="utf-8")
+                    handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                except FileExistsError as error:
+                    raise BackupCollision(
+                        f"{tmp} is a temporary file this run did not create; "
+                        "the edit is not applied") from error
+                try:
+                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                        stream.write(text)
                     os.replace(tmp, path)
                 finally:
                     if tmp.exists():
@@ -490,6 +502,11 @@ class Mutation:
             for path, backup, original in reversed(self.applied):
                 if backup.exists():
                     os.replace(backup, path)
+                    # POSIX rename does nothing when both names are hard
+                    # links to one inode, so a run that stopped before the
+                    # replacement still has its backup name; remove it.
+                    if backup.exists():
+                        backup.unlink()
                     # The rename brings back the original's old mtime; touch
                     # it, so cargo does not take the mutated build for a fresh
                     # one.
@@ -2256,6 +2273,37 @@ def an_edit_with_an_outside_temporary_target_is_refused():
     return ok
 
 
+def a_temporary_file_this_run_did_not_create_is_refused():
+    """The temporary write target is this run's own file. An existing path is
+    refused with its reason before any write, even when it is a hard link to a
+    file outside REPO and the pathname alone resolves inside; the outside file
+    keeps its bytes and the foreign temporary file stays (task 025)."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        inside = here / "inside.txt"
+        inside.write_bytes(b"inside original\n")
+        tmp = inside.with_name(inside.name + ".falsify-tmp")
+        os.link(outside, tmp)
+        want = (False, "BACKUP TAKEN",
+                f"{tmp} is a temporary file this run did not create; "
+                "the edit is not applied")
+        got = refused_edit(edit_entry("inside.txt", "inside original"), here, tree)
+        kept = (inside.read_bytes() == b"inside original\n"
+                and outside.read_bytes() == b"outside original\n"
+                and tmp.exists()
+                and os.stat(tmp).st_ino == os.stat(outside).st_ino
+                and tmp.read_bytes() == b"outside original\n"
+                and not os.path.lexists(inside.with_name(inside.name + BACKUP_SUFFIX)))
+        print(f"self-test: a temporary file this run did not create is refused: "
+              f"{got[1]} ({got[2]}), kept={kept}")
+        if got != want or not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def a_mixed_entry_is_refused_before_any_mutation():
     """An entry whose inside edit comes first and whose second path climbs out
     changes no file. The one path rule checks every name before any link or
@@ -3013,6 +3061,8 @@ SELF_TEST_CASES = {
         an_edit_through_an_outside_parent_with_an_inside_target_is_refused,
     "an edit with an outside temporary target is refused":
         an_edit_with_an_outside_temporary_target_is_refused,
+    "a temporary file this run did not create is refused":
+        a_temporary_file_this_run_did_not_create_is_refused,
     "a mixed entry is refused before any mutation": a_mixed_entry_is_refused_before_any_mutation,
     "an absent outside edit path gets the containment reason":
         an_absent_outside_edit_path_gets_the_containment_reason,
