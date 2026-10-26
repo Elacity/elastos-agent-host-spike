@@ -803,6 +803,81 @@ fn wait_for_terminal(
     panic!("the run must settle within {within:?}: no terminal reply came before the deadline")
 }
 
+/// Every cited `model_` test in "Operations and the rights they need" is a
+/// function in this file.
+///
+/// The section is `CONFINEMENT.md` from that heading through the next heading
+/// line. A cited test name is a backtick span of `model_` plus lowercase
+/// letters, digits and underscores. Each span must occur as `fn <name>(` in
+/// this file. The failure names the missing test. This test starts no process
+/// and needs no sandbox.
+///
+/// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
+/// test no longer finds that function.
+#[test]
+fn operations_section_cites_existing_tests() {
+    fn cited_model_test(span: &str) -> bool {
+        let Some(tail) = span.strip_prefix("model_") else {
+            return false;
+        };
+        !tail.is_empty()
+            && tail
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }
+    fn operations_section_text(doc: &str) -> &str {
+        const HEADING: &str = "## Operations and the rights they need";
+        let Some(start) = doc.find(HEADING) else {
+            panic!("missing heading: {HEADING}");
+        };
+        let after = start + HEADING.len();
+        let Some(next) = doc[after..].find("\n## ") else {
+            panic!("the operations section has no following heading");
+        };
+        let heading_at = after + next + 1;
+        let line_end = doc[heading_at..]
+            .find('\n')
+            .map(|index| heading_at + index)
+            .unwrap_or(doc.len());
+        &doc[start..line_end]
+    }
+
+    let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
+    let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
+        panic!(
+            "CONFINEMENT.md must be readable ({}): {err}",
+            doc_path.display()
+        )
+    });
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine/main.rs");
+    let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+        panic!(
+            "tests/confine/main.rs must be readable ({}): {err}",
+            source_path.display()
+        )
+    });
+    let section = operations_section_text(&doc);
+    let mut cited = Vec::new();
+    let mut rest = section;
+    while let Some(start) = rest.find('`') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('`') else {
+            break;
+        };
+        let span = &rest[..end];
+        rest = &rest[end + 1..];
+        if cited_model_test(span) && !cited.contains(&span) {
+            cited.push(span);
+        }
+    }
+    let missing: Vec<&str> = cited
+        .iter()
+        .copied()
+        .filter(|name| !source.contains(&format!("fn {name}(")))
+        .collect();
+    assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
+}
+
 /// The confined provider serves `init`, `status` and `offers_list`, and
 /// `init` creates the journal root with `runs/` under `STORAGE_ROOT`.
 ///
