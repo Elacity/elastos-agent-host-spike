@@ -1,0 +1,14 @@
+id: F-A5-unregistered
+file: src/lib.rs
+test: model_unknown_instance_is_refused
+--- old
+        let live = self
+            .registry
+            .get(&call.instance)
+            .ok_or(Refuse::UnknownInstance)?;
+--- new
+        let live = self
+            .registry
+            .get(&grant.instance)
+            .ok_or(Refuse::UnknownInstance)?;
+--- end
