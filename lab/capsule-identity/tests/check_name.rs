@@ -147,7 +147,16 @@ fn check_name_uses_the_single_naming_path() {
             "check_name names the bundle by itself ({own_naming}):\n{body}"
         );
     }
-    assert_eq!(code.matches("encode_entries(").count(), 2, "encode_entries");
+    // The encoder's definition, the seam's call, and task 015's one call that
+    // names a variant recipe as one entry: the same encoder, not a second.
+    assert_eq!(code.matches("encode_entries(").count(), 3, "encode_entries");
+    assert_eq!(
+        library_item(&code, "fn recipe_cid(")
+            .matches("encode_entries(")
+            .count(),
+        1,
+        "the recipe is not named by the one encoder"
+    );
     assert_eq!(code.matches("Sha256::new()").count(), 2, "Sha256::new()");
     assert_eq!(
         library_item(&code, "pub fn encode_entries(")

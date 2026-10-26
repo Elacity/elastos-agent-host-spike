@@ -1,0 +1,21 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "ipfs-provider",
+  "version": "0.1.0",
+  "role": "provider",
+  "type": "microvm",
+  "entrypoint": "ipfs-provider",
+  "requires": [{"name": "kubo", "kind": "external"}],
+  "provides": "elastos://ipfs/*",
+  "authority": {
+    "reason": "Low-level content availability backend owned by the runtime.",
+    "capabilities": [{
+      "resource": "elastos://ipfs/*",
+      "actions": ["read", "write", "delete", "admin"],
+      "operations": ["add_bytes", "cat", "download_directory", "unpin", "status"]
+    }],
+    "audit_events": ["ipfs.publish", "ipfs.fetch", "ipfs.unpin"]
+  },
+  "capabilities": ["localhost://ElastOS/SystemServices/IPFS/*"],
+  "resources": {"memory_mb": 128, "gpu": false}
+}
