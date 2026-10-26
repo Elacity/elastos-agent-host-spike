@@ -1,0 +1,17 @@
+id: F-A7-overflow
+file: src/ledger.rs
+test: ledger::model_reserve_past_the_u64_total_is_refused
+--- old
+        let total = match held.checked_add(amount) {
+            Some(total) if total <= self.ledger.ceiling => total,
+            _ => {
+                return Err(ReserveRefuse::OverCeiling {
+                    ceiling: self.ledger.ceiling,
+                    held,
+                    asked: amount,
+                })
+            }
+        };
+--- new
+        let total = held.wrapping_add(amount);
+--- end
