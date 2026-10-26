@@ -318,7 +318,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
           "new": "                if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
         }
       ],
@@ -335,7 +335,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
           "new": "                if section.name().as_bytes().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                    || section.data().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                {"
         }
       ],
@@ -448,8 +448,8 @@
         },
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "    }\n    Ok(())\n}",
-          "new": "    }\n    if Validator::new().validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+          "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
+          "new": "            _ => {}\n        }\n    }\n    if Validator::new().validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
         }
       ],
       "tests": [
@@ -520,6 +520,78 @@
       ],
       "tests": [
         "component_import_names_with_options_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA7a",
+      "title": "Skip the size's last byte when scanning custom sections",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
+          "new": "                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA7b",
+      "title": "Refuse custom sections whose size ends in zero even without code",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "if content.first() == Some(&0) || content.windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA8a",
+      "title": "Run the encoding check after parsing and custom-section checks",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
+          "new": "    if Validator::new().validate_all(wasm).is_err() {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
+          "new": "            _ => {}\n        }\n    }\n    if !right_encoding {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA8b",
+      "title": "DeclaredImport loses its Eq derive in the API document",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/INTERFACE.md",
+          "old": "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct DeclaredImport {",
+          "new": "#[derive(Debug, Clone, PartialEq)]\npub struct DeclaredImport {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
       ]
     }
   ]
