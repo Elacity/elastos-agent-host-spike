@@ -461,7 +461,7 @@ impl Provider {
         panic!(
             "the provider process exited before answering {}: {}",
             request["op"],
-            describe(self.wait())
+            describe(self.wait(FIXTURE_EVENT_TIMEOUT))
         )
     }
 
@@ -469,15 +469,8 @@ impl Provider {
     /// status from `wait`, and the stderr lines no earlier read took, read
     /// from the stderr channel until the stream closes.
     fn ended(&mut self) -> Ended {
-        let status = self.wait();
-        let mut stderr = Vec::new();
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            match self.stderr.recv_timeout(left) {
-                Ok(line) => stderr.push(line),
-                Err(_) => break,
-            }
-        }
+        let status = self.wait(FIXTURE_EVENT_TIMEOUT);
+        let stderr = self.collect_stderr(FIXTURE_EVENT_TIMEOUT);
         Ended { status, stderr }
     }
 
@@ -530,8 +523,8 @@ impl Provider {
         None
     }
 
-    fn wait(&mut self) -> Option<ExitStatus> {
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+    fn wait(&mut self, limit: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + limit;
         loop {
             match self
                 .child
@@ -545,40 +538,33 @@ impl Provider {
         }
     }
 
+    /// Collects the remaining stderr lines, waiting at most `limit` for the
+    /// stream to close. A zero limit drains only the lines already queued.
+    fn collect_stderr(&self, limit: Duration) -> Vec<String> {
+        let deadline = Instant::now() + limit;
+        let mut stderr = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.stderr.recv_timeout(left) {
+                Ok(line) => stderr.push(line),
+                Err(_) => break,
+            }
+        }
+        stderr
+    }
+
     /// The exit status if the process ends within `limit`, and the stderr
     /// lines read by then. `None` means the process is still running after
     /// `limit`. After an exit, stderr is read until the stream closes, so a
     /// refusal line is not lost. A process still running is not waited past
     /// `limit`.
     fn outcome_within(&mut self, limit: Duration) -> (Option<ExitStatus>, Vec<String>) {
-        let deadline = Instant::now() + limit;
-        let status = loop {
-            match self
-                .child
-                .try_wait()
-                .expect("provider status must be readable")
-            {
-                Some(status) => break Some(status),
-                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                None => break None,
-            }
-        };
-        let mut stderr = Vec::new();
-        if status.is_some() {
-            let read_until = Instant::now() + limit;
-            while let Some(left) = read_until.checked_duration_since(Instant::now()) {
-                if left.is_zero() {
-                    break;
-                }
-                match self.stderr.recv_timeout(left) {
-                    Ok(read) => stderr.push(read),
-                    Err(_) => break,
-                }
-            }
-        }
-        while let Ok(line) = self.stderr.try_recv() {
-            stderr.push(line);
-        }
+        let status = self.wait(limit);
+        let stderr = self.collect_stderr(if status.is_some() {
+            limit
+        } else {
+            Duration::ZERO
+        });
         (status, stderr)
     }
 
@@ -597,7 +583,7 @@ impl Provider {
         let data = self.ok(&json!({ "op": "shutdown" }));
         assert_eq!(data["shutdown"], true, "shutdown must be acknowledged");
         self.stdin.take();
-        let status = self.wait();
+        let status = self.wait(FIXTURE_EVENT_TIMEOUT);
         assert!(
             status.is_some_and(|status| status.success()),
             "the provider must exit cleanly after shutdown: {}",
@@ -608,11 +594,7 @@ impl Provider {
 
 impl Drop for Provider {
     fn drop(&mut self) {
-        self.stdin.take();
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        self.kill_and_wait();
     }
 }
 
