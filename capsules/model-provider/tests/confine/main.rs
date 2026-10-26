@@ -817,13 +817,7 @@ fn wait_for_terminal(
 #[test]
 fn operations_section_cites_existing_tests() {
     fn cited_model_test(span: &str) -> bool {
-        let Some(tail) = span.strip_prefix("model_") else {
-            return false;
-        };
-        !tail.is_empty()
-            && tail
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        cited_confine_test(span)
     }
     fn operations_section_text(doc: &str) -> &str {
         const HEADING: &str = "## Operations and the rights they need";
@@ -873,9 +867,79 @@ fn operations_section_cites_existing_tests() {
     let missing: Vec<&str> = cited
         .iter()
         .copied()
-        .filter(|name| !source.contains(&format!("fn {name}(")))
+        .filter(|name| {
+            let function = name.rsplit("::").next().unwrap_or(name);
+            !rust_source_without_comments(&source).contains(&format!("fn {function}("))
+        })
         .collect();
     assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
+}
+
+/// Line comments are not function declarations.
+///
+/// Falsifier: search the raw source for `fn NAME(`; a comment then counts
+/// and this test fails.
+#[test]
+fn operations_section_does_not_cite_a_comment() {
+    let source = "// fn allow_rules_trace_to_declared_rights()\nfn model_provider_ops_under_profile() {}\n";
+    assert!(
+        !rust_source_without_comments(source)
+            .contains("fn allow_rules_trace_to_declared_rights("),
+        "a comment must not count as a function declaration"
+    );
+    assert!(
+        rust_source_without_comments(source).contains("fn model_provider_ops_under_profile("),
+        "a real function must still count"
+    );
+    assert!(
+        cited_confine_test("allow_rules_trace_to_declared_rights"),
+        "the model's own trace test is a citation, not only model_ names"
+    );
+}
+
+/// The model's line-based copy must see a split `(allow` form and a nested
+/// allow. Until the sexp walk lands, these fixtures are the red-team cases.
+///
+/// Falsifier: keep the line-based `(allow ` prefix scan; both cases fail.
+#[test]
+fn model_allow_forms_read_split_and_nested_allows() {
+    let split = "(version 1)\n(deny default)\n(allow\n    file-read* (subpath \"/\"))\n";
+    let forms = model_allow_forms(split);
+    assert!(
+        forms.iter().any(|form| form.contains("file-read*") && form.contains("subpath \"/\"")),
+        "the split allow form must be one allow: {forms:?}"
+    );
+
+    let nested = "(version 1)\n(deny default)\n(if #t (allow default))\n(begin (allow network*))\n(import \"bsd.sb\")\n";
+    let forms = model_allow_forms(nested);
+    assert!(
+        forms.iter().any(|form| form == "(allow default)" || form.contains("allow default")),
+        "a nested allow default must be visible: {forms:?}"
+    );
+    assert!(
+        forms.iter().any(|form| form.contains("network")),
+        "a nested network allow must be visible: {forms:?}"
+    );
+}
+
+/// A root-wide read may not be declared as storage, even when the two files
+/// agree.
+#[test]
+fn model_trace_refuses_a_root_wide_storage_read() {
+    assert!(
+        model_is_root_wide_read("(allow file-read* (subpath \"/\"))"),
+        "a subpath root read is root-wide"
+    );
+    assert!(
+        model_is_root_wide_read("(allow file-read-data (literal \"/\"))"),
+        "a literal root read is root-wide"
+    );
+    assert!(
+        !model_is_root_wide_read(
+            "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))"
+        ),
+        "the shared storage rule is not root-wide"
+    );
 }
 
 /// The confined provider serves `init`, `status` and `offers_list`, and
@@ -2263,6 +2327,45 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     );
 }
 
+/// Top-level `(allow ...)` lines, the model's first copy of the trace parser.
+/// Nested forms and a split `(allow` are added by the sexp walk below.
+fn model_allow_forms(profile: &str) -> Vec<String> {
+    profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| line.starts_with("(allow "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A storage right may not claim a root-wide read.
+fn model_is_root_wide_read(form: &str) -> bool {
+    form.starts_with("(allow ")
+        && form.contains("file-read")
+        && (form.contains("(literal \"/\")") || form.contains("(subpath \"/\")"))
+}
+
+/// Drops Rust comments so a citation cannot point at a commented-out `fn`.
+fn rust_source_without_comments(source: &str) -> String {
+    source.to_string()
+}
+
+/// The model's copy of the operations citation filter: `model_` names and
+/// the other confine tests this section cites.
+fn cited_confine_test(span: &str) -> bool {
+    if let Some(tail) = span.strip_prefix("model_") {
+        return !tail.is_empty()
+            && tail
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    }
+    span == "allow_rules_trace_to_declared_rights"
+        || span == "operations_section_cites_existing_tests"
+        || span == "platform_baseline_rules_stay_narrow"
+        || span.contains("::")
+}
+
 /// Every allow rule in `confine.sb` traces to exactly one approved declared
 /// right or one platform-baseline rule in the declared-rights fixture.
 ///
@@ -2301,12 +2404,7 @@ fn allow_rules_trace_to_declared_rights() {
     }
 
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
-    let allow_lines: Vec<&str> = profile
-        .lines()
-        .filter(|line| !line.starts_with(";;"))
-        .map(str::trim)
-        .filter(|line| line.starts_with("(allow "))
-        .collect();
+    let allow_lines = model_allow_forms(&profile);
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
     let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
         panic!(
@@ -2339,7 +2437,7 @@ fn allow_rules_trace_to_declared_rights() {
         }
     }
 
-    for line in allow_lines.iter().copied() {
+    for line in allow_lines.iter() {
         let mut claimants = Vec::new();
         for entry in rights.iter().chain(baseline.iter()) {
             if rule_strings(entry).iter().any(|rule| *rule == line) {

@@ -2875,6 +2875,38 @@ fn declared_rights_trace_refuses_each_bad_input() {
             && reason.contains("must be claimed by"),
         "the startup root read moved under storage must be refused by rule and id: {reason}"
     );
+
+    let mut widened = profile.clone();
+    widened.push_str("(allow file-read* (subpath \"/\"))\n");
+    let mut declared = read();
+    declared["rights"][0]["rules"]
+        .as_array_mut()
+        .expect("fixture storage rules")
+        .push(json!("(allow file-read* (subpath \"/\"))"));
+    let reason = refuse(&declared, &widened);
+    assert!(
+        reason.contains("storage")
+            && reason.contains("root-wide")
+            && reason.contains("(allow file-read* (subpath \"/\"))"),
+        "a root-wide read declared as storage must be refused: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]["rules"][0]["justification"] = json!(format!(
+        "{}x",
+        platform_baseline_justification(name)
+    ));
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("startup-root-directory")
+            && reason.contains("justification")
+            && !reason.contains(" must start with \"x\""),
+        "a prefix plus a one-letter placeholder is not a real justification: {reason}"
+    );
+    assert!(
+        reason.contains("must be") || reason.contains("exact"),
+        "the refusal must require the pinned justification text: {reason}"
+    );
 }
 
 /// Every top-level allow rule of the did and wallet profiles has a registered
@@ -3503,6 +3535,30 @@ fn operations_table_check_reports_each_missing_citation() {
         "a citation of a present function must pass"
     );
 
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "// fn present_case()\nfn other_case() {}\n",
+    )
+    .expect("comment-only citation fixture");
+    let commented = "## Operations and the rights they need\n\n| `tests/confine.rs::present_case` |\n\n## Host-OS status\n";
+    let problems =
+        operations_table_citation_problems("fixture-provider", commented, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a comment must not count as a function: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("present_case") && problems[0].contains("does not hold"),
+        "a comment citation must be refused: {}",
+        problems[0]
+    );
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "fn present_case() {}\n",
+    )
+    .expect("restore fixture integration test file");
+
     let missing_function = "## Operations and the rights they need\n\n| `tests/confine.rs::absent_case` |\n\n## Host-OS status\n";
     let problems =
         operations_table_citation_problems("fixture-provider", missing_function, capsule.path());
@@ -3771,6 +3827,68 @@ fn file_profile_contract_rejects_an_allow_default() {
         refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
         "the refusal must name the profile and the rule: {refusal}"
     );
+}
+
+/// The one contract check parses nested s-expressions. It refuses
+/// `(allow default)`, a network grant and `(import ...)` at any depth,
+/// including inside `(if ...)` and `(begin ...)`, and it still reads the
+/// split `(allow` form as one allow. The fixtures are built in the test;
+/// no file is read and no process starts.
+///
+/// Falsifier: walk only top-level forms that start with `(allow `; each
+/// nested fixture then passes and this test fails.
+#[test]
+fn file_profile_contract_refuses_nested_grants() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+
+    let nested_default = format!("{complete}(if #t (allow default))\n");
+    let refusal = check_profile_contract("fixture-provider", &nested_default)
+        .expect_err("a nested (allow default) must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
+        "the refusal must name the nested allow default: {refusal}"
+    );
+
+    let split_default = format!("{complete}(if #t (allow\n    default))\n");
+    let refusal = check_profile_contract("fixture-provider", &split_default)
+        .expect_err("a split nested (allow default) must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
+        "the refusal must read the split allow form: {refusal}"
+    );
+
+    let nested_network = format!("{complete}(begin (allow network*))\n");
+    let refusal = check_profile_contract("fixture-provider", &nested_network)
+        .expect_err("a nested network allow must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("network allow is refused"),
+        "the refusal must name the nested network grant: {refusal}"
+    );
+
+    let nested_exec = format!("{complete}(begin (allow process-exec (literal \"/bin/sh\")))\n");
+    let refusal = check_profile_contract("fixture-provider", &nested_exec)
+        .expect_err("a nested second exec allow must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("more than one process-exec allow"),
+        "the refusal must name the nested extra exec: {refusal}"
+    );
+
+    for import in [
+        "(import \"bsd.sb\")",
+        "(begin (import \"bsd.sb\"))",
+        "(if #t (import \"bsd.sb\"))",
+    ] {
+        let profile = format!("{complete}{import}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("an import form must fail");
+        assert!(
+            refusal.contains("fixture-provider") && refusal.contains("import"),
+            "the refusal must name the import form {import}: {refusal}"
+        );
+    }
 }
 
 /// The one contract check refuses a profile that holds a second exec allow,

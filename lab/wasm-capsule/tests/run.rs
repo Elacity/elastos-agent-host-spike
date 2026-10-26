@@ -2502,6 +2502,29 @@ fn memory_cap_on_wasmer_is_skipped() {
 /// argument, with wc-010a's reason.
 const WASMER_SKIPPED: &str =
     "wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)";
+/// C0: never run an engine that cannot apply the declared cap. Wasmer 7.5.0's
+/// CLI has no cap flag. The lab records that as an open gap (Runtime launch
+/// guard or an engine that can apply the cap). A SKIPPED receipt line is
+/// not proof that the cap was enforced.
+const WASMER_CAP_OPEN_GAP: &str =
+    "OPEN GAP / NEEDS RUNTIME: wasmer has no memory cap; C0 refuses an uncapped engine";
+
+/// A SKIPPED wasmer cap line is an open gap, never ENFORCED proof.
+#[test]
+fn wasmer_without_a_memory_cap_is_an_open_gap_not_proof() {
+    assert!(
+        WASMER_SKIPPED.contains("SKIPPED"),
+        "the receipt must name the skip"
+    );
+    assert!(
+        !WASMER_SKIPPED.contains("ENFORCED"),
+        "a skipped cap must not be recorded as enforced"
+    );
+    assert!(
+        WASMER_CAP_OPEN_GAP.contains("NEEDS RUNTIME") && WASMER_CAP_OPEN_GAP.contains("C0"),
+        "the gap must name C0 and the Runtime"
+    );
+}
 
 /// The receipt's line that starts with `key: `, if any.
 fn receipt_line<'a>(receipt: &'a str, key: &str) -> Option<&'a str> {
