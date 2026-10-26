@@ -7,9 +7,12 @@ use std::fs;
 pub enum Effect {
     Default,
     Read,
+    HumanRead,
+    MemoryWrite,
     Network,
     GrantedRead,
     SiblingRead,
+    HostKeyRead,
     Task(u8),
     Runaway,
 }
@@ -19,9 +22,12 @@ impl Effect {
         match self {
             Self::Default => "default",
             Self::Read => "read",
+            Self::HumanRead => "human-read",
+            Self::MemoryWrite => "memory-write",
             Self::Network => "network",
             Self::GrantedRead => "granted-read",
             Self::SiblingRead => "sibling-read",
+            Self::HostKeyRead => "host-key-read",
             Self::Task(0) => "task-a",
             Self::Task(1) => "task-b",
             Self::Task(2) => "task-c",
@@ -36,10 +42,12 @@ impl Effect {
         // These cfg values select the declared Cargo features on the same source.
         match self {
             Self::Default => "-Dwarnings",
-            Self::Read => "-Dwarnings --cfg feature=\"read\"",
+            Self::Read | Self::HumanRead => "-Dwarnings --cfg feature=\"read\"",
+            Self::MemoryWrite => "-Dwarnings --cfg feature=\"memory-write\"",
             Self::Network => "-Dwarnings --cfg feature=\"network\"",
             Self::GrantedRead => "-Dwarnings --cfg feature=\"granted-read\"",
             Self::SiblingRead => "-Dwarnings --cfg feature=\"sibling-read\"",
+            Self::HostKeyRead => "-Dwarnings --cfg feature=\"host-key-read\"",
             Self::Task(_) => "-Dwarnings --cfg feature=\"task\"",
             Self::Runaway => "-Dwarnings --cfg feature=\"runaway\"",
         }
@@ -78,6 +86,14 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
         .arg(root.join("scripts/build-component-capsule.sh"))
         .arg(lane.join("probe"))
         .env("RUSTFLAGS", effect.rustflags())
+        .env(
+            "AC_PROBE_READ_RESOURCE",
+            match effect {
+                Effect::HumanRead => include_str!("../../fixtures/human-read.txt"),
+                _ => include_str!("../../fixtures/ungranted-read.txt"),
+            }
+            .trim(),
+        )
         .env(
             "AC_PROBE_TASK_INDEX",
             match effect {

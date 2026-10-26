@@ -1,18 +1,29 @@
 # `wasm-capsule-tools`, the lab's host-side library. It names a lab bundle only
-# through cc-capsule-identity's lab CID (one re-export in src/lib.rs) and holds
-# this capsule's own `elastos.capsule/v1` manifest bytes. A member of the lab
-# workspace, sharing its Cargo.lock. The root package `capsule` uses it only as
-# a dev-dependency for the named tests in ../tests/, so none of it reaches the
-# capsule artifact.
+# through cc-capsule-identity's lab CID (one re-export in src/lib.rs), holds
+# this capsule's own `elastos.capsule/v1` manifest bytes, and holds wc-004's
+# one verify path (src/verify.rs). A member of the lab workspace, sharing its
+# Cargo.lock. The root package `capsule` uses it only as a dev-dependency for
+# the named tests in ../tests/, so none of it reaches the capsule artifact.
 [package]
 name = "wasm-capsule-tools"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
-# The one bundle-identity rule lives in the cc-capsule-identity lane's crate
-# (read-only here). It path-depends on the Runtime's `elastos-common` and
-# `elastos-identity`, so this workspace's Cargo.lock holds that crate's
-# dependencies too (README, "The lockfile coupling").
+# The one bundle-identity rule, the checked bundle and the test-key name
+# signature live in the cc-capsule-identity lane's crate (read-only here). It
+# path-depends on the Runtime's `elastos-common` and `elastos-identity`, so
+# this workspace's Cargo.lock holds that crate's dependencies too (README,
+# "The lockfile coupling").
+#
+# The verifier's other two inputs: the cx-wasm-audit lane's
+# `wasm-capsule-audit` (read-only here, a member of this workspace), the one
+# import reader, so this crate has no `wasmparser` of its own; and the
+# Runtime's `CapsuleManifest` (read-only), the one reader of `capsule.json`,
+# parsed with `serde_json` as that type is read everywhere else. Both are the
+# versions the lockfile already held through `capsule-identity`.
 [dependencies]
 capsule-identity = { path = "../../capsule-identity" }
+elastos-common = { path = "../../../elastos/crates/elastos-common" }
+serde_json = "1.0"
+wasm-capsule-audit = { path = "../audit" }

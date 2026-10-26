@@ -5,6 +5,7 @@ use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::Observation;
 use agent_conformance::report::{render_run, GitIdentity};
 use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -28,6 +29,30 @@ fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 }
 
 impl Fixture {
+    /// Missing policy supplies zero entries. The caller leaves requests pending
+    /// so the Runtime's own default is observed, without a controller denial.
+    pub fn no_policy() -> Result<(Self, bool)> {
+        let path = repository().join("lab/agent-conformance/fixtures/no-policy.json");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((
+                Self {
+                    deny_reason: "fixture policy absent".into(),
+                    entries: Vec::new(),
+                },
+                false,
+            )),
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= 65536 =>
+            {
+                let text = fs::read_to_string(path).map_err(|_| "could not read fixture policy")?;
+                Ok((Self::parse(&text)?, true))
+            }
+            _ => Err("fixture policy must be a small regular file"),
+        }
+    }
+
     pub fn committed() -> Result<Self> {
         Self::parse(include_str!("../../fixtures/grants.json"))
     }
@@ -93,6 +118,7 @@ pub struct Decisions {
 pub struct Controller {
     port: u16,
     credentials: Vec<String>,
+    printed: RefCell<String>,
     fixture: Fixture,
     used: BTreeSet<usize>,
     pub decisions: Decisions,
@@ -113,6 +139,7 @@ impl Controller {
         Ok(Self {
             port,
             credentials: vec![secret, token],
+            printed: RefCell::default(),
             fixture,
             used: BTreeSet::new(),
             decisions: Decisions::default(),
@@ -181,7 +208,7 @@ impl Controller {
                 self.credentials.push(field(&response, "token")?.to_owned());
                 self.used.insert(index);
                 self.decisions.granted += 1;
-                println!("fixture controller: matched, granted");
+                self.print_checked("fixture controller: matched, granted")?;
             } else {
                 let reason = self.fixture.deny_reason.clone();
                 self.deny(request, &reason)?;
@@ -200,7 +227,14 @@ impl Controller {
         )?;
         require_success(&response)?;
         self.decisions.denied += 1;
-        println!("fixture controller: denied");
+        self.print_checked("fixture controller: denied")?;
+        Ok(())
+    }
+
+    pub fn print_checked(&self, line: &str) -> Result<()> {
+        self.check_bytes(line.as_bytes(), Surface::Printed)?;
+        self.printed.borrow_mut().push_str(&format!("{line}\n"));
+        println!("{line}");
         Ok(())
     }
 
@@ -233,9 +267,21 @@ impl Controller {
     }
 
     pub fn check_report(&self, name: &str, observations: &[Observation]) -> Result<()> {
+        self.check_journey(name, observations, true)
+    }
+
+    pub fn check_journey(
+        &self,
+        name: &str,
+        observations: &[Observation],
+        passed: bool,
+    ) -> Result<()> {
+        // Use the exact lines printed by this controller, including decisions
+        // made before a grant token arrived. Recheck with all credentials known.
+        let printed = self.printed.borrow();
         self.check_inventory(
-            &report_inventory(name, observations)?,
-            &[Surface::Report, Surface::Receipt],
+            &report_inventory(name, observations, &printed, passed)?,
+            &[Surface::Printed, Surface::Report, Surface::Receipt],
         )
     }
 
@@ -276,6 +322,7 @@ enum Surface {
     Stderr,
     Report,
     Receipt,
+    Printed,
     Committed,
     Candidate,
 }
@@ -287,6 +334,7 @@ impl Surface {
             Self::Stderr => "fixture credential detected: child stderr",
             Self::Report => "fixture credential detected: report",
             Self::Receipt => "fixture credential detected: version receipt",
+            Self::Printed => "fixture credential detected: printed journey",
             Self::Committed => "fixture credential detected: committed lane source",
             Self::Candidate => "fixture credential detected: candidate lane source",
         }
@@ -379,18 +427,25 @@ fn source_inventory() -> Result<Vec<(Surface, Vec<u8>)>> {
     Ok(inventory)
 }
 
-fn report_inventory(name: &str, observations: &[Observation]) -> Result<Vec<(Surface, Vec<u8>)>> {
+fn report_inventory(
+    name: &str,
+    observations: &[Observation],
+    printed: &str,
+    passed: bool,
+) -> Result<Vec<(Surface, Vec<u8>)>> {
     let listed = format!("{name}: test\n");
-    let mut output = format!("test {name} ... ok\n");
+    let result = if passed { "ok" } else { "FAILED" };
+    let mut output = format!("{printed}test {name} ... {result}\n");
     for observation in observations {
         output.push_str(&observation.line());
         output.push('\n');
     }
-    let report = render_run(&listed, &output, true, GitIdentity::read(&repository()));
-    if !report.passed {
+    let report = render_run(&listed, &output, passed, GitIdentity::read(&repository()));
+    if !report.failures.is_empty() {
         return Err("credential check requires a complete report");
     }
     Ok(vec![
+        (Surface::Printed, printed.as_bytes().to_vec()),
         (Surface::Report, report.table.into_bytes()),
         (Surface::Receipt, report.receipt_bytes),
     ])
@@ -405,6 +460,7 @@ pub fn assert_memory_surfaces() {
         .as_nanos();
     let controller = Controller {
         port: 0,
+        printed: RefCell::default(),
         credentials: (0..3)
             .map(|index| format!("synthetic-{stamp}-{}-{index}", std::process::id()))
             .collect(),
@@ -446,12 +502,19 @@ pub fn assert_memory_surfaces() {
         },
     ];
     inventory.extend(
-        report_inventory("default_activation_refuses_without_selector", &observations).unwrap(),
+        report_inventory(
+            "default_activation_refuses_without_selector",
+            &observations,
+            "fixture read: synthetic surface control\n",
+            true,
+        )
+        .unwrap(),
     );
     for (path, surface) in paths[0].iter().zip([Surface::Stdout, Surface::Stderr]) {
         inventory.push((surface, fs::read(path).unwrap()));
     }
     let required = [
+        Surface::Printed,
         Surface::Report,
         Surface::Receipt,
         Surface::Committed,
@@ -472,6 +535,7 @@ pub fn assert_memory_surfaces() {
     for surface in [
         Surface::Stdout,
         Surface::Stderr,
+        Surface::Printed,
         Surface::Report,
         Surface::Receipt,
         Surface::Committed,
@@ -716,6 +780,7 @@ mod tests {
         // Synthetic canaries exist only in memory, even when testing detection.
         let controller = Controller {
             port: 1,
+            printed: RefCell::default(),
             credentials: vec!["fixture-canary".into()],
             fixture: fixture(),
             used: BTreeSet::new(),

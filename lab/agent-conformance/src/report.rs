@@ -13,6 +13,10 @@ fn grade(result: &str) -> String {
         return "PASS".into();
     }
     if let Some(reason) = result.strip_prefix("ignored, blocked: ") {
+        // This blocker has a two-word name; preserve its joint selector gate.
+        if reason == "UsersAI binding; AC-002-ARGS" {
+            return format!("BLOCKED ({reason})");
+        }
         if let Some(id) = reason.split_whitespace().next() {
             return format!("BLOCKED ({id})");
         }
@@ -157,9 +161,13 @@ fn required_effects(test: &str) -> &'static [&'static str] {
         "default_activation_refuses_without_selector" => &["default"],
         "granted_read_succeeds" => &["granted-read"],
         "ungranted_sibling_read_is_refused" => &["sibling-read"],
-        "attach_secret_stays_in_memory" => &["granted-read", "sibling-read"],
+        "attach_secret_stays_in_memory" => &["granted-read", "sibling-read", "host-key-read"],
+        "host_key_read_is_refused" => &["host-key-read"],
         "ungranted_effect_is_refused" => &["read"],
         "ungranted_network_is_refused" => &["network"],
+        "agent_cannot_read_human_space_without_grant" => &["human-read"],
+        "ungranted_memory_write_is_refused" => &["memory-write"],
+        "no_policy_file_does_not_mean_allow" => &["granted-read"],
         "process_isolation::parallel_instances_complete_independently" => {
             &["task-a", "task-b", "task-c", "task-d"]
         }

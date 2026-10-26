@@ -328,7 +328,7 @@ cache per selector. Before each call it runs an offline package-scoped clean
 for the probe's WASM release output. The repository component script then
 compiles that package; the helper requires the compiler's package message.
 Both reproducibility rounds do real compilations. Both artifacts still pass
-import checks, pair hashes must agree, all ten variants must differ, and every
+import checks, pair hashes must agree, all variants must differ, and every
 selector pair must fail compilation. Live tests use the same preparation.
 The complete locked gate retains its 600-second bound. F-probe-rebuild omits
 the package clean and catches a cached probe; F-probe-e changes round two's
@@ -336,7 +336,7 @@ bytes and catches the hash mismatch. Remove the ignored selector caches after
 candidate review; they are rebuildable outputs.
 
 `attach_secret_stays_in_memory` checks the existing controller with synthetic
-in-memory canaries, then exercises both granted and sibling journeys. Each
+in-memory canaries, then exercises the granted, sibling and fake host-file journeys. Each
 journey checks its actual attach secret, shell token and returned grant tokens
 against every expected stdout/stderr pair, the report table, the serialized
 version receipt, committed lane blobs and candidate lane source files.
@@ -365,3 +365,73 @@ The granted and sibling checks observe that decision; F-ac1a changes only the
 explicit sibling grant entry. Resource budgets remain a separate Runtime rule.
 Tasks 016 and 017 must reuse these capture, source, report and receipt checks
 before claiming their M1 results.
+
+
+Task 004 adds the agent-memory rows to the same Cargo-derived table:
+
+- `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
+- `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
+- `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
+- `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
+
+F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
+instances the same principal. Run these only after the corresponding blocked
+journeys become live; forcing today's placeholders is zero falsifier evidence.
+F-ac2c adds the absent `fixtures/no-policy.json` file using its `new` text in
+`falsifiers.json` (`old: ""` denotes an absent file for this manual step).
+The entry allows every effect attempted by this instance: its one read.
+Run `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+--test effects no_policy_file_does_not_mean_allow -- --exact --nocapture` with
+the usual offline environment and heavy-build lease. Require a successful
+guest read, one observed grant, and the refusal test's FAIL. Remove only this
+added policy file and rerun the identical command; require PASS. A build
+failure, unrelated error, SKIPPED or BLOCKED result cannot catch a falsifier.
+
+F-ac2-human and F-ac2-write change the respective probe activation to succeed
+without its Bus refusal. Each named refusal test must fail, then pass when the
+original probe bytes are restored. All mutations remain inside fixtures or the
+one probe. The provider lane owns shared-runner support; these lab falsifiers
+continue to run by hand. The existing report records every launched variant's
+component SHA-256 and complete bundle lab CID.
+
+## Fake host-file refusal (M1 A8)
+
+`host_key_read_is_refused` copies `fixtures/fake-ssh/id_ed25519` into the guarded
+throwaway home's `.ssh` directory before launch. The file contains an obvious
+fake marker. The probe uses the one Bus read path, selected at build time by
+`host-key-read`. The manifest bound supplies the baseline refusal. The test
+checks its exact reason, marker-free captures and unchanged fake bytes.
+`host_key::fixture_path_uses_the_guarded_home_rule` checks the fixed resource's
+relative depth against the harness's Mac data-dir rule.
+
+`run.sh` prints `host key read:` along with the checked controller, census,
+refusal and identity lines, followed by the Cargo-derived test row. Read each
+A8 row with the VERSIONS.json path printed by that invocation. Its
+`host-key-read` entry names the launched component SHA-256 and complete bundle
+lab CID. A probe that cannot start receives the existing SKIPPED grade and
+supplies zero passing evidence. The scope is one route to one fake file;
+GAPS.md describes the remaining scope.
+
+Run F-ac8a by applying both exact edits in `falsifiers.json`: its one-use
+controller entry and its exact manifest bound. Under the standard offline
+environment and shared heavy-build lease, run both named tests separately:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects host_key_read_is_refused -- --exact --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects attach_secret_stays_in_memory -- --exact --nocapture
+```
+
+Both must fail on the changed refusal after credential coverage finishes.
+Restore both files, run the same tests, and require PASS. F-ac8-fixture changes
+the relative depth and must fail `host_key::fixture_path_uses_the_guarded_home_rule`.
+F-ac8-receipt removes the required launched identity and must fail
+`host_key_receipt_requires_this_launched_bundle`. These keep `command: lab`;
+the shared runner's lab arm remains with the provider lane.
+
+The existing synthetic-canary test and F-grant-capture also cover the new
+printed-journey surface. The controller keeps the exact lines it prints in
+memory and checks them again after all grant tokens arrive. The host-file
+journey supplies its observed pass/fail result to the existing renderer, so a
+planted-grant failure has a failed report with complete version evidence.
+F-output-inventory and F-capture-inventory continue to test missing surfaces.
+LOG.md records commands, results and local receipt hashes for supervisor review.

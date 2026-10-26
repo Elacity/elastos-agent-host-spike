@@ -331,7 +331,7 @@
       "edits": [
         {
           "file": "probe/src/lib.rs",
-          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        + cfg!(feature = \"granted-read\") as u8\n        + cfg!(feature = \"sibling-read\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
+          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        + cfg!(feature = \"granted-read\") as u8\n        + cfg!(feature = \"sibling-read\") as u8\n        + cfg!(feature = \"memory-write\") as u8\n        + cfg!(feature = \"host-key-read\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
           "new": ""
         }
       ],
@@ -725,6 +725,140 @@
       ],
       "tests": [
         "attach_secret_stays_in_memory"
+      ]
+    },
+    {
+      "id": "F-ac2a",
+      "title": "BLOCKED (UsersAI binding; AC-002-ARGS): grant agent-b the exact agent-a memory path",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/agent-principals.json",
+          "old": "\"cross_agent_grants\": []",
+          "new": "\"cross_agent_grants\": [{\"principal\":\"agent-b\",\"resource\":\"localhost://UsersAI/agent-a/.AppData/ElastOS/AgentHost/tasks/conformance/memory\",\"action\":\"read\",\"duration\":\"once\"}]"
+        }
+      ],
+      "tests": [
+        "agent_cannot_read_other_agent_memory"
+      ]
+    },
+    {
+      "id": "F-ac2b",
+      "title": "BLOCKED (UsersAI binding; AC-002-ARGS): launch both agents as the same principal",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/agent-principals.json",
+          "old": "\"principal\": \"agent-b\"",
+          "new": "\"principal\": \"agent-a\""
+        }
+      ],
+      "tests": [
+        "agent_memory_under_own_principal"
+      ]
+    },
+    {
+      "id": "F-ac2c",
+      "title": "add the absent policy file and allow every attempted effect (one fixture read)",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/no-policy.json",
+          "old": "",
+          "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
+        }
+      ],
+      "tests": [
+        "no_policy_file_does_not_mean_allow"
+      ]
+    },
+    {
+      "id": "F-ac2-human",
+      "title": "make the human-space refusal activation succeed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "    #[cfg(feature = \"read\")]\n    let (resource, action)",
+          "new": "    #[cfg(feature = \"read\")]\n    if option_env!(\"AC_PROBE_READ_RESOURCE\").is_some_and(|r| r.starts_with(\"localhost://Users/\")) {\n        return Ok(());\n    }\n    #[cfg(feature = \"read\")]\n    let (resource, action)"
+        }
+      ],
+      "tests": [
+        "agent_cannot_read_human_space_without_grant"
+      ]
+    },
+    {
+      "id": "F-ac2-write",
+      "title": "make the memory-write activation succeed before its Bus request",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "fn write_memory() -> Result<(), elastos::bus::types::BusError> {\n    use",
+          "new": "fn write_memory() -> Result<(), elastos::bus::types::BusError> {\n    if std::hint::black_box(true) { return Ok(()); }\n    use"
+        }
+      ],
+      "tests": [
+        "ungranted_memory_write_is_refused"
+      ]
+    },
+    {
+      "id": "F-ac8a",
+      "title": "grant the exact fake host-file request and its manifest bound",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/grants.json",
+          "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n",
+          "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    },\n    {\n      \"resource\": \"localhost://Public/../../../../.ssh/id_ed25519\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
+        },
+        {
+          "file": "probe/capsule.json",
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
+        }
+      ],
+      "tests": [
+        "host_key_read_is_refused",
+        "attach_secret_stays_in_memory"
+      ]
+    },
+    {
+      "id": "F-ac8-fixture",
+      "title": "use the wrong relative depth for the fake file",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/host-key-read.txt",
+          "old": "localhost://Public/../../../../.ssh/id_ed25519",
+          "new": "localhost://Public/../../../.ssh/id_ed25519"
+        }
+      ],
+      "tests": [
+        "host_key::fixture_path_uses_the_guarded_home_rule"
+      ]
+    },
+    {
+      "id": "F-ac8-receipt",
+      "title": "accept the host read without its launched bundle identity",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/report.rs",
+          "old": "\"host_key_read_is_refused\" => &[\"host-key-read\"],",
+          "new": "\"host_key_read_is_refused\" => &[],"
+        }
+      ],
+      "tests": [
+        "host_key_receipt_requires_this_launched_bundle"
       ]
     }
   ]

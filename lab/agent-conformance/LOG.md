@@ -2576,3 +2576,204 @@ this uncommitted candidate; these results are author checks.
 | 6. Does the capsule keep its logic and granted Bus calls? | Yes | `probe/src/lib.rs:69` keeps the grant request, provider invocation and byte check inside the capsule. |
 | 7. Do named tests and caught falsifiers prove the rules? | Yes | `tests/effects.rs:252` carries the live checks; F-lock-stale above returned 101 planted and 0 restored. |
 | 8. Are identity, admission and allowance separate? | Yes | `src/report.rs:360` retains the receipt's boundary; `tests/common/grants.rs:146` requires an explicit pending decision. |
+
+004: Added the memory-write probe feature, human-space and absent-policy refusal checks, three UsersAI binding/AC-002-ARGS placeholders, fixture falsifiers F-ac2a/b/c plus F-ac2-human/write, and report/runbook coverage; the live absent-policy baseline passed (1 test, 39.855 s including build), lane/repository formatting and 99 product-data tests passed; the shared heavy-build lease remained busy through a 600 s wait, so the new refusal baselines, planted/restored falsifiers, full locked suite and run.sh remain unverified; lab falsifiers run by hand until the provider lane adds the lab arm.
+
+
+## 017 — Fake host-file refusal (2026-10-26)
+
+017: Added the `host-key-read` selector and fake `.ssh` fixture, exact manifest-refusal journey, launched-bundle receipt requirement, actual printed-line credential coverage, and F-ac8a/F-ac8-fixture/F-ac8-receipt; reused the one controller, probe, operator, spawn site and report.
+
+The baseline asks for `localhost://Public/../../../../.ssh/id_ed25519`. The
+manifest bound answers first, with the exact lifecycle reason
+`Internal("capsule manifest does not declare authority for localhost://Public/../../../../.ssh/id_ed25519")`.
+The fake file sits beside the data directory tree, outside every Runtime Home
+root. The fixture path test derives its depth from the one Mac data-dir rule.
+The fixture contains only an obvious fake marker; Runtime owns its first-run
+state. The harness checks the fake bytes without opening Runtime key files.
+
+The initial host-key filter returned exit 0 in 37.874 s (two passed). The
+receipt regression returned exit 0 in 0.726 s (one passed). The extended
+`attach_secret_stays_in_memory` baseline returned exit 0 in 52.000 s (one
+passed). Its host-file journey observed:
+
+```text
+probe refusal effect:host-key-read exit:Some(1) reason_present:true
+host key read: exit:Some(1) matched:0 granted:0 denied:0 marker_absent:true unchanged:true provider_traversal_refusal:false
+```
+
+F-ac8a was caught by **both** named tests. The controller observed one exact
+request and one grant. The later provider layer refused with
+`Path traversal not allowed`; the bytes stayed inside the fake fixture and
+remained unchanged. Each test failed at `expected exact manifest-bound lifecycle
+refusal`, after capture, printed-line, source, report and receipt checks. Its
+public output was:
+
+```text
+fixture controller: matched, granted
+probe refusal effect:host-key-read exit:Some(1) reason_present:false
+host key read: exit:Some(1) matched:1 granted:1 denied:0 marker_absent:true unchanged:true provider_traversal_refusal:true
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 9.20s
+```
+
+The second test reported the same totals with `finished in 24.90s`.
+The measured command times are in the table below. This is one route and one file. It supplies zero
+acceptance for other routes, key stores, signed admission or resource budgets.
+
+All commands used the shared exclusive heavy-build lease and these settings:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-017/tmp"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects host_key -- --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report host_key_receipt -- --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects attach_secret_stays_in_memory -- --exact --nocapture
+```
+
+The sandbox preflight refused a loopback bind (errno 1). Live runs used local
+process/socket permission with offline builds. The preflight supplies zero
+Runtime acceptance. The first live gate had 20.293 GiB free against a 12 GiB
+build estimate plus 2 GiB reserve.
+
+For every mutation row below, the exact command is
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test GROUP TEST -- --exact --nocapture`,
+with GROUP and TEST from that row. Each mutation was applied from
+`falsifiers.json` and restored in a finally block before the next mutation.
+Every named test returned FAILED; none returned SKIPPED or BLOCKED.
+
+| Mutation / test index | GROUP / TEST | Exit | Seconds |
+| --- | --- | --- | --- |
+| F-ac8a-0 | `effects` / `host_key_read_is_refused` | 101 | 10.326 |
+| F-ac8a-1 | `effects` / `attach_secret_stays_in_memory` | 101 | 25.015 |
+| F-ac8-fixture-0 | `effects` / `host_key::fixture_path_uses_the_guarded_home_rule` | 101 | 1.063 |
+| F-ac8-receipt-0 | `report` / `host_key_receipt_requires_this_launched_bundle` | 101 | 0.947 |
+| F-grant-capture-0 | `effects` / `grants::tests::controller_detects_credentials_without_disclosing_them` | 101 | 1.108 |
+| F-grant-capture-1 | `effects` / `attach_secret_stays_in_memory` | 101 | 0.524 |
+| F-output-inventory-0 | `effects` / `attach_secret_stays_in_memory` | 101 | 1.286 |
+| F-capture-inventory-0 | `effects` / `attach_secret_stays_in_memory` | 101 | 1.038 |
+
+F-ac8-fixture fails the resource-depth assertion. F-ac8-receipt fails when a
+report accepts a different launched variant instead of `host-key-read`.
+F-grant-capture fails both named synthetic controls; canary values remain in
+memory and assertion diagnostics contain only fixed reasons. The same canary
+loop covers the new printed-journey surface. F-output-inventory and
+F-capture-inventory fail the required-surface checks.
+
+The existing report executable rendered each F-ac8a run with its own Cargo
+inventory, output and exit 101, using
+`lab/agent-conformance/target/host/debug/report LIST OUTPUT 101 RECEIPT`.
+LIST and OUTPUT are `target/task-017/F-ac8a-N.list` and
+`target/task-017/F-ac8a-N.txt` under this lane, where N is 0 or 1. RECEIPT is
+`target/task-017/F-ac8a-N-VERSIONS.json`. Both receipts have complete identity
+and a failed outcome. These are local, ignored evidence, outside the committed
+candidate. Their SHA-256 values are:
+
+- `F-ac8a-0-VERSIONS.json`: `b2ff9f4610645eea474bf3ca7ddfe44c7becc6c00bec481fcdbe3e0228d58c14`.
+- `F-ac8a-1-VERSIONS.json`: `70cbc5aac0497c1e587303be5c27b2f004ffc8c8184845ace68567a0c445f9c7`.
+
+Both name component SHA-256
+`d056c5a2d45201d334f5db1028a6a445600d695dafe9021d87883959f9086653`
+and the planted manifest's bundle
+`lab-cid:sha256:3cacbd3abf0c56ab9a92f63ae33821c67b061d4bbbadb54536e7df0df48166b9`.
+The unchanged component and changed bundle identity reflect the exact manifest
+mutation. The build selector, import and exclusivity checks use the same probe;
+F-probe-exclusive's edit was refreshed to include the additional selector.
+
+| Principles question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name/URL replacing code or content hash identity? | No | `tests/artifact.rs:151` stages the exact bytes through the existing component SHA-256 and checked bundle lab CID path. |
+| 2. New capsule or UI ambient authority? | No | `probe/src/lib.rs:93` requests a Runtime grant before `providers::invoke`; the artifact gate checks Bus-only imports. |
+| 3. Second path or rule copy? | No | `probe/src/lib.rs:85` handles the new selector in the existing read function; `tests/common/host_key.rs:72` reuses Controller. |
+| 4. Does Runtime core grow? | No | `tests/common/probe.rs:50` selects a lane-owned probe feature; the candidate paths all remain under this lane. |
+| 5. Do new refusals fail closed with reasons? | Yes | `tests/common/host_key.rs:99` requires the exact Runtime reason; `tests/common/grants.rs:293` rejects missing surfaces with a fixed reason. |
+| 6. Self-contained logic with granted Bus calls? | Yes | `probe/src/lib.rs:85` keeps the read request, grant-scope check, invoke and lifecycle result inside the component. |
+| 7. Named tests and caught falsifiers? | Yes | `tests/common/host_key.rs:39`, `tests/report.rs:553` and the mutation table above cover the fixture, live denial and receipt; F-ac8a failed both named tests. |
+| 8. Identity, admission and allowance separate? | Yes | `src/report.rs:165` requires launched identity evidence while `probe/src/lib.rs:93` independently requests authority; the manifest and Runtime budgets keep their existing roles. |
+
+### Restored gates and exact-run receipts
+
+With all mutations restored, the required commands were:
+
+```sh
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+lab/agent-conformance/run.sh
+```
+
+They used the environment and lease above. Formatting returned exit 0 in
+0.084 s. The complete locked suite returned exit 0 in **301.107 s**:
+**48 passed, zero failed, eight ignored**. Its artifact group passed six tests
+in 150.42 s; the effect group passed 18 with eight ignored in 133.05 s. The
+remaining groups passed nine harness tests, seven report tests, six Runtime
+tests and two probe tests. The gate began with 24.578 GiB free. Thirteen
+variants passed two independent compilations, matching pair hashes, distinct
+variant hashes, Bus-only imports and every selector-pair exclusion.
+
+`run.sh` returned exit 0 in **177.245 s**, starting with 21.051 GiB free.
+It printed 48 PASS test rows, the eight inherited BLOCKED rows, and A14 PASS.
+The two host-file journeys each printed the baseline line above. Relevant
+exact table output:
+
+```text
+attach_secret_stays_in_memory | PASS
+host_key::fixture_path_uses_the_guarded_home_rule | PASS
+host_key_read_is_refused | PASS
+host_key_receipt_requires_this_launched_bundle | PASS
+versions_receipt (A14) | PASS
+versions receipt: target/run-table.yIYXhh/VERSIONS.json
+```
+
+The local, ignored final receipt is
+[`target/run-table.yIYXhh/VERSIONS.json`](target/run-table.yIYXhh/VERSIONS.json),
+SHA-256 `e3dd9c8e450ff7aa2e36d9db17994dea577944930ccf0200dd61e741b19ed114`.
+Its host component is
+`d056c5a2d45201d334f5db1028a6a445600d695dafe9021d87883959f9086653`;
+its restored complete bundle is
+`lab-cid:sha256:e0d8fb9541df4f6bef27eb5fdcfcd8f8820224832abb20ec987518f32ab7fc27`.
+The Runtime and provider SHA-256 values match the built binaries. Every
+launched entry matches this invocation's printed observations and build-only
+entry. The receipt's table equals stdout, and its table digest matches.
+Identity is complete and command success is true; suite scope remains BLOCKED
+for the eight inherited gaps. This is the A8 acceptance receipt for the restored
+candidate, with the repository commit and `dirty: true` recorded by 018.
+
+The earlier live baselines also have local receipts, rendered by the existing
+report executable from each command's saved output and exact test inventory:
+`target/task-017/baseline-0-VERSIONS.json` has SHA-256
+`1b18ce2307470670f5a4fa0bcdaf7bcf71d5cefc1810d924b8a7669a696cecb9`;
+`target/task-017/baseline-memory-VERSIONS.json` has SHA-256
+`9d0270d4b9c2f74f0811885a2c9a90168570fb2a6ab74ad0f0a6a9c752e9aa2b`.
+Their command form is the report command above, with the corresponding
+`baseline-0` or `baseline-memory` prefix and exit argument `0`.
+These receipts also have complete identity and the restored host bundle above.
+
+`git diff --check`, the lane's complete workspace formatting, `bash -n run.sh`,
+Runtime workspace formatting and chain-provider formatting passed.
+`node scripts/check-product-data.mjs` returned
+`{"ok":true,"capsules":42,"profiles":2,"method_contracts":28}`;
+`node --test scripts/check-product-data.test.mjs` passed all 99 tests.
+The candidate diff and new files contain zero key headers or cloud-key shapes.
+Every nonempty falsifier edit matches exactly once in the restored source.
+The expanded selector-exclusivity test passed both full gates. A further run
+of the existing F-probe-exclusive mutation met a busy shared lease before any
+edit; this task claims no new catch for that existing falsifier.
+
+The final executable-path census found **zero lane-owned processes**, and the
+shared probe entrypoint is absent. The private lifecycle inventory at
+`target/task-017/lifecycle.json` records this candidate, generated receipts,
+build cache and retained failed-test roots. The supervisor reviews each retained
+result before removing its root; earlier roots keep their prior owners. This
+builder preserves those roots and unrelated worktrees.
+
+The tested uncommitted candidate is based on `6ed2c12029ac5ca5a2d25959cd41d081fc13bb92`
+(tree `25820a091f415ee0fdc5b5d971c9bc574b4f13ea`). These identify the committed
+base, rather than the dirty candidate tree. Final documentation was appended
+after the gates; tested code and fixture bytes stayed unchanged. The final
+cached upstream comparison is zero ahead and nine behind. Those nine commits
+change zero lane paths, capsule-identity paths, Runtime paths or checked build
+inputs. Network fetch, Git state mutations and publication stay with the
+supervisor. The supervisor also owns independent reviews and current-base
+integration; the evidence here is author verification.

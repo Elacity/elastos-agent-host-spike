@@ -119,8 +119,13 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 name = "capsule"
 version = "0.1.0"
 dependencies = [
+ "capsule-identity",
+ "ed25519-dalek",
  "elastos-common",
+ "elastos-identity",
+ "rand",
  "serde_json",
+ "wasm-capsule-audit",
  "wasm-capsule-tools",
 ]
 
@@ -1135,6 +1140,9 @@ name = "wasm-capsule-tools"
 version = "0.1.0"
 dependencies = [
  "capsule-identity",
+ "elastos-common",
+ "serde_json",
+ "wasm-capsule-audit",
 ]
 
 [[package]]

@@ -494,3 +494,107 @@ three diagnostic completions. A harness timeout or signal exit fails. F-ac3a
 changes the runaway probe loop to a short finite loop; it tests this live
 bounded-trap evidence only. Its result does not close AC-005-REASON. The strict
 reason test remains available with `--ignored` for the future Runtime fix.
+
+
+## 004 — agent memory and the shared authority model
+
+Runtime owns each verified agent principal and its resource grants. The same
+probe now has a `memory-write` build feature, with its target in
+`fixtures/memory-write.txt`. It requests write authority before invoking the
+Bus provider. `human-read` is a build-time variant of the existing `read`
+feature; `fixtures/human-read.txt` supplies its target. Neither variant reads
+guest environment variables or receives a runtime selector.
+
+### UsersAI binding — principal-scoped agent launches
+
+Anders must bind the existing component launch to a verified agent principal,
+resolve `UsersAI/self` to that principal's root, and enforce the principal and
+explicit Runtime grants on every access to an agent or human object. The
+human-side reference is `principal_localhost_root` and the bridge's
+`scope_current_user_alias`; agent-side acceptance uses the same authority
+model. `run_cmd.rs::run_component_via_operator_runtime` currently calls
+`Runtime::run_local`, whose principal context is `None`. Runtime must carry
+its verified launch principal through this existing path. A fixture label or
+a separate Home supplies zero principal evidence.
+
+| Ignored test | Blocker IDs | Acceptance after the Runtime change |
+| --- | --- | --- |
+| `agent_memory_under_own_principal` | UsersAI binding; AC-002-ARGS | Launch the two identities in `fixtures/agent-principals.json` through the existing primitive, write one memory object each, and compare the Runtime's resolved owners and distinct roots. |
+| `agent_cannot_read_other_agent_memory` | UsersAI binding; AC-002-ARGS | Launch agent-b with its verified context, request agent-a's exact memory path, and require a reason with zero returned bytes. F-ac2a then explicitly grants that read. |
+| `agent_can_read_human_space_with_grant` | UsersAI binding; AC-002-ARGS | Reuse `Controller` to seed the human object and grant the verified agent its exact read; compare the complete bytes inside the existing probe read path. |
+
+These tests are explicit failing placeholders when forced with `--ignored`.
+They remain BLOCKED until the verified launch and typed selector/result seam
+can be wired into the existing helpers. AC-002-ARGS requires the WIT,
+ComponentProvider and CLI forwarding change described above, including the
+resolved ownership result. Merely removing an ignore or changing a fixture
+cannot establish acceptance. F-ac2a and F-ac2b are specified fixture mutations
+for that future live path; neither is counted as caught today.
+
+`agent_cannot_read_human_space_without_grant` is the live refusal half. It
+requires the Runtime's principal-context refusal for `Users/self` through the
+003 read feature. This proves refusal for today's unbound CLI launch; the
+verified agent's refusal/positive-grant pair remains under both blockers above.
+`ungranted_memory_write_is_refused` requires a manifest-authority refusal from
+the memory-write Bus request. It proves the request cannot write without
+allowance, rather than proving principal-scoped storage. The new variants also
+undergo the existing two-build hash, import and feature-exclusivity checks.
+
+`no_policy_file_does_not_mean_allow` attempts one in-manifest read using the
+existing granted-read probe. `fixtures/no-policy.json` is absent in the
+baseline. The existing Controller attaches only to seed the known object and
+check credential surfaces; it supplies zero approval or denial decisions.
+The Runtime must exit naturally with its explicit pending-request refusal
+within the collector's 40-second bound. A collector timeout or any other
+error fails. The capsule's manifest and successful admission supply zero
+grant credit. F-ac2c creates that optional policy file with an exact entry for
+the one attempted effect; the same Controller then approves the pending
+request. The guest checks every byte and exits successfully, which must fail
+the refusal assertion. This is a controller-owned fixture policy, using the
+existing approval API; it claims no Runtime policy-file loader.
+
+AC-010-OFFLINE remains closed by 013's measured recipe. AC-006-STORAGE keeps
+its existing `run` constructor scope. All these launches use the existing
+operator census, guarded spawn site, bounded collector and group cleanup.
+A missing-policy acceptance failure receives private triage under spec section
+6. The test always remains active; only a neutral blocker belongs here.
+
+## 017 — M1 A8, one fake host-file route
+
+Runtime owns access to files through the Bus. The `host-key-read` build uses
+`localhost://Public/../../../../.ssh/id_ed25519` as its fixed resource.
+The one data-dir rule in `src/harness.rs::data_dir` gives
+`<home>/Library/Application Support/elastos`; a file-backed `Public` root adds
+one level. Four parent segments therefore name `<home>/.ssh/id_ed25519`.
+`host_key::fixture_path_uses_the_guarded_home_rule` checks this depth from that
+rule without resolving the resource on the host. The fixture copies only the
+committed fake marker, through exclusive creation inside the guarded home,
+before the operator starts. It sits outside every Runtime Home root.
+
+The first refusal is the `run` client's manifest bound in
+`elastos/crates/elastos-server/src/resource_bridge.rs:1379`. Its lifecycle reason
+is exactly `Internal("capsule manifest does not declare authority for localhost://Public/../../../../.ssh/id_ed25519")`.
+`host_key_read_is_refused` requires that reason, a nonzero exit, zero controller
+decisions, marker-free stdout/stderr and unchanged fake-file bytes. F-ac8a adds
+only this exact manifest bound and the matching one-use fixture grant. Both
+named F-ac8a tests observed one grant, then the provider's
+`Path traversal not allowed` reason with unchanged fake bytes. Its parent-segment
+check is in `elastos/capsules/localhost-provider/src/main.rs:300`. LOG.md records
+the commands and same-run receipts.
+
+This proves one named Bus route to one fake file outside the Home roots. Other
+routes and key stores require separate journeys. The fixture owns only its fake
+file; Runtime keeps ownership of its first-run state. The real home and Runtime
+key stores stay outside the probe's inputs. AC-006-STORAGE retains the existing
+component client's fixed scratch-path exception. All other fixture reads and
+writes stay inside the repository. Local fixture traffic uses loopback.
+
+The new build uses the existing component, import gate, SHA-256 staging and
+complete bundle lab CID. The existing report requires its launched identity for
+both this row and `attach_secret_stays_in_memory`; each A8 result is read with
+that invocation's VERSIONS.json. Identity, unsigned fixture admission and the
+explicit grant decision remain separate. The credential check runs before
+refusal assertions, including under F-ac8a. It covers both process captures,
+actual printed journey lines, the rendered report, serialized receipt, committed
+lane blobs and candidate source files. Missing coverage fails with a fixed
+reason; the fake marker is separate from the in-memory fixture credentials.
