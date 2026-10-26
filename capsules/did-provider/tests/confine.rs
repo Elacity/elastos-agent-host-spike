@@ -1149,13 +1149,21 @@ fn unbound_copy_is_refused_under_profile() {
 /// `PROVIDER_EXECUTABLE` and started under the same `confine.sb`. `init` with
 /// `base_path` as the fixture base answers `ok`, a following `get_did` answers
 /// `ok`, and `shutdown` exits 0. The binding is the only difference between
-/// the two runs.
+/// the two runs, and like the refused run, the served run must leave the
+/// copy's bytes unchanged: the test reads them before the spawn and checks
+/// them again after `shutdown`.
+///
+/// Falsifier: append one byte to the provider's own executable when it lies
+/// beneath `self.storage_path` in the `Shutdown` arm (DID29); the served run
+/// holds a write grant over `STORAGE_ROOT`, where the copy lies, so the copy
+/// changes and this test fails on its bytes assertion.
 #[test]
 fn bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
     let stored = StoredCopy::prepare();
+    let before = fs::read(&stored.copy).expect("the copy must be readable");
     let bindings: Vec<(&str, String)> = canonical_bindings(&stored.base)
         .into_iter()
         .map(|(name, value)| match name {
@@ -1174,6 +1182,11 @@ fn bound_copy_serves_under_profile() {
     }));
     provider.ok(json!({ "op": "get_did" }));
     provider.shutdown();
+    assert_eq!(
+        fs::read(&stored.copy).expect("the copy must stay readable"),
+        before,
+        "the served run must leave the copy's bytes unchanged"
+    );
 }
 
 /// The harness drains standard error while the child runs.
