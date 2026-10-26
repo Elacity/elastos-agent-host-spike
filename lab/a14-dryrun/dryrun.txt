@@ -1,0 +1,614 @@
+host: Linux x86_64
+bash: GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)
+python3: Python 3.12.3 at /usr/bin/python3
+ssh: OpenSSH_9.6p1 Ubuntu-3ubuntu13.20, OpenSSL 3.0.13 30 Jan 2024
+HOME=/home/ubuntu
+This VM has no macOS. A14 stays NOT RUN.
+
+######## Part A. Morning steps exactly, before any path is created ########
+
+======== A step 1, path from the runbook, before creating it ========
+start: 2026-10-26T19:42:41Z
+dir: /home/ubuntu
+command: cd ~/code/elastos-agent-host-spike && pwd && git rev-parse --abbrev-ref HEAD
+bash: line 1: cd: /home/ubuntu/code/elastos-agent-host-spike: No such file or directory
+exit: 1
+seconds: 0
+end: 2026-10-26T19:42:41Z
+
+######## Setup for the rest of Part A (not a runbook step): a local clone so steps 2-5 have a repository. ########
+Cloning into '/home/ubuntu/code/elastos-agent-host-spike'...
+done.
+clone seconds: 1
+clone HEAD: 042cb132 branch spike/agent-host
+
+######## Part A continued, from the clone, commands copied from RUNBOOK.md ########
+
+======== A step 1 ========
+start: 2026-10-26T19:42:42Z
+dir: /home/ubuntu/code/elastos-agent-host-spike
+command: pwd && git status --short --branch
+/home/ubuntu/code/elastos-agent-host-spike
+## spike/agent-host...origin/spike/agent-host
+exit: 0
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+======== A step 2 ========
+start: 2026-10-26T19:42:42Z
+dir: /home/ubuntu/code/elastos-agent-host-spike
+command: git checkout spike/agent-host && git pull --ff-only
+Already on 'spike/agent-host'
+Your branch is up to date with 'origin/spike/agent-host'.
+From https://github.com/Elacity/elastos-agent-host-spike
+   042cb132..70bf2de6  spike/agent-host        -> origin/spike/agent-host
+ * [new branch]        claude/bus2-proof       -> origin/claude/bus2-proof
+ * [new branch]        claude/compute-invalid-mapping -> origin/claude/compute-invalid-mapping
+ * [new branch]        claude/exec-exit-channel -> origin/claude/exec-exit-channel
+ * [new branch]        claude/festive-wozniak-rf6shm -> origin/claude/festive-wozniak-rf6shm
+ * [new branch]        claude/fixes-after-overnight-1 -> origin/claude/fixes-after-overnight-1
+ * [new branch]        claude/guard-sweep      -> origin/claude/guard-sweep
+ * [new branch]        claude/journal-format-2 -> origin/claude/journal-format-2
+ * [new branch]        claude/omp-audit        -> origin/claude/omp-audit
+ * [new branch]        claude/omp-seen-range   -> origin/claude/omp-seen-range
+ * [new branch]        claude/omp2-child-limits -> origin/claude/omp2-child-limits
+ * [new branch]        claude/omp2-child-limits-fix -> origin/claude/omp2-child-limits-fix
+ * [new branch]        claude/omp2-compaction-reasons -> origin/claude/omp2-compaction-reasons
+ * [new branch]        claude/omp2-compaction-state -> origin/claude/omp2-compaction-state
+ * [new branch]        claude/omp2-design      -> origin/claude/omp2-design
+ * [new branch]        claude/overnight-1      -> origin/claude/overnight-1
+ * [new branch]        claude/photo-archive-design -> origin/claude/photo-archive-design
+ * [new branch]        claude/photo-fuel-cause -> origin/claude/photo-fuel-cause
+ * [new branch]        claude/photo-kit        -> origin/claude/photo-kit
+ * [new branch]        claude/photo-kit-crate  -> origin/claude/photo-kit-crate
+ * [new branch]        claude/photo-kit-shared -> origin/claude/photo-kit-shared
+ * [new branch]        claude/photo-p0         -> origin/claude/photo-p0
+ * [new branch]        claude/photo-p1         -> origin/claude/photo-p1
+ * [new branch]        claude/photo-p1b        -> origin/claude/photo-p1b
+ * [new branch]        claude/photo-p2         -> origin/claude/photo-p2
+ * [new branch]        claude/photo-p2b        -> origin/claude/photo-p2b
+ * [new branch]        claude/photo-p3         -> origin/claude/photo-p3
+ * [new branch]        claude/photo-p3-seam    -> origin/claude/photo-p3-seam
+ * [new branch]        claude/photo-p3-surface -> origin/claude/photo-p3-surface
+ * [new branch]        claude/photo-p4         -> origin/claude/photo-p4
+ * [new branch]        claude/photo-p4b        -> origin/claude/photo-p4b
+ * [new branch]        claude/rescore-grade    -> origin/claude/rescore-grade
+ * [new branch]        claude/s0b-catch-up     -> origin/claude/s0b-catch-up
+ * [new branch]        claude/s3-bridge-cas    -> origin/claude/s3-bridge-cas
+ * [new branch]        claude/s3-e2e           -> origin/claude/s3-e2e
+ * [new branch]        claude/s3-guest-journal -> origin/claude/s3-guest-journal
+ * [new branch]        claude/s3-journal-store -> origin/claude/s3-journal-store
+ * [new branch]        claude/sweep-gap-tests  -> origin/claude/sweep-gap-tests
+ * [new branch]        cursor/a1-a8-hardening-85ce -> origin/cursor/a1-a8-hardening-85ce
+ * [new branch]        cursor/bump-wasmtime-36-0-19-e94c -> origin/cursor/bump-wasmtime-36-0-19-e94c
+ * [new branch]        cursor/demo-a14-installed-demo-83e1 -> origin/cursor/demo-a14-installed-demo-83e1
+ * [new branch]        cursor/fail-closed-linux-0b95 -> origin/cursor/fail-closed-linux-0b95
+ * [new branch]        cursor/fail-closed-linux-recover -> origin/cursor/fail-closed-linux-recover
+ * [new branch]        cursor/intent-planner-a15-10c1 -> origin/cursor/intent-planner-a15-10c1
+ * [new branch]        cursor/lab-linux-matrix-0973 -> origin/cursor/lab-linux-matrix-0973
+ * [new branch]        cursor/linux-confine-e156 -> origin/cursor/linux-confine-e156
+ * [new branch]        cursor/owned-storage-a9-9b7c -> origin/cursor/owned-storage-a9-9b7c
+ * [new branch]        cursor/redteam-m1-c3b0  -> origin/cursor/redteam-m1-c3b0
+ * [new branch]        cursor/resident-instances-harness-c6ae -> origin/cursor/resident-instances-harness-c6ae
+ * [new branch]        cursor/runtime-asks-ad52 -> origin/cursor/runtime-asks-ad52
+ * [new branch]        sec/emudhra-webpki-bump -> origin/sec/emudhra-webpki-bump
+ * [new branch]        spark/32-bakeoff        -> origin/spark/32-bakeoff
+ * [new branch]        spark/32-bakeoff-tp4    -> origin/spark/32-bakeoff-tp4
+ * [new branch]        spark/agent-host/001-model-written-compaction -> origin/spark/agent-host/001-model-written-compaction
+ * [new branch]        spark/agent-host/003-prefix-stable-across-turns -> origin/spark/agent-host/003-prefix-stable-across-turns
+ * [new branch]        spark/agent-host/004-falsifier-must-run-its-tests -> origin/spark/agent-host/004-falsifier-must-run-its-tests
+ * [new branch]        spark/agent-host/005-falsify-survives-same-proof -> origin/spark/agent-host/005-falsify-survives-same-proof
+ * [new branch]        spark/agent-host/006-compaction-required-fact-whole-token -> origin/spark/agent-host/006-compaction-required-fact-whole-token
+ * [new branch]        spark/agent-host/007-prefix-stable-unit-test-only -> origin/spark/agent-host/007-prefix-stable-unit-test-only
+ * [new branch]        spark/agent-host/008-compaction-opt-in-real-model-summary -> origin/spark/agent-host/008-compaction-opt-in-real-model-summary
+ * [new branch]        spark/agent-host/009-prefix-opt-in-real-model-turns -> origin/spark/agent-host/009-prefix-opt-in-real-model-turns
+ * [new branch]        spark/agent-host/010-falsify-harness-error-never-a-catch -> origin/spark/agent-host/010-falsify-harness-error-never-a-catch
+ * [new branch]        spark/agent-host/011-fail-closed-test-http-client -> origin/spark/agent-host/011-fail-closed-test-http-client
+ * [new branch]        spark/agent-host/012-compaction-opt-in-real-model-on-client -> origin/spark/agent-host/012-compaction-opt-in-real-model-on-client
+ * [new branch]        spark/agent-host/013-http-client-validate-framing-before-trim -> origin/spark/agent-host/013-http-client-validate-framing-before-trim
+ * [new branch]        spark/agent-host/014-apply-restore-through-edit-path -> origin/spark/agent-host/014-apply-restore-through-edit-path
+ * [new branch]        spark/agent-host/015-compaction-opt-in-real-model-on-013-client -> origin/spark/agent-host/015-compaction-opt-in-real-model-on-013-client
+ * [new branch]        spark/agent-host/016-prefix-opt-in-real-model-on-013-client -> origin/spark/agent-host/016-prefix-opt-in-real-model-on-013-client
+ * [new branch]        spark/agent-host/017-skill-loaded-from-content-named-by-hash -> origin/spark/agent-host/017-skill-loaded-from-content-named-by-hash
+ * [new branch]        spark/agent-host/018-create-app-scaffold-applied-opens-again -> origin/spark/agent-host/018-create-app-scaffold-applied-opens-again
+ * [new branch]        spark/agent-host/019-grade-rescore-after-005-to-018 -> origin/spark/agent-host/019-grade-rescore-after-005-to-018
+ * [new branch]        spark/agent-host/020-falsifier-for-skill-positive-admission -> origin/spark/agent-host/020-falsifier-for-skill-positive-admission
+ * [new branch]        spark/agent-host/021-falsifier-for-compaction-proposal-shaping -> origin/spark/agent-host/021-falsifier-for-compaction-proposal-shaping
+ * [new branch]        spark/agent-host/022-admit-cargo-test-on-exec-path -> origin/spark/agent-host/022-admit-cargo-test-on-exec-path
+ * [new branch]        spark/agent-host/024-four-interleaved-sessions-isolated -> origin/spark/agent-host/024-four-interleaved-sessions-isolated
+ * [new branch]        spark/agent-host/025-asks-json-declares-per-step-asks -> origin/spark/agent-host/025-asks-json-declares-per-step-asks
+ * [new branch]        spark/agent-host/027-asks-json-declaration-and-coverage -> origin/spark/agent-host/027-asks-json-declaration-and-coverage
+ * [new branch]        spark/agent-host/028-stored-reads-through-one-checked-decoder -> origin/spark/agent-host/028-stored-reads-through-one-checked-decoder
+ * [new branch]        spark/agent-host/029-land-027-declaration-on-moved-base -> origin/spark/agent-host/029-land-027-declaration-on-moved-base
+ * [new branch]        spark/agent-host/030-declared-asks-only-own-principal-and-root -> origin/spark/agent-host/030-declared-asks-only-own-principal-and-root
+ * [new branch]        spark/agent-host/033-land-030-narrowing-same-guest-hash -> origin/spark/agent-host/033-land-030-narrowing-same-guest-hash
+ * [new branch]        spark/agent-host/034-land-033-reviewed-narrowing-fresh-branch -> origin/spark/agent-host/034-land-033-reviewed-narrowing-fresh-branch
+ * [new branch]        spark/agent-host/035-test-only-items-below-the-export -> origin/spark/agent-host/035-test-only-items-below-the-export
+ * [new branch]        spark/agent-host/035-test-only-items-below-the-export-on-b112bb02e -> origin/spark/agent-host/035-test-only-items-below-the-export-on-b112bb02e
+ * [new branch]        spark/agent-host/036-falsifiers-json-one-indentation -> origin/spark/agent-host/036-falsifiers-json-one-indentation
+ * [new branch]        spark/cc-capsule-identity/001-fixtures-and-lab-cid -> origin/spark/cc-capsule-identity/001-fixtures-and-lab-cid
+ * [new branch]        spark/cc-capsule-identity/003-location-and-byte-falsifiers -> origin/spark/cc-capsule-identity/003-location-and-byte-falsifiers
+ * [new branch]        spark/cc-capsule-identity/004-test-key-did-signature -> origin/spark/cc-capsule-identity/004-test-key-did-signature
+ * [new branch]        spark/cc-capsule-identity/005-land-001-from-round-1-checked-handles -> origin/spark/cc-capsule-identity/005-land-001-from-round-1-checked-handles
+ * [new branch]        spark/cc-capsule-identity/006-gap-report -> origin/spark/cc-capsule-identity/006-gap-report
+ * [new branch]        spark/cc-capsule-identity/007-valid-signature-grants-nothing -> origin/spark/cc-capsule-identity/007-valid-signature-grants-nothing
+ * [new branch]        spark/cc-capsule-identity/008-gap-report-names-runtime-issues -> origin/spark/cc-capsule-identity/008-gap-report-names-runtime-issues
+ * [new branch]        spark/cc-capsule-identity/009-checked-bundle-one-walk -> origin/spark/cc-capsule-identity/009-checked-bundle-one-walk
+ * [new branch]        spark/cc-capsule-identity/011-lab-record-binds-cid -> origin/spark/cc-capsule-identity/011-lab-record-binds-cid
+ * [new branch]        spark/cc-capsule-identity/012-app-provider-model-rules -> origin/spark/cc-capsule-identity/012-app-provider-model-rules
+ * [new branch]        spark/cc-capsule-identity/013-one-parse-for-a-printed-lab-cid -> origin/spark/cc-capsule-identity/013-one-parse-for-a-printed-lab-cid
+ * [new branch]        spark/cc-capsule-identity/014-close-the-review-followups-of-004-and-007 -> origin/spark/cc-capsule-identity/014-close-the-review-followups-of-004-and-007
+ * [new branch]        spark/cc-capsule-identity/015-platform-variants-and-a-signed-variant-binding -> origin/spark/cc-capsule-identity/015-platform-variants-and-a-signed-variant-binding
+ * [new branch]        spark/cc-capsule-identity/016-a-wasm-app-binds-exactly-one-portable-variant -> origin/spark/cc-capsule-identity/016-a-wasm-app-binds-exactly-one-portable-variant
+ * [new branch]        spark/cc-capsule-identity/017-a-variant-label-is-the-signers-claim -> origin/spark/cc-capsule-identity/017-a-variant-label-is-the-signers-claim
+ * [new branch]        spark/cc-capsule-identity/018-swap-the-one-lab-cid-to-a-unixfs-root-with-no-new-crate -> origin/spark/cc-capsule-identity/018-swap-the-one-lab-cid-to-a-unixfs-root-with-no-new-crate
+ * [new branch]        spark/cc-capsule-identity/019-the-readme-python-rule-recomputes-every-lab-cid-pin -> origin/spark/cc-capsule-identity/019-the-readme-python-rule-recomputes-every-lab-cid-pin
+ * [new branch]        spark/cc-capsule-identity/020-the-readme-python-digests-match-the-signed-bytes -> origin/spark/cc-capsule-identity/020-the-readme-python-digests-match-the-signed-bytes
+ * [new branch]        spark/cc-capsule-identity/021-gap-report-records-anders-answers-and-the-lab-now -> origin/spark/cc-capsule-identity/021-gap-report-records-anders-answers-and-the-lab-now
+ * [new branch]        spark/cc-capsule-identity/022-consumer-adoption-note-lists-every-lab-cid-user-under-test -> origin/spark/cc-capsule-identity/022-consumer-adoption-note-lists-every-lab-cid-user-under-test
+ * [new branch]        spark/cc-capsule-identity/025-adoption-note-lists-lab-cid-users-read-by-cargo-metadata -> origin/spark/cc-capsule-identity/025-adoption-note-lists-lab-cid-users-read-by-cargo-metadata
+ * [new branch]        spark/cc-capsule-identity/026-gap-report-records-anders-b1-split-and-the-b2-boundary -> origin/spark/cc-capsule-identity/026-gap-report-records-anders-b1-split-and-the-b2-boundary
+ * [new branch]        spark/cc-model-confine/004-outside-read-denied -> origin/spark/cc-model-confine/004-outside-read-denied
+ * [new branch]        spark/cc-model-confine/006-profile-on-shared-contract -> origin/spark/cc-model-confine/006-profile-on-shared-contract
+ * [new branch]        spark/cc-model-confine/009-land-006-profile-on-moved-base -> origin/spark/cc-model-confine/009-land-006-profile-on-moved-base
+ * [new branch]        spark/cc-model-confine/010-hosted-run-fails-closed -> origin/spark/cc-model-confine/010-hosted-run-fails-closed
+ * [new branch]        spark/cc-model-confine/011-local-offer-refused-at-init -> origin/spark/cc-model-confine/011-local-offer-refused-at-init
+ * [new branch]        spark/cc-model-confine/012-register-deny-network-wallet-entry -> origin/spark/cc-model-confine/012-register-deny-network-wallet-entry
+ * [new branch]        spark/cc-model-confine/013-create-refusal-reports-access-denied -> origin/spark/cc-model-confine/013-create-refusal-reports-access-denied
+ * [new branch]        spark/cc-model-confine/014-only-bound-binary-starts -> origin/spark/cc-model-confine/014-only-bound-binary-starts
+ * [new branch]        spark/cc-model-confine/015-stand-in-counts-connection-at-accept -> origin/spark/cc-model-confine/015-stand-in-counts-connection-at-accept
+ * [new branch]        spark/cc-model-confine/016-hosted-run-wait-holds-its-deadline -> origin/spark/cc-model-confine/016-hosted-run-wait-holds-its-deadline
+ * [new branch]        spark/cc-model-confine/016-hosted-run-wait-holds-its-deadline-r2 -> origin/spark/cc-model-confine/016-hosted-run-wait-holds-its-deadline-r2
+ * [new branch]        spark/cc-model-confine/017-macos-confine-test-fails-instead-of-skipping -> origin/spark/cc-model-confine/017-macos-confine-test-fails-instead-of-skipping
+ * [new branch]        spark/cc-model-confine/018-land-015-stand-in-count -> origin/spark/cc-model-confine/018-land-015-stand-in-count
+ * [new branch]        spark/cc-model-confine/019-start-refused-when-profile-cannot-apply -> origin/spark/cc-model-confine/019-start-refused-when-profile-cannot-apply
+ * [new branch]        spark/cc-model-confine/020-model-profile-is-the-oracle -> origin/spark/cc-model-confine/020-model-profile-is-the-oracle
+ * [new branch]        spark/cc-model-confine/021-point-model-doc-at-linux-design -> origin/spark/cc-model-confine/021-point-model-doc-at-linux-design
+ * [new branch]        spark/cc-model-confine/022-land-017-macos-skip-gate -> origin/spark/cc-model-confine/022-land-017-macos-skip-gate
+ * [new branch]        spark/cc-model-confine/023-land-022-skip-gate-on-fixed-base -> origin/spark/cc-model-confine/023-land-022-skip-gate-on-fixed-base
+ * [new branch]        spark/cc-model-confine/024-gate-refusal-uses-host-os-words -> origin/spark/cc-model-confine/024-gate-refusal-uses-host-os-words
+ * [new branch]        spark/cc-model-confine/025-point-startup-refusal-at-did-bridge -> origin/spark/cc-model-confine/025-point-startup-refusal-at-did-bridge
+ * [new branch]        spark/cc-model-confine/026-list-operations-and-rights -> origin/spark/cc-model-confine/026-list-operations-and-rights
+ * [new branch]        spark/cc-model-confine/027-operations-linux-cells-stay-designed -> origin/spark/cc-model-confine/027-operations-linux-cells-stay-designed
+ * [new branch]        spark/cc-model-confine/028-state-one-exec-term-in-contract-list -> origin/spark/cc-model-confine/028-state-one-exec-term-in-contract-list
+ * [new branch]        spark/cc-model-confine/029-bound-executable-digest-stand-in -> origin/spark/cc-model-confine/029-bound-executable-digest-stand-in
+ * [new branch]        spark/cc-model-confine/031-operations-table-cites-real-tests -> origin/spark/cc-model-confine/031-operations-table-cites-real-tests
+ * [new branch]        spark/cc-model-confine/032-stand-in-counts-toward-no-m1-check -> origin/spark/cc-model-confine/032-stand-in-counts-toward-no-m1-check
+ * [new branch]        spark/cc-model-confine/033-trace-allow-rules-to-declared-rights -> origin/spark/cc-model-confine/033-trace-allow-rules-to-declared-rights
+ * [new branch]        spark/cc-model-confine/034-path-binding-show-rejects-exit-65 -> origin/spark/cc-model-confine/034-path-binding-show-rejects-exit-65
+ * [new branch]        spark/cc-model-confine/035-platform-baseline-rules-fail-when-they-widen -> origin/spark/cc-model-confine/035-platform-baseline-rules-fail-when-they-widen
+ * [new branch]        spark/cc-redteam/001-confine-wallet-profile-escape-probe -> origin/spark/cc-redteam/001-confine-wallet-profile-escape-probe
+ * [new branch]        spark/cc-redteam/002-agent-host-falsifier-asks-honesty -> origin/spark/cc-redteam/002-agent-host-falsifier-asks-honesty
+ * [new branch]        spark/cc-redteam/003-wasm-capsule-receipt-binding-probe -> origin/spark/cc-redteam/003-wasm-capsule-receipt-binding-probe
+ * [new branch]        spark/cc-redteam/005-land-001-wallet-confine-probe -> origin/spark/cc-redteam/005-land-001-wallet-confine-probe
+ * [new branch]        spark/cc-redteam/006-land-002-anchor-schema-probe-one-pin -> origin/spark/cc-redteam/006-land-002-anchor-schema-probe-one-pin
+ * [new branch]        spark/cc-redteam/008-wasm-capsule-copy-path-layout -> origin/spark/cc-redteam/008-wasm-capsule-copy-path-layout
+ * [new branch]        spark/confine/001-did-provider-storage-root-required -> origin/spark/confine/001-did-provider-storage-root-required
+ * [new branch]        spark/confine/002-did-provider-runs-under-profile -> origin/spark/confine/002-did-provider-runs-under-profile
+ * [new branch]        spark/confine/003-wallet-provider-storage-and-protocol-map -> origin/spark/confine/003-wallet-provider-storage-and-protocol-map
+ * [new branch]        spark/confine/004-wallet-provider-runs-under-profile -> origin/spark/confine/004-wallet-provider-runs-under-profile
+ * [new branch]        spark/confine/005-unify-confinement-bridge-contract -> origin/spark/confine/005-unify-confinement-bridge-contract
+ * [new branch]        spark/confine/006-did-provider-confinement-core -> origin/spark/confine/006-did-provider-confinement-core
+ * [new branch]        spark/confine/007-did-provider-verify-recovery-under-profile -> origin/spark/confine/007-did-provider-verify-recovery-under-profile
+ * [new branch]        spark/confine/008-nickname-lookup-reports-storage-error -> origin/spark/confine/008-nickname-lookup-reports-storage-error
+ * [new branch]        spark/confine/009-did-provider-confinement-core-single-loader -> origin/spark/confine/009-did-provider-confinement-core-single-loader
+ * [new branch]        spark/confine/010-wallet-provider-storage-root-required -> origin/spark/confine/010-wallet-provider-storage-root-required
+ * [new branch]        spark/confine/011-wallet-falsifiers-committed-list -> origin/spark/confine/011-wallet-falsifiers-committed-list
+ * [new branch]        spark/confine/012-did-falsifiers-committed-list -> origin/spark/confine/012-did-falsifiers-committed-list
+ * [new branch]        spark/confine/013-wallet-confine-sb-falsifiers-committed-list -> origin/spark/confine/013-wallet-confine-sb-falsifiers-committed-list
+ * [new branch]        spark/confine/014-every-file-profile-on-one-contract -> origin/spark/confine/014-every-file-profile-on-one-contract
+ * [new branch]        spark/confine/015-did-allow-rules-load-bearing -> origin/spark/confine/015-did-allow-rules-load-bearing
+ * [new branch]        spark/confine/016-wallet-allow-rules-load-bearing -> origin/spark/confine/016-wallet-allow-rules-load-bearing
+ * [new branch]        spark/confine/017-one-check-refuses-network-allow -> origin/spark/confine/017-one-check-refuses-network-allow
+ * [new branch]        spark/confine/018-model-profile-required-in-one-check -> origin/spark/confine/018-model-profile-required-in-one-check
+ * [new branch]        spark/confine/019-did-falsifier-list-and-document-agree -> origin/spark/confine/019-did-falsifier-list-and-document-agree
+ * [new branch]        spark/confine/020-one-check-tests-allow-default -> origin/spark/confine/020-one-check-tests-allow-default
+ * [new branch]        spark/confine/021-one-check-tests-the-canonical-token-rule -> origin/spark/confine/021-one-check-tests-the-canonical-token-rule
+ * [new branch]        spark/confine/022-did-startup-denial-shows-its-reason -> origin/spark/confine/022-did-startup-denial-shows-its-reason
+ * [new branch]        spark/confine/023-did-write-grant-stops-at-its-root -> origin/spark/confine/023-did-write-grant-stops-at-its-root
+ * [new branch]        spark/confine/024-wallet-falsifier-list-on-the-runner-path-rule -> origin/spark/confine/024-wallet-falsifier-list-on-the-runner-path-rule
+ * [new branch]        spark/confine/026-land-022-reviewed-build -> origin/spark/confine/026-land-022-reviewed-build
+ * [new branch]        spark/confine/027-one-check-reads-forms-as-they-load -> origin/spark/confine/027-one-check-reads-forms-as-they-load
+ * [new branch]        spark/confine/028-did-start-refused-when-profile-cannot-apply -> origin/spark/confine/028-did-start-refused-when-profile-cannot-apply
+ * [new branch]        spark/confine/029-wallet-start-refused-when-profile-cannot-apply -> origin/spark/confine/029-wallet-start-refused-when-profile-cannot-apply
+ * [new branch]        spark/confine/030-confine-sb-is-the-oracle-for-the-generated-profile -> origin/spark/confine/030-confine-sb-is-the-oracle-for-the-generated-profile
+ * [new branch]        spark/confine/031-did-falsifier-list-follows-the-runner-path-rule -> origin/spark/confine/031-did-falsifier-list-follows-the-runner-path-rule
+ * [new branch]        spark/confine/032-linux-design-for-the-one-profile-contract -> origin/spark/confine/032-linux-design-for-the-one-profile-contract
+ * [new branch]        spark/confine/033-harness-comments-say-only-what-tests-show -> origin/spark/confine/033-harness-comments-say-only-what-tests-show
+ * [new branch]        spark/confine/034-wallet-launch-bindings-in-one-place-both-lists-caught -> origin/spark/confine/034-wallet-launch-bindings-in-one-place-both-lists-caught
+ * [new branch]        spark/confine/035-linux-design-claims-only-what-each-primitive-carries -> origin/spark/confine/035-linux-design-claims-only-what-each-primitive-carries
+ * [new branch]        spark/confine/035-linux-design-claims-only-what-each-primitive-carries-r2 -> origin/spark/confine/035-linux-design-claims-only-what-each-primitive-carries-r2
+ * [new branch]        spark/confine/036-harness-comments-name-the-deadline-and-drop-did12-overclaim -> origin/spark/confine/036-harness-comments-name-the-deadline-and-drop-did12-overclaim
+ * [new branch]        spark/confine/036-harness-comments-name-the-deadline-and-drop-did12-overclaim-on-7b5bcc9af -> origin/spark/confine/036-harness-comments-name-the-deadline-and-drop-did12-overclaim-on-7b5bcc9af
+ * [new branch]        spark/confine/037-only-the-tests-launch-today-one-wallet-parent -> origin/spark/confine/037-only-the-tests-launch-today-one-wallet-parent
+ * [new branch]        spark/confine/038-linux-status-describes-the-lab-contract -> origin/spark/confine/038-linux-status-describes-the-lab-contract
+ * [new branch]        spark/confine/039-linux-file-probes-state-their-fixture-authority -> origin/spark/confine/039-linux-file-probes-state-their-fixture-authority
+ * [new branch]        spark/confine/040-linux-ipc-kernel-and-process-probes-name-the-deciding-layer -> origin/spark/confine/040-linux-ipc-kernel-and-process-probes-name-the-deciding-layer
+ * [new branch]        spark/confine/041-linux-opening-states-no-provider-status -> origin/spark/confine/041-linux-opening-states-no-provider-status
+ * [new branch]        spark/confine/042-gate-refusal-uses-the-host-os-status-words -> origin/spark/confine/042-gate-refusal-uses-the-host-os-status-words
+ * [new branch]        spark/confine/043-linux-file-probes-keep-stdio-and-one-fcntl-command -> origin/spark/confine/043-linux-file-probes-keep-stdio-and-one-fcntl-command
+ * [new branch]        spark/confine/044-linux-ipc-exec-and-bpf-probes-claim-only-what-is-settled -> origin/spark/confine/044-linux-ipc-exec-and-bpf-probes-claim-only-what-is-settled
+ * [new branch]        spark/confine/045-linux-file-probe-claims-each-falsifier-at-its-own-call -> origin/spark/confine/045-linux-file-probe-claims-each-falsifier-at-its-own-call
+ * [new branch]        spark/confine/046-linux-exec-probes-get-their-copy-before-the-policy-starts -> origin/spark/confine/046-linux-exec-probes-get-their-copy-before-the-policy-starts
+ * [new branch]        spark/confine/047-linux-files-row-states-the-fixture-check-on-its-own -> origin/spark/confine/047-linux-files-row-states-the-fixture-check-on-its-own
+ * [new branch]        spark/confine/048-linux-exec-probes-show-the-copy-can-run-before-the-policy -> origin/spark/confine/048-linux-exec-probes-show-the-copy-can-run-before-the-policy
+ * [new branch]        spark/confine/049-did-sandbox-caller-fails-on-the-gate-error -> origin/spark/confine/049-did-sandbox-caller-fails-on-the-gate-error
+ * [new branch]        spark/confine/050-wallet-sandbox-caller-fails-on-the-gate-error -> origin/spark/confine/050-wallet-sandbox-caller-fails-on-the-gate-error
+ * [new branch]        spark/confine/051-linux-exec-probes-keep-the-outside-start-out-of-the-root -> origin/spark/confine/051-linux-exec-probes-keep-the-outside-start-out-of-the-root
+ * [new branch]        spark/confine/052-did-harness-follow-ups-score-the-drain-exec-and-json-paths -> origin/spark/confine/052-did-harness-follow-ups-score-the-drain-exec-and-json-paths
+ * [new branch]        spark/confine/053-wallet-harness-copies-did-drain-exec-and-json-tests -> origin/spark/confine/053-wallet-harness-copies-did-drain-exec-and-json-tests
+ * [new branch]        spark/confine/054-wallet-profile-parser-reads-strings-and-comments-as-loaded -> origin/spark/confine/054-wallet-profile-parser-reads-strings-and-comments-as-loaded
+ * [new branch]        spark/confine/055-every-did-and-wallet-allow-rule-has-a-registered-removal -> origin/spark/confine/055-every-did-and-wallet-allow-rule-has-a-registered-removal
+ * [new branch]        spark/confine/056-did-profile-refuses-to-start-an-unbound-copy-of-its-binary -> origin/spark/confine/056-did-profile-refuses-to-start-an-unbound-copy-of-its-binary
+ * [new branch]        spark/confine/057-did-file-planted-beneath-storage-parent-stays-unread-and-unwritten -> origin/spark/confine/057-did-file-planted-beneath-storage-parent-stays-unread-and-unwritten
+ * [new branch]        spark/confine/058-wallet-launch-refuses-a-second-binding-of-a-canonical-parameter -> origin/spark/confine/058-wallet-launch-refuses-a-second-binding-of-a-canonical-parameter
+ * [new branch]        spark/confine/059-wallet-profile-refuses-to-start-an-unbound-copy-of-its-binary -> origin/spark/confine/059-wallet-profile-refuses-to-start-an-unbound-copy-of-its-binary
+ * [new branch]        spark/confine/060-wallet-key-planted-beneath-storage-parent-stays-unread -> origin/spark/confine/060-wallet-key-planted-beneath-storage-parent-stays-unread
+ * [new branch]        spark/confine/061-each-confinement-doc-names-every-falsifier-id-of-its-list -> origin/spark/confine/061-each-confinement-doc-names-every-falsifier-id-of-its-list
+ * [new branch]        spark/confine/062-wallet-start-beneath-storage-parent-is-refused-at-its-first-write -> origin/spark/confine/062-wallet-start-beneath-storage-parent-is-refused-at-its-first-write
+ * [new branch]        spark/confine/063-wallet-list-reader-refuses-an-entry-without-a-string-id -> origin/spark/confine/063-wallet-list-reader-refuses-an-entry-without-a-string-id
+ * [new branch]        spark/confine/064-each-id-boundary-check-in-the-section-check-has-a-falsifier -> origin/spark/confine/064-each-id-boundary-check-in-the-section-check-has-a-falsifier
+ * [new branch]        spark/confine/065-did-bound-copy-control-keeps-the-copy-bytes-after-shutdown -> origin/spark/confine/065-did-bound-copy-control-keeps-the-copy-bytes-after-shutdown
+ * [new branch]        spark/confine/066-one-check-refuses-a-second-exec-allow -> origin/spark/confine/066-one-check-refuses-a-second-exec-allow
+ * [new branch]        spark/confine/067-second-exec-refusal-quotes-the-real-extra-rule -> origin/spark/confine/067-second-exec-refusal-quotes-the-real-extra-rule
+ * [new branch]        spark/confine/068-did-operations-table-cites-each-right-and-its-test -> origin/spark/confine/068-did-operations-table-cites-each-right-and-its-test
+ * [new branch]        spark/confine/069-wallet-operations-table-on-the-did-table-format -> origin/spark/confine/069-wallet-operations-table-on-the-did-table-format
+ * [new branch]        spark/confine/070-did-and-wallet-allow-rules-trace-to-declared-rights -> origin/spark/confine/070-did-and-wallet-allow-rules-trace-to-declared-rights
+ * [new branch]        spark/confine/071-did-storage-rows-prove-both-sides-of-their-right -> origin/spark/confine/071-did-storage-rows-prove-both-sides-of-their-right
+ * [new branch]        spark/confine/072-wallet-storage-rows-prove-both-sides-of-their-right -> origin/spark/confine/072-wallet-storage-rows-prove-both-sides-of-their-right
+ * [new branch]        spark/confine/073-did-and-wallet-declared-rights-take-the-model-baseline-shape -> origin/spark/confine/073-did-and-wallet-declared-rights-take-the-model-baseline-shape
+ * [new branch]        spark/confine/074-declared-rights-check-pins-each-rule-to-its-one-id -> origin/spark/confine/074-declared-rights-check-pins-each-rule-to-its-one-id
+ * [new branch]        spark/confine/075-platform-baseline-justification-names-its-provider-and-reason -> origin/spark/confine/075-platform-baseline-justification-names-its-provider-and-reason
+ * [new branch]        spark/cu-bus-v2-proposal/001-citation-check -> origin/spark/cu-bus-v2-proposal/001-citation-check
+ * [new branch]        spark/cu-bus-v2-proposal/002-agent-identity -> origin/spark/cu-bus-v2-proposal/002-agent-identity
+ * [new branch]        spark/cu-bus-v2-proposal/003-signed-declarations -> origin/spark/cu-bus-v2-proposal/003-signed-declarations
+ * [new branch]        spark/cu-bus-v2-proposal/004-grant-binding -> origin/spark/cu-bus-v2-proposal/004-grant-binding
+ * [new branch]        spark/cu-bus-v2-proposal/005-model-operations -> origin/spark/cu-bus-v2-proposal/005-model-operations
+ * [new branch]        spark/cu-bus-v2-proposal/006-budgets -> origin/spark/cu-bus-v2-proposal/006-budgets
+ * [new branch]        spark/cu-bus-v2-proposal/007-b2-file-asks -> origin/spark/cu-bus-v2-proposal/007-b2-file-asks
+ * [new branch]        spark/cu-bus-v2-proposal/008-b2-project-asks -> origin/spark/cu-bus-v2-proposal/008-b2-project-asks
+ * [new branch]        spark/cu-bus-v2-proposal/009-b2-hosted-journal -> origin/spark/cu-bus-v2-proposal/009-b2-hosted-journal
+ * [new branch]        spark/cx-agent-conformance/002-probe-component-by-hash -> origin/spark/cx-agent-conformance/002-probe-component-by-hash
+ * [new branch]        spark/cx-agent-conformance/003-no-ambient-authority-effect-tests -> origin/spark/cx-agent-conformance/003-no-ambient-authority-effect-tests
+ * [new branch]        spark/cx-agent-conformance/004-agent-memory-under-own-principal -> origin/spark/cx-agent-conformance/004-agent-memory-under-own-principal
+ * [new branch]        spark/cx-agent-conformance/005-parallel-instances-complete-and-runaway-bounded -> origin/spark/cx-agent-conformance/005-parallel-instances-complete-and-runaway-bounded
+ * [new branch]        spark/cx-agent-conformance/006-launch-grant-seam-discovery-writeup -> origin/spark/cx-agent-conformance/006-launch-grant-seam-discovery-writeup
+ * [new branch]        spark/cx-agent-conformance/008-throwaway-home-guard-and-launch-primitive -> origin/spark/cx-agent-conformance/008-throwaway-home-guard-and-launch-primitive
+ * [new branch]        spark/cx-agent-conformance/009-runtime-under-test-and-contained-launch -> origin/spark/cx-agent-conformance/009-runtime-under-test-and-contained-launch
+ * [new branch]        spark/cx-agent-conformance/010-operator-in-throwaway-home-discovery -> origin/spark/cx-agent-conformance/010-operator-in-throwaway-home-discovery
+ * [new branch]        spark/cx-agent-conformance/011-land-009-runtime-under-test-on-moved-base -> origin/spark/cx-agent-conformance/011-land-009-runtime-under-test-on-moved-base
+ * [new branch]        spark/cx-agent-conformance/012-first-serve-provider-admitted-by-hash -> origin/spark/cx-agent-conformance/012-first-serve-provider-admitted-by-hash
+ * [new branch]        spark/cx-agent-conformance/013-operator-ready-offline-settle-ac-010-offline -> origin/spark/cx-agent-conformance/013-operator-ready-offline-settle-ac-010-offline
+ * [new branch]        spark/cx-agent-conformance/014-land-012-first-serve-fixture-on-moved-base -> origin/spark/cx-agent-conformance/014-land-012-first-serve-fixture-on-moved-base
+ * [new branch]        spark/cx-agent-conformance/015-fixture-grant-controller-granted-read -> origin/spark/cx-agent-conformance/015-fixture-grant-controller-granted-read
+ * [new branch]        spark/cx-agent-conformance/017-host-secret-read-refused-fake-key-dir -> origin/spark/cx-agent-conformance/017-host-secret-read-refused-fake-key-dir
+ * [new branch]        spark/cx-agent-conformance/018-versions-receipt-through-existing-report -> origin/spark/cx-agent-conformance/018-versions-receipt-through-existing-report
+ * [new branch]        spark/cx-agent-conformance/019-land-grant-controller-with-bounded-gate -> origin/spark/cx-agent-conformance/019-land-grant-controller-with-bounded-gate
+ * [new branch]        spark/cx-agent-conformance/020-carry-019-grant-controller-and-refresh-lockfile -> origin/spark/cx-agent-conformance/020-carry-019-grant-controller-and-refresh-lockfile
+ * [new branch]        spark/cx-agent-conformance/021-cleanup-census-after-a-run -> origin/spark/cx-agent-conformance/021-cleanup-census-after-a-run
+ * [new branch]        spark/cx-agent-conformance/022-run-004-falsifiers-and-grade-blocker-lists -> origin/spark/cx-agent-conformance/022-run-004-falsifiers-and-grade-blocker-lists
+ * [new branch]        spark/cx-agent-conformance/023-two-instances-overlap-seeded-reads-separate-grants -> origin/spark/cx-agent-conformance/023-two-instances-overlap-seeded-reads-separate-grants
+ * [new branch]        spark/cx-agent-conformance/024-receipt-reads-bundle-lab-cid-through-one-parse -> origin/spark/cx-agent-conformance/024-receipt-reads-bundle-lab-cid-through-one-parse
+ * [new branch]        spark/cx-agent-conformance/025-launch-by-cid-refused-without-a-verified-content-provider -> origin/spark/cx-agent-conformance/025-launch-by-cid-refused-without-a-verified-content-provider
+ * [new branch]        spark/cx-agent-conformance/026-cancel-one-instance-mid-run-sibling-unaffected -> origin/spark/cx-agent-conformance/026-cancel-one-instance-mid-run-sibling-unaffected
+ * [new branch]        spark/cx-agent-conformance/027-kill-one-worker-settlement-recorded-no-retry -> origin/spark/cx-agent-conformance/027-kill-one-worker-settlement-recorded-no-retry
+ * [new branch]        spark/cx-agent-conformance/028-real-agent-host-capsule-gets-no-ungranted-authority -> origin/spark/cx-agent-conformance/028-real-agent-host-capsule-gets-no-ungranted-authority
+ * [new branch]        spark/cx-agent-conformance/029-overlap-barrier-checks-each-caught-by-a-falsifier -> origin/spark/cx-agent-conformance/029-overlap-barrier-checks-each-caught-by-a-falsifier
+ * [new branch]        spark/cx-agent-conformance/032-p7-gap-row-agent-host-journal-under-users-self -> origin/spark/cx-agent-conformance/032-p7-gap-row-agent-host-journal-under-users-self
+ * [new branch]        spark/cx-agent-conformance/033-one-sibling-read-rule-for-barrier-cancel-and-kill -> origin/spark/cx-agent-conformance/033-one-sibling-read-rule-for-barrier-cancel-and-kill
+ * [new branch]        spark/cx-agent-conformance/034-blocked-rows-need-gaps-rows-falsifiers-run-by-hand -> origin/spark/cx-agent-conformance/034-blocked-rows-need-gaps-rows-falsifiers-run-by-hand
+ * [new branch]        spark/cx-agent-conformance/035-kill-row-orphan-owner-measured-falsifiers-run-by-hand -> origin/spark/cx-agent-conformance/035-kill-row-orphan-owner-measured-falsifiers-run-by-hand
+ * [new branch]        spark/cx-agent-conformance/038-a5-grant-refused-from-another-session-or-a-new-session -> origin/spark/cx-agent-conformance/038-a5-grant-refused-from-another-session-or-a-new-session
+ * [new branch]        spark/cx-wasm-audit/001-core-module-import-audit -> origin/spark/cx-wasm-audit/001-core-module-import-audit
+ * [new branch]        spark/cx-wasm-audit/002-component-import-audit -> origin/spark/cx-wasm-audit/002-component-import-audit
+ * [new branch]        spark/cx-wasm-audit/003-audit-crate-skeleton -> origin/spark/cx-wasm-audit/003-audit-crate-skeleton
+ * [new branch]        spark/cx-wasm-audit/004-custom-section-rule-reads-whole-section -> origin/spark/cx-wasm-audit/004-custom-section-rule-reads-whole-section
+ * [new branch]        spark/cx-wasm-audit/005-pin-v1-derives-and-refusal-order -> origin/spark/cx-wasm-audit/005-pin-v1-derives-and-refusal-order
+ * [new branch]        spark/cx-wasm-audit/006-pin-exact-versions-and-every-import-section -> origin/spark/cx-wasm-audit/006-pin-exact-versions-and-every-import-section
+ * [new branch]        spark/cx-wasm-audit/007-component-import-names-with-options-are-refused -> origin/spark/cx-wasm-audit/007-component-import-names-with-options-are-refused
+ * [new branch]        spark/cx-wasm-audit/008-custom-section-rule-reads-size-last-byte -> origin/spark/cx-wasm-audit/008-custom-section-rule-reads-size-last-byte
+ * [new branch]        spark/cx-wasm-audit/009-encoding-check-before-custom-section-check -> origin/spark/cx-wasm-audit/009-encoding-check-before-custom-section-check
+ * [new branch]        spark/cx-wasm-audit/010-pre-release-and-build-versions-are-refused -> origin/spark/cx-wasm-audit/010-pre-release-and-build-versions-are-refused
+ * [new branch]        spark/cx-wasm-audit/011-implements-case-gets-its-own-falsifier -> origin/spark/cx-wasm-audit/011-implements-case-gets-its-own-falsifier
+ * [new branch]        spark/cx-wasm-audit/012-size-last-byte-inside-embedded-module -> origin/spark/cx-wasm-audit/012-size-last-byte-inside-embedded-module
+ * [new branch]        spark/cx-wasm-audit/013-run-and-record-task-009-falsifier-proof -> origin/spark/cx-wasm-audit/013-run-and-record-task-009-falsifier-proof
+ * [new branch]        spark/cx-wasm-audit/014-exact-versions-hold-on-the-declared-side -> origin/spark/cx-wasm-audit/014-exact-versions-hold-on-the-declared-side
+ * [new branch]        spark/cx-wasm-audit/015-module-and-name-from-one-declared-entry -> origin/spark/cx-wasm-audit/015-module-and-name-from-one-declared-entry
+ * [new branch]        spark/cx-wasm-audit/016-core-names-match-exactly-not-by-prefix -> origin/spark/cx-wasm-audit/016-core-names-match-exactly-not-by-prefix
+ * [new branch]        spark/cx-wasm-audit/017-component-names-match-case-exactly -> origin/spark/cx-wasm-audit/017-component-names-match-case-exactly
+ * [new branch]        spark/cx-wasm-audit/018-core-names-match-exactly-not-by-suffix -> origin/spark/cx-wasm-audit/018-core-names-match-exactly-not-by-suffix
+ * [new branch]        spark/cx-wasm-audit/019-component-names-match-exactly-not-by-suffix -> origin/spark/cx-wasm-audit/019-component-names-match-exactly-not-by-suffix
+ * [new branch]        spark/grant-binding/001-verifier-ignores-forged-identity -> origin/spark/grant-binding/001-verifier-ignores-forged-identity
+ * [new branch]        spark/grant-binding/002-verifier-reserve-ceiling -> origin/spark/grant-binding/002-verifier-reserve-ceiling
+ * [new branch]        spark/grant-binding/003-append-grant-refuses-overwrite -> origin/spark/grant-binding/003-append-grant-refuses-overwrite
+ * [new branch]        spark/grant-binding/004-use-path-under-owned-root -> origin/spark/grant-binding/004-use-path-under-owned-root
+ * [new branch]        spark/grant-binding/005-settle-verifier-figure -> origin/spark/grant-binding/005-settle-verifier-figure
+ * [new branch]        spark/grant-binding/006-child-journal-own-right -> origin/spark/grant-binding/006-child-journal-own-right
+ * [new branch]        spark/grant-binding/007-public-storage-read -> origin/spark/grant-binding/007-public-storage-read
+ * [new branch]        spark/grant-binding/008-second-settle-refused -> origin/spark/grant-binding/008-second-settle-refused
+ * [new branch]        spark/grant-binding/009-release-charges-nothing -> origin/spark/grant-binding/009-release-charges-nothing
+ * [new branch]        spark/grant-binding/010-child-journal-inside-root -> origin/spark/grant-binding/010-child-journal-inside-root
+ * [new branch]        spark/grant-binding/011-smaller-settle-frees-the-hold -> origin/spark/grant-binding/011-smaller-settle-frees-the-hold
+ * [new branch]        spark/grant-binding/012-second-release-refused -> origin/spark/grant-binding/012-second-release-refused
+ * [new branch]        spark/grant-binding/013-concurrent-reserves-one-ceiling -> origin/spark/grant-binding/013-concurrent-reserves-one-ceiling
+ * [new branch]        spark/photo/001-archive-core-end-record -> origin/spark/photo/001-archive-core-end-record
+ * [new branch]        spark/photo/002-archive-core-listing-names-statuses -> origin/spark/photo/002-archive-core-listing-names-statuses
+ * [new branch]        spark/photo/003-archive-text-previews -> origin/spark/photo/003-archive-text-previews
+ * [new branch]        spark/photo/004-archive-host-test-grant-fuel -> origin/spark/photo/004-archive-host-test-grant-fuel
+ * [new branch]        spark/photo/005-archive-ratio-check-and-declared-totals -> origin/spark/photo/005-archive-ratio-check-and-declared-totals
+ * [new branch]        spark/photo/006-archive-page-and-smoke -> origin/spark/photo/006-archive-page-and-smoke
+ * [new branch]        spark/photo/007-shared-docs-block-renderer-in-kit -> origin/spark/photo/007-shared-docs-block-renderer-in-kit
+ * [new branch]        spark/photo/008-archive-page-on-shared-renderer -> origin/spark/photo/008-archive-page-on-shared-renderer
+ * [new branch]        spark/provider/001-falsify-runner-provider-list -> origin/spark/provider/001-falsify-runner-provider-list
+ * [new branch]        spark/provider/002-idle-release-falsifiers -> origin/spark/provider/002-idle-release-falsifiers
+ * [new branch]        spark/provider/003-context-full-refusal-behaviour-test -> origin/spark/provider/003-context-full-refusal-behaviour-test
+ * [new branch]        spark/provider/004-provider-runner-list-and-refusals -> origin/spark/provider/004-provider-runner-list-and-refusals
+ * [new branch]        spark/provider/005-nested-selftest-isolation-and-provider-recovery -> origin/spark/provider/005-nested-selftest-isolation-and-provider-recovery
+ * [new branch]        spark/provider/006-provider-command-from-flag-strict-argv -> origin/spark/provider/006-provider-command-from-flag-strict-argv
+ * [new branch]        spark/provider/007-load-document-refusals-and-mp01 -> origin/spark/provider/007-load-document-refusals-and-mp01
+ * [new branch]        spark/provider/008-cache-off-until-measured-falsifier -> origin/spark/provider/008-cache-off-until-measured-falsifier
+ * [new branch]        spark/provider/009-rescore-row-10-by-behaviour -> origin/spark/provider/009-rescore-row-10-by-behaviour
+ * [new branch]        spark/provider/011-nested-selftest-backup-isolation -> origin/spark/provider/011-nested-selftest-backup-isolation
+ * [new branch]        spark/provider/012-journal-access-denied-error -> origin/spark/provider/012-journal-access-denied-error
+ * [new branch]        spark/provider/013-model-profile-recovery-target -> origin/spark/provider/013-model-profile-recovery-target
+ * [new branch]        spark/provider/014-provider-crate-table-did-wallet -> origin/spark/provider/014-provider-crate-table-did-wallet
+ * [new branch]        spark/provider/015-confinement-harness-recovery-targets -> origin/spark/provider/015-confinement-harness-recovery-targets
+ * [new branch]        spark/provider/016-wallet-honesty-test-recovery-target -> origin/spark/provider/016-wallet-honesty-test-recovery-target
+ * [new branch]        spark/provider/018-capsule-identity-command-no-lab-mutation -> origin/spark/provider/018-capsule-identity-command-no-lab-mutation
+ * [new branch]        spark/provider/019-own-failure-text-is-not-a-harness-error -> origin/spark/provider/019-own-failure-text-is-not-a-harness-error
+ * [new branch]        spark/provider/020-loader-check-first-and-exact-section-lines -> origin/spark/provider/020-loader-check-first-and-exact-section-lines
+ * [new branch]        spark/provider/020-loader-check-first-and-exact-section-lines-r2 -> origin/spark/provider/020-loader-check-first-and-exact-section-lines-r2
+ * [new branch]        spark/provider/021-lab-command-on-existing-runner -> origin/spark/provider/021-lab-command-on-existing-runner
+ * [new branch]        spark/provider/022-runner-verdict-parity-and-wind-down -> origin/spark/provider/022-runner-verdict-parity-and-wind-down
+ * [new branch]        spark/provider/023-macos-closure-probe-waits-out-zombie-group -> origin/spark/provider/023-macos-closure-probe-waits-out-zombie-group
+ * [new branch]        spark/provider/024-runner-baseline-before-the-first-edit -> origin/spark/provider/024-runner-baseline-before-the-first-edit
+ * [new branch]        spark/provider/025-edit-paths-stay-inside-the-repository -> origin/spark/provider/025-edit-paths-stay-inside-the-repository
+ * [new branch]        spark/provider/026-lab-recovery-targets-and-a-true-tuple-comment -> origin/spark/provider/026-lab-recovery-targets-and-a-true-tuple-comment
+ * [new branch]        spark/provider/027-wasm-lab-files-are-recovery-targets -> origin/spark/provider/027-wasm-lab-files-are-recovery-targets
+ * [new branch]        spark/provider/028-edit-path-rule-for-the-tree-as-it-stands -> origin/spark/provider/028-edit-path-rule-for-the-tree-as-it-stands
+ * [new branch]        spark/provider/029-temporary-file-is-new-never-written-through -> origin/spark/provider/029-temporary-file-is-new-never-written-through
+ * [new branch]        spark/provider/030-run-the-pv-ids-merged-before-the-gate -> origin/spark/provider/030-run-the-pv-ids-merged-before-the-gate
+ * [new branch]        spark/provider/031-what-one-real-deepseek-turn-through-the-runtime-lacks -> origin/spark/provider/031-what-one-real-deepseek-turn-through-the-runtime-lacks
+ * [new branch]        spark/provider/032-a-runner-killed-mid-run-is-recovered -> origin/spark/provider/032-a-runner-killed-mid-run-is-recovered
+ * [new branch]        spark/provider/033-mp4-kill-safe-recovery-proof-report -> origin/spark/provider/033-mp4-kill-safe-recovery-proof-report
+ * [new branch]        spark/provider/034-where-a-budget-reservation-must-come-before-dispatch -> origin/spark/provider/034-where-a-budget-reservation-must-come-before-dispatch
+ * [new branch]        spark/provider/036-land-the-runner-kill-recovery-case-after-a-gate-flake -> origin/spark/provider/036-land-the-runner-kill-recovery-case-after-a-gate-flake
+ * [new branch]        spark/provider/037-deadline-capacity-test-survives-a-slow-engine-start -> origin/spark/provider/037-deadline-capacity-test-survives-a-slow-engine-start
+ * [new branch]        spark/wasm-capsule-lab/001-byte-identical-capsule-build -> origin/spark/wasm-capsule-lab/001-byte-identical-capsule-build
+ * [new branch]        spark/wasm-capsule-lab/003-hash-named-bundle -> origin/spark/wasm-capsule-lab/003-hash-named-bundle
+ * [new branch]        spark/wasm-capsule-lab/004-sign-and-offline-verifier -> origin/spark/wasm-capsule-lab/004-sign-and-offline-verifier
+ * [new branch]        spark/wasm-capsule-lab/005-audit-crate-workspace-member -> origin/spark/wasm-capsule-lab/005-audit-crate-workspace-member
+ * [new branch]        spark/wasm-capsule-lab/006-two-engine-verified-run -> origin/spark/wasm-capsule-lab/006-two-engine-verified-run
+ * [new branch]        spark/wasm-capsule-lab/007-lab-name-rule-library -> origin/spark/wasm-capsule-lab/007-lab-name-rule-library
+ * [new branch]        spark/wasm-capsule-lab/009-bundle-command -> origin/spark/wasm-capsule-lab/009-bundle-command
+ * [new branch]        spark/wasm-capsule-lab/010-adopt-capsule-identity-lab-cid -> origin/spark/wasm-capsule-lab/010-adopt-capsule-identity-lab-cid
+ * [new branch]        spark/wasm-capsule-lab/011-bare-capsule-runtime-abi-home -> origin/spark/wasm-capsule-lab/011-bare-capsule-runtime-abi-home
+ * [new branch]        spark/wasm-capsule-lab/012-bundle-create-new-falsifier -> origin/spark/wasm-capsule-lab/012-bundle-create-new-falsifier
+ * [new branch]        spark/wasm-capsule-lab/014-run-one-engine-on-verified-bytes -> origin/spark/wasm-capsule-lab/014-run-one-engine-on-verified-bytes
+ * [new branch]        spark/wasm-capsule-lab/015-verify-then-same-output-on-two-engines -> origin/spark/wasm-capsule-lab/015-verify-then-same-output-on-two-engines
+ * [new branch]        spark/wasm-capsule-lab/016-run-receipt-with-observed-engine-versions -> origin/spark/wasm-capsule-lab/016-run-receipt-with-observed-engine-versions
+ * [new branch]        spark/wasm-capsule-lab/017-retired-label-guard-covers-docs-on-recovered-runner -> origin/spark/wasm-capsule-lab/017-retired-label-guard-covers-docs-on-recovered-runner
+ * [new branch]        spark/wasm-capsule-lab/018-lane-lister-reads-names-git-would-quote -> origin/spark/wasm-capsule-lab/018-lane-lister-reads-names-git-would-quote
+ * [new branch]        spark/wasm-capsule-lab/019-one-engine-start-per-run-and-true-readme-counts -> origin/spark/wasm-capsule-lab/019-one-engine-start-per-run-and-true-readme-counts
+ * [new branch]        spark/wasm-capsule-lab/020-granted-imports-only-before-any-engine-start -> origin/spark/wasm-capsule-lab/020-granted-imports-only-before-any-engine-start
+ * [new branch]        spark/wasm-capsule-lab/021-find-each-engine-memory-cap-flag -> origin/spark/wasm-capsule-lab/021-find-each-engine-memory-cap-flag
+ * [new branch]        spark/wasm-capsule-lab/022-find-how-each-engine-hosts-a-granted-import -> origin/spark/wasm-capsule-lab/022-find-how-each-engine-hosts-a-granted-import
+ * [new branch]        spark/wasm-capsule-lab/023-falsifier-list-intro-leaves-evidence-to-readme -> origin/spark/wasm-capsule-lab/023-falsifier-list-intro-leaves-evidence-to-readme
+ * [new branch]        spark/wasm-capsule-lab/024-adopt-unixfs-lab-cid-pins-recomputed-outside-the-lab-code -> origin/spark/wasm-capsule-lab/024-adopt-unixfs-lab-cid-pins-recomputed-outside-the-lab-code
+ * [new branch]        spark/wasm-capsule-lab/025-carry-wc-009a-granted-imports-onto-the-unixfs-lab-cid-base -> origin/spark/wasm-capsule-lab/025-carry-wc-009a-granted-imports-onto-the-unixfs-lab-cid-base
+ * [new branch]        spark/wasm-capsule-lab/026-engines-test-only-not-endorsed-and-discovery-not-the-import-path -> origin/spark/wasm-capsule-lab/026-engines-test-only-not-endorsed-and-discovery-not-the-import-path
+ * [new branch]        spark/wasm-capsule-lab/027-wasmtime-memory-cap-from-the-declared-manifest-size -> origin/spark/wasm-capsule-lab/027-wasmtime-memory-cap-from-the-declared-manifest-size
+ * [new branch]        spark/wasm-capsule-lab/028-run-receipt-records-the-declared-memory-cap-per-engine -> origin/spark/wasm-capsule-lab/028-run-receipt-records-the-declared-memory-cap-per-engine
+ * [new branch]        spark/wasm-capsule-lab/029-runner-entries-for-the-two-falsifiers-r2-held-back -> origin/spark/wasm-capsule-lab/029-runner-entries-for-the-two-falsifiers-r2-held-back
+ * [new branch]        spark/wasm-capsule-lab/030-find-whether-each-engine-enforces-the-module-memory-maximum -> origin/spark/wasm-capsule-lab/030-find-whether-each-engine-enforces-the-module-memory-maximum
+ * [new branch]        spark/wasm-capsule-lab/031-typed-lab-operations-refuse-untyped-imports-and-unneeded-rights -> origin/spark/wasm-capsule-lab/031-typed-lab-operations-refuse-untyped-imports-and-unneeded-rights
+ * [new branch]        spark/wasm-capsule-lab/032-capsule-build-declares-its-64-mb-memory-maximum -> origin/spark/wasm-capsule-lab/032-capsule-build-declares-its-64-mb-memory-maximum
+ * [new branch]        spike/photo-viewer      -> origin/spike/photo-viewer
+Updating 042cb132..70bf2de6
+Fast-forward
+ capsules/did-provider/CONFINEMENT.md               |   7 +-
+ .../tests/fixtures/confine/declared-rights.json    |   2 +-
+ capsules/wallet-provider/CONFINEMENT.md            |  12 +-
+ capsules/wallet-provider/falsifiers.json           |  34 ++-
+ capsules/wallet-provider/src/tests/falsifiers.rs   |   7 +-
+ capsules/wallet-provider/tests/confine.rs          |  50 +++-
+ .../tests/fixtures/confine/declared-rights.json    |   2 +-
+ examples/agent-host/handoff/LOG.md                 |   1 +
+ .../reports/provider-mp4-kill-safe-recovery.md     | 265 +++++++++++++++++++++
+ 9 files changed, 366 insertions(+), 14 deletions(-)
+ create mode 100644 examples/agent-host/handoff/reports/provider-mp4-kill-safe-recovery.md
+exit: 0
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+======== A observation after step 2: is the demo on this branch? ========
+start: 2026-10-26T19:42:42Z
+dir: /home/ubuntu/code/elastos-agent-host-spike
+command: git rev-parse HEAD && git status --short --branch && if [ -f lab/demo-a14/install.sh ]; then echo DEMO_PRESENT; else echo DEMO_ABSENT; fi && git cat-file -e HEAD:lab/demo-a14/install.sh && echo TREE_HAS_INSTALL || echo TREE_LACKS_INSTALL
+70bf2de6738d786d950c6eec4a053e05704a848c
+## spike/agent-host...origin/spike/agent-host
+DEMO_ABSENT
+fatal: path 'lab/demo-a14/install.sh' does not exist in 'HEAD'
+TREE_LACKS_INSTALL
+exit: 0
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+======== A step 3 ========
+start: 2026-10-26T19:42:42Z
+dir: /home/ubuntu/code/elastos-agent-host-spike
+command: bash lab/demo-a14/install.sh --sign
+bash: lab/demo-a14/install.sh: No such file or directory
+exit: 127
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+======== A step 4 ========
+start: 2026-10-26T19:42:42Z
+dir: /home/ubuntu/code/elastos-agent-host-spike
+command: bash lab/demo-a14/run.sh
+bash: lab/demo-a14/run.sh: No such file or directory
+exit: 127
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+======== A step 5 ========
+start: 2026-10-26T19:42:42Z
+dir: /home/ubuntu/code/elastos-agent-host-spike
+command: open "$(ls -dt ~/Library/Application\ Support/elastos-demo-a14/runs/*/ | head -1)"
+ls: cannot access '/home/ubuntu/Library/Application Support/elastos-demo-a14/runs/*/': No such file or directory
+xdg-open - opens a file or URL in the user's preferred application
+
+Synopsis
+
+xdg-open { file | URL }
+
+xdg-open { --help | --manual | --version }
+
+Use 'man xdg-open' or 'xdg-open --manual' for additional info.
+exit: 1
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+######## Part B. Same install and run from PR 289 commit 25d524e5 (detached worktree). Step 2 is not repeated here; it would leave this commit. ########
+
+======== B status before install ========
+start: 2026-10-26T19:42:42Z
+dir: /tmp/pr289-demo-a14
+command: git status --short --branch && git rev-parse HEAD && git diff --stat && git status --porcelain=v1 --untracked-files=all | wc -c
+## HEAD (no branch)
+25d524e549439be0757cc672a1d39b0b8459dec2
+0
+exit: 0
+seconds: 0
+end: 2026-10-26T19:42:42Z
+
+======== B step 3 install.sh --sign ========
+start: 2026-10-26T19:42:42Z
+dir: /tmp/pr289-demo-a14
+command: bash lab/demo-a14/install.sh --sign
+Installing the A14 demo into /home/ubuntu/.local/share/elastos-demo-a14/current
+Signing is on: this machine's key is /home/ubuntu/.local/share/elastos-demo-a14/signing/receipt-signing.key (it proves VERSIONS.json and INSTALL.json are unchanged since install on this machine; it does not prove who published them).
+REFUSED: no VERSIONS.json for this machine.
+  - VERSIONS.json comes from lab/agent-conformance/run.sh, which runs on macOS only; on this machine give --receipt PATH
+Next: fix the item above, then run `bash lab/demo-a14/install.sh` again.
+exit: 3
+seconds: 1
+end: 2026-10-26T19:42:43Z
+B home after install (paths and modes only):
+755 d /home/ubuntu/.local/share/elastos-demo-a14
+700 d /home/ubuntu/.local/share/elastos-demo-a14/signing
+600 f /home/ubuntu/.local/share/elastos-demo-a14/signing/receipt-signing.key
+644 f /home/ubuntu/.local/share/elastos-demo-a14/signing/receipt-signing.key.pub
+Library path exists? no
+
+======== B step 4 run.sh ========
+start: 2026-10-26T19:42:43Z
+dir: /tmp/pr289-demo-a14
+command: bash lab/demo-a14/run.sh
+A14 installed demo: /home/ubuntu/.local/share/elastos-demo-a14/current
+REFUSED: the demo is not installed. No journey was run.
+  - no installed demo at /home/ubuntu/.local/share/elastos-demo-a14/current; run lab/demo-a14/install.sh first
+Next: run `bash lab/demo-a14/install.sh`, then run this command again.
+exit: 3
+seconds: 0
+end: 2026-10-26T19:42:43Z
+
+======== B step 5 macOS open ========
+start: 2026-10-26T19:42:43Z
+dir: /tmp/pr289-demo-a14
+command: open "$(ls -dt ~/Library/Application\ Support/elastos-demo-a14/runs/*/ | head -1)"
+ls: cannot access '/home/ubuntu/Library/Application Support/elastos-demo-a14/runs/*/': No such file or directory
+xdg-open - opens a file or URL in the user's preferred application
+
+Synopsis
+
+xdg-open { file | URL }
+
+xdg-open { --help | --manual | --version }
+
+Use 'man xdg-open' or 'xdg-open --manual' for additional info.
+exit: 1
+seconds: 0
+end: 2026-10-26T19:42:43Z
+
+======== B repo dirty after the refused install? ========
+start: 2026-10-26T19:42:43Z
+dir: /tmp/pr289-demo-a14
+command: git status --porcelain=v1 --untracked-files=all
+exit: 0
+seconds: 0
+end: 2026-10-26T19:42:43Z
+
+######## Part C. RUNBOOK reviewer command ########
+
+======== C unittest ========
+start: 2026-10-26T19:42:43Z
+dir: /tmp/pr289-demo-a14
+command: python3 -B -I -m unittest discover -s lab/demo-a14/tests -v
+test_untracked_file_makes_the_checkout_dirty (test_version_binding.CheckoutIdentity.test_untracked_file_makes_the_checkout_dirty) ... ok
+test_install_pins_files_the_run_accepts (test_version_binding.InstallBinding.test_install_pins_files_the_run_accepts) ... ok
+test_install_refuses_a_receipt_from_another_commit (test_version_binding.InstallBinding.test_install_refuses_a_receipt_from_another_commit) ... ok
+test_install_refuses_a_receipt_that_does_not_match_the_build (test_version_binding.InstallBinding.test_install_refuses_a_receipt_that_does_not_match_the_build) ... ok
+test_install_refuses_off_macos_without_a_receipt (test_version_binding.InstallBinding.test_install_refuses_off_macos_without_a_receipt) ... ok
+test_install_refuses_unclear_test_executables (test_version_binding.InstallBinding.test_install_refuses_unclear_test_executables) ... ok
+test_install_sign_turns_signing_on (test_version_binding.InstallBinding.test_install_sign_turns_signing_on) ... ok
+test_every_named_test_exists_in_its_suite (test_version_binding.NeverPassWithoutARun.test_every_named_test_exists_in_its_suite) ... ok
+test_failed_or_missing_result_fails (test_version_binding.NeverPassWithoutARun.test_failed_or_missing_result_fails) ... ok
+test_journeys_name_each_check (test_version_binding.NeverPassWithoutARun.test_journeys_name_each_check) ... ok
+test_macos_steps_do_not_run_off_macos (test_version_binding.NeverPassWithoutARun.test_macos_steps_do_not_run_off_macos) ... ok
+test_skip_line_is_not_run (test_version_binding.NeverPassWithoutARun.test_skip_line_is_not_run) ... ok
+test_split_result_line_uses_the_final_list (test_version_binding.NeverPassWithoutARun.test_split_result_line_uses_the_final_list) ... ok
+test_a8_cargo_must_run_the_recorded_executable (test_version_binding.RunBinding.test_a8_cargo_must_run_the_recorded_executable) ... ok
+test_a8_refuses_when_the_launched_copy_differs (test_version_binding.RunBinding.test_a8_refuses_when_the_launched_copy_differs) ... ok
+test_executable_changed_before_its_suite_is_not_run (test_version_binding.RunBinding.test_executable_changed_before_its_suite_is_not_run) ... ok
+test_install_changed_during_run_fails (test_version_binding.RunBinding.test_install_changed_during_run_fails) ... ok
+test_journey_identity_that_differs_fails_the_run (test_version_binding.RunBinding.test_journey_identity_that_differs_fails_the_run) ... ok
+test_journey_probe_that_differs_fails_the_run (test_version_binding.RunBinding.test_journey_probe_that_differs_fails_the_run) ... ok
+test_matching_run_walks_every_step (test_version_binding.RunBinding.test_matching_run_walks_every_step) ... ok
+test_missing_required_identity_fails_the_run (test_version_binding.RunBinding.test_missing_required_identity_fails_the_run) ... ok
+test_refused_run_starts_no_journey (test_version_binding.RunBinding.test_refused_run_starts_no_journey) ... ok
+test_run_executes_the_recorded_files (test_version_binding.RunBinding.test_run_executes_the_recorded_files) ... ok
+test_run_without_install_names_it (test_version_binding.RunBinding.test_run_without_install_names_it) ... ok
+test_demo_folder_inside_the_repository_is_refused (test_version_binding.Signing.test_demo_folder_inside_the_repository_is_refused) ... ok
+test_run_states_what_the_signature_proves (test_version_binding.Signing.test_run_states_what_the_signature_proves) ... ok
+test_signature_from_another_key_is_refused (test_version_binding.Signing.test_signature_from_another_key_is_refused) ... ok
+test_signed_install_is_allowed (test_version_binding.Signing.test_signed_install_is_allowed) ... ok
+test_signing_key_is_private_and_outside_the_repository (test_version_binding.Signing.test_signing_key_is_private_and_outside_the_repository) ... ok
+test_signing_off_needs_no_signature (test_version_binding.Signing.test_signing_off_needs_no_signature) ... ok
+test_tampered_signed_install_record_is_refused (test_version_binding.Signing.test_tampered_signed_install_record_is_refused) ... ok
+test_tampered_signed_receipt_is_refused (test_version_binding.Signing.test_tampered_signed_receipt_is_refused) ... ok
+test_unsigned_receipt_is_refused_when_signing_is_on (test_version_binding.Signing.test_unsigned_receipt_is_refused_when_signing_is_on) ... ok
+test_changed_provider_binary_is_refused (test_version_binding.StepBinaries.test_changed_provider_binary_is_refused) ... ok
+test_changed_step_executable_is_refused (test_version_binding.StepBinaries.test_changed_step_executable_is_refused) ... ok
+test_install_without_step_bindings_is_refused (test_version_binding.StepBinaries.test_install_without_step_bindings_is_refused) ... ok
+test_step_path_outside_the_repository_is_refused (test_version_binding.StepBinaries.test_step_path_outside_the_repository_is_refused) ... ok
+test_changed_agent_host_component_is_refused (test_version_binding.VersionGate.test_changed_agent_host_component_is_refused) ... ok
+test_changed_installed_provider_is_refused (test_version_binding.VersionGate.test_changed_installed_provider_is_refused) ... ok
+test_changed_installed_runtime_is_refused (test_version_binding.VersionGate.test_changed_installed_runtime_is_refused) ... ok
+test_dirty_checkout_is_refused (test_version_binding.VersionGate.test_dirty_checkout_is_refused) ... ok
+test_git_failure_is_refused (test_version_binding.VersionGate.test_git_failure_is_refused) ... ok
+test_incomplete_or_failed_receipt_is_refused (test_version_binding.VersionGate.test_incomplete_or_failed_receipt_is_refused) ... ok
+test_matching_install_is_allowed (test_version_binding.VersionGate.test_matching_install_is_allowed) ... ok
+test_missing_install_is_refused (test_version_binding.VersionGate.test_missing_install_is_refused) ... ok
+test_missing_installed_component_is_refused (test_version_binding.VersionGate.test_missing_installed_component_is_refused) ... ok
+test_receipt_from_another_commit_is_refused (test_version_binding.VersionGate.test_receipt_from_another_commit_is_refused) ... ok
+test_runtime_the_journeys_launch_must_match (test_version_binding.VersionGate.test_runtime_the_journeys_launch_must_match) ... ok
+test_swapped_receipt_is_refused (test_version_binding.VersionGate.test_swapped_receipt_is_refused) ... ok
+test_unreadable_install_is_refused (test_version_binding.VersionGate.test_unreadable_install_is_refused) ... ok
+
+----------------------------------------------------------------------
+Ran 50 tests in 1.327s
+
+OK
+exit: 0
+seconds: 1
+end: 2026-10-26T19:42:44Z
+
+######## Cleanup of the dry-run side effects (not a runbook step) ########
+755 d /home/ubuntu/.local/share/elastos-demo-a14
+700 d /home/ubuntu/.local/share/elastos-demo-a14/signing
+600 f /home/ubuntu/.local/share/elastos-demo-a14/signing/receipt-signing.key
+644 f /home/ubuntu/.local/share/elastos-demo-a14/signing/receipt-signing.key.pub
+removed /home/ubuntu/.local/share/elastos-demo-a14
+transcript bytes: 66965
