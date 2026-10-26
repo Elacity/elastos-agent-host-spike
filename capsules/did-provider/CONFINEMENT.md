@@ -65,6 +65,40 @@ The model provider's own file profile, `../model-provider/confine.sb`,
 presents this contract as an oracle, and the shared test requires it; the
 generated profile for the model provider must match it too.
 
+## Operations and the rights they need
+
+Each operation the provider answers is one row. The inputs are the operation's
+top-level JSON names. An ok answer is `status` plus `data`. An error answer is
+`status`, `code` and `message`. The keys of `data` are the keys of the value
+the handler returns. A right, an effect, a macOS rule or a test is written only
+where a named test in `tests/confine.rs` shows it. Where no named test shows
+one, the cell says "no named test shows this". A citation is a backtick span
+that holds a file relative to this folder, two colons and a function name. The
+check `every_operations_table_cites_existing_tests` in
+`../wallet-provider/tests/confine.rs` finds `fn <fn>(` in that file and does
+not decide whether the function is a `#[test]`. A refusal under `(deny
+default)` is a denial, not a grant, and no row writes it as a right. The
+startup grants stay in "What the profile allows".
+
+M1 check B4 stays open: this table records the macOS half of its permission
+model. Linux stays designed, not enforced, and this section claims no current
+Linux behaviour. The design is `../wallet-provider/CONFINEMENT-LINUX.md`; its
+tests do not exist yet. A JSON parse failure answers `parse_error`; it is not
+an operation and gets no row.
+
+| Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
+| --- | --- | --- | --- | --- | --- | --- |
+| init | `op`, `config` | ok: `status`, `data` (`protocol_version`, `provider`). error: `status`, `code`, `message`. | `storage` | reads `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_read_denied` shows the read refused with `storage_error` when that path resolves outside. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is DID10 and `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` fails. | designed, not enforced |
+| get_did | `op` | ok: `status`, `data` (`did`). error: `status`, `code`, `message`. | no named test shows this | derives the DID from the device key in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the answer; no named test shows a storage rule for this call. | designed, not enforced |
+| resolve | `op`, `did` | ok: `status`, `data` (`public_key`, `document`). error: `status`, `code`, `message`. | no named test shows this | builds the document from the DID in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the document id; no named test shows a storage rule for this call. | designed, not enforced |
+| sign_chat_message | `op`, `sender_id`, `ts`, `content` | ok: `status`, `data` (`payload`, `signature`). error: `status`, `code`, `message`. | no named test shows this | signs the rendered payload in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the payload and the signature; no named test shows a storage rule for this call. | designed, not enforced |
+| verify | `op`, `did`, `data`, `signature` | ok: `status`, `data` (`valid`). error: `status`, `code`, `message`. | no named test shows this | verifies the payload in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows `valid: true` and `valid: false` for a flipped signature; no named test shows a storage rule for this call. | designed, not enforced |
+| verify_did_recovery | `op`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `nonce`, `issued_at`, `expires_at`, `signature` | ok: `status`, `data` (`schema`, `valid`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `payload_sha256`, `verified_at`). error: `status`, `code`, `message`. | no named test shows this | refuses a non-hex signature with `invalid_signature` and stays in service; genuine-proof correctness is the in-process unit tests in `src/main.rs`. | `tests/confine.rs::verify_did_recovery_under_profile` shows the refusal and the later `get_did`; no named test shows a storage rule for this call. | designed, not enforced |
+| get_nickname | `op` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | no named test shows this | returns the cached nickname; the file read belongs to `init`, and no named test shows a read for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the nickname after a restart; the read is `init`'s. | designed, not enforced |
+| set_nickname | `op`, `nickname` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | `storage` | writes `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_write_denied` shows the write refused with `storage_error` outside the root. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is DID10 and `tests/confine.rs::outside_write_denied` fails. | designed, not enforced |
+| get_persona_did | `op`, `name` | ok: `status`, `data` (`did`, `owner_did`, `name`). error: `status`, `code`, `message`. | `storage` | reads or writes `did/personas/<name>.enc` under `STORAGE_ROOT`; `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the file after the call and the same persona after a restart. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is DID10 and `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` fails. | designed, not enforced |
+| shutdown | `op` | ok: `status`, `data` (`message`). error: `status`, `code`, `message`. | no named test shows this | answers and exits; no named test shows a file read or write for this call. | `tests/confine.rs::bound_copy_serves_under_profile` shows the answer and a clean exit; no named test shows a storage rule for this call. | designed, not enforced |
+
 ## Host-OS status
 
 The confinement tests exercise these oracles on macOS through
