@@ -192,9 +192,11 @@ a program in the provider's own storage cannot run, and only the bound path
 runs. Which binary the Runtime binds stays the Runtime half (see "The Runtime
 half"). `byte_different_file_at_bound_path_starts` shows the profile binds
 `PROVIDER_EXECUTABLE` by path: a byte-different file at the bound path, in a
-temporary directory, gets past the profile's exec refusal. The launch is an
-exit other than status 71 with `execvp()` and `Operation not permitted`, or
-a process still running after 2 seconds. The launch helper records the sha256
+temporary directory, gets past the profile's exec refusal. The show is not
+exit 65, because exit 65 means the profile did not apply, and it is not exit
+71 with `execvp()` and `Operation not permitted`. A process still running
+after 2 seconds, or any other exit, is the outcome the test allows. The
+launch helper records the sha256
 when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
 when the file changes (`bound_executable_digest_mismatch_refuses_start`).
 That refusal is a lab stand-in for the Runtime's launch-by-hash check, not the
@@ -512,9 +514,10 @@ profile does not grant".
 - `byte_different_file_at_bound_path_starts`: a copy of the provider binary
   in a temporary directory, with its last byte flipped, bound as
   `PROVIDER_EXECUTABLE` and started. The copy's digest differs from the real
-  binary. The launch gets past the profile's exec refusal: it is an exit
-  other than status 71 with `execvp()` and `Operation not permitted`, or a
-  process still running after 2 seconds. The real binary's digest is
+  binary. The show is not exit 65, because exit 65 means the profile did not
+  apply, and it is not exit 71 with `execvp()` and `Operation not permitted`.
+  A process still running after 2 seconds, or any other exit, is the outcome
+  the test allows. The real binary's digest is
   unchanged. It runs under `sandbox-exec`, as the other confined tests do.
 - `bound_executable_digest_mismatch_refuses_start`: the launch helper records
   the sha256 of a copy of `/usr/bin/true`, one byte is appended, and the
