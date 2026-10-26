@@ -19,7 +19,6 @@ Each cited file under `elastos/` or `scripts/`, checked with
 | `elastos/crates/elastos-server/src/api/capsule_inventory/preparation.rs` | same as develop (read in part) |
 | `elastos/crates/elastos-server/src/capsule_record.rs` | same as develop |
 | `elastos/crates/elastos-server/src/content.rs` | same as develop |
-| `elastos/crates/elastos-server/src/crypto.rs` | same as develop |
 | `elastos/crates/elastos-server/src/ipfs.rs` | same as develop |
 | `elastos/crates/elastos-server/src/main.rs` | same as develop |
 | `elastos/crates/elastos-server/src/publish.rs` | same as develop |
@@ -39,7 +38,8 @@ also the same as develop. The lab files are not in develop
 the line when the line is long). Paths under `elastos/crates/` are given in full. A verdict is "matches", "gap"
 or "not covered by the code read". "Unverified" marks what reading did not confirm. The task's questions are
 answered in 13.4 (a, b), 15.1 (c, d) and 15.3 (e). Questions for Anders are numbered Q1 to Q10 and listed again
-at the end.
+at the end. This is a gap list, not a security review: a weakness in shipping code is not described in any
+entry; it is one line at the end of Questions, for Sasha, with its file paths only.
 
 ## PRINCIPLES 13
 
@@ -52,7 +52,7 @@ at the end.
 
 - Bullet: `PRINCIPLES.md:134` `- Digital Capsules are complete, portable signed packages; admission is a`
   and `PRINCIPLES.md:135` `separate decision made under each Runtime's trust policy`
-- Overall verdict: **gap** (points 2, 3 and 4).
+- Overall verdict: **gap** (points 2 and 3).
 
 1. **A release can sign each capsule archive on its own.** Verdict: matches.
    - `elastos/crates/elastos-server/src/capsule_record.rs:3` `//! record is signed on its own and names only the archive's bytes and declared`
@@ -68,10 +68,7 @@ at the end.
    - The comment says the next release turns records on:
      `elastos/crates/elastos-server/src/capsule_record.rs:16` `/// release lists them. The next release sets this, and a release without`
    - **Q1 for Anders:** Is the next release still the one that sets `REQUIRED` to true?
-3. **The manifest's own signature covers the manifest and one file.** Verdict: gap.
-   - `elastos/crates/elastos-runtime/src/signature/verifier.rs:78` `/// The signature covers: SHA256(manifest_json_without_signature) || SHA256(content)`
-   - Gap: it does not sign the complete package. The details and Q6 are in 15.1 (c).
-4. **The signed manifest part is the checking Runtime's own serialization.** Verdict: gap.
+3. **The signed manifest is the checking Runtime's own serialization, not the bundle's bytes.** Verdict: gap.
    - The Runtime parses `capsule.json` into its type:
      `elastos/crates/elastos-server/src/runtime.rs:258` `let manifest: CapsuleManifest = serde_json::from_str(&manifest_data).map_err(|e| {`
    - The verifier serializes that value again and hashes the result:
@@ -81,9 +78,9 @@ at the end.
      `elastos/crates/elastos-common/src/manifest.rs:687` `/// Keep the original fields unchanged for signatures and older update clients.`
    - The docs list a canonical manifest encoding as an admission check:
      `docs/CONTENT_CAPSULE_DISTRIBUTION.md:566` `- canonical manifest encoding and the complete bundle CID;`
-   - Gap: the signed bytes are not the bundle's `capsule.json` bytes but the checking Runtime's serialization
-     of its `CapsuleManifest` type (the lines above). So a signature stays valid only while every Runtime that
-     checks it serializes that type the same way.
+   - Gap: the signed manifest bytes are not the bundle's `capsule.json` bytes but the checking Runtime's
+     serialization of its `CapsuleManifest` type (the lines above). So a signature stays valid only while every
+     Runtime that checks it serializes that type the same way.
    - Unverified (not run): `providers` is a hash map,
      `elastos/crates/elastos-common/src/manifest.rs:114` `pub providers: Option<std::collections::HashMap<String, String>>,`
      and only provider and shell capsules may fill it, because app, viewer and content capsules are refused:
@@ -91,9 +88,9 @@ at the end.
      and `elastos/crates/elastos-common/src/manifest.rs:534` `"{} capsules cannot choose provider implementations; the runtime/provider layer owns local vs network routing",`
      Whether such a manifest with two or more `providers` entries serializes in the same order when it is signed
      and when it is checked was not tested.
-   - **Q2 for Anders:** Should the signed manifest part be the hash of the manifest's own bytes in the bundle, so
-     a signature does not depend on the checking Runtime's types?
-5. **Admission is a separate decision under each Home's own policy.** Verdict: matches.
+   - **Q2 for Anders:** Should the signed manifest be the manifest's own bytes in the bundle, so a signature does
+     not depend on the checking Runtime's types?
+4. **Admission is a separate decision under each Home's own policy.** Verdict: matches.
    - `elastos/crates/elastos-server/src/runtime.rs:188` `pub async fn configure_capsule_admission(`
    - Its inputs are the Home's trusted keys, its installed release and its `dev_mode`:
      `elastos/crates/elastos-server/src/runtime.rs:191` `trusted_keys: &[String],`,
@@ -287,7 +284,7 @@ at the end.
 
 - Bullet: `PRINCIPLES.md:162` `- use CIDs and hashes for content integrity, and verified DIDs and signatures`
   and `PRINCIPLES.md:163` `for publisher identity`
-- Overall verdict: **gap** (c1, c2, d1 and d2).
+- Overall verdict: **gap** (c1, d1 and d2).
 
 **Integrity**
 
@@ -295,19 +292,9 @@ at the end.
   - `elastos/crates/elastos-server/src/capsule_record.rs:83` `/// and CID. Bytes fetched for the row are then checked against the same values.`
   - `elastos/crates/elastos-server/src/release_publication.rs:900` `"artifact hash differs: {}",`
 
-**(c) What the capsule signature covers, and whether it names a verified DID or a raw trusted key**
+**(c) Whether the capsule signature names its publisher by a verified DID or by a raw trusted key**
 
-- **c1. It covers the manifest and the entrypoint file.** Verdict: gap.
-  - `elastos/crates/elastos-runtime/src/signature/verifier.rs:78` `/// The signature covers: SHA256(manifest_json_without_signature) || SHA256(content)`
-  - At launch the content is the entrypoint file:
-    `elastos/crates/elastos-server/src/runtime.rs:389` `// Compute content hash (hash the entrypoint file)`
-    and `elastos sign` reads the same one file:
-    `elastos/crates/elastos-server/src/trust_cmd.rs:67` `let entrypoint_path = path.join(&manifest.entrypoint);`
-  - The signed message is the two hashes and nothing else:
-    `elastos/crates/elastos-runtime/src/signature/verifier.rs:132` `message.extend_from_slice(&manifest_hash);`
-    and `elastos/crates/elastos-runtime/src/signature/verifier.rs:133` `message.extend_from_slice(content_hash);`
-  - Gap: it signs the manifest and one payload file, not the complete package (13.2).
-- **c2. It names no publisher; it is checked against a list of raw keys.** Verdict: gap.
+- **c1. The manifest `signature` names no publisher; it is checked against a list of raw keys.** Verdict: gap.
   - The manifest holds a signature and no signer:
     `elastos/crates/elastos-common/src/manifest.rs:130` `/// Optional base64-encoded signature`
   - The verifier holds raw keys and tries each one:
@@ -324,16 +311,15 @@ at the end.
     publisher. The docs and the Inspector already treat a signature alone as weaker than publisher trust:
     `docs/CAPSULE_MODEL.md:53` `A valid signature proves control of its signing key; Runtime publisher policy establishes publisher trust.`
     and `docs/CAPSULE_INSPECTOR.md:26` `Inspector reports manifest signature evidence as declared but unverified:`
-  - **Q6 for Anders:** Should the capsule signature take the record's form (a domain tag, and a named `did:key`
-    signer checked against the accepted DIDs, over one name for the whole bundle), so a pass names its
-    publisher and covers the whole package? That would also answer Q2.
-- **c3. The per-capsule record names a verified DID.** Verdict: matches.
+  - **Q6 for Anders:** Should the manifest signature name its signer as a `did:key` that is checked against the
+    accepted publisher DIDs, as the per-capsule record does (c2), so a pass names its publisher?
+- **c2. The per-capsule record names a verified DID.** Verdict: matches.
   - `elastos/crates/elastos-server/src/capsule_record.rs:33` `pub(crate) signer_did: String,`
   - `elastos/crates/elastos-server/src/capsule_record.rs:143` `publisher_dids.iter().any(|did| did == &envelope.signer_did),`
   - `elastos/crates/elastos-server/src/capsule_record.rs:148` `crate::crypto::verify_domain_separated_signature(`
   - The publisher's own tool checks the records against its pinned DID before it publishes:
     `elastos/crates/elastos-server/src/release_publication.rs:188` `crate::capsule_record::CapsuleRecords::from_release(r, &[pinned_did.to_owned()])?;`
-- **c4. `author` is free text, not an identity.** Verdict: matches.
+- **c3. `author` is free text, not an identity.** Verdict: matches.
   - `elastos/crates/elastos-common/src/manifest.rs:30` `pub author: Option<String>,`
   - Publishing refuses only placeholder authors:
     `elastos/crates/elastos-server/src/publish.rs:1087` `if matches!(author, "local-development" | "example-publisher") {`
@@ -343,20 +329,20 @@ at the end.
 
 Four schemes sign capsule bytes or rows:
 
-1. The manifest `signature` (c1, c2):
-   `elastos/crates/elastos-runtime/src/signature/verifier.rs:119` `/// Format: SHA256(manifest_json_without_signature) || content_hash`
+1. The manifest `signature` (c1):
+   `elastos/crates/elastos-runtime/src/signature/verifier.rs:76` `/// Verify a capsule's signature`
    It is checked at launch:
-   `elastos/crates/elastos-server/src/runtime.rs:400` `if !verifier.verify_capsule(manifest, &content_hash)? {`
+   `elastos/crates/elastos-server/src/runtime.rs:282` `self.verify_capsule_signature(&manifest, path).await?;`
    and written by `elastos sign`:
-   `elastos/crates/elastos-server/src/trust_cmd.rs:71` `sign_capsule(&signing_key, &mut manifest, &content_hash)?;`
-2. The per-capsule record (c3):
+   `elastos/crates/elastos-server/src/trust_cmd.rs:77` `println!("Signature added to capsule.json");`
+2. The per-capsule record (c2):
    `elastos/crates/elastos-server/src/capsule_record.rs:13` `pub(crate) const DOMAIN: &str = "elastos.capsule.record.v1";`
 3. The release envelope, which binds the components file and so every row in it (13.2, point 2):
    `elastos/crates/elastos-server/src/capsule_record.rs:363` `"elastos.release.v1",`
 4. The model catalog envelope:
    `elastos/crates/elastos-server/src/api/capsule_inventory.rs:15` `const MODEL_CATALOG_DOMAIN: &str = "elastos.model.catalog.v1";`
 
-A capsule's bytes are named in four ways, and the first has two row shapes:
+The release, catalog and run paths name a capsule's bytes in three ways, and the first has two row shapes:
 
 - A. The archive's SHA-256, size and CID, raw or UnixFS as the pin says (13.4 a1 and a2):
   `elastos/crates/elastos-server/src/capsule_record.rs:29` `pub(crate) sha256: String,`,
@@ -367,9 +353,7 @@ A capsule's bytes are named in four ways, and the first has two row shapes:
   whose hash must equal the archive row's:
   `elastos/crates/elastos-server/src/setup.rs:1569` `"capsule component '{name}' package sha256 does not match platform archive checksum"`
 - B. The model closure: a DAG-PB CID and a `content_digest` over its file list (13.4 a4).
-- C. The entrypoint's SHA-256 inside scheme 1:
-  `elastos/crates/elastos-server/src/runtime.rs:397` `let content_hash = hash_content(&content);`
-- D. A capsule run by CID:
+- C. A capsule run by CID:
   `elastos/crates/elastos-server/src/run_cmd.rs:132` `tracing::info!("Running capsule from CID: {}", cid);`
   The Runtime reads `capsule.json` at a path under that CID:
   `elastos/crates/elastos-server/src/content.rs:3027` `let manifest_bytes = match fetch_bytes_via_provider(registry, cid, Some("capsule.json")).await {`
@@ -382,14 +366,13 @@ A capsule's bytes are named in four ways, and the first has two row shapes:
 
 The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not counted here.
 
-- **d1. Two forms sign capsule bytes.** Verdict: gap.
-  - Scheme 1 signs the two hashes with no domain tag, checked against raw keys (c1, c2). Scheme 2 uses the
-    Runtime's domain-separated form with a named DID (c3):
-    `elastos/crates/elastos-server/src/crypto.rs:91` `` /// Signing input: `SHA256(domain || b"\0" || payload)` → Ed25519 sign. ``
+- **d1. Two schemes sign one capsule on its own, with different trust rules.** Verdict: gap.
+  - Scheme 1 names no signer and is checked against a list of raw keys (c1). Scheme 2 names its signer's DID,
+    which must be an accepted publisher DID (c2).
   - No committed capsule manifest carries a signature:
     `git grep -n '"signature"' c641bcff21d9ceaad769b1ed89529d541ffd8766 -- '*capsule.json'` prints nothing
     (a read-only search at this commit).
-  - Gap: one operation, signing a capsule, has two forms with different trust rules (P10).
+  - Gap: one operation, signing a capsule, has two schemes with different trust rules (P10).
   - **Q7 for Anders:** Is scheme 1 still needed? If not, can capsules be signed only through scheme 2, so there
     is one path?
 - **d2. Two row shapes in `components.json`.** Verdict: gap.
@@ -477,24 +460,22 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
 
 ## Questions
 
-For Anders, each from the entry named:
+Q1 to Q10 are for Anders, each from the entry named. The last line is for Sasha.
 
 - Q1 (13.2): Is the next release still the one that sets `REQUIRED` to true?
-- Q2 (13.2): Should the signed manifest part be the hash of the manifest's own bytes, not the checking
-  Runtime's serialization?
+- Q2 (13.2): Should the signed manifest be the manifest's own bytes, not the checking Runtime's serialization?
 - Q3 (13.4 a2): Which single CID form is the package identity for every capsule kind?
 - Q4 (13.4 a3): Should a provider capsule's manifest and binary be named and signed as one closure?
 - Q5 (13.4 b4): Should `requires` and `viewer` be pinned to CIDs, at least in the signed release, or should the
   `viewer` comment drop "or CID"?
-- Q6 (15.1 c2): Should the capsule signature take the record's form, so a pass names its publisher and covers
-  the whole package?
+- Q6 (15.1 c1): Should the manifest signature name a `did:key` signer checked against the accepted publisher
+  DIDs, as the record does, so a pass names its publisher?
 - Q7 (15.1 d1): Is the manifest `signature` scheme still needed?
 - Q8 (15.1 d2): Which row shape should the launch check read once releases list records, and can `capsules` be
   retired?
 - Q9 (15.2): Should the IPFS provider take raw blocks, so the publisher has one import route?
 - Q10 (15.3): Should every published capsule use the model closure's object form?
-
-Security: this report records no security finding. It is a gap list, not a security review.
+- security finding, details for Sasha: `elastos/crates/elastos-runtime/src/signature/verifier.rs`, `elastos/crates/elastos-server/src/runtime.rs` and `elastos/crates/elastos-server/src/trust_cmd.rs`.
 
 ## What the lab harness shows and does not show
 
