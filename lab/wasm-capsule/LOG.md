@@ -773,3 +773,46 @@
   Gates, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (98 passed, 2 ignored, 0 failed) and
   `cargo fmt --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/`
   and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 035 (`tools/build` keeps its failure status through the cleanup trap; base
+  `e3f510722`): probes first, before any edit, all with `/bin/bash`, whose `--version` first line is `GNU bash,
+  version 3.2.57(1)-release (arm64-apple-darwin25)` (PATH `bash` is `/opt/homebrew/bin/bash`, 5.3.15). 032's probe
+  `/bin/bash -c 'set -euo pipefail; trap "true" EXIT; : "$WC_UNSET_PROBE"'` printed `/bin/bash: WC_UNSET_PROBE:
+  unbound variable`, exit 0; with `false` in place of the expansion, exit 1. Today's shape (`D="$(mktemp -d)"; trap
+  'rm -rf "$D"' EXIT; : "$WC_UNSET_PROBE"`): exit 0 (the same with `/opt/homebrew/bin/bash`: exit 1). The planned
+  shape, `trap 'status=$?; exit "$status"' EXIT` then the expansion: exit 0, because the trap sees `$?` 0: `trap
+  'echo "trap sees $?" >&2' EXIT` printed `trap sees 0`, exit 0. Nothing else in the trap tells the two exits
+  apart: `$BASH_COMMAND` is the failing command, `${PIPESTATUS[*]}` is `0`, `$LINENO` and `${BASH_LINENO[*]}` are
+  `0`, an ERR trap does not fire, and a script file (`/bin/bash <(printf ...)`) behaves as `-c` does; `trap "false"
+  EXIT` makes even a clean `true` exit 1, so 3.2 exits with the trap's last status. So no one-line trap keeps the
+  status. The shape chosen from the probe: arm the trap to fail, `trap 'status=$?; rm -rf "$D"; exit "$((status ==
+  0 ? 1 : status))"' EXIT`, and re-arm `trap 'rm -rf "$D"' EXIT` as the last line. In a probe script per body, with
+  `/bin/bash` and with `/opt/homebrew/bin/bash`: `: "$WC_UNSET_PROBE"` exit 1, `false` exit 1, `(exit 7)` exit 7,
+  `true` exit 0, and `$D` removed every time. `tools/build` changes only its trap lines (plus their comments): line
+  41 is the armed trap, the new last line the plain re-arm. Test `build_script_fails_closed_after_an_unbound_variable`
+  (`tests/reproducible.rs`) copies `tools/build` to `<tmp>/lane/tools/build`, with `: "$WC_UNSET_PROBE"` after the
+  one line starting with `trap ` before `cargo build` (the re-arm comes after it, so the spec's "starts with `trap
+  `, found once" is checked before that line), and runs it through `spawn_build` (`tests/common/build.rs`), the one
+  spawn function, which `run_build_with_env` now calls. The spec check's FIX: this test runs `SYSTEM_BASH`
+  (`/bin/bash`); every other build keeps `PATH_BASH` (`bash`). Before the fix, `cargo test --locked --test
+  reproducible build_script_fails_closed_after_an_unbound_variable` failed at `tests/reproducible.rs:116:5`
+  ("tools/build exited exit status: 0 after an unbound variable past its cleanup trap:", with bash's `line 39:
+  WC_UNSET_PROBE: unbound variable`); after it, ok. A real build after the fix, `TMPDIR=<empty> <bash> tools/build
+  <out>`: exit 0, TMPDIR empty, receipt written and sha256 `2002429e73ee…` (the pin) with both bashes. Falsifier
+  F-WC1-TRAP-STATUS (the trap goes back to `trap 'rm -rf "$TARGET_DIR"' EXIT`); by hand, planted then restored
+  (`cmp` identical), the test fails at the same `tests/reproducible.rs:116:5` assertion. Canonical runner, from the
+  repo root, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC1
+  F-WC3-COPY-DEPS F-WC3-CMD-BYPASS F-WC3-REUSE-OUT F-WC3-ARGS-UNKNOWN F-WC3-BUILD-STDOUT F-WC3-CMD-REASON
+  F-WC3-CMD-STATUS F-WC3-CMD-STDOUT F-WC3-ARTIFACT-PIN F-WC-README-COUNT` (F-WC1 is a prefix: every F-WC1*,
+  F-WC10*, F-WC10C* and F-WC10D* entry): "baseline: 21 named tests pass without an edit, 0 do not", "F-WC1-TRAP-STATUS
+  CAUGHT", "F-WC-README-COUNT CAUGHT" (re-anchored to 162, the same bug as before), "summary: 30 CAUGHT, 1 NOT RUN
+  of 31", "not as expected: F-WC1-SPACED-PATH" ("did not run: two_clean_builds_in_different_paths_are_byte_identical",
+  the runner's Cargo failure marker, as task 032 recorded; it stays hand-proven), exit 1 (that NOT RUN; task 032's
+  run of the same set exited 0), no `*.falsify-original` backup left. Every existing `tools/build` anchor ran, so
+  each is still found once. README: one Build sentence, the named test, totals 162 (one task 035) and 98
+  runner-caught, a task 035 section. Consumer check, from the repo root: `cargo test --locked --manifest-path
+  lab/capsule-identity/Cargo.toml` exit 0, 123 passed, 0 failed (`wc001_capsule_bundle_gets_a_stable_lab_cid ...
+  ok`). Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (99
+  passed, 2 ignored, 0 failed), `cargo fmt --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No
+  dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/` or pin changed. Retired-label greps from the
+  repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
+  lab/wasm-capsule/`): both empty, exit 1.
