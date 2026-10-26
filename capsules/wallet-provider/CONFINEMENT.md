@@ -189,6 +189,13 @@ oracles and supplies contract evidence, not Linux execution evidence.
   form appended, with the exact `must reject (allow default)` and
   `network allow is refused` reasons. The test reads no file and starts no
   process.
+- `a_space_after_the_opening_parenthesis_still_names_its_rule` reads a form
+  whose head a space or a comment separates from its first symbol:
+  `( allow default)` and `(;x`, a newline, then `allow default)` both give
+  `(allow default)`, and the network forms give `(allow network*)`. The one
+  check refuses the passing fixture with each of those appended, with the
+  exact `must reject (allow default)` and `network allow is refused` reasons.
+  The test reads no file and starts no process.
 - `a_bare_top_level_value_is_its_own_form` reads a bare value outside every
   form as its own form: `1`, a newline, then `(allow default)` gives `1` and
   `(allow default)`, and so do `1(allow default)` and `"x" (allow default)`; a
@@ -315,6 +322,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `a_bare_top_level_value_is_its_own_form` fails because `1`, a newline, then
   `(allow default)` reads as the one form `1 (allow default)` and passes the
   check.
+- Add the separator space after an opening parenthesis (WP40):
+  `a_space_after_the_opening_parenthesis_still_names_its_rule` fails because
+  `( allow default)` reads as its own form and passes the check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

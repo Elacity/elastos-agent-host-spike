@@ -1228,6 +1228,69 @@ fn a_comment_inside_a_form_keeps_its_tokens_apart() {
     }
 }
 
+/// Whitespace directly after an opening parenthesis does not change the rule
+/// name, as `sandbox-exec` reads it. Without the normalization
+/// `( allow default)` and `(;x\nallow default)` read as `( allow default)`,
+/// which matches neither `is_default_allow` nor `is_network_allow`; the hidden
+/// rule would then pass the one check while `sandbox-exec` applies it. The
+/// same holds for the network form. The fixtures are built in the test; no
+/// file is read and no process starts.
+///
+/// Falsifier: WP40 adds the separator space after an opening parenthesis; this
+/// test fails because the parser returns `( allow default)` and both spaced
+/// forms pass the check.
+#[test]
+fn a_space_after_the_opening_parenthesis_still_names_its_rule() {
+    for line in ["(allow default)", "( allow default)", "(;x\nallow default)"] {
+        assert_eq!(
+            profile_forms(line),
+            vec!["(allow default)"],
+            "whitespace after the opening parenthesis must not name a new rule"
+        );
+    }
+    for line in [
+        "(allow network*)",
+        "( allow network*)",
+        "(;x\nallow network*)",
+    ] {
+        assert_eq!(
+            profile_forms(line),
+            vec!["(allow network*)"],
+            "whitespace after the opening parenthesis must not name a new rule"
+        );
+    }
+
+    let complete = contract_fixture_profile(true);
+    for (line, refusal) in [
+        (
+            "( allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "(;x\nallow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "( allow network*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+        (
+            "(;x\nallow network*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+    ] {
+        let profile = format!("{complete}{line}");
+        let reason = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a spaced allow form must fail the one check");
+        assert_eq!(
+            reason, refusal,
+            "the refusal must be the exact reason for the spaced form"
+        );
+    }
+}
+
 /// A bare value outside every form, such as `1` or `"x"`, is its own form,
 /// as `sandbox-exec` reads it: whitespace or a `(` ends it. Without that split
 /// `1 (allow default)` reads as one form, which matches neither
@@ -1455,8 +1518,10 @@ fn file_profile_contract_checks_the_model_profile_when_present() {
 /// function collapses whitespace outside strings, keeps every character inside
 /// one, counts parentheses only outside strings and collects the forms. Outside
 /// every form, whitespace or a `(` ends a bare value such as `1` or `"x"`, so
-/// that value is its own form and every top-level form starts its own entry. An
-/// unclosed form is a refusal with its own reason.
+/// that value is its own form and every top-level form starts its own entry.
+/// Whitespace directly after an opening parenthesis is dropped, so
+/// `( allow default)` reads as the form `(allow default)`.
+/// An unclosed form is a refusal with its own reason.
 fn profile_forms(profile: &str) -> Vec<String> {
     let mut forms = Vec::new();
     let mut current = String::new();
@@ -1464,8 +1529,8 @@ fn profile_forms(profile: &str) -> Vec<String> {
     let mut space_due = false;
     for (ch, in_string) in profile_characters(profile) {
         if in_string {
-            if space_due && !current.is_empty() {
-                current.push(' ');
+            if space_due {
+                push_separator(&mut current);
             }
             space_due = false;
             current.push(ch);
@@ -1477,8 +1542,8 @@ fn profile_forms(profile: &str) -> Vec<String> {
         match ch {
             _ if ch.is_whitespace() => space_due = true,
             '(' | ')' => {
-                if space_due && !current.is_empty() {
-                    current.push(' ');
+                if space_due {
+                    push_separator(&mut current);
                 }
                 space_due = false;
                 current.push(ch);
@@ -1492,8 +1557,8 @@ fn profile_forms(profile: &str) -> Vec<String> {
                 }
             }
             _ => {
-                if space_due && !current.is_empty() {
-                    current.push(' ');
+                if space_due {
+                    push_separator(&mut current);
                 }
                 space_due = false;
                 current.push(ch);
@@ -1508,6 +1573,16 @@ fn profile_forms(profile: &str) -> Vec<String> {
         "the profile must not end early: unclosed form {current}"
     );
     forms
+}
+
+/// Adds the one separator space between tokens. No separator is added directly
+/// after an opening parenthesis, where no token has started, so `( allow
+/// default)` reads as the form `(allow default)` and the allow rules still
+/// match it.
+fn push_separator(current: &mut String) {
+    if !current.is_empty() && !current.ends_with('(') {
+        current.push(' ');
+    }
 }
 
 /// The characters the profile reader consumes, each marked with whether it
