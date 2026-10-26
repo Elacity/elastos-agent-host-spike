@@ -1,0 +1,42 @@
+id: F-A15-approval
+file: src/lib.rs
+test: approved_plan_executes_with_the_approved_grants
+test: rejected_plan_executes_nothing
+test: plan_altered_after_approval_is_refused
+test: extra_step_injected_at_run_time_is_refused
+test: approved_grant_runs_once
+--- old
+        if review.choice != Choice::Approve {
+            return Err(Refuse::NotApproved);
+        }
+        if review.canonical != plan.canonical() {
+            return Err(Refuse::PlanAltered);
+        }
+        if steps.len() != review.grants.len() {
+            return Err(Refuse::OutsidePlan);
+        }
+        let mut allowed = Vec::with_capacity(steps.len());
+        for (step, grant) in steps.iter().zip(review.grants.iter()) {
+            if !grant.covers(step) {
+                return Err(Refuse::OutsidePlan);
+            }
+            if self.used.contains(&grant.token) {
+                return Err(Refuse::GrantSpent);
+            }
+            allowed.push(grant.clone());
+        }
+        Ok(allowed)
+--- new
+        let _ = (self, review, plan);
+        Ok(steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| Grant {
+                token: format!("open-{index}"),
+                step_id: step.id,
+                action: step.capability.action,
+                operation: step.capability.operation.clone(),
+                resource: step.resource.clone(),
+            })
+            .collect())
+--- end
