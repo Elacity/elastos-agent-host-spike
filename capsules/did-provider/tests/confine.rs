@@ -181,7 +181,8 @@ impl std::fmt::Display for ChildExit {
 /// standard error on its own thread from the moment the child starts, so a
 /// child that fills the pipe still reaches its own exit. A request the child
 /// never answered fails with the one message from `unanswered`, which names the
-/// request, the child's exit status and all the child wrote to standard error.
+/// request, the child's exit status or the deadline that ended the wait, and
+/// all the child wrote to standard error.
 /// An answer that is not JSON fails with its own message, which names the
 /// request, the parse error and the answer.
 struct ConfinedProvider {
@@ -230,9 +231,9 @@ impl ConfinedProvider {
     /// Sends one request and returns its answer; a failure panics with the
     /// message from `try_send`. A request the child never answered fails with
     /// the one message from `unanswered`, which names the request, the child's
-    /// exit status and all the child wrote to standard error. An answer that is
-    /// not JSON fails with its own message, which names the request, the parse
-    /// error and the answer.
+    /// exit status or the deadline that ended the wait, and all the child wrote
+    /// to standard error. An answer that is not JSON fails with its own message,
+    /// which names the request, the parse error and the answer.
     fn send(&mut self, request: Value) -> Value {
         self.try_send(&request)
             .unwrap_or_else(|failure| panic!("{failure}"))
@@ -240,9 +241,10 @@ impl ConfinedProvider {
 
     /// Sends one request and returns its answer. A request the child never
     /// answered fails with the one message from `unanswered`, which names the
-    /// request, the child's exit status and all the child wrote to standard
-    /// error. An answer that is not JSON fails with its own message, which
-    /// names the request, the parse error and the answer.
+    /// request, the child's exit status or the deadline that ended the wait, and
+    /// all the child wrote to standard error. An answer that is not JSON fails
+    /// with its own message, which names the request, the parse error and the
+    /// answer.
     fn try_send(&mut self, request: &Value) -> Result<Value, String> {
         let written = writeln!(self.stdin, "{request}").and_then(|()| self.stdin.flush());
         if let Err(err) = written {
@@ -627,8 +629,7 @@ fn outside_read_denied() {
 ///
 /// Falsifier: drop the child's standard error from `unanswered` (DID12); the
 /// denied start loses `Operation not permitted`, so this test fails on that
-/// assertion at the first case, and the silent child's failure loses the line
-/// it wrote.
+/// assertion at the first case.
 ///
 /// Falsifier: omit the request from `unanswered` (DID14); the denied start's
 /// failure no longer names the request, so this test fails on its request
