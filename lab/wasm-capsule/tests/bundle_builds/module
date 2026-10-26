@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# A stand-in tools/build: writes the 8-byte empty module to OUT_DIR ($1).
+set -euo pipefail
+printf '\000asm\001\000\000\000' > "$1/capsule.wasm"
