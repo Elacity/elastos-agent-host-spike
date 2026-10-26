@@ -13,3 +13,9 @@
   the per-right floor. C0 source is selectable with `JPK_C0_PR`. Simulated
   kernel fixtures and F-JPK-ABI cover a mis-reported ABI. Jetson rows stay
   NOT RUN.
+- 26 Oct 2026, cloud: fix the #338 JPK findings. `decide.py` is a labeled
+  oracle of #307 `2c70a0d8`. Default C0 pin is that commit. Refusal text
+  matches `missing_rights_reason`. `CAP_SETPCAP` is bit 8. A real stand-in
+  is launched for did, wallet, and model. Absent rights stamp `ABSENT`.
+  A lying ABI 5 launches under per_right because #307 trusts the ABI
+  number. Jetson rows stay NOT RUN.

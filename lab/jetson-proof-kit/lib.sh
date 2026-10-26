@@ -5,7 +5,10 @@ JPK_MEM_FLOOR_KB=1048576
 JPK_ROOT_NAME=flint-elastos-test
 JPK_BUILD_JOBS=4
 JPK_C0_DEFAULT_BRANCH=cursor/fail-closed-linux-0b95
-JPK_C0_DEFAULT_SHA=129fdc98428c9029b328976511478c46ebe765a6
+# #307 per-right floor. The older ABI 5 pin was 129fdc98428c9029b328976511478c46ebe765a6.
+JPK_C0_PER_RIGHT_SHA=2c70a0d845f9acc15144a2afec889370612cca66
+JPK_C0_OLD_ABI5_FLOOR_SHA=129fdc98428c9029b328976511478c46ebe765a6
+JPK_C0_DEFAULT_SHA=$JPK_C0_PER_RIGHT_SHA
 JPK_C0_BRANCH=${JPK_C0_BRANCH:-$JPK_C0_DEFAULT_BRANCH}
 JPK_C9_BRANCH=cursor/linux-confine-e156
 JPK_C9_SHA=2dc3c565c6649d668f1e50efefeea7d964330f9c
@@ -121,6 +124,39 @@ jpk_with_memory_guard() {
         sleep 1
     done
     wait "$cmd"
+}
+
+# available -> PASS. absent -> ABSENT. anything else, including empty, -> REFUSED.
+# Never stamps an absent right as PASS.
+jpk_availability_status() {
+    local value="$1"
+    local first
+    first=$(printf '%s\n' "$value" | awk '{ print $1; exit }')
+    case "$first" in
+        available) printf 'PASS\n' ;;
+        absent) printf 'ABSENT\n' ;;
+        *) printf 'REFUSED\n' ;;
+    esac
+}
+
+# Classify one fcl-launch result. Exec format error is not a guard refusal.
+jpk_classify_c0_launch() {
+    local rc="$1"
+    local out="$2"
+    case "$out" in
+        *"Exec format error"* | *"os error 8"*)
+            printf 'NOT RUN\n'
+            ;;
+        *)
+            if printf '%s\n' "$out" | grep -q '^started '; then
+                printf 'PASS\n'
+            elif [ "$rc" -eq 71 ]; then
+                printf 'REFUSED\n'
+            else
+                printf 'REFUSED\n'
+            fi
+            ;;
+    esac
 }
 
 jpk_set_row() {

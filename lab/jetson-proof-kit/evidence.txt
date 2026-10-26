@@ -1,6 +1,6 @@
 # lab/jetson-proof-kit evidence
 # Each data row: id<TAB>status<TAB>detail
-# status is PASS, REFUSED, or NOT RUN.
+# status is PASS, REFUSED, ABSENT, or NOT RUN.
 # Jetson rows stay NOT RUN until a human runs run-on-jetson.sh on the board.
 host.uname_r	NOT RUN	-
 host.uname_m	NOT RUN	-
@@ -30,5 +30,8 @@ decision.model.per_right	NOT RUN	-
 C0.source	NOT RUN	-
 C0.build	NOT RUN	-
 C0.guard	NOT RUN	-
+C0.guard.did	NOT RUN	-
+C0.guard.wallet	NOT RUN	-
+C0.guard.model	NOT RUN	-
 C9.build	NOT RUN	-
 C9.launcher	NOT RUN	-

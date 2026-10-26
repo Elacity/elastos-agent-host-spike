@@ -61,6 +61,8 @@ assert_eq allowed_root "$root" "$HOME/$JPK_ROOT_NAME"
 
 assert_eq default_c0_ref "$(jpk_c0_ref)" "$JPK_C0_DEFAULT_BRANCH"
 assert_eq default_c0_pin "$(jpk_c0_pin)" "$JPK_C0_DEFAULT_SHA"
+assert_eq default_c0_pin_is_per_right "$JPK_C0_DEFAULT_SHA" "2c70a0d845f9acc15144a2afec889370612cca66"
+assert_eq default_c0_pin_not_old_floor "$JPK_C0_DEFAULT_SHA" "$JPK_C0_PER_RIGHT_SHA"
 JPK_C0_PR=307
 assert_eq pr_c0_ref "$(jpk_c0_ref)" "pull/307/head"
 assert_eq pr_c0_pin_empty "$(jpk_c0_pin)" ""
@@ -159,6 +161,30 @@ set -e
 assert_status script_refuses_low_memory "$low_script_rc" 2
 assert_contains script_low_memory_reason "$(cat "$scratch/script-low-mem.txt")" "REFUSED available memory below 1 GiB"
 
+assert_eq availability_available "$(jpk_availability_status "available")" PASS
+assert_eq availability_absent "$(jpk_availability_status "absent EINVAL")" ABSENT
+assert_eq availability_unavailable "$(jpk_availability_status "unavailable ENOSPC")" REFUSED
+assert_eq availability_empty "$(jpk_availability_status "")" REFUSED
+
+assert_eq classify_started "$(jpk_classify_c0_launch 0 "started did-provider pid=9")" PASS
+assert_eq classify_refusal "$(jpk_classify_c0_launch 71 "fail-closed-linux refused to start did-provider: layer landlock, step abi_floor: this kernel's Landlock ABI 1 cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5); the provider was not started")" REFUSED
+assert_eq classify_enoexec "$(jpk_classify_c0_launch 71 "step execve: Exec format error (os error 8)")" "NOT RUN"
+assert_eq classify_os_error_8 "$(jpk_classify_c0_launch 71 "fail-closed-linux refused to start did-provider: layer exec, step execve: Exec format error (os error 8); the provider was not started")" "NOT RUN"
+
+# The operator script launches a real stand-in for each provider.
+if grep -F ': >"$exe"' "$kit/run-on-jetson.sh"; then
+    printf 'FAIL script_uses_empty_provider\n'
+    fail=$((fail + 1))
+else
+    printf 'PASS script_has_no_empty_provider\n'
+    pass=$((pass + 1))
+fi
+script=$(cat "$kit/run-on-jetson.sh")
+assert_contains script_launches_did "$script" 'jpk_run_c0_provider "$bin" "$standin" did'
+assert_contains script_launches_wallet "$script" 'jpk_run_c0_provider "$bin" "$standin" wallet'
+assert_contains script_launches_model "$script" 'jpk_run_c0_provider "$bin" "$standin" model'
+assert_contains script_provider_name_suffix "$script" '"${name}-provider"'
+
 # Committed Jetson rows stay NOT RUN.
 while IFS= read -r line; do
     case "$line" in
@@ -170,14 +196,14 @@ while IFS= read -r line; do
 done <"$kit/evidence.txt"
 
 # The operator script never names the host surfaces it must leave alone.
-if grep -E '(^|[[:space:]])(sudo|apt|pm2|PM2)([[:space:]]|$)' "$kit/run-on-jetson.sh" "$kit/lib.sh" "$kit/probe_host.py" "$kit/decide.py"; then
+if grep -E '(^|[[:space:]])(sudo|apt|pm2|PM2)([[:space:]]|$)' "$kit/run-on-jetson.sh" "$kit/lib.sh" "$kit/probe_host.py" "$kit/decide.py" "$kit/standin.rs"; then
     printf 'FAIL scripts_name_host_surfaces\n'
     fail=$((fail + 1))
 else
     printf 'PASS scripts_leave_host_surfaces_unnamed\n'
     pass=$((pass + 1))
 fi
-if grep -E '4200' "$kit/run-on-jetson.sh" "$kit/lib.sh" "$kit/probe_host.py" "$kit/decide.py"; then
+if grep -E '4200' "$kit/run-on-jetson.sh" "$kit/lib.sh" "$kit/probe_host.py" "$kit/decide.py" "$kit/standin.rs"; then
     printf 'FAIL scripts_name_port_4200\n'
     fail=$((fail + 1))
 else

@@ -17,20 +17,25 @@ that folder). Then:
 cd ~/flint-elastos-test && ./run-on-jetson.sh
 ```
 
-To fetch the current #307 head instead of the pinned commit (the per-right
-floor work):
+The default C0 pin is #307 commit
+`2c70a0d845f9acc15144a2afec889370612cca66` (the per-right floor). To fetch
+the current #307 head instead:
 
 ```bash
 cd ~/flint-elastos-test && JPK_C0_PR=307 ./run-on-jetson.sh
 ```
 
+The old ABI 5 pin `129fdc98428c9029b328976511478c46ebe765a6` still builds,
+but the kit refuses to print a per-right table against that floor.
+
 The script writes `~/flint-elastos-test/evidence.txt`. Each row is `PASS`,
-`REFUSED` with a reason, or `NOT RUN`.
+`REFUSED`, `ABSENT`, or `NOT RUN`. A measured-absent right is `ABSENT`,
+never `PASS`.
 
 Set `JPK_REMOTE` when git should fetch the draft branches from a clone the
 board already has. The default pins are:
 
-- C0: `cursor/fail-closed-linux-0b95` at `129fdc98428c9029b328976511478c46ebe765a6`
+- C0: `cursor/fail-closed-linux-0b95` at `2c70a0d845f9acc15144a2afec889370612cca66`
 - C9: `cursor/linux-confine-e156` at `2dc3c565c6649d668f1e50efefeea7d964330f9c`
 
 `JPK_C0_PR`, `JPK_C0_REF`, and `JPK_C0_SHA` select the guard source. A PR
@@ -52,17 +57,20 @@ From one run it writes:
 - the sysctls that gate those namespaces
 - the capability bounding set
 
-It then prints a table. For each provider (did, wallet, model) and each
-floor (single ABI 5, per-right) it says LAUNCH or REFUSE and why. The
-single floor uses the ABI number. The per-right floor uses the measured
-truncate and ioctl_dev bits. Both also need an unprivileged user
-namespace, seccomp, and a droppable bounding set.
+It then prints two tables for did, wallet, and model:
 
-## What a refusal means
+1. A policy oracle (`decide.py`) that copies `fail_closed_linux` at
+   `2c70a0d8`. It is labeled as an oracle, not as `fcl-launch`.
+2. The real #307 guard: `fcl-launch` of a static stand-in for each of
+   `did-provider`, `wallet-provider`, and `model-provider`.
 
-The table is computed from the measured facts. It does not depend on
-which C0 commit was fetched. The fetched C0 and C9 binaries still run
-their own guards; those rows are the binary's own text.
+The oracle uses #307's public functions. The extra ABI 5 floor prints
+`Landlock ABI N is below the required 5`. The per-right floor prints
+`this kernel's Landlock ABI N cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5)`.
+#307 trusts the ABI number. A lying ABI 5 with ABI 1 rights therefore
+launches under `per_right`; the kit also records the measured rights.
+
+`CAP_SETPCAP` is bit 8.
 
 ## Bounds
 
@@ -80,9 +88,7 @@ bash lab/jetson-proof-kit/falsify.sh
 ```
 
 The first command covers the path guard, a planted path outside the
-folder, the memory floor, the C0 source selector, and the committed
-Jetson rows. The second command feeds simulated kernel answers into the
-decision table. The third command plants three bugs on copies: an
-outside path that is accepted, a missing memory check, and a
-mis-reported ABI. All three plants are caught. The working tree stays
-unchanged.
+folder, the memory floor, the C0 source selector, launch classification,
+and the committed Jetson rows. The second command feeds simulated kernel
+answers into the oracle and checks #307's reason text. The third command
+plants bugs on copies. The working tree stays unchanged.

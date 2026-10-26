@@ -80,25 +80,32 @@ jpk_record_host() {
         esac
     fi
 
-    jpk_set_row "$evidence" host.right.truncate PASS "$(jpk_fact right.truncate "$facts")"
-    jpk_set_row "$evidence" host.right.ioctl_dev PASS "$(jpk_fact right.ioctl_dev "$facts")"
-    jpk_set_row "$evidence" host.right.net_bind_tcp PASS "$(jpk_fact right.net_bind_tcp "$facts")"
-    jpk_set_row "$evidence" host.right.net_connect_tcp PASS "$(jpk_fact right.net_connect_tcp "$facts")"
-    jpk_set_row "$evidence" host.right.scope_signal PASS "$(jpk_fact right.scope_signal "$facts")"
-    jpk_set_row "$evidence" host.right.scope_abstract_unix PASS "$(jpk_fact right.scope_abstract_unix "$facts")"
-    jpk_set_row "$evidence" host.seccomp PASS "$(jpk_fact seccomp "$facts")"
+    jpk_record_availability host.right.truncate "$(jpk_fact right.truncate "$facts")"
+    jpk_record_availability host.right.ioctl_dev "$(jpk_fact right.ioctl_dev "$facts")"
+    jpk_record_availability host.right.net_bind_tcp "$(jpk_fact right.net_bind_tcp "$facts")"
+    jpk_record_availability host.right.net_connect_tcp "$(jpk_fact right.net_connect_tcp "$facts")"
+    jpk_record_availability host.right.scope_signal "$(jpk_fact right.scope_signal "$facts")"
+    jpk_record_availability host.right.scope_abstract_unix "$(jpk_fact right.scope_abstract_unix "$facts")"
+    jpk_record_availability host.seccomp "$(jpk_fact seccomp "$facts")"
     jpk_set_row "$evidence" host.seccomp_arch PASS "$(jpk_fact seccomp_arch "$facts") $(jpk_fact seccomp_arch_id "$facts")"
-    jpk_set_row "$evidence" host.userns PASS "$(jpk_fact userns "$facts")"
-    jpk_set_row "$evidence" host.pidns PASS "$(jpk_fact pidns "$facts")"
-    jpk_set_row "$evidence" host.mntns PASS "$(jpk_fact mntns "$facts")"
+    jpk_record_availability host.userns "$(jpk_fact userns "$facts")"
+    jpk_record_availability host.pidns "$(jpk_fact pidns "$facts")"
+    jpk_record_availability host.mntns "$(jpk_fact mntns "$facts")"
     jpk_set_row "$evidence" host.sysctl.max_user_namespaces PASS "$(jpk_fact sysctl.user.max_user_namespaces "$facts")"
     jpk_set_row "$evidence" host.sysctl.max_pid_namespaces PASS "$(jpk_fact sysctl.user.max_pid_namespaces "$facts")"
     jpk_set_row "$evidence" host.sysctl.max_mnt_namespaces PASS "$(jpk_fact sysctl.user.max_mnt_namespaces "$facts")"
     jpk_set_row "$evidence" host.sysctl.unprivileged_userns_clone PASS "$(jpk_fact sysctl.kernel.unprivileged_userns_clone "$facts")"
     jpk_set_row "$evidence" host.cap_bnd PASS "$(jpk_fact cap_bnd "$facts")"
 
+    printf 'oracle (copies fail_closed_linux at %s; not fcl-launch)\n' "$JPK_C0_PER_RIGHT_SHA"
     printf 'provider\tfloor\tdecision\treason\n'
     jpk_record_decisions "$facts"
+}
+
+jpk_record_availability() {
+    local id="$1"
+    local value="$2"
+    jpk_set_row "$evidence" "$id" "$(jpk_availability_status "$value")" "$value"
 }
 
 jpk_record_decisions() {
@@ -114,14 +121,14 @@ jpk_record_decisions() {
         jpk_set_row "$evidence" "decision.${provider}.${floor}" "$status" "$reason"
         printf '%s\t%s\t%s\t%s\n' "$provider" "$floor" "$decision" "$reason"
     done <<EOF
-$(printf '%s\n' "$facts" | python3 -I "$kit/decide.py")
+$(printf '%s\n' "$facts" | python3 -I "$kit/decide.py" --pin "$(jpk_c0_pin)")
 EOF
 }
 
 jpk_run_c0() {
     local dest="$src/fail-closed-linux"
     local crate="$dest/lab/fail-closed-linux"
-    local ref pin head bin storage exe out rc
+    local ref pin head bin standin out rc
     ref=$(jpk_c0_ref)
     pin=$(jpk_c0_pin)
     if ! head=$(jpk_fetch "$dest" "$ref" "$pin"); then
@@ -151,20 +158,84 @@ jpk_run_c0() {
     fi
     jpk_set_row "$evidence" C0.build PASS "fcl-launch at $head"
     bin="$CARGO_TARGET_DIR/debug/fcl-launch"
-    storage="$work/c0-storage"
-    exe="$work/c0-provider"
-    mkdir -p -- "$storage"
-    : >"$exe"
-    chmod +x "$exe"
+    if ! standin=$(jpk_c0_standin "$CARGO_TARGET_DIR"); then
+        jpk_set_row "$evidence" C0.guard NOT RUN "no static stand-in"
+        jpk_set_row "$evidence" C0.guard.did NOT RUN "no static stand-in"
+        jpk_set_row "$evidence" C0.guard.wallet NOT RUN "no static stand-in"
+        jpk_set_row "$evidence" C0.guard.model NOT RUN "no static stand-in"
+        return 0
+    fi
+    printf 'fcl-launch (real guard at %s)\n' "$head"
+    printf 'provider\tfloor\tdecision\treason\n'
+    jpk_run_c0_provider "$bin" "$standin" did
+    jpk_run_c0_provider "$bin" "$standin" wallet
+    jpk_run_c0_provider "$bin" "$standin" model
+    jpk_summarize_c0_guard
+}
+
+jpk_c0_standin() {
+    local target_dir="$1"
+    local found dest
+    found=$(find "$target_dir" -name fcl-probe -type f -perm -111 2>/dev/null | head -n 1)
+    if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        return 0
+    fi
+    dest="$work/c0-standin"
+    jpk_require_path "$dest" || return 2
+    if command -v rustc >/dev/null 2>&1; then
+        if jpk_with_memory_guard rustc --edition 2021 -C opt-level=1 -C panic=abort \
+            -C target-feature=+crt-static -o "$dest" "$kit/standin.rs"; then
+            printf '%s\n' "$dest"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+jpk_run_c0_provider() {
+    local bin="$1"
+    local standin="$2"
+    local name="$3"
+    local storage outside out rc status
+    storage="$work/c0-storage-$name"
+    outside="$work/c0-outside-$name"
+    mkdir -p -- "$storage" "$outside"
+    : >"$outside/file"
+    jpk_require_path "$storage"
+    jpk_require_path "$standin"
     set +e
-    out=$("$bin" --provider did-provider --storage-root "$storage" -- "$exe" 2>&1)
+    out=$("$bin" --provider "${name}-provider" --storage-root "$storage" -- \
+        "$standin" "${name}-provider" "$storage" "$outside/file" "$outside" </dev/null 2>&1)
     rc=$?
     set -e
-    if [ "$rc" -eq 0 ]; then
-        jpk_set_row "$evidence" C0.guard PASS "$out"
+    status=$(jpk_classify_c0_launch "$rc" "$out")
+    jpk_set_row "$evidence" "C0.guard.$name" "$status" "$out"
+    if [ "$status" = PASS ]; then
+        printf '%s\t%s\t%s\t%s\n' "$name" "fcl-launch" LAUNCH "$out"
+    elif [ "$status" = REFUSED ]; then
+        printf '%s\t%s\t%s\t%s\n' "$name" "fcl-launch" REFUSE "$out"
     else
-        jpk_set_row "$evidence" C0.guard REFUSED "$out"
+        printf '%s\t%s\t%s\t%s\n' "$name" "fcl-launch" "$status" "$out"
     fi
+}
+
+jpk_summarize_c0_guard() {
+    local did wallet model
+    did=$(awk -F '\t' '$1 == "C0.guard.did" { print $2; exit }' "$evidence")
+    wallet=$(awk -F '\t' '$1 == "C0.guard.wallet" { print $2; exit }' "$evidence")
+    model=$(awk -F '\t' '$1 == "C0.guard.model" { print $2; exit }' "$evidence")
+    case "$did $wallet $model" in
+        "PASS PASS PASS")
+            jpk_set_row "$evidence" C0.guard PASS "did wallet model launched"
+            ;;
+        *"REFUSED"*)
+            jpk_set_row "$evidence" C0.guard REFUSED "did=$did wallet=$wallet model=$model"
+            ;;
+        *)
+            jpk_set_row "$evidence" C0.guard NOT RUN "did=$did wallet=$wallet model=$model"
+            ;;
+    esac
 }
 
 jpk_run_c9() {

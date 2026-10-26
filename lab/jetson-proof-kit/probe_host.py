@@ -31,7 +31,8 @@ AUDIT_ARCH = {
     "x86_64": ("AUDIT_ARCH_X86_64", "0xc000003e"),
     "aarch64": ("AUDIT_ARCH_AARCH64", "0xc00000b7"),
 }
-CAP_SETPCAP = 21
+# <linux/capability.h>. CAP_SYS_ADMIN is 21 and is not this check.
+CAP_SETPCAP = 8
 
 SYSCTL_PATHS = (
     ("sysctl.user.max_user_namespaces", "/proc/sys/user/max_user_namespaces"),
@@ -149,6 +150,12 @@ def _probe_unshare(flags):
     return f"unavailable {name}"
 
 
+def cap_setpcap_from_mask(mask):
+    if mask == 0 or mask & (1 << CAP_SETPCAP):
+        return "available"
+    return "unavailable"
+
+
 def _cap_bnd():
     raw = _status_field("CapBnd")
     if not raw:
@@ -157,9 +164,7 @@ def _cap_bnd():
         mask = int(raw, 16)
     except ValueError:
         return raw, "unavailable"
-    if mask == 0 or mask & (1 << CAP_SETPCAP):
-        return raw, "available"
-    return raw, "unavailable"
+    return raw, cap_setpcap_from_mask(mask)
 
 
 def live_facts():
