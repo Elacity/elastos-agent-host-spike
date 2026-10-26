@@ -1,4 +1,4 @@
-        {
+        if core::hint::black_box(true) {
             use elastos::bus::capabilities;
             use elastos::bus::types::CapabilityRequest;
             let _ = capabilities::request(&CapabilityRequest {
