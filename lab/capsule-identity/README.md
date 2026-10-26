@@ -766,6 +766,15 @@ a capsule that is not per platform (`capsule_record.rs:582`). The lab reads
 both, edits neither, and does not use the Runtime's schema name. A label is
 not identity: each variant is named by its complete bundle CID (PRINCIPLES 13).
 
+**A label is the signer's claim.** The lab does not check that a variant's
+bytes were built for its label. It never reads a label from a manifest, path
+or payload: the signer asserts it, and the pinned recipe (issue 285,
+https://github.com/Elacity/elastos-runtime/issues/285) stands in for the
+build that would back it. So `provider-variant-a`, whose payload says
+`aarch64-darwin`, verifies under `x86_64-linux` if the signer bound it there
+(`a_variant_label_is_the_signers_claim`, task 017). That test pins a limit,
+not a feature.
+
 **The recipe.** `recipes/provider-variant.recipe` is a few lines of ASCII
 that say which fixture files make each variant. It is a lab stand-in, not a
 build recipe: the lab never runs it, and it holds no build command, URL or
@@ -902,6 +911,7 @@ admission, launch, rotation or delegation. It runs no build.
 | `content-sample` (`type: data`) binds under `*` and under `aarch64-darwin`: the rule keys on the manifest type | `a_portable_data_capsule_binds_under_the_portable_label` | F-CI16c |
 | The WASM type comes from the one `CapsuleManifest` parse in `check_manifest`, kept by the seam | `wasm_type_comes_from_the_one_manifest_check` | F-CI16d |
 | Two faults at once, at (e2) and each check next to it ((e), (f), (g)): the earlier check answers | `wasm_variant_refusal_order_is_stable` | F-CI16f, F-CI16g |
+| A limit, not a feature: a signed under `x86_64-linux` and b under `aarch64-darwin`, against the words in their payloads, pass both verifiers with the pinned CIDs | `a_variant_label_is_the_signers_claim` | F-CI17a |
 
 The tests are in `tests/variant_binding.rs`. Every refusal test runs both
 verifiers and checks the refusal's value and its exact text. Every expected
@@ -1012,7 +1022,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 161 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 162 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1028,8 +1038,8 @@ and task 014's F-CI14a to F-CI14e (see
 F-CI11a to F-CI11x (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task 012's
 F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)), and task 015's
-F-CI15a to F-CI15z and F-CI15aa to F-CI15af, and task 016's F-CI16a to
-F-CI16i (both: see
+F-CI15a to F-CI15z and F-CI15aa to F-CI15af, task 016's F-CI16a to
+F-CI16i, and task 017's F-CI17a (all three: see
 [the variant binding](#lab-variant-binding-outside-the-bundles)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
@@ -1089,8 +1099,9 @@ At task 013 it reported `summary: 89 CAUGHT of 89`. At task 014 it reported
 At task 012 it reported `summary: 120 CAUGHT of 120`. At task 015 it reported
 `summary: 152 CAUGHT of 152` (with the id prefix `F-CI15`: 32 of 32). At
 task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
-`F-CI16`: 9 of 9).
+`F-CI16`: 9 of 9). At task 017, with the id prefix `F-CI17`, it reported
+`summary: 1 CAUGHT of 1`.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015 and 016 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016 and 017 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
