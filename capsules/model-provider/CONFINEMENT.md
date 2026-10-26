@@ -57,7 +57,13 @@ from the starting set's `file-read*` to `file-read-data`, the one class that
 startup needs.
 
 `(deny network*)` is held by the shared contract check, not by a behaviour
-test here (see Tests).
+test here (see Tests): F-cc12a removes it, and that check fails (see
+Falsifiers). With that one form removed, `(deny default)` still
+refuses the hosted run's connect, and
+`model_hosted_run_fails_closed_under_profile` still passes. The profile's
+refusal of a network operation is now also shown by behaviour: that test and
+F-cc10b, which turns `(deny network*)` into `(allow network*)` (see "What the
+profile does not grant").
 
 ## Reads outside the storage root
 
@@ -131,7 +137,9 @@ succeeds and `runs/` appears under the outside sibling, so the second test
 fails: it watches the write grant itself. `model_outside_write_denied` still
 passes under F-cc8c, because it is refused at a read.
 
-## What the profile does not grant: the local engine
+## What the profile does not grant
+
+### The local engine
 
 A local model run needs three things, and this profile grants none of them:
 
@@ -179,6 +187,64 @@ The Runtime half of any extension is Anders's (P4). Until the decision lands,
 this profile has no engine grant, and
 `model_local_offer_fails_closed_under_profile` holds the edge closed.
 
+### The hosted transport
+
+On macOS a hosted run goes ahead only when the init config names the
+Runtime-owned Unix socket in `runtime_hosted_socket`
+(`src/config.rs:111-113`). Without it, the provider refuses every hosted
+adapter itself, before any socket (`require_external_http_containment`,
+`src/adapters.rs:111-128`, and
+`production_provider_refuses_every_external_adapter_before_socket_and_after_restart`
+in `tests/process.rs`). That refusal is the provider's, not the sandbox's.
+With the socket named, the run sends its effect request,
+`POST /v1/hosted-effect` with the `x-elastos-*` headers, over that socket
+(`effect_request` and `backend_client_with_socket`,
+`src/adapters.rs:45-100`). The profile refuses that connect.
+
+The run fails closed. `runs_create` answers `status: ok`, and the run then
+settles as `status: failed` with `code: transport_interrupted`,
+`message: model backend transport was interrupted` (`map_reqwest_failure`,
+`src/adapters.rs:2773-2785`). It settles within `FIXTURE_EVENT_TIMEOUT`, so it
+does not hang. Nothing reaches the socket, and the provider stays in service:
+`offers_list` answers and `shutdown` exits cleanly. The provider logs no
+adapter fault, so the evidence is the run's terminal error, the socket's
+record of connections and the control.
+
+- `model_hosted_run_fails_closed_under_profile` proves this under
+  `confine.sb` itself, with no fixture rule and the three parameters bound.
+  The socket is a stand-in that the test binds under `/tmp`: the
+  provider refuses a socket path of 104 bytes or more
+  (`src/config.rs:163-167`), and a path under the test's temporary root comes
+  close to that. The stand-in records every connection it accepts, and under
+  the profile it records none.
+- `model_hosted_run_reaches_runtime_socket_when_unconfined` is the control:
+  the same fixture and requests without the profile. The run's one request
+  reaches the stand-in with a request line that starts with
+  `POST /v1/hosted-effect `. The stand-in answers `403` with
+  `X-Elastos-Hosted-Access: refused`, which the provider reads as the
+  Runtime's refusal before dispatch (`map_effect_http_status`,
+  `src/adapters.rs:2799-2834`), and the run settles as
+  `hosted_effect_refused`. Off macOS the provider refuses every hosted run
+  itself, so there the control prints a skip reason.
+
+F-cc10b turns `(deny network*)` into `(allow network*)` and changes nothing
+else. The request then reaches the stand-in, and the confined test fails. So
+the network denial alone holds this edge; it is the widening a hosted grant
+would add. F-cc10a, `(allow default)` with `(deny network*)` removed, fails
+the test the same way. `(allow default)` alone does not, because
+`(deny network*)` still refuses the connect.
+
+With this profile no model run completes, local or hosted. Only the storage
+operations work.
+
+Granting this transport is part of the same open decision for Sasha and Rong
+as the local engine. It touches the same two places: the shared check,
+`both_file_profiles_bind_one_storage_parameter_contract` (see Tests), and "The
+Runtime bridge change" in `../did-provider/CONFINEMENT.md`. The Runtime half
+of any extension is Anders's (P4). Hosted routing is not decided here. Until
+the decision lands, this profile has no network grant, and
+`model_hosted_run_fails_closed_under_profile` holds the edge closed.
+
 ## Tests
 
 `tests/confine/main.rs` (the cargo test target `confine`) holds this crate's
@@ -191,7 +257,7 @@ of `confine.sb` with fixture rules appended. The copy is read from the same
 source, so a profile edit reaches it too. The `init` config carries one hosted
 offer, which touches no file at `init`. A local engine offer reads files
 outside `STORAGE_ROOT`, and this profile does not grant them: see "What the
-profile does not grant: the local engine".
+profile does not grant".
 
 - `model_provider_ops_under_profile`: `STORAGE_PARENT` exists at launch and
   `STORAGE_ROOT` does not. The test drives `init`, `status` and `offers_list`,
@@ -224,11 +290,19 @@ profile does not grant: the local engine".
   outside the storage root".
 - `model_local_offer_fails_closed_under_profile`: an `init` whose one offer is
   a local engine offer fails closed under the profile, writes nothing, and
-  leaves the provider in service. See "What the profile does not grant: the
-  local engine".
+  leaves the provider in service. See "What the profile does not grant".
 - `model_local_offer_accepted_when_unconfined`: the control. The same fixture
   and the same `init`, without the profile, answer `status: ok` with the offer
   ready. It sends no `runs_create`, so no engine starts.
+- `model_hosted_run_fails_closed_under_profile`: the `init` config names a
+  stand-in for the Runtime socket in `runtime_hosted_socket`. Under the
+  profile the hosted run's connect to it is refused: the run settles as
+  `transport_interrupted`, the stand-in records no connection, and the
+  provider stays in service. See "What the profile does not grant".
+- `model_hosted_run_reaches_runtime_socket_when_unconfined`: the control. The
+  same fixture and requests, without the profile: the run's one request
+  reaches the stand-in, and the stand-in's refusal settles the run as
+  `hosted_effect_refused`.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and `journal_access_denied` is its code for a refused journal create or write
@@ -241,11 +315,15 @@ profile is the only difference between the two runs.
 
 The confined tests print a skip reason and return when `/usr/bin/sandbox-exec`
 is absent. When it is present and the sandbox refuses to launch the binary,
-they fail. The controls need no sandbox and run on every Unix host.
+they fail. The controls need no sandbox and run on every Unix host, except
+`model_hosted_run_reaches_runtime_socket_when_unconfined`: off macOS the
+provider refuses every hosted run before any socket, so that control prints a
+skip reason there and returns.
 
 The profile shape has one check (P10):
 `both_file_profiles_bind_one_storage_parameter_contract` in
-`../wallet-provider/tests/confine.rs` runs over this file whenever it exists.
+`../wallet-provider/tests/confine.rs` requires this file and fails when it is
+missing or unreadable.
 It requires `(version 1)` first, `(deny default)` second, `(deny network*)`,
 no network allow, only the three parameter tokens, the three shared rules
 verbatim, and no `(allow default)`. This crate adds no second shape test.
@@ -261,10 +339,11 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 ## Falsifiers
 
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
-runner. Every entry uses command `provider` and `expect: caught`. Each
-mutates `confine.sb` only, except the two entries that edit
-`tests/confine/main.rs`: F-cc1e removes the outside-read fixture rule, and
-F-cc8-rm-journal removes the outside-create fixture grant.
+runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
+because the one shape check is in the wallet crate, and every other entry
+uses command `provider`. Each mutates `confine.sb` only, except the two
+entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
+fixture rule, and F-cc8-rm-journal removes the outside-create fixture grant.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -283,6 +362,9 @@ F-cc8-rm-journal removes the outside-create fixture grant.
 | F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The redirected `init` answers `ok`. |
 | F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
 | F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
+| F-cc10a | `(deny default)` becomes `(allow default)` and `(deny network*)` is removed; `(version 1)` stays first | `model_hosted_run_fails_closed_under_profile` | The hosted run's request reaches the Runtime socket stand-in. `(allow default)` alone is not enough: `(deny network*)` still refuses the connect. |
+| F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
+| F-cc12a | Remove `(deny network*)`; nothing else changes | `both_file_profiles_bind_one_storage_parameter_contract` (wallet crate) | The one shape check refuses the model profile with "model-provider must deny the network explicitly with (deny network*)". |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -292,13 +374,12 @@ startup recovery restores `tests/confine/main.rs` after a killed run (provider
 task 015), as it restores `confine.sb`.
 
 The list is a Mac gate. Without `/usr/bin/sandbox-exec` the confined tests
-skip and pass, so the runner reports each entry as SURVIVED there.
+skip and pass, so the runner reports each sandbox entry as SURVIVED there.
+F-cc12a needs no sandbox. Its check only reads the profile files, so it is
+CAUGHT on any host that builds the wallet crate.
 
-The runner's `provider` command runs only this crate, so the `(deny network*)`
-falsifier is applied by hand: delete `(deny network*)` from `confine.sb` and
-run the wallet command above.
-`both_file_profiles_bind_one_storage_parameter_contract` then fails with
-"model-provider must deny the network explicitly with (deny network*)".
-Restore the file and it passes. The check itself is guarded by WP06 in
-`../wallet-provider/falsifiers.json`, which deletes the `(deny network*)`
+F-cc12a registers the removal of `(deny network*)`: the runner applies it
+with the `wallet` command and restores `confine.sb` afterwards, or at its
+next start after a killed run. WP06 in `../wallet-provider/falsifiers.json`
+guards the check's own `(deny network*)` requirement: it deletes that
 requirement from the check.

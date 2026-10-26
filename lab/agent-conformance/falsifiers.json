@@ -63,7 +63,8 @@
         }
       ],
       "tests": [
-        "tests::probe_refuses_without_a_launch_argument_channel"
+        "tests::probe_refuses_without_a_launch_argument_channel",
+        "default_activation_refuses_without_selector"
       ]
     },
     {
@@ -121,7 +122,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/artifact.rs",
+          "file": "tests/common/probe.rs",
           "old": "    artifact\n}",
           "new": "    if round == 2 {\n        let mut changed = artifact;\n        changed.push(0);\n        changed\n    } else {\n        artifact\n    }\n}"
         }
@@ -288,6 +289,54 @@
       ],
       "tests": [
         "managed_child_drop_kills_its_group_and_keeps_root"
+      ]
+    },
+    {
+      "id": "F-ac1h",
+      "title": "discard the Bus refusal in the read build",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "        Err(error) => Err(error),",
+          "new": "        Err(error) => {\n            if cfg!(feature = \"read\") {\n                return Ok(());\n            }\n            Err(error)\n        },"
+        }
+      ],
+      "tests": [
+        "ungranted_effect_is_refused"
+      ]
+    },
+    {
+      "id": "F-ac1n",
+      "title": "discard the Bus refusal in the network build",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "        Err(error) => Err(error),",
+          "new": "        Err(error) => {\n            if cfg!(feature = \"network\") {\n                return Ok(());\n            }\n            Err(error)\n        },"
+        }
+      ],
+      "tests": [
+        "ungranted_network_is_refused"
+      ]
+    },
+    {
+      "id": "F-probe-exclusive",
+      "title": "accept two effect selectors in one probe build",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "#[cfg(all(feature = \"read\", feature = \"network\"))]\ncompile_error!(\"select exactly one probe effect: read or network\");\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "probe_effects_are_exclusive"
       ]
     }
   ]

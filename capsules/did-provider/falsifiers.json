@@ -1,5 +1,5 @@
 {
-  "about": "Did-provider confine falsifiers merged by tasks 001, 009 and 007, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant, and DID11 returns `parse_error` instead of the non-hex signature refusal. Task 022 adds DID12 for a failure message that drops the child's standard error, DID13 for a spawn that drops the stderr pipe instead of draining it, DID14 for a failure message that omits the request, DID15 for one that omits the exit status, and DID16/DID17 for the failed-write and response-stream branches bypassing the shared diagnostic. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. File paths are relative to the repository root, and every edit snippet is verbatim in the current source. The list grows as later confine tasks land; wiring the shared examples/agent-host/falsify.py runner to accept the did command and run each named test with --exact is the remaining step.",
+  "about": "Did-provider confine falsifiers merged by tasks 001, 007, 009, 015, 019, 022 and 023, each anchored in the committed source. DID01 restores a temp-directory fallback for a missing or empty storage root, DID02 drops the absolute-path check, DID03 swallows a nickname read error, which both its unit test and the confinement's `outside_read_denied` catch, DID04 replaces `(deny default)` with `(allow default)`, DID05 grants the network, DID06 makes `verify_did_recovery` panic on a bad signature instead of returning a refusal, DID07 drops the process-exec grant, DID08 the root-directory read, DID09 the kernel-fact read, DID10 the storage-root state grant. Task 019 adds DID11, which returns `parse_error` instead of the non-hex signature refusal. Task 022 adds DID12 for a failure message that drops the child's standard error, DID13 for a spawn that drops the stderr pipe instead of draining it, DID14 for a failure message that omits the request, DID15 for one that omits the exit status, and DID16/DID17 for the failed-write and response-stream branches bypassing the shared diagnostic. Task 023 adds DID18, which widens the one write grant from `STORAGE_ROOT` to `STORAGE_PARENT`, so `outside_write_denied` fails on its sibling target because that write succeeds. Task 015 removed every other allow form from the profile because no confinement test needed it; the shared `STORAGE_PARENT` grant stays only for the one file-profile contract, and its removal falsifier is WP11 in `../wallet-provider/falsifiers.json`. A falsifier counts as caught only when every named test fails. Edit paths are relative to `examples/agent-host`, the one runner's rule, so every file starts with `../../`, and every edit snippet is verbatim in the current source. Task 031 adds DID19, which resolves edit paths from the repository root again: `tests::falsifiers_list_is_honest` fails on DID01 because the committed `../../` path no longer resolves, and `tests::falsifiers_list_rejects_a_repository_relative_path` fails because the DID01 refusal does not come. Run `python3 -I examples/agent-host/falsify.py --from capsules/did-provider/falsifiers.json` from the repository root, and the sandbox entries make the full run a Mac gate.",
   "falsifiers": [
     {
       "id": "DID01",
@@ -8,7 +8,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/src/main.rs",
+          "file": "../../capsules/did-provider/src/main.rs",
           "old": "            return Err(STORAGE_PATH_NOT_SET.to_string());",
           "new": "            return Ok(std::env::temp_dir());"
         }
@@ -25,7 +25,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/src/main.rs",
+          "file": "../../capsules/did-provider/src/main.rs",
           "old": "        if !base.is_absolute() {\n            return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n        }",
           "new": "        if false && !base.is_absolute() {\n            return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n        }"
         }
@@ -41,7 +41,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/src/main.rs",
+          "file": "../../capsules/did-provider/src/main.rs",
           "old": "        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)\n            .map_err(|e| format!(\"did-provider: failed to read nickname: {e}\"))?;",
           "new": "        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)\n            .ok()\n            .flatten();"
         }
@@ -58,7 +58,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(deny default)",
           "new": "(allow default)"
         }
@@ -75,7 +75,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(deny network*)",
           "new": "(allow network*)"
         }
@@ -91,7 +91,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/src/main.rs",
+          "file": "../../capsules/did-provider/src/main.rs",
           "old": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(e) => {\n                return Response::error(\"invalid_signature\", &format!(\"Invalid hex sig: {}\", e))\n            }\n        };",
           "new": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(_) => panic!(\"recovery signature decode failure\"),\n        };"
         }
@@ -107,7 +107,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
           "new": ";; Removed: shared process-exec grant."
         }
@@ -126,7 +126,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(allow file-read* (literal \"/\"))",
           "new": ";; Removed: root-directory read grant."
         }
@@ -145,7 +145,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(allow sysctl-read)",
           "new": ";; Removed: sysctl-read grant."
         }
@@ -164,7 +164,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/confine.sb",
+          "file": "../../capsules/did-provider/confine.sb",
           "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
           "new": ";; Removed: storage-root state grant."
         }
@@ -181,7 +181,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/src/main.rs",
+          "file": "../../capsules/did-provider/src/main.rs",
           "old": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(e) => {\n                return Response::error(\"invalid_signature\", &format!(\"Invalid hex sig: {}\", e))\n            }\n        };",
           "new": "        let vk = match decode_did_key(did).map_err(|e| e.to_string()) {\n            Ok(vk) => vk,\n            Err(e) => return Response::error(\"invalid_did\", &e),\n        };\n        let sig_bytes = match hex::decode(sig_hex) {\n            Ok(s) => s,\n            Err(e) => {\n                return Response::error(\"parse_error\", &format!(\"Invalid hex sig: {}\", e))\n            }\n        };"
         }
@@ -197,7 +197,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/tests/confine.rs",
+          "file": "../../capsules/did-provider/tests/confine.rs",
           "old": "        let exit = self.wait_for_exit();\n        let stderr = self.stderr().to_string();\n        format!(\n            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"\n        )",
           "new": "        let exit = self.wait_for_exit();\n        format!(\"provider did not answer request {request} ({cause}); child {exit}\")"
         }
@@ -213,7 +213,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/tests/confine.rs",
+          "file": "../../capsules/did-provider/tests/confine.rs",
           "old": "        let mut stderr_pipe = child.stderr.take().expect(\"provider stderr\");\n        let stderr_reader = std::thread::spawn(move || {\n            let mut bytes = Vec::new();\n            let _ = stderr_pipe.read_to_end(&mut bytes);\n            String::from_utf8_lossy(&bytes).into_owned()\n        });",
           "new": "        drop(child.stderr.take().expect(\"provider stderr\"));\n        let stderr_reader = std::thread::spawn(|| String::new());"
         }
@@ -229,7 +229,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/tests/confine.rs",
+          "file": "../../capsules/did-provider/tests/confine.rs",
           "old": "            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"",
           "new": "            \"provider did not answer ({cause}); child {exit}; standard error: {stderr}\""
         }
@@ -245,7 +245,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/tests/confine.rs",
+          "file": "../../capsules/did-provider/tests/confine.rs",
           "old": "            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"",
           "new": "            \"provider did not answer request {request} ({cause}); standard error: {stderr}\""
         }
@@ -261,7 +261,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/tests/confine.rs",
+          "file": "../../capsules/did-provider/tests/confine.rs",
           "old": "        if let Err(err) = written {\n            return Err(self.unanswered(request, &format!(\"writing the request failed: {err}\")));\n        }",
           "new": "        if written.is_err() {\n            return Err(\"provider stdin must accept a request\".to_string());\n        }"
         }
@@ -277,13 +277,46 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "capsules/did-provider/tests/confine.rs",
+          "file": "../../capsules/did-provider/tests/confine.rs",
           "old": "            Ok(0) => Err(self.unanswered(request, \"the response stream ended\")),",
           "new": "            Ok(0) => Err(\"provider exited without a response\".to_string()),"
         }
       ],
       "tests": [
         "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "DID18",
+      "title": "the write grant widens to the storage root's parent, so a sibling write succeeds",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/confine.sb",
+          "old": "(subpath (param \"STORAGE_ROOT\"))",
+          "new": "(subpath (param \"STORAGE_PARENT\"))"
+        }
+      ],
+      "tests": [
+        "outside_write_denied"
+      ]
+    },
+    {
+      "id": "DID19",
+      "title": "the honesty test resolves edit paths from the repository root again",
+      "command": "did",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/src/main.rs",
+          "old": "        let edit_base = root.join(\"examples/agent-host\");",
+          "new": "        let edit_base = root;"
+        }
+      ],
+      "tests": [
+        "tests::falsifiers_list_is_honest",
+        "tests::falsifiers_list_rejects_a_repository_relative_path"
       ]
     }
   ]

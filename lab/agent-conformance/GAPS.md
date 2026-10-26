@@ -401,3 +401,47 @@ dropped when 007 split into 008 and 009. Grant delivery and component-effect
 refusal stderr remain with the later effect and grant tasks.
 AC-010-OFFLINE is closed by the two named operator tests; AC-006-STORAGE and
 AC-002-ARGS remain open.
+
+
+## Task 003 — ungranted requests through the live Bus
+
+Task 003 supersedes the earlier pending effect experiment. The default build
+still returns AC-002-ARGS, now measured by
+`default_activation_refuses_without_selector`. The `read` and `network` Cargo
+features select one request each on the same probe source. The existing build
+script accepts inherited `RUSTFLAGS`, so the shared build helper passes
+`--cfg feature="read"` or `--cfg feature="network"`. It saves each build's bytes
+before the next build. The five allowed imports are Bus v1 `types`, `runtime`,
+`identity`, `capabilities` and `providers`; foreign and wrong-version imports
+remain refused.
+
+The deny-only probe requests `read` on the synthetic resource in
+`fixtures/ungranted-read.txt`, or `execute` on `elastos://net/stream` from
+`fixtures/ungranted-network.txt`. These resources are outside the probe's empty
+manifest bound and outside future granted fixture directories. The Runtime
+owns resource authority. Its manifest refusal returns through the guest's Bus
+call and lifecycle to `elastos run`. The live wrapper uses
+`Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`;
+the default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
+The probe returns immediately after the
+request, including unexpected success, so this check performs no provider
+invoke, storage read or network effect. A successful request makes its refusal
+test fail. Network provider execution is a separate acceptance question.
+
+`tests/effects.rs` uses 013's `Operator::start`, readiness, two socket samples
+at least three seconds apart, and process-group stop. It uses the existing
+Runtime build and guarded launch primitive throughout. The fixture's operator
+captures and attach data stay unread. AC-006-STORAGE remains the recorded
+Runtime-owned constructor exception; this lane reads nothing through it.
+
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `ungranted_model_call_is_refused` | RT3 | Anders supplies the component model-call grant contract and its refusal path. |
+| `operator_storage_is_under_throwaway_home` | AC-006-STORAGE | Anders derives the `run` client's storage path from the selected Home, as specified above. |
+
+Both rows are `#[ignore = "blocked: <ID>"]`, print BLOCKED in the one table,
+and fail explicitly if forced with `--ignored`. They supply zero passing
+acceptance checks. AC-010-OFFLINE remains closed by 013's measured operator
+recipe. The positive-grant controller remains with task 015; launch by bundle
+CID remains a separate task. Artifact SHA-256 identifies the exact local
+component bytes used here and is separate from signed-bundle admission.

@@ -1206,3 +1206,369 @@ Principles check (paths relative to this lane):
 | 5. Do refusals fail closed with a reason? | Yes. `tests/common/operator.rs:98` refuses census errors, `tests/common/operator.rs:227` requires API visibility, and `src/harness.rs:367` cleans up failed stops. |
 | 6. Does capsule logic stay inside and trap down through grants? | Yes. `probe/src/lib.rs:8` retains the typed Bus bindings unchanged; this task adds fixture support only. |
 | 7. Do tests and caught falsifiers prove the new rules? | Yes. `tests/runtime.rs:164`, `tests/runtime.rs:185`, `tests/runtime.rs:206`, `tests/harness.rs:82`, `tests/harness.rs:167` and `tests/harness.rs:182` passed; `falsifiers.json:214` onward owns the five planted failures recorded above. |
+
+
+## 003 — ungranted read and network refusal (2026-10-26)
+
+Added build-time read/network requests on the one probe source, shared artifact
+builds and hash checks, live Bus-refusal tests through 013's operator fixture,
+BLOCKED model/storage rows, and probe-only falsifiers.
+
+`probe::request_effect` requests exactly one action and returns the Bus error
+unchanged. The default `run_probe` keeps AC-002-ARGS. The repository build script
+has no feature argument, so `tests/common/probe.rs::build_probe` passes the
+Cargo feature cfg through inherited `RUSTFLAGS`: `--cfg feature="read"` or
+`--cfg feature="network"`. It copies each build's bytes into memory before
+removing the shared entrypoint and build directory. The effect tests install
+those bytes in a SHA-256 directory inside the guarded throwaway root.
+`tests/artifact.rs` accepts the five Bus v1 interfaces and checks two fresh
+builds per selector, with distinct hashes across selectors.
+
+The existing operator fixture owns startup, readiness, census and group stop.
+`tests/effects.rs::assert_refusal` uses that fixture and the existing bounded
+launch primitive. It checks a nonzero exit plus the exact lifecycle refusal
+in stderr, then removes a passed Home. Failed assertions keep the root after
+the operator has stopped. The guest stops after the capability request even
+if a grant arrives; this deny-only task performs zero provider effects.
+RT3 and AC-006-STORAGE have explicit ignored tests and BLOCKED table rows.
+
+All build/test commands below held the repository's shared heavy-build lease.
+Available space was 33.38 GiB before building, above the 12 GiB estimate plus
+2 GiB reserve. Commands used the following environment, with build outputs
+and temporary files inside this lane:
+
+```sh
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-003"
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+```
+
+The first effects run stopped at the sandbox's denied loopback bind, before
+Runtime startup; it supplies zero live acceptance evidence. The permitted
+local-bind rerun reached all three guest refusals and both socket samples.
+Its assertions initially expected `Internal` / `Unavailable` without the
+actual `BusError::` prefix. The corrected assertions require the full live
+format; they retain the resource, lifecycle wrapper and nonzero-exit checks.
+Operator captures and coordinates contents stayed unread.
+
+Required lane gates after that correction:
+
+| Command | Exit | Result | Elapsed |
+| --- | --- | --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | PASS | 0.11 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 22 passed, 0 failed, 2 ignored (BLOCKED) | 159.91 s |
+
+Both commands preserved `git status --porcelain`. The Home guard, cleared
+environment, readiness and process-group checks passed. The repository basic
+gate also passed: `git diff --check`, `node scripts/check-product-data.mjs`
+(42 capsules, 2 profiles, 28 method contracts), `node --test
+scripts/check-product-data.test.mjs` (99 passed), Runtime workspace formatting,
+chain-provider formatting, and `bash -n lab/agent-conformance/run.sh`.
+
+### F-ac1h — the read refusal must reach the harness
+
+Applied the exact `F-ac1h` edit from `falsifiers.json` to `probe/src/lib.rs`,
+ran the command, restored its original bytes, then ran the same command again:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_effect_is_refused -- --exact --nocapture
+```
+
+Planted output:
+
+```text
+operator census: 2 then 2 loopback sockets for read; group stopped
+probe refusal effect:read exit:Some(0) reason_present:false
+expected nonzero exit and lifecycle refusal Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt"); exit:Some(0) reason_present:false
+test ungranted_effect_is_refused ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 23.43s
+```
+
+Restored output:
+
+```text
+operator census: 2 then 2 loopback sockets for read; group stopped
+probe refusal effect:read exit:Some(1) reason_present:true
+test ungranted_effect_is_refused ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 22.72s
+```
+
+Planted: Cargo exit 101, 23.54 s.
+Restored: Cargo exit 0, 22.81 s.
+
+The planted test ran and failed because the guest returned success and the
+reason disappeared. Restoring the probe returned exit 1 with the expected
+reason. Both operator socket samples passed and both groups stopped. The
+supervisor can copy these command/output blocks into the private PR.
+
+### F-ac1n — the network refusal must reach the harness
+
+Applied the exact probe edit from `falsifiers.json`, then restored the original
+bytes before the second run. The command for both runs was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_network_is_refused -- --exact --nocapture
+```
+
+Planted (Cargo exit 101, 22.83 s):
+
+```text
+operator census: 2 then 2 loopback sockets for network; group stopped
+probe refusal effect:network exit:Some(0) reason_present:false
+expected nonzero exit and lifecycle refusal Internal("capsule manifest does not declare authority for elastos://net/stream"); exit:Some(0) reason_present:false
+test ungranted_network_is_refused ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 22.75s
+```
+
+Restored (Cargo exit 0, 22.00 s):
+
+```text
+operator census: 2 then 2 loopback sockets for network; group stopped
+probe refusal effect:network exit:Some(1) reason_present:true
+test ungranted_network_is_refused ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 21.90s
+```
+
+### F-probe-exclusive — exact planted and restored checks
+
+Applied its exact edit from `falsifiers.json`; restored the original source
+bytes before the restored runs. Commands used the environment and lease above.
+
+Planted (Cargo exit 101, 82.16 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_effects_are_exclusive -- --exact --nocapture
+```
+
+```text
+two effects must be refused
+test probe_effects_are_exclusive ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 82.08s
+```
+
+Restored (Cargo exit 0, 91.11 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_effects_are_exclusive -- --exact --nocapture
+```
+
+```text
+test probe_effects_are_exclusive ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 91.02s
+```
+
+### F-probe-a — exact planted and restored checks
+
+Applied its exact edit from `falsifiers.json`; restored the original source
+bytes before the restored runs. Commands used the environment and lease above.
+
+Planted (Cargo exit 101, 0.99 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance-probe tests::probe_refuses_without_a_launch_argument_channel -- --exact --nocapture
+```
+
+```text
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("probe launch arguments are unavailable in elastos:bus@v1")
+test tests::probe_refuses_without_a_launch_argument_channel ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Planted (Cargo exit 101, 25.89 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects default_activation_refuses_without_selector -- --exact --nocapture
+```
+
+```text
+probe refusal effect:default exit:Some(0) reason_present:false
+expected nonzero exit and lifecycle refusal Unavailable("probe launch arguments are unavailable in elastos:bus@v1"); exit:Some(0) reason_present:false
+test default_activation_refuses_without_selector ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 25.82s
+```
+
+Restored (Cargo exit 0, 0.49 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -p agent-conformance-probe tests::probe_refuses_without_a_launch_argument_channel -- --exact --nocapture
+```
+
+```text
+test tests::probe_refuses_without_a_launch_argument_channel ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Restored (Cargo exit 0, 26.76 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects default_activation_refuses_without_selector -- --exact --nocapture
+```
+
+```text
+probe refusal effect:default exit:Some(1) reason_present:true
+test default_activation_refuses_without_selector ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 26.69s
+```
+
+### F-probe-b — exact planted and restored checks
+
+Applied its exact edit from `falsifiers.json`; restored the original source
+bytes before the restored runs. Commands used the environment and lease above.
+
+Planted (Cargo exit 101, 0.77 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact foreign_and_wrong_version_imports_are_refused -- --exact --nocapture
+```
+
+```text
+assertion `left == right` failed
+  left: Ok(())
+ right: Err("probe import is outside the supported ElastOS Bus interfaces")
+test foreign_and_wrong_version_imports_are_refused ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+```
+
+Restored (Cargo exit 0, 1.33 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact foreign_and_wrong_version_imports_are_refused -- --exact --nocapture
+```
+
+```text
+test foreign_and_wrong_version_imports_are_refused ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+```
+
+
+### Principles check
+
+Answers follow the task's question wording. Paths are relative to this lane.
+
+| Question | Answer and evidence |
+| --- | --- |
+| 1. New name or URL in place of code/content hash? | No. `tests/effects.rs:20` computes SHA-256 from the component bytes and `:26` uses that hash for the local artifact directory; bundle-CID admission remains separate. |
+| 2. New ambient access or UI authority? | No. `probe/src/lib.rs:51` calls the typed capability request; `:58` stops even on unexpected success. `tests/artifact.rs:53` permits only Bus v1 imports. |
+| 3. A second operation path or rule copy? | No. `tests/common/probe.rs:33` is the shared probe builder. `tests/effects.rs:40` and `:44` reuse the existing operator and launch primitive. |
+| 4. Does the trusted Runtime core grow? | No. All candidate paths stay under this lane; `tests/effects.rs:21` uses the existing Runtime-under-test helper. |
+| 5. Do new refusals fail closed with a clear reason? | Yes. `probe/src/lib.rs:59` returns the Bus error unchanged; `tests/effects.rs:65` requires its exact lifecycle reason and a nonzero exit. |
+| 6. Does capsule logic stay inside and call down through the Bus? | Yes. `probe/src/lib.rs:25` owns activation and `:51` requests authority through the generated typed Bus bindings. |
+| 7. Do named tests and caught falsifiers prove each new rule? | Yes. `tests/effects.rs:82`, `:91`, `:100` and `tests/artifact.rs:157` cover refusal, default activation and exclusive selection; the planted/restored outputs above show F-ac1h, F-ac1n, F-probe-exclusive and both F-probe-a tests. |
+
+These are author checks. Independent review, PR creation and the candidate
+commit remain with the supervisor under this task's builder rules.
+
+### F-probe-e — the moved builder retains its hash falsifier
+
+Applied the unchanged mutation at its new `tests/common/probe.rs` path, then
+restored the original bytes. Commands used the environment and lease above.
+
+Planted (Cargo exit 101, 96.59 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_hash_is_stable -- --exact --nocapture
+```
+
+```text
+assertion `left == right` failed: independent Default builds differ
+  left: "1c01fec4c1a0c901d7e72b68b7d190943e3178261c83ced381457ec73722fd49"
+ right: "e79a40b7e49f493f904466b5d571bb0f01aaf2ce84b3d8f3bdd21cedd26cb870"
+test probe_hash_is_stable ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 95.77s
+```
+
+Restored (Cargo exit 0, 96.10 s):
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_hash_is_stable -- --exact --nocapture
+```
+
+```text
+probe component sha256:1c01fec4c1a0c901d7e72b68b7d190943e3178261c83ced381457ec73722fd49 effect:default
+probe component sha256:189abaef6b36b5fe4dac116cd8f24fc4971183c3505747e01c2f1a9c787da0fc effect:read
+probe component sha256:9845b22b8dc0576e45cdf74effb9a790985cd778b36bf98d9c4a372ec9f8f6c5 effect:network
+test probe_hash_is_stable ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 95.51s
+```
+
+All three new falsifiers and the three affected existing falsifiers were
+caught. Every named test ran and failed while planted, then passed restored.
+The other existing falsifiers retain their earlier evidence; all their normal
+tests passed in this task’s full lane gate.
+
+### Final table and cleanup
+
+`lab/agent-conformance/run.sh` returned exit 0 in
+160.44 s after all mutations were restored. Its output was:
+
+```text
+probe component sha256:1c01fec4c1a0c901d7e72b68b7d190943e3178261c83ced381457ec73722fd49 effect:default
+probe component sha256:189abaef6b36b5fe4dac116cd8f24fc4971183c3505747e01c2f1a9c787da0fc effect:read
+probe component sha256:9845b22b8dc0576e45cdf74effb9a790985cd778b36bf98d9c4a372ec9f8f6c5 effect:network
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+probe component sha256:1c01fec4c1a0c901d7e72b68b7d190943e3178261c83ced381457ec73722fd49 effect:default
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+operator census: 2 then 2 loopback sockets for default; group stopped
+probe refusal effect:default exit:Some(1) reason_present:true
+probe component sha256:189abaef6b36b5fe4dac116cd8f24fc4971183c3505747e01c2f1a9c787da0fc effect:read
+operator census: 2 then 2 loopback sockets for read; group stopped
+probe refusal effect:read exit:Some(1) reason_present:true
+probe component sha256:9845b22b8dc0576e45cdf74effb9a790985cd778b36bf98d9c4a372ec9f8f6c5 effect:network
+operator census: 2 then 2 loopback sockets for network; group stopped
+probe refusal effect:network exit:Some(1) reason_present:true
+elastos sha256:150bc7279ca22856b8464cc61d3f52aa33385fc7fd081c939138706c181d7efd
+localhost-provider sha256:f70baa44037dea2c97167324864d8a35d7eb0845854d2023bf41f426681451e2
+operator census: 2 then 2 loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped
+test | PASS/FAIL/BLOCKED (id)
+default_activation_refuses_without_selector | PASS
+fixture_operator_sockets_are_loopback_only | PASS
+fixture_operator_starts_ready_and_stops_cleanly | PASS
+foreign_and_wrong_version_imports_are_refused | PASS
+home_is_throwaway | PASS
+launch_env_is_only_the_throwaway_home | PASS
+launch_stops_a_child_past_its_bound | PASS
+managed_child_drop_kills_its_group_and_keeps_root | PASS
+managed_child_stop_reaps_its_process_group | PASS
+non_component_and_invalid_component_are_refused | PASS
+operator_storage_is_under_throwaway_home | BLOCKED (AC-006-STORAGE)
+probe_effects_are_exclusive | PASS
+probe_hash_is_stable | PASS
+probe_imports_only_the_bus | PASS
+probe_manifest_names_the_current_bus_world | PASS
+run_table_requires_cargo_results | PASS
+run_without_operator_is_refused_with_reason | PASS
+runtime_data_dir_is_under_throwaway_home | PASS
+serve_refuses_provider_whose_bytes_differ_from_its_hash | PASS
+socket_census_requires_parseable_loopback_endpoints_and_api_listener | PASS
+tests::probe_refuses_without_a_launch_argument_channel | PASS
+ungranted_effect_is_refused | PASS
+ungranted_model_call_is_refused | BLOCKED (RT3)
+ungranted_network_is_refused | PASS
+```
+
+The table has 22 PASS rows and two BLOCKED rows. Every ignored test names its
+blocker in GAPS.md. SHA-256 snapshots of all lane source files and
+`git status --porcelain` matched before and after this run. The worktree began
+clean and now contains only this task's uncommitted lane edits; an empty status
+awaits the supervisor's commit, which this builder is instructed to leave to
+the supervisor. The run itself added zero source changes.
+
+All 21 falsifier IDs are unique and every edit anchor matches exactly once.
+The nine retained task-003 failure roots were removed after each had an empty
+`lsof -nP +D <root> -Fp` check. Passed roots removed themselves. The final
+`pgrep -f` check for this lane's Runtime/provider paths returned exit 1 and
+empty output. This task leaves zero fixture processes, test Homes or shared
+probe entrypoints. Earlier roots retain their previous owners and cleanup
+conditions. The private lifecycle inventory keeps the active branch/worktree
+and build artifacts for the supervisor rerun, with removal after acceptance
+and evidence transfer.
+
+The cached upstream advanced during this task: 0 ahead / 9 behind.
+`git diff --stat HEAD..@{upstream} -- lab/agent-conformance` is empty. Remote
+freshness and integration remain with the supervisor; the checks used the
+documented loopback fixture and the builder changed no Git state. Candidate source and all test changes
+stay under `lab/agent-conformance/`.
