@@ -931,6 +931,140 @@ Not in this task: the receipt's cap lines (wc-010c, task 028, in "Run receipt
 (wc-005c)") and measured peak memory, a maximum inside `capsule.wasm`, and any
 admission or launch decision.
 
+## Module memory maximum discovery (wc-010d0)
+
+Read-only discovery for the C0 refusal (Flint, 26 Oct 23:50: refuse to start
+an engine that cannot apply the capsule's declared memory cap, never run it
+uncapped). wasmer 7.5.0 has no cap flag (wc-010a), so the question here is
+the other route: the cap written into the module itself, as its memory's
+declared maximum, which a Wasm engine must apply with no flag. No runner,
+argv, receipt, test, `falsifiers.json`, `capsule/`, `tools/build` or pin
+change; `capsule.wasm` is not re-pinned. Facts are what each engine's CLI does
+on this Mac only, at base `a541cd7ba8e656ddc07466b3fc533118c5771ac7`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0` (both
+exit 0). Each engine ran by its absolute path as its own process from a shell
+(no engine inside an engine, no VM, no Docker), with **no cap flag** (no
+`max-memory-size`). Both engines stay test-only; this picks neither.
+
+**The probe modules** (WAT text under the git-ignored `target/wc010d/r1/`,
+never committed; both engines took the `.wat` files directly). The maximum
+1024 pages is 64 × 2^20 bytes, the capsule's declared default, read as
+wc-010a reads MB.
+
+`grow-max.wat`:
+
+```wat
+(module (memory (export "memory") 1 1024) (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))
+```
+
+`bad-max.wat` (its minimum, 1025, is above its own maximum, 1024):
+
+```wat
+(module (memory (export "memory") 1025 1024) (func (export "size") (result i32) memory.size))
+```
+
+`grow-nomax.wat` is the contrast: `grow-max.wat` with no maximum,
+`(module (memory (export "memory") 1) (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))`.
+`memory.grow` returns the old size in pages (1) on success and -1 on failure;
+growing by 1023 reaches exactly 1024 pages (at the maximum), by 1024 reaches
+1025 (past it). Runs from `lab/wasm-capsule/target/wc010d/r1/`.
+
+### wasmtime 45.0.1
+
+Each successful `grow` run's stderr is the CLI's own two `--invoke` warnings,
+``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future``
+and the same for "returns values".
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (w1) at the maximum | `/opt/homebrew/bin/wasmtime run --invoke grow grow-max.wat 1023` | 0 | `1` | the two warnings |
+| (w2) past the maximum | `/opt/homebrew/bin/wasmtime run --invoke grow grow-max.wat 1024` | 0 | `-1` | the two warnings |
+| (w2-t) past the maximum, trap flag only | `/opt/homebrew/bin/wasmtime run -W trap-on-grow-failure=y --invoke grow grow-max.wat 1024` | 1 | (none) | the first warning, ``Error: failed to run main module `grow-max.wat` ``, then ``0: failed to invoke `grow` ``, `1: error while executing at wasm backtrace:` and, last, `2: forcing trap when growing memory to 67174400 bytes` |
+| (w1-t) at the maximum, trap flag only | `/opt/homebrew/bin/wasmtime run -W trap-on-grow-failure=y --invoke grow grow-max.wat 1023` | 0 | `1` | the two warnings |
+| (w3) start, minimum above maximum | `/opt/homebrew/bin/wasmtime run --invoke size bad-max.wat` | 1 | (none) | `Error: failed to parse WebAssembly module`, then `size minimum must not be greater than maximum (at offset 0x16)` |
+| (w4) contrast, no maximum | `/opt/homebrew/bin/wasmtime run --invoke grow grow-nomax.wat 1024` | 0 | `1` | the two warnings |
+
+(w4) returning `1` where (w2) returned `-1`, with the same argument and no
+flag on either, shows the module's own maximum made the grow fail. (w2-t)
+shows `trap-on-grow-failure=y` alone, with no `max-memory-size`, turns that
+failure into a trap.
+
+### wasmer 7.5.0
+
+stderr is empty (0 bytes) on each run that exits 0.
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (m1) at the maximum | `/opt/homebrew/bin/wasmer run --invoke grow grow-max.wat 1023` | 0 | `1` | (none) |
+| (m2) past the maximum | `/opt/homebrew/bin/wasmer run --invoke grow grow-max.wat 1024` | 0 | `-1` | (none) |
+| (m3) start, minimum above maximum | `/opt/homebrew/bin/wasmer run --invoke size bad-max.wat` | 1 | (none) | `error: Unable to compile "bad-max.wat"`, then `╰─▶ 1: compile error: Validate("size minimum must not be greater than maximum (at offset 0x16)")` |
+| (m4) contrast, no maximum | `/opt/homebrew/bin/wasmer run --invoke grow grow-nomax.wat 1024` | 0 | `1` | (none) |
+
+(m4) against (m2) is the same contrast: wasmer applies the module's own
+maximum with no flag. wasmer has no flag that turns the -1 into a trap
+(wc-010a), so on wasmer a grow past the maximum returns -1 and the capsule
+keeps running.
+
+### The capsule's memory section
+
+Read by a `python3 -I` script written from the Wasm core binary format
+(section id 5; limits flag 0x00 = minimum only, 0x01 = minimum and maximum),
+never committed; its full text is in LOG.md, task 030. The audit crate's v1
+API returns imports only (`audit/INTERFACE.md`), so it cannot answer this.
+
+- Today's capsule, `tools/build target/wc010d/r1/today` (exit 0): sha256
+  `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13` (the
+  pinned value), 178 bytes, one memory: **minimum 16 pages, maximum none**.
+- A control build by hand, `tools/build`'s recipe (its `SOURCE_DATE_EPOCH`,
+  `CARGO_INCREMENTAL=0`, the three `--remap-path-prefix` flags in
+  `CARGO_ENCODED_RUSTFLAGS`, `cargo build --locked --package capsule --release
+  --target wasm32-unknown-unknown`) with `CARGO_TARGET_DIR` set to
+  `target/wc010d/r1/build-control`: the same sha256, `6dd9af1a…`, so the hand
+  recipe is `tools/build`'s.
+- The scratch build, that recipe plus `-C link-arg=--max-memory=67108864`, with
+  `CARGO_TARGET_DIR` set to `target/wc010d/r1/build-max`: sha256
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180 bytes,
+  one memory: **minimum 16 pages, maximum 1024 pages**. It is not committed,
+  and `capsule.wasm`, `tools/build` and every pin are unchanged.
+
+`--invoke digest 1592590337` on each, as `env -i <engine> run --invoke digest
+<absolute module path> 1592590337 < /dev/null`, `<D>` = the absolute path of
+`lab/wasm-capsule/target/wc010d/r1`:
+
+| Module | Engine | Exit | stdout | stderr |
+|---|---|---|---|---|
+| `<D>/capsule-max.wasm` (scratch, maximum 1024) | `/opt/homebrew/bin/wasmtime` | 0 | `230101071268130872` | the two warnings |
+| `<D>/capsule-max.wasm` (scratch, maximum 1024) | `/opt/homebrew/bin/wasmer` | 0 | `230101071268130872` | (none) |
+| `<D>/today/capsule.wasm` (pinned, no maximum) | `/opt/homebrew/bin/wasmtime` | 0 | `230101071268130872` | the two warnings |
+| `<D>/today/capsule.wasm` (pinned, no maximum) | `/opt/homebrew/bin/wasmer` | 0 | `230101071268130872` | (none) |
+
+`230101071268130872` is `FIXED_OUTPUT` (`0x0331_7BB4_875F_B038`,
+`capsule/src/lib.rs`) for `FIXED_INPUT` `0x5EED_0001` = 1592590337. `digest`
+never grows memory, so these runs show the same output, not a grow refusal in
+the capsule.
+
+### The answer for the C0 refusal
+
+- (a) FOUND: wasmtime refuses a grow past the module's own maximum with no
+  flag: (w2) returns `-1`, against (w4)'s `1`; with only
+  `trap-on-grow-failure=y` it traps, (w2-t).
+- (b) FOUND: wasmer does: (m2) returns `-1`, against (m4)'s `1`. It returns
+  -1 only; it has no trap flag.
+- (c) FOUND: both refuse a module whose minimum is above its maximum at start,
+  before any call: (w3) and (m3), each exit 1 with "size minimum must not be
+  greater than maximum".
+- (d) NOT FOUND: `capsule.wasm` declares no maximum today: minimum 16 pages,
+  maximum none ("The capsule's memory section", today's capsule).
+- (e) FOUND: the `--max-memory=67108864` build gives the capsule a maximum of
+  exactly 1024 pages (sha256 `2002429e…`) with the same digest output,
+  `230101071268130872`, on both engines (the `capsule-max.wasm` rows).
+
+What the C0 refusal still needs that this lane cannot write: a reader of the
+module's memory maximum (each memory's maximum, and that there is only one
+memory), and the audit crate (cx-wasm-audit) is the one module reader, so that
+ask goes to cx-wasm-audit through Flint, not into a second reader here.
+
 ## Granted import hosting discovery (wc-009b0)
 
 Read-only discovery for wc-009b. wc-009a lets a granted import through the
