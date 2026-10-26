@@ -95,7 +95,13 @@ platform baseline for the wallet-provider executable on macOS, not approved
 rights". The model provider's
 `capsules/model-provider/tests/fixtures/confine/declared-rights.json` uses the
 same template, and `model_declared_rights_read_on_the_did_and_wallet_template`
-reads it. The generator stays the Runtime's.
+reads it. The generator stays the Runtime's. Each platform-baseline rule in
+that file gives one justification that starts with the wallet-provider
+executable prefix,
+`macOS wallet-provider executable bound as PROVIDER_EXECUTABLE:`, and gives a
+reason; the `startup-root-directory` justification uses this document's
+root-directory sentence, and a justification with another provider's prefix or
+no reason is refused.
 
 ## The model provider's inline profile
 
@@ -724,6 +730,30 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the duplicate-form refusal (WP92): the same test fails on its
   `(allow sysctl-read)`-twice case, which then reads "declared rule is not an
   allow rule of its profile".
+- Drop the prefix refusal (WP93): the same test fails because a justification
+  that names another provider's executable prefix passes the check.
+- Drop the empty-reason refusal (WP94): the same test fails because a bare
+  provider prefix passes the check.
+- Drop the role refusal (WP95): the same test fails because a file that gives
+  "approved rights" as its role passes the check, so its role case finds no
+  refusal.
+- Drop the provider refusal (WP96): the same test fails because the did file
+  that names "wallet-provider" passes the check, so its provider case finds no
+  refusal.
+- Drop the platform-baseline status refusal (WP97): the same test fails
+  because a baseline without ", not approved rights" in its status sentence
+  passes the check, so its status case finds no refusal.
+- Replace the missing rights-list refusal with an empty list (WP98): the same
+  test fails because the check goes on and refuses the process-exec form with
+  no claimant, so its rights case finds no "must hold a rights list" reason.
+- Replace the missing platform-baseline refusal with an empty map (WP99): the
+  same test fails because the check goes on and refuses the empty baseline with
+  the status reason, so its platform-baseline case finds no "must hold a
+  platform baseline" reason.
+- Replace the missing baseline rules-list refusal with an empty list (WP100):
+  the same test fails because the check goes on and refuses the startup-root
+  form with no claimant, so its rules-list case finds no "platform baseline
+  must hold a rules list" reason.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

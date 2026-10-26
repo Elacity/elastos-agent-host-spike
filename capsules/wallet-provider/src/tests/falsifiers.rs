@@ -111,8 +111,21 @@ use std::process::Command;
 /// the repeated-rule refusal and WP92 the duplicate-form refusal, so the
 /// profile that holds `(allow sysctl-read)` twice reads "declared rule is not
 /// an allow rule of its profile"; `declared_rights_trace_refuses_each_bad_input`
-/// fails on each case.
-const EXPECTED_FALSIFIERS: usize = 90;
+/// fails on each case. Task 075's WP93 drops the prefix refusal, so a
+/// justification that names another provider passes, and WP94 drops the
+/// empty-reason refusal, so a bare provider prefix passes;
+/// `declared_rights_trace_refuses_each_bad_input` fails on the matching case.
+/// Task 076's WP95 drops the role refusal, so a file without the lab role
+/// passes, WP96 drops the provider refusal, so a file that names another
+/// provider passes, and WP97 drops the platform-baseline status refusal, so a
+/// baseline without its status sentence passes;
+/// `declared_rights_trace_refuses_each_bad_input` fails on the matching case.
+/// Task 077's WP98 replaces the missing rights-list refusal with an empty
+/// list, WP99 replaces the missing platform-baseline refusal with an empty
+/// map, and WP100 replaces the missing baseline rules-list refusal with an
+/// empty list, so the check goes on and refuses later with other words, and
+/// `declared_rights_trace_refuses_each_bad_input` fails on the matching case.
+const EXPECTED_FALSIFIERS: usize = 98;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

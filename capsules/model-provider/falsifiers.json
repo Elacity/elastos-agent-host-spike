@@ -2111,6 +2111,40 @@
       ]
     },
     {
+      "id": "PV115",
+      "title": "startup recovery is skipped in main()",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if not parsed.keep_backups:\n        recover_backups()",
+          "new": "    if not parsed.keep_backups:\n        pass"
+        }
+      ],
+      "tests": [
+        "a runner killed in its test step is recovered",
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV116",
+      "title": "startup recovery finds a backup but restores nothing",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])\n        os.replace(backup, target)",
+          "new": "        target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])"
+        }
+      ],
+      "tests": [
+        "a runner killed in its test step is recovered",
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP17",
       "title": "the post-reap probe fails at once when the group answers EPERM, so a zombie-only group reads as a close error",
       "command": "provider",
@@ -2172,6 +2206,38 @@
       ],
       "tests": [
         "local_llama::tests::zombie_left_past_the_deadline_is_a_close_failure"
+      ]
+    },
+    {
+      "id": "MP21",
+      "title": "the hosted run id header carries the request id",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            .header(\"x-elastos-run-id\", run_id)",
+          "new": "            .header(\"x-elastos-run-id\", request_id)"
+        }
+      ],
+      "tests": [
+        "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
+      ]
+    },
+    {
+      "id": "MP22",
+      "title": "the hosted text request carries the bearer key",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        if runtime_socket.is_none() {",
+          "new": "        if runtime_socket.is_none() || runtime_socket.is_some() {"
+        }
+      ],
+      "tests": [
+        "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
       ]
     }
   ]

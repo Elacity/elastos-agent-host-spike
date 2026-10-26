@@ -2058,6 +2058,109 @@ os.kill(os.getpid(), signal.SIGKILL)
     return ok
 
 
+def a_runner_killed_in_its_test_step_is_recovered():
+    """Kill this runner through its own main() after the baseline, restart it
+    through main(), and read the recovered bytes. A synthetic provider entry
+    edits one PROVIDER_TARGETS file in an isolated tree; a stub for run()
+    answers the baseline on the original bytes and kills the child on the
+    mutated ones in the named test's run. In both startup modes the next run
+    puts the original bytes back and leaves no backup or temporary file beside
+    the target."""
+    target_name = "../../capsules/model-provider/src/local_llama.rs"
+    original_text = "synthetic local_llama original bytes\n"
+    mutated_text = "synthetic local_llama mutated bytes\n"
+    original = original_text.encode("utf-8")
+    mutated = mutated_text.encode("utf-8")
+    entry = {"id": "MP01",
+             "title": "a synthetic local_llama edit",
+             "command": "provider",
+             "expect": "caught",
+             "edits": [{"file": target_name,
+                        "old": original_text.rstrip("\n"),
+                        "new": mutated_text.rstrip("\n")}],
+             "tests": ["tests::the_stub_answers"]}
+    child = """import os, pathlib, runpy, signal, sys
+runner = runpy.run_path(sys.argv[1])
+here = pathlib.Path(sys.argv[2])
+list_path = sys.argv[3]
+target = here / sys.argv[4]
+test_name = sys.argv[5]
+call_log = pathlib.Path(sys.argv[6])
+original = ORIGINAL
+
+def stub(argv, cwd):
+    word = "original" if target.read_bytes() == original else "mutated"
+    step = "build" if "--no-run" in argv else "list" if "--list" in argv else "test"
+    with open(call_log, "a", encoding="utf-8") as stream:
+        stream.write(word + ":" + step + "\\n")
+    if step == "build":
+        return 0, ""
+    if step == "list":
+        return 0, test_name + ": test\\n"
+    if word == "mutated":
+        os.kill(os.getpid(), signal.SIGKILL)
+    return 0, "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\\n"
+
+namespace = runner['main'].__globals__
+namespace.update(HERE=here, REPO=here.parent.parent, DATA=here / "falsifiers.json", run=stub)
+# Mutation's default base is bound when the class is defined, and the runner's
+# own falsify() applies each edit at that default. Point it at the tree too,
+# so main() edits the tree's file.
+runner['Mutation'].__init__.__defaults__ = (here,)
+raise SystemExit(runner['main'](["--from", str(list_path), "MP01"]))
+""".replace("ORIGINAL", repr(original))
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        for mode in ("provider", "default"):
+            repo = SELF_TEST_DIR / mode
+            here = repo / "examples/agent-host"
+            here.mkdir(parents=True)
+            data = here / "falsifiers.json"
+            data.write_text('{"falsifiers": []}', encoding="utf-8")
+            list_path = repo / "capsules/model-provider/falsifiers.json"
+            list_path.parent.mkdir(parents=True)
+            list_path.write_text(json.dumps({"falsifiers": [entry]}), encoding="utf-8")
+            target = here / target_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(original)
+            backup = target.with_name(target.name + BACKUP_SUFFIX)
+            call_log = repo / "stub-calls.txt"
+            killed = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", child, str(HERE / "falsify.py"),
+                 str(here), str(list_path), target_name, entry["tests"][0],
+                 str(call_log)], capture_output=True, text=True, timeout=30)
+            calls = call_log.read_text(encoding="utf-8").splitlines()
+            planted = (target.read_bytes() == mutated
+                       and backup.is_file() and backup.read_bytes() == original)
+            argv = ["--from", str(list_path), "--list"] if mode == "provider" else ["--list"]
+            with mock.patch.dict(globals(), HERE=here, REPO=repo, DATA=data):
+                code = main(argv)
+            restored = target.read_bytes() == original
+            leftovers = [path.name for path in
+                         (backup, target.with_name(target.name + ".falsify-tmp"))
+                         if path.exists()]
+            # The kill must land in the mutated test run: the original test run
+            # answered before the first mutated call, and the last call is the
+            # mutated test run itself, not a build or list step.
+            first_mutated = next((index for index, call in enumerate(calls)
+                                  if call.startswith("mutated")), len(calls))
+            order = ("original:test" in calls[:first_mutated]
+                     and calls[-1:] == ["mutated:test"])
+            print(f"self-test: runner kill {mode}: exit={killed.returncode}, "
+                  f"calls={','.join(calls)}, planted={planted}, restart={code}, "
+                  f"restored={restored}, leftovers={leftovers}")
+            if (killed.returncode != -signal.SIGKILL or not order or not planted
+                    or code != 0 or not restored or leftovers):
+                ok = False
+    except Exception as error:
+        print(f"self-test: runner kill raised {type(error).__name__}: {error}")
+        return False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def an_edit_of_a_missing_file_is_refused():
     """An edit whose file does not exist is refused by Mutation before any
     link or write, with the one path-rule reason; reported() returns it as
@@ -3042,6 +3145,8 @@ SELF_TEST_CASES = {
     "an interrupted edit is restored": interruption_restores,
     "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
     "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
+    "a runner killed in its test step is recovered":
+        a_runner_killed_in_its_test_step_is_recovered,
     "an edit of a missing file is refused": an_edit_of_a_missing_file_is_refused,
     "an absolute edit path is refused": an_absolute_edit_path_is_refused,
     "an edit path that climbs out is refused": an_edit_path_that_climbs_out_is_refused,

@@ -93,7 +93,12 @@ writes `OUT_DIR/capsule.wasm` and `OUT_DIR/receipt.txt`. The build is pinned:
 one codegen unit, LTO, a stripped binary and `panic = "abort"` (the release
 profile in `Cargo.toml`), a fixed `SOURCE_DATE_EPOCH`, no incremental cache, a
 fresh isolated target dir, and `--remap-path-prefix` for the source tree,
-`CARGO_HOME` and the toolchain sysroot.
+`CARGO_HOME` and the toolchain sysroot. Since task 032 it also passes
+`-Clink-arg=--max-memory=67108864`, so the capsule declares its own memory
+maximum, 1024 pages ("Module memory maximum discovery (wc-010d0)", "The capsule
+declares its maximum (task 032)"). A failing build exits non-zero even after
+its cleanup trap, also for a `set -u` error on this Mac's `/bin/bash` 3.2.57
+(task 035, `build_script_fails_closed_after_an_unbound_variable`).
 
 ### Receipt
 
@@ -119,8 +124,12 @@ from two clean builds at different temp paths on 2026-10-25:
 
 - rustc: `rustc 1.91.0 (f8297e351 2025-10-28)`, host `aarch64-apple-darwin`
 - target: `wasm32-unknown-unknown`
-- `capsule.wasm` sha256 (both builds): `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`
-- size: 178 bytes
+- `capsule.wasm` sha256 (both builds): `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`
+  (27 Oct 2026, re-pinned by task 032: two `tools/build` builds and a
+  `python3 -I` `hashlib` recomputation agree, LOG.md task 032; it was
+  `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`, 178
+  bytes, with no memory maximum)
+- size: 180 bytes (one memory: minimum 16 pages, maximum 1024 pages)
 
 On this stripped, zero-dependency release cdylib nothing absolute leaks, so
 `--remap-path-prefix` is defensive (it would neutralise a leak from debug info
@@ -312,17 +321,20 @@ and `rename`. Another process changing OUT_DIR during the run is not covered
 either: that needs folder-relative opens. The retired lane-own name had the
 same limit.
 
-**Reference lab CID on this Mac** (2026-10-26), for this capsule's 277-byte
-manifest beside `capsule.wasm` `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`:
+**Reference lab CID on this Mac** (2026-10-27, re-pinned by task 032), for
+this capsule's 277-byte manifest beside `capsule.wasm`
+`2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`:
 
 ```
-bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
+bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
 ```
 
 `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it
 (`REFERENCE_LAB_CID`). Task 024 recomputed it with the same outside
 `python3 -I` script, over the bundle `tools/bundle` wrote on this Mac, and
 pinned it only because it equals what `bundle_identity` prints for that folder.
+Task 032 did the same for the new `capsule.wasm` (LOG.md, task 032); the value
+before it was `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse`.
 It is a lab CID, not the Runtime's CID.
 
 **The test seam.** `run(mode, build_script)` takes the build script's path, so
@@ -587,11 +599,14 @@ build receipt (`tools/build:82`), under its own schema line. Every value comes
 from the run. The real receipt from this Mac, from
 `real_receipt_names_both_installed_engines` on 26 Oct 2026, task 028 (the
 capsule `tools/build` makes, bundled, signed with a fresh test key, verified
-and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`):
+and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`;
+its `bundle` line re-pinned by task 032 on 27 Oct 2026: the test asserts
+`bundle: <bundle_identity of the run's bundle>`, which holds the same two files
+as `REFERENCE_LAB_CID`'s bundle; the other lines are task 028's):
 
 ```
 schema: wc-005.run-receipt/v2
-bundle: bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
+bundle: bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
 function: digest
 argument: 1592590337
 wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"
@@ -1111,6 +1126,20 @@ module's memory maximum (each memory's maximum, and that there is only one
 memory), and the audit crate (cx-wasm-audit) is the one module reader, so that
 ask goes to cx-wasm-audit through Flint, not into a second reader here.
 
+### The capsule declares its maximum (task 032)
+
+[Proposal] Since task 032 (27 Oct), `tools/build` passes
+`-Clink-arg=--max-memory=67108864`, so `capsule.wasm` declares a maximum of
+1024 pages, its declared `memory_mb` (64) × 2^20 bytes; its minimum is still 16
+pages and its `digest` output is unchanged. Both engines apply a module's own
+maximum with no flag ((w2) and (m2) above): wasmer returns -1 to a grow past
+it, where wasmtime with `run`'s flag traps. `run` does not yet check a
+module's maximum (C0 step iii waits for the audit crate's reader), and its
+argv and the receipt's cap lines are unchanged, so wasmer's receipt line still
+says SKIPPED: it reports the flag `run` passed. The claim stays "a
+self-contained capsule in a fixed flat space with a host-enforced cap", on
+this one Mac only: not the ~4 GB DigitCapsule and not any-RTOS loading.
+
 ## Granted import hosting discovery (wc-009b0)
 
 Read-only discovery for wc-009b. wc-009a lets a granted import through the
@@ -1265,10 +1294,20 @@ hosting cannot be claimed for wasmer.
 
 - `digest_returns_the_fixed_value` — the shared impl returns the pinned value.
 - `two_clean_builds_in_different_paths_are_byte_identical` — the foundation claim.
+- `build_script_fails_closed_after_an_unbound_variable` — task 035: a copy of
+  `tools/build` with `: "$WC_UNSET_PROBE"` right after its cleanup trap, run
+  with `/bin/bash` 3.2.57 and that variable unset, exits non-zero with bash's
+  `unbound variable` line, writes no capsule or receipt, and leaves its own
+  TMPDIR empty.
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
-- plus crafted-byte coverage of the shape reader.
+- plus crafted-byte coverage of the shape reader. Task 032 adds three, in
+  `tests/wasm_shape.rs`: `reads_a_memory_maximum_from_a_crafted_module`
+  (flag 0x01: minimum 16, maximum 1024 pages),
+  `reads_a_memory_with_no_maximum_from_a_crafted_module` (flag 0x00: minimum
+  16, maximum none) and `fails_closed_on_a_truncated_memory_section` (flag 0x01
+  with no maximum: exactly `memory section: unexpected end of module`).
 
 The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identity`):
 
@@ -1292,7 +1331,8 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   that spawns the real wrapper. A fresh OUT_DIR gives one stdout line, equal to
   `bundle_identity(OUT_DIR/bundle)` and to the reference lab CID; the bundle
   holds exactly the two regular files; `capsule.wasm`'s sha256 is the
-  receipt's `artifact_sha256` and the pinned `6dd9af1a…`; `capsule.json` is
+  receipt's `artifact_sha256` and the pinned `2002429e…` (task 032);
+  `capsule.json` is
   `CAPSULE_MANIFEST`; `--name` prints the same name. Then the same OUT_DIR
   again, an empty folder for `--name` (the shared reason, unchanged) and
   `--unknown` are each refused with the right status, the path and reason on
@@ -1338,7 +1378,8 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 - `the_real_capsule_passes_the_verifier` — the capsule `tools/build` makes,
   bundled with this capsule's manifest, signed and verified with no grants,
   passes with no imports; its sha256 is the receipt's `artifact_sha256` and
-  the pinned `6dd9af1a…`.
+  the pinned `2002429e…` (task 032). One `PINNED_ARTIFACT_SHA256`, in
+  `tests/common/mod.rs`, serves this test and the one above.
 - `missing_entrypoint_is_refused` — an entrypoint no entry has gets its own
   reason; `capsule.wasm` beside it does not stand in.
 - `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
@@ -1627,6 +1668,15 @@ engine not found prints SKIPPED and gives no result, never PASS:
 `runner_passes_no_directory_env_or_network_flags` and `verified_bundle_is_sealed`
 (the new private field and its accessor) were updated for the cap.
 
+Task 032's one, in `tests/run.rs`:
+
+- `built_capsule_declares_the_manifest_memory_as_its_maximum` — the
+  `tools/build` capsule, signed and verified: its module, from
+  `entrypoint()`, read by the test-only shape reader, imports nothing (no
+  memory either) and defines exactly one memory, with minimum 16 pages and a
+  maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20 from the
+  verifier's one manifest read: 1024 pages for 64.
+
 wc-010c's two (task 028), in `tests/run.rs`, on stand-in engines, with a
 bundle signed by `signed_bundle_declaring` (the signing half of 027's
 `verified_bundle_declaring`, which now calls it):
@@ -1647,22 +1697,23 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 
 ## Falsifiers
 
-`falsifiers.json` holds 159 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 162 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
-seven wc-010b (task 027), two wc-010c (task 028), two task 029 and two task
-031.
+seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
+031, two task 032 and one task 035.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 95, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 98, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029 and 031: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2), each run by the
-canonical runner with its summary line quoted.
+029, 031, 032 and 035: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2 + 2 +
+1), each
+run by the canonical runner with its summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1680,7 +1731,16 @@ wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
 
 - F-WC1 — an embedded `CARGO_MANIFEST_DIR` breaks the byte-identical build.
 - F-WC1-SPACED-PATH — whitespace-split `RUSTFLAGS` break the build when the
-  path has a space.
+  path has a space. Task 032 re-anchored it, the same bug as before: a second
+  edit turns the new link-argument line into the same `RUSTFLAGS` form. Without
+  it, the planted script stops at an unbound `CARGO_ENCODED_RUSTFLAGS`, and
+  `tools/build` then exited 0 with no capsule (LOG.md, task 032; since task
+  035 it exits 1), so the test would fail for another reason. By hand after the re-anchor, the named test
+  fails at its "tools/build failed" assertion with rustc's
+  `--remap-path-prefix must contain '=' between FROM and TO`. The canonical
+  runner reads it NOT RUN: the child cargo's `process didn't exit
+  successfully` line is a Cargo failure marker even inside the test's own
+  output, so it stays hand-proven.
 - F-WC1-DIGEST — the digest result changes, so the fixed value no longer holds.
 - F-WC1-IMPORT — the capsule keeps a host import.
 - F-WC1-SIG — the `digest` export takes a second parameter.
@@ -2132,3 +2192,34 @@ target, and each named test fails at its assertion:
 
 Task 031 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before.
+
+Task 032's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 032). Both anchors are on `tools/build`'s new link-argument line,
+and each named test fails at its assertion:
+
+- F-WC10D-NO-MODULE-MAX — the line is removed, so the capsule declares no
+  memory maximum (`built_capsule_declares_the_manifest_memory_as_its_maximum`,
+  "the capsule declares no memory maximum";
+  `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` and
+  `the_real_capsule_passes_the_verifier`, at `PINNED_ARTIFACT_SHA256`).
+- F-WC10D-MAX-WRONG — the line passes `--max-memory=134217728`, 2048 pages
+  (the same three tests: the maximum's bytes are not `memory_mb()` × 2^20, and
+  the sha256 is not the pin).
+
+Task 032 also re-anchors F-WC1-SPACED-PATH (above, still hand-proven) and
+F-WC-README-COUNT to the new total, each the same bug as before.
+
+Task 035's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 035). Its anchor is `tools/build`'s cleanup trap line, and its
+named test fails at its exit-status assertion:
+
+- F-WC1-TRAP-STATUS — the trap goes back to `trap 'rm -rf "$TARGET_DIR"'
+  EXIT`, so on `/bin/bash` 3.2.57 a `set -u` error after it exits 0
+  (`build_script_fails_closed_after_an_unbound_variable`, "tools/build exited
+  exit status: 0 after an unbound variable past its cleanup trap").
+
+The trap is armed to fail: `/bin/bash` 3.2.57 hands it `$?` 0 after a `set -u`
+error, the same as at the script's end (LOG.md, task 035, has the probes), so
+it turns 0 into 1 and keeps any other status. The script's last line re-arms
+a plain `rm -rf` trap, so a finished build exits 0. Task 035 also re-anchors
+F-WC-README-COUNT to the new total, the same bug as before.
