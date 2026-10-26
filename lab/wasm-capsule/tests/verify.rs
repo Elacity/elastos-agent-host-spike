@@ -25,6 +25,7 @@ use capsule_identity::{
 };
 use common::build::{lane_dir, run_build, sha256_file, Receipt, TempDir};
 use common::grants::{env_f, grant, grants_file, write_grants, IMPORTING_MODULE};
+use common::PINNED_ARTIFACT_SHA256;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
@@ -50,10 +51,6 @@ const CUSTOM_CODE_MODULE: &[u8] = &[
 
 /// Bytes that are not a core module.
 const MALFORMED_MODULE: &[u8] = b"not a module";
-
-/// wc-001's pinned `capsule.wasm` (README, "Claim scope").
-const PINNED_ARTIFACT_SHA256: &str =
-    "6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13";
 
 /// The unsigned reason, exactly.
 const UNSIGNED: &str = "the bundle has no signature: an unsigned bundle is refused";

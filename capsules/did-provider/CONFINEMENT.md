@@ -42,13 +42,19 @@ refused when the profile cannot be applied.
 `capsules/did-provider/tests/fixtures/confine/declared-rights.json`. That file
 is a lab stand-in for the Runtime generator's input and not a manifest field.
 Every top-level allow rule of the did profile traces to exactly one right the
-shared contract names, or to one platform-baseline rule. The profile rules are
-evidence for Anders to review and not accepted rights. Its status label says
-"Runtime platform baseline for the did-provider executable on macOS, not
-approved rights". The model provider's
+shared contract names, or to one platform-baseline rule. In the did profile,
+each allow rule is claimed by the one id the contract names for it, and no id or
+rule is declared twice. The profile rules are evidence for Anders to review and
+not accepted rights. Its status label says "Runtime platform baseline for the
+did-provider executable on macOS, not approved rights". The model provider's
 `capsules/model-provider/tests/fixtures/confine/declared-rights.json` uses the
 same template, and `model_declared_rights_read_on_the_did_and_wallet_template`
-reads it. The generator stays the Runtime's.
+reads it. The generator stays the Runtime's. Each platform-baseline rule in
+that file gives one justification that starts with the did-provider executable
+prefix, `macOS did-provider executable bound as PROVIDER_EXECUTABLE:`, and
+gives a reason; the `startup-root-directory` justification uses this document's
+root-directory sentence, and a justification with another provider's prefix or
+no reason is refused.
 
 ## Profile parameters
 

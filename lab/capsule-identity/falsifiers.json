@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018 and 019). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020 and 025). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule or the Cargo-based consumer scan (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -3288,6 +3288,216 @@
       ],
       "tests": [
         "readme_python_matches_the_package_record_bytes"
+      ]
+    },
+    {
+      "id": "F-CI25a",
+      "title": "the git listing keeps only lab/*/Cargo.toml, so a nested consumer manifest (lab/wasm-capsule/tools) is never scanned",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .args([\"ls-files\", \"-z\", \"--\", \":(glob)lab/**/Cargo.toml\"])\n",
+          "new": "        .args([\"ls-files\", \"-z\", \"--\", \":(glob)lab/*/Cargo.toml\"])\n"
+        }
+      ],
+      "tests": [
+        "every_lab_cid_consumer_is_in_the_adoption_note"
+      ]
+    },
+    {
+      "id": "F-CI25b",
+      "title": "the match compares a dependency's package name with capsule_identity, the crate's Rust name, so no consumer is found",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "const CRATE_NAME: &str = \"capsule-identity\";\n",
+          "new": "const CRATE_NAME: &str = \"capsule_identity\";\n"
+        }
+      ],
+      "tests": [
+        "every_lab_cid_consumer_is_in_the_adoption_note",
+        "the_consumer_scan_uses_cargos_reader"
+      ]
+    },
+    {
+      "id": "F-CI25c",
+      "title": "a non-zero cargo exit is read as no dependency, so a manifest Cargo cannot read is skipped",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    if !output.status.success() {\n        return Err(format!(\n            \"cargo metadata refused {} ({}): {}\",\n",
+          "new": "    if !output.status.success() {\n        return Ok(false);\n    }\n    if false {\n        return Err(format!(\n            \"cargo metadata refused {} ({}): {}\",\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_uses_cargos_reader"
+      ]
+    },
+    {
+      "id": "F-CI25d",
+      "title": "the path check is dropped: a dependency named capsule-identity with no path counts as this crate",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let Some(path) = dependency[\"path\"].as_str() else {\n            continue;\n        };\n",
+          "new": "        let Some(path) = dependency[\"path\"].as_str() else {\n            return Ok(true);\n        };\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_uses_cargos_reader"
+      ]
+    },
+    {
+      "id": "F-CI25e",
+      "title": "the adoption note's heading the helper looks for loses one letter, so the note is not found",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "pub const ADOPTION_HEADING: &str = \"## For a lab that uses the lab CID\\n\";\n",
+          "new": "pub const ADOPTION_HEADING: &str = \"## For a lab that use the lab CID\\n\";\n"
+        }
+      ],
+      "tests": [
+        "every_lab_cid_consumer_is_in_the_adoption_note",
+        "the_adoption_note_states_the_outside_recomputation"
+      ]
+    },
+    {
+      "id": "F-CI25f",
+      "title": "any path counts: the same name at another folder is taken for this crate",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if resolved(path)? == lane {\n",
+          "new": "        if !path.is_empty() {\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_uses_cargos_reader"
+      ]
+    },
+    {
+      "id": "F-CI25g",
+      "title": "build-dependencies are dropped, so a consumer that uses this crate only in its build script is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if dependency[\"name\"] != CRATE_NAME {\n",
+          "new": "        if dependency[\"name\"] != CRATE_NAME || dependency[\"kind\"] == \"build\" {\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_uses_cargos_reader"
+      ]
+    },
+    {
+      "id": "F-CI25h",
+      "title": "JSON that does not parse reads as no dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let metadata: serde_json::Value = serde_json::from_slice(metadata)\n        .map_err(|error| format!(\"cargo metadata for {shown} is not JSON: {error}\"))?;\n",
+          "new": "    let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(metadata) else {\n        return Ok(false);\n    };\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_bad_metadata"
+      ]
+    },
+    {
+      "id": "F-CI25i",
+      "title": "no package for the manifest reads as no dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let package = package.ok_or_else(|| {\n        format!(\"cargo metadata for {shown} holds no package whose manifest is that file\")\n    })?;\n",
+          "new": "    let Some(package) = package else {\n        return Ok(false);\n    };\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_bad_metadata"
+      ]
+    },
+    {
+      "id": "F-CI25j",
+      "title": "a dependency path that does not resolve reads as not this crate",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if resolved(path)? == lane {\n",
+          "new": "        if resolved(path).map_or(false, |path| path == lane) {\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_bad_metadata"
+      ]
+    },
+    {
+      "id": "F-CI25k",
+      "title": "the scan leaves a target/ folder beside a manifest outside the repo (only there, so this falsifier never writes in a consumer)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    consumer_in_metadata(manifest, &output.stdout)\n",
+          "new": "    if !manifest.starts_with(repo_dir()) {\n        let _ = fs::create_dir(manifest.with_file_name(\"target\"));\n    }\n    consumer_in_metadata(manifest, &output.stdout)\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_writes_nothing"
+      ]
+    },
+    {
+      "id": "F-CI25l",
+      "title": "the scan drops --no-deps, so Cargo resolves the package and writes a Cargo.lock beside its manifest",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            \"--no-deps\",\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_writes_nothing"
+      ]
+    },
+    {
+      "id": "F-CI25m",
+      "title": "a list line the adoption note reader cannot read is skipped, not refused",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                return Err(format!(\"the adoption note's line {line:?} is not {what}\"));\n",
+          "new": "                let _ = what;\n                continue;\n"
+        }
+      ],
+      "tests": [
+        "the_adoption_list_is_read_strictly"
       ]
     }
   ]

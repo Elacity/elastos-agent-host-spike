@@ -1,10 +1,12 @@
 //! Unit coverage for the shape reader itself, on crafted modules: it reads the
 //! required shape, counts an import, sees an altered signature, rejects a
 //! non-core file, and fails closed on a truncated module (PRINCIPLES P11).
+//! Task 032: it reads a defined memory's minimum and maximum (or no maximum)
+//! in pages, and fails closed on a truncated memory section.
 
 mod common;
 
-use common::wasm_shape::{read, FuncType, ValType};
+use common::wasm_shape::{read, FuncType, MemoryLimits, ValType};
 
 const I32: u8 = 0x7f;
 const I64: u8 = 0x7e;
@@ -123,4 +125,52 @@ fn fails_closed_on_a_truncated_module() {
     // Section id 1 claims five body bytes but only one follows.
     let truncated = core_module(&[vec![1, 5, 0x60]]);
     assert!(read(&truncated).is_err());
+}
+
+/// A memory section defining one memory with these limits. 1024 is the
+/// two-byte LEB128 `0x80 0x08`; 16 fits in one byte.
+fn memory_section(limits: &[u8]) -> Vec<u8> {
+    let mut body = vec![1];
+    body.extend_from_slice(limits);
+    section(5, body)
+}
+
+#[test]
+fn reads_a_memory_maximum_from_a_crafted_module() {
+    // Flag 0x01: minimum 16 pages, maximum 1024 pages.
+    let module = core_module(&[memory_section(&[0x01, 16, 0x80, 0x08])]);
+    let shape = read(&module).expect("shape");
+    assert_eq!(
+        shape.memories,
+        vec![MemoryLimits {
+            minimum: 16,
+            maximum: Some(1024),
+        }]
+    );
+    assert_eq!(shape.imported_memory_count, 0);
+}
+
+#[test]
+fn reads_a_memory_with_no_maximum_from_a_crafted_module() {
+    // Flag 0x00: minimum 16 pages, no maximum.
+    let module = core_module(&[memory_section(&[0x00, 16])]);
+    let shape = read(&module).expect("shape");
+    assert_eq!(
+        shape.memories,
+        vec![MemoryLimits {
+            minimum: 16,
+            maximum: None,
+        }]
+    );
+}
+
+#[test]
+fn fails_closed_on_a_truncated_memory_section() {
+    // The section is whole, but its one memory's flag 0x01 promises a maximum
+    // that is not there.
+    let module = core_module(&[memory_section(&[0x01, 16])]);
+    assert_eq!(
+        read(&module),
+        Err("memory section: unexpected end of module".to_string())
+    );
 }

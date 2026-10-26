@@ -6,6 +6,7 @@ test: model_owned_root_must_sit_under_the_agent
 test: model_use_path_dotdot_is_refused
 test: model_use_path_outside_the_owned_root_is_refused
 test: model_symlink_shaped_use_path_is_refused
+test: model_public_storage_read_is_refused
 --- old
     if name.contains('\\') || name.starts_with('/') {
         return Err(Refuse::HostPath);
@@ -16,6 +17,9 @@ test: model_symlink_shaped_use_path_is_refused
         .any(|part| part.is_empty() || *part == "." || *part == "..")
     {
         return Err(Refuse::HostPath);
+    }
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
     }
     if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
         return Err(Refuse::OutsidePrincipal);
