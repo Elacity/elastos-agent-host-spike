@@ -491,7 +491,25 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
   two refusals, with their path and cause kept; any other writer reason is
   carried unchanged as `the shared writer refused: <reason>`);
 - `<engine> did not start: <OS error>` (for example a missing program);
+- `<engine> rejected the memory cap argument -W <argument> (exit status: <n>): <its stderr>; the module is not run without its cap`
+  (task 038, below);
 - `<engine> failed (exit status: <n>): <its stderr>`.
+
+**A rejected cap argument (task 038).** A module run that was given a memory
+cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
+status and stderr that task 038 measured on the pinned wasmtime 45.0.1 for a
+`-W` argument it rejects is refused with the rejected-cap reason above, which
+names the argument. The measured values, from two probes (an unknown `-W` key
+and a bad value; LOG.md, task 038): exit status 2, and a first stderr line
+that starts with `error: ` and holds ` -W `. Each is one `const` in
+`tools/src/run.rs`. The module is never started again without its cap: no
+retry, no fallback, and `wasmer` is not started after it. Any other nonzero
+exit stays `<engine> failed ...`, unchanged, and so does a failure of a run
+given no cap argument (`wasmer`), whatever it prints.
+
+`run_engine` makes no `--version` query and does not check the engine's
+version; `run`, the entry that starts both engines, checks the pins (next two
+sections), so `run_engine`'s one start per call holds.
 
 **The claim.** The bytes the engine is given come from the verified value,
 `entrypoint()`, never from a second read of the bundle on disk: the verified
@@ -542,8 +560,9 @@ first refusal is the answer:
    refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
    as the verifier prints it; nothing is written and no engine is started;
 2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
-   (the next section). A refusal comes back as `TwoEngineRefusal::Version`, and
-   no module run starts;
+   (the next section). Task 038: the first line must name the pinned version,
+   `wasmtime 45.0.1` or `wasmer 7.5.0` (the next section). A refusal comes
+   back as `TwoEngineRefusal::Version`, and no module run starts;
 3. `run_engine` (above) runs `wasmtime` on the verified value and returns;
 4. only then `run_engine` runs `wasmer` on the same value. The two are separate
    processes, one after the other, never nested or overlapping. `run_engine` is
@@ -588,15 +607,35 @@ wasm_capsule_tools::receipt::write_receipt(run: &TwoEngineRun, path: &Path) -> R
 any module run, `run` asks each engine `--version`: one process each, by the
 same absolute program path the module run starts, through the same
 `engine_command` (an empty environment, stdin null), `wasmtime` first. It keeps
-the first line of stdout as printed, without its newline. An engine upgrade
-therefore changes the receipt with no code change; nothing in the lane names
-a version it expects. A version query is refused, with its own reason after
-`<path>: `, and no module run starts:
+the first line of stdout as printed, without its newline, and the receipt
+records that line, never a configured one.
+
+**Only the pinned versions run (task 038).** The runner's memory promise rests
+on facts measured on one engine version each: wasmtime 45.0.1 takes `-W
+max-memory-size=...` (wc-010a, task 021), and wasmer 7.5.0 applies the
+module's own maximum (task 030). So `run` starts only those versions. Split on
+single spaces, the first `--version` line's first word must be the engine's
+name and its second word must equal the engine's pinned version, exactly
+(`WASMTIME_VERSION` = `45.0.1`, `WASMER_VERSION` = `7.5.0`, one `const` each
+in `tools/src/run.rs`); anything after the second word is allowed, so
+`wasmtime 45.0.1 (83166ba31 2026-06-05)` passes. The check runs inside the
+version query, on the first line as soon as it is read, so an unpinned
+`wasmtime` is refused before `wasmer` is asked, and no module run starts on
+either engine and no run folder is made. There is no range or list of
+accepted versions. An engine upgrade is refused until the pin is changed, and
+changing a pin is a deliberate edit after a fresh probe like 021 and 030.
+A pin names the version the facts were measured on, not an engine choice:
+both engines stay test-only and not endorsed, and the choice is Anders's.
+
+A version query is refused, with its own reason after `<path>: `, and no
+module run starts:
 
 - a relative program: the module run's own reason, `the engine program path is not absolute: ...`;
 - `<engine> --version did not start: <OS error>` (for example a missing program);
 - `<engine> --version failed (exit status: <n>): <its stderr>`;
-- `<engine> --version printed no version: its first stdout line is empty`.
+- `<engine> --version printed no version: its first stdout line is empty`;
+- `<engine> --version printed "<first line>", not the pinned version <engine> <pinned>: no module run starts`
+  (task 038).
 
 **The receipt.** `render` gives `key: value` lines in the shape of wc-001's
 build receipt (`tools/build:82`), under its own schema line. Every value comes
@@ -995,6 +1034,15 @@ cap.
 Not in this task: the receipt's cap lines (wc-010c, task 028, in "Run receipt
 (wc-005c)") and measured peak memory, a maximum inside `capsule.wasm`, and any
 admission or launch decision.
+
+**Fail closed on the cap (task 038).** The cap argument rests on wasmtime
+45.0.1's measured behaviour, so `run` starts only the pinned versions ("Run
+receipt (wc-005c)"). A capped start that wasmtime rejects (exit 2, a first
+stderr line that starts `error: ` and holds ` -W `, measured in LOG.md, task
+038) is refused as a rejected cap, and the module is never run without its cap
+("Run one engine (wc-005a)"). The runner promises no fuel or time limit and
+no limit other than this memory cap, so it checks none and passes no fuel
+flag.
 
 ## Module memory maximum discovery (wc-010d0)
 
@@ -1545,8 +1593,9 @@ query and another for a module run):
 The run receipt (task 016), in `tests/run.rs`:
 
 - `receipt_records_observed_engine_versions` — two runs of one bundle by
-  stand-ins that print made-up versions (each with a second line): the run
-  holds exactly those first lines, never 45.0.1 or 7.5.0, and `render` gives
+  stand-ins that print the pinned versions with made-up tails (task 038; each
+  with a second line): the run holds exactly those first lines, never this
+  Mac's installed lines, and `render` gives
   the whole receipt exactly (schema, the verified lab CID, `digest`,
   `1592590337`, both versions, both `exit status: 0` and both stdouts; task
   028: the v2 schema and the four memory lines, 64 MB = 67108864 bytes). Both
@@ -1557,8 +1606,9 @@ The run receipt (task 016), in `tests/run.rs`:
   engine and cause (exact text), no module run starts, nothing is written,
   `wasmtime` is asked first and `wasmer` is not asked after it is refused.
 - `version_queries_use_explicit_inputs` — each stand-in's version answer is
-  its `$0`, `HOME` and whether its stdin is `/dev/null`: the run keeps
-  `<absolute program> unset null` for both. A relative program for either
+  its pinned version line (task 038), then its `$0`, `HOME` and whether its
+  stdin is `/dev/null`: the run keeps `<pinned line> <absolute program> unset
+  null` for both. A relative program for either
   engine is refused with the module run's own reason, and no module run starts.
 - `receipt_write_refuses_an_existing_path` — the receipt is written once,
   byte for byte; then the same path, a planted file, a live link and a
@@ -1704,24 +1754,53 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 `receipt_records_observed_engine_versions` and
 `real_receipt_names_both_installed_engines` were updated to the v2 text.
 
+Task 038, pinned engine versions and a rejected cap argument (`tests/run.rs`).
+Every stand-in the two-engine runner starts (`marked`, `recording`,
+`counting`) now prints `<engine> <pinned version> (stand-in)`, from the tools
+crate's `WASMTIME_VERSION` and `WASMER_VERSION`; the ` (stand-in)` tail keeps
+it apart from the real lines.
+
+- `run_refuses_an_unpinned_engine_version_before_any_module_run` — through
+  `run`, each first line `wasmtime 46.0.0 (x)`, `wasmtime 45.0.10`,
+  `wasmtime-45.0.1`, `wasmer 7.6.0`, `wasmer` and `wasmer  7.5.0` (two spaces)
+  is refused with that engine's pin reason (exact text once); no module run
+  starts on either engine, no run folder is made, and after an unpinned
+  `wasmtime` the `wasmer` stand-in is not asked `--version`.
+- `run_accepts_the_pinned_version_with_any_tail` — `wasmtime 45.0.1
+  (83166ba31 2026-06-05)`, `wasmtime 45.0.1 (stand-in)` and `wasmer 7.5.0`
+  pass, both engines run, and the receipt records each line as printed.
+- `run_refuses_a_rejected_memory_cap_without_retrying_it` — a pinned
+  `wasmtime` stand-in that, when its argv holds `-W`, prints the measured
+  stderr line and exits 2: `run` is refused with the rejected-cap reason (exact
+  text) naming the `-W` argument `run` passed; `wasmtime` was started for a
+  module run exactly once, with `-W`; `wasmer` was never started. Other
+  failures stay `EngineFailed`: other stderr with exit 2, the measured line
+  with exit 3, an `error: ` line that does not name `-W`, and the measured
+  failure from `wasmer`, which is given no cap argument.
+
+`real_receipt_names_both_installed_engines` and
+`built_capsule_runs_under_the_declared_cap_on_wasmtime` pass on this Mac's
+pinned engines with no change to their assertions.
+
 ## Falsifiers
 
-`falsifiers.json` holds 165 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 170 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032, one task 035 and three task 036.
+031, two task 032, one task 035, three task 036 and five task 038.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 101, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 106, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035 and 036: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2 +
-2 + 1 + 3), each run by the canonical runner with its summary line quoted.
+029, 031, 032, 035, 036 and 038: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 +
+2 + 2 + 1 + 3 + 5), each run by the canonical runner with its summary line
+quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -2254,3 +2333,30 @@ Before task 036 the empty-TMPDIR check watched nothing: with `rm -rf
 (LOG.md, task 036, has the probe). Task 036 also re-runs F-WC1-TRAP-STATUS
 (still caught) and re-anchors F-WC-README-COUNT to the new total, the same bug
 as before.
+
+Task 038's five, runner-caught (the canonical runner's summary line is in
+LOG.md, task 038). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and the named test fails at its assertion:
+
+- F-WC5-VERSION-UNPINNED — the pin check `check_pinned` returns success at its
+  first line, so an engine of any version runs a module
+  (`run_refuses_an_unpinned_engine_version_before_any_module_run`, at its
+  version refusal).
+- F-WC10-CAP-REJECTED-RETRY — on the rejected-cap refusal, `start_engine`
+  starts the engine again without the cap argument and returns that run's
+  result, so the module runs uncapped and `wasmer` runs after it
+  (`run_refuses_a_rejected_memory_cap_without_retrying_it`, at its refusal).
+- F-WC10-CAP-REJECTED-UNNAMED — `cap_rejected` is always false, so a rejected
+  cap reads as a plain engine failure that does not name the cap (the same
+  test, at the refusal text).
+- F-WC10-CAP-REJECTED-ANY-STATUS — `cap_rejected` drops the measured exit
+  status, so the measured line with exit 3 is called a rejected cap (the same
+  test, at its other-status case).
+- F-WC10-CAP-REJECTED-UNCAPPED — the rule applies to a start given no cap
+  argument, so `wasmer`'s failure is called a rejected cap (the same test, at
+  its uncapped case).
+
+Task 038 also re-runs F-WC5-HARDCODED-VERSIONS (still caught: the stand-ins'
+` (stand-in)` tail and the receipt test's made-up tails keep each line apart
+from this Mac's real lines) and re-anchors F-WC-README-COUNT to the new total,
+the same bug as before.

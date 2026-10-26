@@ -21,6 +21,10 @@ struct OpenHold {
     amount: u64,
 }
 
+fn handles_match(bound: Handle, presented: Handle) -> bool {
+    bound == presented
+}
+
 /// The one ledger the verifier owns.
 #[derive(Debug)]
 pub(crate) struct Ledger {
@@ -110,6 +114,7 @@ impl std::fmt::Display for SettleRefuse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseRefuse {
     NotOutstanding,
+    OtherHandle,
     Binding(Refuse),
 }
 
@@ -117,6 +122,9 @@ impl std::fmt::Display for ReleaseRefuse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReleaseRefuse::NotOutstanding => formatter.write_str("reservation is not outstanding"),
+            ReleaseRefuse::OtherHandle => {
+                formatter.write_str("reservation is bound to another handle")
+            }
             ReleaseRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -195,7 +203,7 @@ impl Verifier {
             Some(open) => (open.handle, open.amount),
             None => return Err(SettleRefuse::NotOutstanding),
         };
-        if bound != request.handle {
+        if !handles_match(bound, request.handle) {
             return Err(SettleRefuse::OtherHandle);
         }
         if measured > stored {
@@ -223,10 +231,13 @@ impl Verifier {
         self.resolve(*call, request.handle)
             .map_err(ReleaseRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
-        let amount = match ledger.open.get(&reservation.id) {
-            Some(open) => open.amount,
+        let (bound, amount) = match ledger.open.get(&reservation.id) {
+            Some(open) => (open.handle, open.amount),
             None => return Err(ReleaseRefuse::NotOutstanding),
         };
+        if !handles_match(bound, request.handle) {
+            return Err(ReleaseRefuse::OtherHandle);
+        }
         ledger.open.remove(&reservation.id);
         ledger.held -= amount;
         Ok(())
@@ -738,4 +749,72 @@ fn model_settle_on_another_handle_is_refused() {
     assert_eq!(after_settle.charged, 4);
     assert_eq!(after_settle.held, 0);
     assert!(!after_settle.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_release_on_another_handle_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let request = guest(holder);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let refusal = verifier
+        .release(&verifier.open_call(second), &guest(other), reservation)
+        .expect_err("another handle");
+    assert_eq!(refusal, ReleaseRefuse::OtherHandle);
+    assert_eq!(
+        refusal.to_string(),
+        "reservation is bound to another handle"
+    );
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 4);
+    assert_eq!(after_refusal.charged, 0);
+    assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &request, reservation), Ok(()));
+    let after_release = books(&verifier);
+    assert_eq!(after_release.charged, 0);
+    assert_eq!(after_release.held, 0);
+    assert!(!after_release.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_raise_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(5);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 100,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 5);
+    let refusal = verifier
+        .reserve(&call, &request, 6)
+        .expect_err("forged ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 5,
+            held: 0,
+            asked: 6,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 0);
+    assert_eq!(after_refusal.charged, 0);
+    assert!(after_refusal.open.is_empty());
+    verifier
+        .reserve(&call, &request, 5)
+        .expect("at the stored ceiling");
+    assert_eq!(books(&verifier).held, 5);
 }
