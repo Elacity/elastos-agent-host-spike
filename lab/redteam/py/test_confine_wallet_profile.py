@@ -1,13 +1,22 @@
-"""Red-team the merged wallet-provider seatbelt profile for escapes.
+"""Red-team the merged wallet, did and model seatbelt profiles for escapes.
 
-Target (read only), pinned by guard (a):
+Targets (read only), pinned by guard (a). Measured with
+``git log -1 --format='%H %s' HEAD -- <file>`` and ``shasum -a 256 <file>``
+on HEAD ``b67ae9509a52936089ad0bfb3d6a4055f951a80c``:
+
   capsules/wallet-provider/confine.sb
-  commit 09ad101c24cde4375befd98be3bb6d69ef1e0a06  PR #86 (confine/016)
-  sha256 5a0140c6b02b60508e6fcd3ff8896504406430e14eaa87749ee10ab419cf319a
-  Re-checked on base dde918148591edb64a676bddd65c857430867921 (2026-10-26) with
-  `git log -1 --format='%H %s' HEAD -- capsules/wallet-provider/confine.sb`
-  and `shasum -a 256`: the bytes have not changed since 09ad101c2.
+  commit 959b104022bd0e8ae55636f69f6f06b8eb028e2b  merge PR #157 (confine 037)
+  sha256 fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b
 
+  capsules/did-provider/confine.sb
+  commit 959b104022bd0e8ae55636f69f6f06b8eb028e2b  merge PR #157 (confine 037)
+  sha256 79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950
+
+  capsules/model-provider/confine.sb
+  commit 58ab45897e666f4315b33212e2d7140367db4290  merge PR #196 (cc-model-confine 020)
+  sha256 bc9c821dcbf30adafb63e0374ce8b71d395a37318d0da14a2ae1171cb6bcb6b5
+
+``DidConfineProbe`` and ``ModelConfineProbe`` reuse ``WalletConfineProbe``.
 Each attack drives ``/usr/bin/sandbox-exec`` directly with a stock binary (not
 the provider's protocol) and asserts the sandbox **denies** with a specific
 reason and leaks nothing: a denied *read* must leave stdout empty, so a partial
@@ -37,6 +46,7 @@ Honesty (guards d, b):
     (``test_expected_failures_are_recorded_findings``).
 """
 
+import hashlib
 import inspect
 import os
 import shutil
@@ -140,7 +150,7 @@ def preflight(profile):
     """
     if not sbx.sandbox_exec_available():
         raise unittest.SkipTest(
-            f"{sbx.SANDBOX_EXEC} is absent; the wallet profile was not exercised "
+            f"{sbx.SANDBOX_EXEC} is absent; profile {profile} was not exercised "
             f"on this machine (sandbox-exec is macOS only)"
         )
     for name, path in STOCK_BINARIES:
@@ -241,6 +251,28 @@ def _expected_failure_methods(case_cls):
     ]
 
 
+# Sha256 pins for the three profiles this module probes. The pin test reads
+# this table. It does not parse the README. Commits and PRs match the module
+# docstring and the README pin block.
+PROFILE_PINS = {
+    "capsules/wallet-provider/confine.sb": {
+        "commit": "959b104022bd0e8ae55636f69f6f06b8eb028e2b",
+        "pr": "#157",
+        "sha256": "fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b",
+    },
+    "capsules/did-provider/confine.sb": {
+        "commit": "959b104022bd0e8ae55636f69f6f06b8eb028e2b",
+        "pr": "#157",
+        "sha256": "79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950",
+    },
+    "capsules/model-provider/confine.sb": {
+        "commit": "58ab45897e666f4315b33212e2d7140367db4290",
+        "pr": "#196",
+        "sha256": "bc9c821dcbf30adafb63e0374ce8b71d395a37318d0da14a2ae1171cb6bcb6b5",
+    },
+}
+
+
 class WalletConfineProbe(unittest.TestCase):
     """Direct seatbelt attacks on the merged wallet profile, beyond the owner's."""
 
@@ -261,10 +293,12 @@ class WalletConfineProbe(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.outside, ignore_errors=True)
         self.root = os.path.join(self.base, "root")
         os.mkdir(self.root)
-        # Attacks run against this profile unless a falsifier swaps it for a
-        # weakened copy; _run defaults to it, so the attack methods are reused
-        # verbatim by the falsifiers against the weakened profile.
-        self.profile = sbx.WALLET_CONFINE_SB
+        # Attacks run against this class's profile unless a falsifier swaps
+        # self.profile for a weakened copy. _run defaults to self.profile, so
+        # the attack methods are reused verbatim against the weakened copy.
+        # _derived_profile reads type(self).PROFILE, not self.profile, because
+        # that swap happens after the copy is built.
+        self.profile = type(self).PROFILE
         self._write(os.path.join(self.root, "inside.txt"), INSIDE_OK)
         self._write(os.path.join(self.base, "secret.txt"), SIBLING_SECRET)
         self.outside_secret = os.path.join(self.outside, "secret.txt")
@@ -289,16 +323,48 @@ class WalletConfineProbe(unittest.TestCase):
         """A disposable copy of the real profile with extra allow rules appended.
 
         Used only by falsifiers to reproduce an escape; the real profile is read,
-        never edited. Injected literal paths are checked for quotes/newlines.
+        never edited. The copy starts with the exact bytes of this class's
+        profile (``type(self).PROFILE``), not ``self.profile``: a falsifier
+        replaces ``self.profile`` with the weakened copy after this returns.
+        Injected literal paths are checked for quotes/newlines.
         """
-        text = sbx.WALLET_CONFINE_SB.read_text(encoding="utf-8")
+        raw = type(self).PROFILE.read_bytes()
         path = os.path.join(self.base, "weakened.sb")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.write("\n;; red-team falsifier: extra grant to reproduce the escape\n")
+        with open(path, "wb") as handle:
+            handle.write(raw)
+            handle.write(b"\n;; red-team falsifier: extra grant to reproduce the escape\n")
             for rule in extra_rules:
-                handle.write(rule + "\n")
+                handle.write(rule.encode("utf-8") + b"\n")
         return path
+
+    def test_derived_profile_comes_from_this_profile(self):
+        """The disposable copy starts with the exact bytes of this class's profile.
+
+        ``_derived_profile`` reads ``type(self).PROFILE``. A reader that always
+        opens ``sbx.WALLET_CONFINE_SB`` makes this test fail on the did class.
+        """
+        derived = self._derived_profile()
+        with open(derived, "rb") as handle:
+            written = handle.read()
+        source = type(self).PROFILE.read_bytes()
+        self.assertTrue(source, f"profile under test is empty: {type(self).PROFILE}")
+        self.assertTrue(
+            written.startswith(source),
+            f"{derived} does not start with the bytes of {type(self).PROFILE}",
+        )
+
+    def test_profile_sha256_matches_the_recorded_pin(self):
+        """``hashlib.sha256`` of this class's profile equals the recorded pin.
+
+        ``PROFILE_PINS`` holds one sha256 per profile path. Putting the wallet
+        digest on the did entry makes this test fail on the did class.
+        """
+        profile = type(self).PROFILE
+        rel = profile.relative_to(sbx.REPO_ROOT).as_posix()
+        self.assertIn(rel, PROFILE_PINS, f"no recorded pin for {rel}")
+        recorded = PROFILE_PINS[rel]["sha256"]
+        digest = hashlib.sha256(profile.read_bytes()).hexdigest()
+        self.assertEqual(digest, recorded)
 
     @staticmethod
     def _safe_literal(path):
@@ -559,12 +625,14 @@ class WalletConfineProbe(unittest.TestCase):
         self.assertTrue(result.errors, "the unrelated error must surface as an ERROR")
 
     def test_expected_failures_are_recorded_findings(self):
-        # Guard (b): every @unittest.expectedFailure probe must name a finding
-        # file that exists under findings/. On this clean commit all probes deny,
-        # so none are marked and the set is empty -- but the invariant is enforced
-        # for the day a real escape is recorded.
+        # Guard (b): every @unittest.expectedFailure probe on this class must
+        # name a finding file that exists under findings/. Walk type(self), so
+        # a mark on the did or model class with no finding file fails that
+        # class. On this clean commit all probes deny, so none are marked and
+        # the set is empty -- but the invariant is enforced for the day a real
+        # escape is recorded.
         findings_dir = sbx.REPO_ROOT / "lab" / "redteam" / "findings"
-        for name, method in _expected_failure_methods(WalletConfineProbe):
+        for name, method in _expected_failure_methods(type(self)):
             doc = method.__doc__ or ""
             named = [tok for tok in doc.split() if tok.endswith(".md")]
             self.assertTrue(
@@ -573,6 +641,18 @@ class WalletConfineProbe(unittest.TestCase):
                 self.assertTrue(
                     (findings_dir / finding).is_file(),
                     f"{name} names finding {finding!r} but no such file exists")
+
+
+class DidConfineProbe(WalletConfineProbe):
+    """The wallet probe, pointed at the did-provider profile."""
+
+    PROFILE = sbx.REPO_ROOT / "capsules" / "did-provider" / "confine.sb"
+
+
+class ModelConfineProbe(WalletConfineProbe):
+    """The wallet probe, pointed at the model-provider profile."""
+
+    PROFILE = sbx.REPO_ROOT / "capsules" / "model-provider" / "confine.sb"
 
 
 if __name__ == "__main__":
