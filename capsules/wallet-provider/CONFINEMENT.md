@@ -95,7 +95,13 @@ platform baseline for the wallet-provider executable on macOS, not approved
 rights". The model provider's
 `capsules/model-provider/tests/fixtures/confine/declared-rights.json` uses the
 same template, and `model_declared_rights_read_on_the_did_and_wallet_template`
-reads it. The generator stays the Runtime's.
+reads it. The generator stays the Runtime's. Each platform-baseline rule in
+that file gives one justification that starts with the wallet-provider
+executable prefix,
+`macOS wallet-provider executable bound as PROVIDER_EXECUTABLE:`, and gives a
+reason; the `startup-root-directory` justification uses this document's
+root-directory sentence, and a justification with another provider's prefix or
+no reason is refused.
 
 ## The model provider's inline profile
 
@@ -724,6 +730,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the duplicate-form refusal (WP92): the same test fails on its
   `(allow sysctl-read)`-twice case, which then reads "declared rule is not an
   allow rule of its profile".
+- Drop the prefix refusal (WP93): the same test fails because a justification
+  that names another provider's executable prefix passes the check.
+- Drop the empty-reason refusal (WP94): the same test fails because a bare
+  provider prefix passes the check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
