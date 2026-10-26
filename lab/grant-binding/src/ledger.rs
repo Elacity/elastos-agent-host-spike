@@ -364,6 +364,32 @@ fn model_reported_usage_does_not_lower_the_settled_charge() {
 }
 
 #[test]
+fn model_settle_twice_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 0,
+        ..guest(handle)
+    };
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(10))
+        .expect("settle");
+    assert_eq!(charge, 10);
+    assert_eq!(verifier.ledger.charged, 10);
+    assert_eq!(verifier.ledger.held, 0);
+    let refusal = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(10))
+        .expect_err("second settle");
+    assert_eq!(refusal, SettleRefuse::NotOutstanding);
+    assert_eq!(refusal.to_string(), "reservation is not outstanding");
+    assert_eq!(verifier.ledger.charged, 10);
+    assert_eq!(verifier.ledger.held, 0);
+}
+
+#[test]
 fn model_unknown_outcome_keeps_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
