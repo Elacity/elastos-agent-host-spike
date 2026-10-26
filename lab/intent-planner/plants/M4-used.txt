@@ -1,0 +1,9 @@
+id: M4
+file: src/lib.rs
+test: approved_grant_runs_once
+--- old
+            if self.used.contains(&grant.token) {
+                return Err(Refuse::GrantSpent);
+            }
+--- new
+--- end

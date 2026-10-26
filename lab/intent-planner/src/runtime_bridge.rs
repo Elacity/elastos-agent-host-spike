@@ -1,11 +1,13 @@
-//! The real Runtime path this lab can call without changing ElastOS.
+//! In-process Runtime library calls this lab can make without changing ElastOS.
 //!
-//! Grants are `CapabilityManager` tokens: one resource, one action, one use.
+//! Grants are a lab `CapabilityManager`: one resource, one action, one use.
 //! Journal steps are `resource_invoke` lines on
-//! `elastos_server::resource_bridge::handle_remote_request_with_audit_dir`,
-//! the public elastos:bus bridge. The in-runtime journal store is
+//! `elastos_server::resource_bridge::handle_remote_request_with_audit_dir`
+//! in this test process. That is the public bus entry linked as a crate, not
+//! a spawned `elastos` process. The in-runtime journal store is
 //! `handle_component_resource_request`, and that function is `pub(crate)`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use elastos_runtime::capability::manager::ValidationError;
@@ -51,7 +53,7 @@ pub fn scoped_journal(agent: &str) -> String {
     format!("{root}/.AppData/Agents/{agent}/tasks/task-1/journal")
 }
 
-/// The Runtime capability signer and use counter for one lab host.
+/// A lab `CapabilityManager`: signer and use counter for one Host.
 pub struct Grants {
     manager: CapabilityManager,
 }
@@ -134,12 +136,31 @@ pub fn classify(reply: &BridgeReply) -> BridgeClass {
     }
 }
 
-/// Send one journal write on the public elastos:bus bridge.
+/// Audit records left by one in-process `handle_remote_request_with_audit_dir`
+/// call. Empty when that function was not called with this directory.
+pub fn component_invoke_audit(data_dir: &Path) -> Vec<(String, String, String)> {
+    match elastos_server::auth::load_auth_state(data_dir) {
+        Ok(state) => state
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type.starts_with("component.invoke."))
+            .map(|event| (event.event_type, event.result, event.reason))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Send one journal write through the in-process public bus entry.
 ///
 /// An empty `token` is an unapproved step. A non-empty token is the capability
-/// grant the caller presents. The public bridge refuses principal-root storage
-/// before it validates that token.
-pub fn invoke_journal(token: &str, guest_uri: &str) -> Result<BridgeReply, String> {
+/// grant the caller presents. The public entry refuses principal-root storage
+/// before it validates that token. A `data_dir` records the requested and
+/// completed audit events for that call.
+pub fn invoke_journal(
+    token: &str,
+    guest_uri: &str,
+    audit_data_dir: Option<&Path>,
+) -> Result<BridgeReply, String> {
     let line = serde_json::json!({
         "id": 1,
         "request": {
@@ -165,7 +186,7 @@ pub fn invoke_journal(token: &str, guest_uri: &str) -> Result<BridgeReply, Strin
             CAPSULE_ID,
             &manifest,
             Some(LAUNCHING_PERSON),
-            None,
+            audit_data_dir,
         ),
     )
     .map_err(|err| err.to_string())?;

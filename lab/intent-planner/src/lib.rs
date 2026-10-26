@@ -4,13 +4,16 @@
 //!
 //! A local planner turns one intent into a typed plan. Each step names a
 //! capability and a resource. The preview shows that plan. Approval mints a
-//! real Runtime capability token for each step the Runtime can name. Execution
-//! sends that token on the public elastos:bus bridge.
+//! lab `CapabilityManager` token for each step the Runtime can name. Execution
+//! sends that token through in-process
+//! `handle_remote_request_with_audit_dir`. That is not a spawned Runtime
+//! process.
 //!
 //! A rejected plan, a plan whose bytes changed after approval, a run list
-//! that is not the approved list, and a second use of the same grant all
-//! stop before a bridge call. A step the Runtime cannot express is BLOCKED
-//! with the missing capability. The public bridge does not store a journal.
+//! that is not the approved ordered list, a review from another Host, and a
+//! second use of the same grant all stop before a bridge call. A step the
+//! Runtime cannot express is BLOCKED with the missing capability. The public
+//! entry does not store a journal.
 
 #[cfg(test)]
 mod plant;
@@ -110,6 +113,7 @@ pub enum Refuse {
     PlanAltered,
     OutsidePlan,
     GrantSpent,
+    ForeignHost,
     Bridge,
 }
 
@@ -122,6 +126,7 @@ impl fmt::Display for Refuse {
             Refuse::PlanAltered => "the plan was altered after approval",
             Refuse::OutsidePlan => "a step is outside the approved plan",
             Refuse::GrantSpent => "the approved grant was already used",
+            Refuse::ForeignHost => "the review was minted by another host",
             Refuse::Bridge => "the bus bridge did not answer",
         })
     }
@@ -158,7 +163,7 @@ impl Grant {
         &self.resource
     }
 
-    fn covers(&self, step: &Step) -> bool {
+    pub fn covers(&self, step: &Step) -> bool {
         self.step_id == step.id
             && self.action == step.capability.action
             && self.operation == step.capability.operation
@@ -169,6 +174,7 @@ impl Grant {
 /// The decision recorded for one plan, plus the grants approval minted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Review {
+    host_id: String,
     choice: Choice,
     canonical: String,
     grants: Vec<Grant>,
@@ -204,20 +210,25 @@ pub struct Effect {
     pub kind: EffectKind,
 }
 
-/// The lab host. It records the person's decision and calls the Runtime.
+/// The lab host. It records the person's decision and calls the in-process
+/// bus entry. Each Host has its own lab `CapabilityManager` and audit dir.
 #[derive(Debug)]
 pub struct Host {
+    id: String,
     grants: runtime_bridge::Grants,
     effects: Vec<Effect>,
     used: Vec<String>,
+    audit: tempfile::TempDir,
 }
 
 impl Host {
     pub fn new() -> Self {
         Self {
+            id: new_host_id(),
             grants: runtime_bridge::Grants::new(),
             effects: Vec::new(),
             used: Vec::new(),
+            audit: tempfile::TempDir::new().expect("lab audit dir"),
         }
     }
 
@@ -225,7 +236,17 @@ impl Host {
         &self.effects
     }
 
-    /// Records the person's choice. Approve mints one Runtime token for each
+    /// Directory that records in-process bus audit events for this Host.
+    pub fn audit_dir(&self) -> &std::path::Path {
+        self.audit.path()
+    }
+
+    /// Lab `CapabilityManager::validate` for a journal write token.
+    pub fn validate_journal_write(&self, token: &str, resource: &str) -> Result<(), String> {
+        self.grants.validate_journal_write(token, resource)
+    }
+
+    /// Records the person's choice. Approve mints one lab token for each
     /// step the Runtime can name. Reject mints none. A blocked step gets no token.
     pub fn review(&mut self, plan: &Plan, choice: Choice) -> Review {
         let grants = if choice == Choice::Approve {
@@ -238,6 +259,7 @@ impl Host {
             Vec::new()
         };
         Review {
+            host_id: self.id.clone(),
             choice,
             canonical: plan.canonical(),
             grants,
@@ -245,12 +267,15 @@ impl Host {
     }
 
     /// Runs `steps` when `review` approves this exact `plan` and `steps` is
-    /// that approved list. A refused call leaves the effect list unchanged.
+    /// that approved ordered list. A refused call leaves the effect list
+    /// unchanged.
     pub fn execute(&mut self, review: &Review, plan: &Plan, steps: &[Step]) -> Result<(), Refuse> {
         let allowed = self.approval_check(review, plan, steps)?;
+        let mut recorded = Vec::new();
+        let mut spent = Vec::new();
         for step in steps {
             if let Some(missing) = runtime_gap(step) {
-                self.effects.push(Effect {
+                recorded.push(Effect {
                     step_id: step.id,
                     action: step.capability.action,
                     operation: step.capability.operation.clone(),
@@ -263,16 +288,17 @@ impl Host {
                 });
                 continue;
             }
-            let grant = allowed
-                .iter()
-                .find(|grant| grant.covers(step))
-                .ok_or(Refuse::OutsidePlan)?;
+            let grant = grant_that_covers(&allowed, step)?;
             let agent = plan_agent(&step.resource);
             self.grants
                 .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
                 .map_err(|_| Refuse::Bridge)?;
-            let reply = runtime_bridge::invoke_journal(&grant.token, &step.resource)
-                .map_err(|_| Refuse::Bridge)?;
+            let reply = runtime_bridge::invoke_journal(
+                &grant.token,
+                &step.resource,
+                Some(self.audit.path()),
+            )
+            .map_err(|_| Refuse::Bridge)?;
             let kind = match runtime_bridge::classify(&reply) {
                 runtime_bridge::BridgeClass::StorageBlocked => EffectKind::Blocked {
                     missing: runtime_bridge::STORAGE_BRIDGE_GAP.to_owned(),
@@ -285,7 +311,7 @@ impl Host {
                     }
                 }
             };
-            self.effects.push(Effect {
+            recorded.push(Effect {
                 step_id: step.id,
                 action: step.capability.action,
                 operation: step.capability.operation.clone(),
@@ -293,8 +319,10 @@ impl Host {
                 grant_token: grant.token.clone(),
                 kind,
             });
-            self.used.push(grant.token.clone());
+            spent.push(grant.token.clone());
         }
+        self.effects.extend(recorded);
+        self.used.extend(spent);
         Ok(())
     }
 
@@ -315,18 +343,16 @@ impl Host {
         plan: &Plan,
         steps: &[Step],
     ) -> Result<Vec<Grant>, Refuse> {
+        if review.host_id != self.id {
+            return Err(Refuse::ForeignHost);
+        }
         if review.choice != Choice::Approve {
             return Err(Refuse::NotApproved);
         }
         if review.canonical != plan.canonical() {
             return Err(Refuse::PlanAltered);
         }
-        if steps.len() != plan.steps.len()
-            || steps
-                .iter()
-                .zip(plan.steps.iter())
-                .any(|(step, approved)| step != approved)
-        {
+        if steps != plan.steps.as_slice() {
             return Err(Refuse::OutsidePlan);
         }
         let mut allowed = Vec::new();
@@ -334,11 +360,7 @@ impl Host {
             if runtime_gap(step).is_some() {
                 continue;
             }
-            let grant = review
-                .grants
-                .iter()
-                .find(|grant| grant.covers(step))
-                .ok_or(Refuse::OutsidePlan)?;
+            let grant = grant_that_covers(&review.grants, step)?;
             if self.used.contains(&grant.token) {
                 return Err(Refuse::GrantSpent);
             }
@@ -346,6 +368,19 @@ impl Host {
         }
         Ok(allowed)
     }
+}
+
+fn new_host_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("host-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+fn grant_that_covers<'a>(grants: &'a [Grant], step: &Step) -> Result<&'a Grant, Refuse> {
+    grants
+        .iter()
+        .find(|grant| grant.covers(step))
+        .ok_or(Refuse::OutsidePlan)
 }
 
 impl Default for Host {
@@ -545,7 +580,7 @@ fn planner_lists_capability_and_resource_for_each_step() {
 }
 
 #[test]
-fn approved_plan_executes_with_the_approved_grants() {
+fn approved_plan_records_blocked_in_process_bridge_effects() {
     let plan = sample();
     let mut host = Host::new();
     let review = host.review(&plan, Choice::Approve);
@@ -575,7 +610,7 @@ fn approved_plan_executes_with_the_approved_grants() {
         }
     );
     let token = elastos_runtime::capability::CapabilityToken::from_base64(grant.token())
-        .expect("runtime token");
+        .expect("lab token");
     assert_eq!(token.capsule(), runtime_bridge::CAPSULE_ID);
     assert_eq!(
         token.action().to_string(),
@@ -691,15 +726,15 @@ fn dependencies_are_the_runtime_crates() {
 }
 
 #[test]
-fn runtime_denies_an_unapproved_journal_step() {
-    let reply =
-        runtime_bridge::invoke_journal("", &runtime_bridge::guest_journal("ada")).expect("bridge");
+fn in_process_bridge_denies_an_unapproved_journal_step() {
+    let reply = runtime_bridge::invoke_journal("", &runtime_bridge::guest_journal("ada"), None)
+        .expect("bridge");
     assert_eq!(reply.code, runtime_bridge::MISSING_TOKEN_CODE);
     assert_eq!(reply.message, runtime_bridge::MISSING_TOKEN_MESSAGE);
 }
 
 #[test]
-fn runtime_denies_an_altered_journal_resource() {
+fn lab_manager_denies_an_altered_journal_resource() {
     let grants = runtime_bridge::Grants::new();
     let token = grants.mint_journal_write("ada");
     let altered = runtime_bridge::scoped_journal("ada").replace("journal", "secrets");
@@ -716,7 +751,7 @@ fn runtime_denies_an_altered_journal_resource() {
 }
 
 #[test]
-fn runtime_denies_a_reused_single_use_grant() {
+fn lab_manager_denies_a_reused_single_use_grant() {
     let grants = runtime_bridge::Grants::new();
     let token = grants.mint_journal_write("ada");
     let resource = runtime_bridge::scoped_journal("ada");
@@ -737,14 +772,142 @@ fn public_bridge_blocks_journal_storage_before_token_checks() {
     let grants = runtime_bridge::Grants::new();
     let token = grants.mint_journal_write("ada");
     let altered = runtime_bridge::guest_journal("ada").replace("journal", "secrets");
-    let reply = runtime_bridge::invoke_journal(&token, &altered).expect("bridge");
+    let reply = runtime_bridge::invoke_journal(&token, &altered, None).expect("bridge");
     assert_eq!(reply.code, runtime_bridge::STORAGE_BRIDGE_CODE);
     assert_eq!(reply.message, runtime_bridge::STORAGE_BRIDGE_GAP);
     assert_ne!(reply.code, "capability_denied");
-    let again = runtime_bridge::invoke_journal(&token, &runtime_bridge::guest_journal("ada"))
+    let again = runtime_bridge::invoke_journal(&token, &runtime_bridge::guest_journal("ada"), None)
         .expect("bridge");
     assert_eq!(again.code, runtime_bridge::STORAGE_BRIDGE_CODE);
     assert_eq!(again.message, runtime_bridge::STORAGE_BRIDGE_GAP);
+}
+
+#[test]
+fn reordered_approved_steps_are_refused() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut steps = plan.steps.clone();
+    steps.swap(0, 1);
+    assert_eq!(steps.len(), plan.steps.len());
+    let error = host.execute(&review, &plan, &steps).expect_err("reordered");
+    assert_eq!(error, Refuse::OutsidePlan);
+    assert_eq!(error.to_string(), "a step is outside the approved plan");
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn grant_lookup_uses_covers_for_the_exact_resource() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada"), journal_write_step(2, "bea")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.grants().len(), 2);
+    assert!(review.grants()[0].covers(&plan.steps[0]));
+    assert!(!review.grants()[0].covers(&plan.steps[1]));
+    assert!(review.grants()[1].covers(&plan.steps[1]));
+    assert_ne!(review.grants()[0].token(), review.grants()[1].token());
+    host.execute(&review, &plan, &plan.steps).expect("run");
+    assert_eq!(host.effects().len(), 2);
+    for (effect, grant) in host.effects().iter().zip(review.grants()) {
+        assert_eq!(effect.grant_token, grant.token());
+        assert_eq!(effect.resource, grant.resource());
+        assert_eq!(effect.action, grant.action());
+        assert_eq!(effect.operation, grant.operation());
+        assert_eq!(effect.step_id, grant.step_id());
+    }
+}
+
+#[test]
+fn unused_review_does_not_run_on_a_second_host() {
+    let plan = sample();
+    let mut host_a = Host::new();
+    let review = host_a.review(&plan, Choice::Approve);
+    let mut host_b = Host::new();
+    let error = host_b
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("foreign host");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert_eq!(error.to_string(), "the review was minted by another host");
+    assert!(host_a.effects().is_empty());
+    assert!(host_b.effects().is_empty());
+}
+
+#[test]
+fn execute_spends_the_allow_once_grant_at_the_lab_manager() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let token = review.grants()[0].token().to_owned();
+    let resource = runtime_bridge::scoped_journal("ada");
+    host.execute(&review, &plan, &plan.steps).expect("run");
+    let spent = host
+        .validate_journal_write(&token, &resource)
+        .expect_err("execute must call validate_journal_write");
+    assert!(
+        spent.contains("use limit exceeded"),
+        "lab CapabilityManager after execute: {spent}"
+    );
+}
+
+#[test]
+fn blocked_journal_effect_comes_from_a_bus_round_trip() {
+    let plan = sample();
+    let mut host = Host::new();
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+    let review = host.review(&plan, Choice::Approve);
+    host.execute(&review, &plan, &plan.steps).expect("run");
+    let journal = &host.effects()[1];
+    assert_eq!(
+        journal.kind,
+        EffectKind::Blocked {
+            missing: runtime_bridge::STORAGE_BRIDGE_GAP.to_owned(),
+            code: runtime_bridge::STORAGE_BRIDGE_CODE.to_owned(),
+        }
+    );
+    let audit = runtime_bridge::component_invoke_audit(host.audit_dir());
+    assert_eq!(audit.len(), 2, "in-process bus audit: {audit:?}");
+    assert_eq!(audit[0].0, "component.invoke.requested");
+    assert_eq!(audit[0].1, "pending");
+    assert!(
+        audit[0].2.contains("write") && audit[0].2.contains("journal"),
+        "requested reason: {}",
+        audit[0].2
+    );
+    assert_eq!(audit[1].0, "component.invoke.completed");
+    assert_eq!(audit[1].1, "denied");
+    assert_eq!(audit[0].2, audit[1].2);
+}
+
+#[test]
+fn approval_for_one_principal_does_not_execute_for_another() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut other = plan.clone();
+    other.principal = "bea".to_owned();
+    assert_eq!(other.steps, plan.steps);
+    assert_ne!(plan.canonical(), other.canonical());
+    let error = host
+        .execute(&review, &other, &other.steps)
+        .expect_err("other principal");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
+
+fn journal_write_step(id: u32, agent: &str) -> Step {
+    Step {
+        id,
+        capability: Capability {
+            action: Action::Write,
+            operation: "write".to_owned(),
+        },
+        resource: runtime_bridge::guest_journal(agent),
+    }
 }
 
 #[test]

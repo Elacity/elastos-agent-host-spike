@@ -1,23 +1,21 @@
 id: F-A15-approval
 file: src/lib.rs
-test: approved_plan_executes_with_the_approved_grants
+test: approved_plan_records_blocked_in_process_bridge_effects
 test: rejected_plan_executes_nothing
 test: plan_altered_after_approval_is_refused
 test: extra_step_injected_at_run_time_is_refused
 test: approved_grant_runs_once
 --- old
+        if review.host_id != self.id {
+            return Err(Refuse::ForeignHost);
+        }
         if review.choice != Choice::Approve {
             return Err(Refuse::NotApproved);
         }
         if review.canonical != plan.canonical() {
             return Err(Refuse::PlanAltered);
         }
-        if steps.len() != plan.steps.len()
-            || steps
-                .iter()
-                .zip(plan.steps.iter())
-                .any(|(step, approved)| step != approved)
-        {
+        if steps != plan.steps.as_slice() {
             return Err(Refuse::OutsidePlan);
         }
         let mut allowed = Vec::new();
@@ -25,11 +23,7 @@ test: approved_grant_runs_once
             if runtime_gap(step).is_some() {
                 continue;
             }
-            let grant = review
-                .grants
-                .iter()
-                .find(|grant| grant.covers(step))
-                .ok_or(Refuse::OutsidePlan)?;
+            let grant = grant_that_covers(&review.grants, step)?;
             if self.used.contains(&grant.token) {
                 return Err(Refuse::GrantSpent);
             }

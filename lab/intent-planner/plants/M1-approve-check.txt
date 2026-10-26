@@ -1,0 +1,9 @@
+id: M1
+file: src/lib.rs
+test: rejected_plan_executes_nothing
+--- old
+        if review.choice != Choice::Approve {
+            return Err(Refuse::NotApproved);
+        }
+--- new
+--- end

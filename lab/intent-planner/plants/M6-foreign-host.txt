@@ -1,0 +1,9 @@
+id: M6-host
+file: src/lib.rs
+test: unused_review_does_not_run_on_a_second_host
+--- old
+        if review.host_id != self.id {
+            return Err(Refuse::ForeignHost);
+        }
+--- new
+--- end

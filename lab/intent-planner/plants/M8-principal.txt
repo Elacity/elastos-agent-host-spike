@@ -1,0 +1,9 @@
+id: M8
+file: src/lib.rs
+test: approval_for_one_principal_does_not_execute_for_another
+--- old
+        push_field(&mut out, &self.principal);
+        push_field(&mut out, &self.intent);
+--- new
+        push_field(&mut out, &self.intent);
+--- end
