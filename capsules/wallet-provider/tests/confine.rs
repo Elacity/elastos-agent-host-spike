@@ -1855,8 +1855,7 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
         }
         if justification[prefix.len()..].trim().is_empty() {
             return Err(format!(
-                "{name} platform baseline {} justification must start with {prefix:?} \
-                 and give a reason",
+                "{name} platform baseline {} justification gives no reason after {prefix:?}",
                 claim.id
             ));
         }
@@ -2839,8 +2838,9 @@ fn declared_rights_trace_refuses_each_bad_input() {
     assert!(
         reason.starts_with(name)
             && reason.contains("startup-root-directory")
-            && reason.contains("must start with"),
-        "a justification with another provider's prefix must be refused by id: {reason}"
+            && reason.contains("must start with")
+            && !reason.contains("gives no reason after"),
+        "a justification with another provider's prefix must be refused by its prefix: {reason}"
     );
 
     let mut declared = read();
@@ -2851,8 +2851,10 @@ fn declared_rights_trace_refuses_each_bad_input() {
     assert!(
         reason.starts_with(name)
             && reason.contains("startup-root-directory")
-            && reason.contains("must start with"),
-        "a platform-baseline justification without a reason must be refused by id: {reason}"
+            && reason.contains("gives no reason after")
+            && !reason.contains("must start with"),
+        "a platform-baseline justification without a reason must be refused as giving \
+         no reason: {reason}"
     );
 
     let mut declared = read();

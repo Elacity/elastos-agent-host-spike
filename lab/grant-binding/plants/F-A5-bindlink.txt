@@ -1,0 +1,20 @@
+id: F-A5-bindlink
+file: src/lib.rs
+test: model_symlink_shaped_owned_root_is_refused
+--- old
+    if !parts.iter().skip(2).all(|part| {
+        part.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    }) {
+        return Err(Refuse::SymlinkShaped);
+    }
+--- new
+    if owned_root.is_some()
+        && !parts.iter().skip(2).all(|part| {
+            part.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        })
+    {
+        return Err(Refuse::SymlinkShaped);
+    }
+--- end
