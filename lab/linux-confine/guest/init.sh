@@ -59,7 +59,13 @@ moddir=/lib/modules/6.18.58-0-virt
 load_ko() {
     path="$moddir/$1"
     if [ -f "$path" ]; then
-        insmod "$path" 2>/dev/null || true
+        if insmod "$path"; then
+            echo "insmod_ok=$1"
+        else
+            echo "insmod_fail=$1"
+        fi
+    else
+        echo "insmod_absent=$1"
     fi
 }
 load_ko kernel/fs/netfs/netfs.ko
@@ -67,18 +73,21 @@ load_ko kernel/net/9p/9pnet.ko
 load_ko kernel/net/9p/9pnet_virtio.ko
 load_ko kernel/fs/9p/9p.ko
 # NIC so skip-netns is visible (lo-only qemu hid it).
+load_ko kernel/net/core/failover.ko
+load_ko kernel/drivers/net/net_failover.ko
 load_ko kernel/drivers/net/dummy.ko
 load_ko kernel/net/dummy.ko
 load_ko kernel/drivers/net/virtio_net.ko
 
 # Extra interface besides lo. dummy0 is enough; virtio-net is a bonus.
-if ip link add dummy0 type dummy 2>/dev/null; then
-    ip link set dummy0 up 2>/dev/null || true
+if ip link add dummy0 type dummy; then
+    ip link set dummy0 up || true
     echo "guest_nic=dummy0"
 else
     echo "guest_nic=dummy-missing"
 fi
 ip link set eth0 up 2>/dev/null && echo "guest_nic=eth0" || true
+echo "guest_nics=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ' || true)"
 
 mkdir -p /evidence
 if mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 evidence /evidence 2>/dev/null; then

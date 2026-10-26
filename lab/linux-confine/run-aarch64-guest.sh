@@ -222,6 +222,8 @@ for rel in \
         gzip -dc "$src" > "$dest"
     fi
 done
+copy_kernel_mod failover
+copy_kernel_mod net_failover
 copy_kernel_mod dummy
 copy_kernel_mod virtio_net
 
@@ -271,12 +273,13 @@ if [ -d "$LAB/guest-plants" ]; then
     cp -a "$LAB/guest-plants" "$ROOT$REPO/lab/linux-confine/guest-plants"
 fi
 
-cat > "$ROOT/etc/lc-guest.env" <<ENV
-LC_GUEST_REPO=$REPO
-LC_GUEST_HELPER_DIR=$HELPER_DIR
-LC_GUEST_NONCE=$NONCE
-LC_GUEST_LABEL=$LABEL
-ENV
+# Quote every value. The TCG label contains parentheses that break `sh`.
+{
+    printf "LC_GUEST_REPO='%s'\n" "$REPO"
+    printf "LC_GUEST_HELPER_DIR='%s'\n" "$HELPER_DIR"
+    printf "LC_GUEST_NONCE='%s'\n" "$NONCE"
+    printf "LC_GUEST_LABEL='%s'\n" "$LABEL"
+} > "$ROOT/etc/lc-guest.env"
 echo "$NONCE" > "$ROOT/etc/lc-nonce"
 chmod 644 "$ROOT/etc/lc-guest.env" "$ROOT/etc/lc-nonce"
 
