@@ -645,6 +645,10 @@ launch step.
 | The list is every lab crate with a path dependency on this crate, and only those; the scan changes no scanned crate's folder | `every_lab_cid_consumer_is_in_the_adoption_note` | F-CI25a (only `lab/*/Cargo.toml` is listed), F-CI25b (the name `capsule_identity`), F-CI25e (the heading the helper looks for) |
 | Cargo's reader decides: a manifest it cannot read is refused with Cargo's message; a quoted key, a rename, a dev- and a build-dependency are found; no path, or another path, is not | `the_consumer_scan_uses_cargos_reader` | F-CI25b, F-CI25c (a non-zero cargo exit reads as no dependency), F-CI25d (a dependency with no path counts), F-CI25f (any path counts), F-CI25g (build-dependencies are dropped) |
 | Cargo's JSON is read strictly: not JSON, no package for the manifest and a path that does not resolve are each refused with their own reason | `the_consumer_scan_refuses_bad_metadata` | F-CI25h (JSON that does not parse reads as no dependency), F-CI25i (no package for the manifest reads as no dependency), F-CI25j (a path that does not resolve reads as no dependency) |
+| Cargo's JSON with no packages list is refused with that reason, never read as no dependency | `the_consumer_scan_refuses_bad_metadata` | F-CI27a (no packages list reads as no dependency) |
+| A package with no `manifest_path` is refused with that reason, never read as no dependency | `the_consumer_scan_refuses_bad_metadata` | F-CI27b (no `manifest_path` reads as no dependency) |
+| A package with no dependencies list is refused with that reason, never read as no dependency | `the_consumer_scan_refuses_bad_metadata` | F-CI27c (no dependencies list reads as no dependency) |
+| A dev-dependency counts: `lab/wasm-capsule` uses this crate only under `[dev-dependencies]` | `the_consumer_scan_uses_cargos_reader`, `every_lab_cid_consumer_is_in_the_adoption_note` | F-CI27d (dev-dependencies are dropped, so `lab/wasm-capsule/Cargo.toml` is missing from the scan) |
 | The scan writes nothing beside a manifest, ignored files included | `the_consumer_scan_writes_nothing` | F-CI25k (a `target/` is left beside a manifest outside the repo), F-CI25l (`--no-deps` is dropped, so Cargo resolves and writes a `Cargo.lock`) |
 | The list is read strictly: a missing note, no list and a line it cannot read each fail with their reason | `the_adoption_list_is_read_strictly` | F-CI25m (a line it cannot read is skipped) |
 | The note states the outside recomputation | `the_adoption_note_states_the_outside_recomputation` | F-CI25e |
@@ -1404,7 +1408,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 222 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 231 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1430,7 +1434,9 @@ F-CI16i, and task 017's F-CI17a (all three: see
 [for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
 023's F-CI23a to F-CI23l (see [claim scope](#claim-scope)), and task 024's
 F-CI24a to F-CI24e (see
-[the cross-implementation check](#the-cross-implementation-check)).
+[the cross-implementation check](#the-cross-implementation-check)), and task
+027's F-CI27a to F-CI27d (see
+[for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1472,6 +1478,11 @@ F-CI19g's. The README reader is shared, so F-CI24b and F-CI24c also name
 `the_adoption_list_is_read_strictly`, and F-CI24b also names
 `the_claim_wording_check_names_each_gap`: each asserts the same refusal.
 Task 024 changed no older edit's text.
+Task 027's entries all edit `tests/common/mod.rs`, in `consumer_in_metadata`:
+F-CI27a to F-CI27c each turn one refusal into `Ok(false)`, and each anchor
+holds that refusal's own message text, so it is found exactly once. F-CI27d
+shares F-CI25g's anchor, the name-match line, and drops `dev` where F-CI25g
+drops `build`. Task 027 changed no code and no older edit's text.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1552,8 +1563,10 @@ without an edit, 0 do not`; F-CI25a to F-CI25m each CAUGHT). At task 023,
 it reported `summary: 222 CAUGHT of 222` (`baseline: 124 named tests pass
 without an edit, 0 do not`; with the id prefix `F-CI23`: 12 of 12). At task
 024 it reported `summary: 227 CAUGHT of 227` (`baseline: 124 named tests pass
-without an edit, 0 do not`; F-CI24a to F-CI24e each CAUGHT).
+without an edit, 0 do not`; F-CI24a to F-CI24e each CAUGHT). At task
+027 it reported `summary: 231 CAUGHT of 231` (`baseline: 124 named tests pass
+without an edit, 0 do not`; F-CI27a to F-CI27d each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023 and 024 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024 and 027 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
