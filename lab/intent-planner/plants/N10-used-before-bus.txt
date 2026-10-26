@@ -1,0 +1,11 @@
+id: N10
+file: src/lib.rs
+test: failed_execute_does_not_spend_the_grant
+--- old
+            let grant = grant_that_covers(&allowed, step)?;
+            let reply = runtime_bridge::invoke_journal(
+--- new
+            let grant = grant_that_covers(&allowed, step)?;
+            self.used.push(grant.token.clone());
+            let reply = runtime_bridge::invoke_journal(
+--- end

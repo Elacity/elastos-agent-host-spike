@@ -1,0 +1,13 @@
+id: N5
+file: src/lib.rs
+test: grant_lookup_uses_covers_for_the_exact_resource
+--- old
+        self.step_id == step.id
+            && self.action == step.capability.action
+            && self.operation == step.capability.operation
+            && exact_resource(&self.resource, &step.resource)
+--- new
+        self.action == step.capability.action
+            && self.operation == step.capability.operation
+            && self.resource.rsplit('/').next() == step.resource.rsplit('/').next()
+--- end

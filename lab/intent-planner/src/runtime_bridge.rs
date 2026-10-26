@@ -126,6 +126,33 @@ pub enum BridgeClass {
     Other,
 }
 
+#[cfg(test)]
+enum ForcedInvoke {
+    Reply(BridgeReply),
+    Fail,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_INVOKE: std::cell::RefCell<Option<ForcedInvoke>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn force_next_journal_reply(reply: BridgeReply) {
+    FORCED_INVOKE.with(|slot| *slot.borrow_mut() = Some(ForcedInvoke::Reply(reply)));
+}
+
+#[cfg(test)]
+pub fn force_next_journal_fail() {
+    FORCED_INVOKE.with(|slot| *slot.borrow_mut() = Some(ForcedInvoke::Fail));
+}
+
+#[cfg(test)]
+fn take_forced_invoke() -> Option<ForcedInvoke> {
+    FORCED_INVOKE.with(|slot| slot.borrow_mut().take())
+}
+
 pub fn classify(reply: &BridgeReply) -> BridgeClass {
     if reply.code == STORAGE_BRIDGE_CODE && reply.message == STORAGE_BRIDGE_GAP {
         BridgeClass::StorageBlocked
@@ -192,16 +219,26 @@ pub fn invoke_journal(
     )
     .map_err(|err| err.to_string())?;
     let response = &value["response"];
-    if response["type"] == "resource_result" {
-        return Ok(BridgeReply {
+    let reply = if response["type"] == "resource_result" {
+        BridgeReply {
             code: "stored".to_owned(),
             message: response.to_string(),
-        });
+        }
+    } else {
+        BridgeReply {
+            code: response["code"].as_str().unwrap_or("").to_owned(),
+            message: response["message"].as_str().unwrap_or("").to_owned(),
+        }
+    };
+    #[cfg(test)]
+    {
+        match take_forced_invoke() {
+            Some(ForcedInvoke::Reply(forced)) => return Ok(forced),
+            Some(ForcedInvoke::Fail) => return Err("forced journal fail".to_owned()),
+            None => {}
+        }
     }
-    Ok(BridgeReply {
-        code: response["code"].as_str().unwrap_or("").to_owned(),
-        message: response["message"].as_str().unwrap_or("").to_owned(),
-    })
+    Ok(reply)
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {

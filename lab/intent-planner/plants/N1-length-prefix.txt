@@ -1,0 +1,16 @@
+id: N1
+file: src/lib.rs
+test: newline_fields_do_not_collide
+--- old
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- new
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(field);
+    out.push('\n');
+}
+--- end

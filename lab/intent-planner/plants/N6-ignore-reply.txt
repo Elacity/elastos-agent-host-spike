@@ -1,0 +1,20 @@
+id: N6
+file: src/lib.rs
+test: approved_plan_refuses_a_stored_bus_reply
+--- old
+            let kind = match runtime_bridge::classify(&reply) {
+                runtime_bridge::BridgeClass::StorageBlocked => EffectKind::Blocked {
+                    missing: runtime_bridge::STORAGE_BRIDGE_GAP.to_owned(),
+                    code: reply.code,
+                },
+                runtime_bridge::BridgeClass::Unapproved | runtime_bridge::BridgeClass::Other => {
+                    return Err(Refuse::Bridge);
+                }
+            };
+--- new
+            let _ = runtime_bridge::classify(&reply);
+            let kind = EffectKind::Blocked {
+                missing: runtime_bridge::STORAGE_BRIDGE_GAP.to_owned(),
+                code: runtime_bridge::STORAGE_BRIDGE_CODE.to_owned(),
+            };
+--- end

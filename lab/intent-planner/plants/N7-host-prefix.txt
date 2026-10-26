@@ -1,0 +1,12 @@
+id: N7
+file: src/lib.rs
+test: prefix_host_id_stays_foreign
+--- old
+        if review.host_id != self.id {
+            return Err(Refuse::ForeignHost);
+        }
+--- new
+        if !self.id.starts_with(&review.host_id) {
+            return Err(Refuse::ForeignHost);
+        }
+--- end

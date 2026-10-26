@@ -1,6 +1,6 @@
 id: M7
 file: src/lib.rs
-test: blocked_journal_effect_comes_from_a_bus_round_trip
+test: blocked_journal_effect_comes_from_an_in_process_library_call
 --- old
             let reply = runtime_bridge::invoke_journal(
                 &grant.token,

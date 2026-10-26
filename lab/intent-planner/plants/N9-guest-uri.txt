@@ -1,0 +1,8 @@
+id: N9
+file: src/lib.rs
+test: execute_spends_the_allow_once_grant_at_the_lab_manager
+--- old
+                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
+--- new
+                .validate_journal_write(&grant.token, &grant.resource)
+--- end

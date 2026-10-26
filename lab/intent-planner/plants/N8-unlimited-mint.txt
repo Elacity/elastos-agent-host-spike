@@ -1,0 +1,8 @@
+id: N8
+file: src/runtime_bridge.rs
+test: execute_spends_the_allow_once_grant_at_the_lab_manager
+--- old
+            TokenConstraints::new(0, false, None, Some(1)),
+--- new
+            TokenConstraints::new(0, false, None, None),
+--- end

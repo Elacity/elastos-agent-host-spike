@@ -2,10 +2,12 @@ id: M6
 file: src/lib.rs
 test: execute_spends_the_allow_once_grant_at_the_lab_manager
 --- old
-            let agent = plan_agent(&step.resource);
+        for grant in &spent {
+            let agent = plan_agent(&grant.resource);
             self.grants
                 .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
                 .map_err(|_| Refuse::Bridge)?;
+        }
 --- new
-            let _agent = plan_agent(&step.resource);
+        let _ = &spent;
 --- end

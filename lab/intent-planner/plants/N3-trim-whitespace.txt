@@ -1,0 +1,19 @@
+id: N3
+file: src/lib.rs
+test: trailing_space_principal_is_a_different_plan
+--- old
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- new
+fn push_field(out: &mut String, field: &str) {
+    let field = field.trim();
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- end

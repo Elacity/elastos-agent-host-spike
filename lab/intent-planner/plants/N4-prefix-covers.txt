@@ -1,0 +1,12 @@
+id: N4
+file: src/lib.rs
+test: prefix_resource_does_not_cover_a_child_journal
+--- old
+fn exact_resource(granted: &str, requested: &str) -> bool {
+    granted.split('/').eq(requested.split('/'))
+}
+--- new
+fn exact_resource(granted: &str, requested: &str) -> bool {
+    requested.starts_with(granted) || granted.starts_with(requested)
+}
+--- end

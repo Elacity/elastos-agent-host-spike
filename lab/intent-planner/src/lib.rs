@@ -9,11 +9,13 @@
 //! `handle_remote_request_with_audit_dir`. That is not a spawned Runtime
 //! process.
 //!
-//! A rejected plan, a plan whose bytes changed after approval, a run list
-//! that is not the approved ordered list, a review from another Host, and a
-//! second use of the same grant all stop before a bridge call. A step the
+//! A rejected plan, a plan whose bytes changed after approval, a constructed
+//! plan whose length-prefixed bytes collide only if the prefix is dropped, a
+//! run list that is not the approved ordered list, a review from another Host
+//! (`host-1` is not `host-10`), and a second use of the same grant all stop
+//! before a grant is spent. A failed execute does not spend. A step the
 //! Runtime cannot express is BLOCKED with the missing capability. The public
-//! entry does not store a journal.
+//! entry does not store a journal. A `stored` bus reply fails the run.
 
 #[cfg(test)]
 mod plant;
@@ -167,7 +169,7 @@ impl Grant {
         self.step_id == step.id
             && self.action == step.capability.action
             && self.operation == step.capability.operation
-            && self.resource == step.resource
+            && exact_resource(&self.resource, &step.resource)
     }
 }
 
@@ -289,10 +291,6 @@ impl Host {
                 continue;
             }
             let grant = grant_that_covers(&allowed, step)?;
-            let agent = plan_agent(&step.resource);
-            self.grants
-                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
-                .map_err(|_| Refuse::Bridge)?;
             let reply = runtime_bridge::invoke_journal(
                 &grant.token,
                 &step.resource,
@@ -305,10 +303,7 @@ impl Host {
                     code: reply.code,
                 },
                 runtime_bridge::BridgeClass::Unapproved | runtime_bridge::BridgeClass::Other => {
-                    EffectKind::Denied {
-                        code: reply.code,
-                        message: reply.message,
-                    }
+                    return Err(Refuse::Bridge);
                 }
             };
             recorded.push(Effect {
@@ -319,10 +314,17 @@ impl Host {
                 grant_token: grant.token.clone(),
                 kind,
             });
-            spent.push(grant.token.clone());
+            spent.push(grant.clone());
+        }
+        for grant in &spent {
+            let agent = plan_agent(&grant.resource);
+            self.grants
+                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
+                .map_err(|_| Refuse::Bridge)?;
         }
         self.effects.extend(recorded);
-        self.used.extend(spent);
+        self.used
+            .extend(spent.iter().map(|grant| grant.token.clone()));
         Ok(())
     }
 
@@ -374,6 +376,10 @@ fn new_host_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     format!("host-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+fn exact_resource(granted: &str, requested: &str) -> bool {
+    granted.split('/').eq(requested.split('/'))
 }
 
 fn grant_that_covers<'a>(grants: &'a [Grant], step: &Step) -> Result<&'a Grant, Refuse> {
@@ -854,7 +860,7 @@ fn execute_spends_the_allow_once_grant_at_the_lab_manager() {
 }
 
 #[test]
-fn blocked_journal_effect_comes_from_a_bus_round_trip() {
+fn blocked_journal_effect_comes_from_an_in_process_library_call() {
     let plan = sample();
     let mut host = Host::new();
     assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
@@ -897,6 +903,158 @@ fn approval_for_one_principal_does_not_execute_for_another() {
     assert_eq!(error, Refuse::PlanAltered);
     assert_eq!(error.to_string(), "the plan was altered after approval");
     assert!(host.effects().is_empty());
+}
+
+#[test]
+fn newline_fields_do_not_collide() {
+    let left_run = Plan {
+        principal: "a\nb".to_owned(),
+        intent: "c".to_owned(),
+        steps: vec![journal_write_step(1, "ada")],
+    };
+    let right_run = Plan {
+        principal: "a".to_owned(),
+        intent: "b\nc".to_owned(),
+        steps: vec![journal_write_step(1, "ada")],
+    };
+    assert_ne!(left_run.canonical(), right_run.canonical());
+    let mut host = Host::new();
+    let review = host.review(&left_run, Choice::Approve);
+    let error = host
+        .execute(&review, &right_run, &right_run.steps)
+        .expect_err("newline field split");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn trailing_space_principal_is_a_different_plan() {
+    let plan = sample();
+    let mut spaced = plan.clone();
+    spaced.principal = "ada ".to_owned();
+    assert_ne!(plan.canonical(), spaced.canonical());
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let error = host
+        .execute(&review, &spaced, &spaced.steps)
+        .expect_err("trailing space");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn prefix_resource_does_not_cover_a_child_journal() {
+    let parent = Step {
+        id: 1,
+        capability: Capability {
+            action: Action::Write,
+            operation: "write".to_owned(),
+        },
+        resource: "localhost://Users/self/.AppData/Agents/ada/tasks".to_owned(),
+    };
+    let child = Step {
+        id: 1,
+        capability: Capability {
+            action: Action::Write,
+            operation: "write".to_owned(),
+        },
+        resource: runtime_bridge::guest_journal("ada"),
+    };
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![parent, child],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.grants().len(), 2);
+    assert!(
+        !review.grants()[0].covers(&plan.steps[1]),
+        "a parent-path grant must not cover the child journal"
+    );
+    assert!(review.grants()[0].covers(&plan.steps[0]));
+    assert!(review.grants()[1].covers(&plan.steps[1]));
+}
+
+#[test]
+fn approved_plan_refuses_a_stored_bus_reply() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    runtime_bridge::force_next_journal_reply(runtime_bridge::BridgeReply {
+        code: "stored".to_owned(),
+        message: "probe-stored-journal".to_owned(),
+    });
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("stored reply");
+    assert_eq!(error, Refuse::Bridge);
+    assert_eq!(error.to_string(), "the bus bridge did not answer");
+    assert!(host.effects().is_empty());
+    host.execute(&review, &plan, &plan.steps)
+        .expect("retry after a stored reply must still run");
+    assert_eq!(host.effects().len(), plan.steps.len());
+}
+
+#[test]
+fn prefix_host_id_stays_foreign() {
+    let plan = sample();
+    let mut first = Host::new();
+    first.id = "host-1".to_owned();
+    let review = first.review(&plan, Choice::Approve);
+    let mut other = Host::new();
+    other.id = "host-10".to_owned();
+    let error = other
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("prefix host id");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert_eq!(error.to_string(), "the review was minted by another host");
+    assert!(first.effects().is_empty());
+    assert!(other.effects().is_empty());
+}
+
+#[test]
+fn failed_execute_does_not_spend_the_grant() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let token = review.grants()[0].token().to_owned();
+    let resource = runtime_bridge::scoped_journal("ada");
+    runtime_bridge::force_next_journal_fail();
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("forced bus fail");
+    assert_eq!(error, Refuse::Bridge);
+    assert!(host.effects().is_empty());
+    host.execute(&review, &plan, &plan.steps)
+        .expect("retry after a failed execute");
+    assert_eq!(host.effects().len(), plan.steps.len());
+    let spent = host
+        .validate_journal_write(&token, &resource)
+        .expect_err("grant is spent only after confirmed success");
+    assert!(
+        spent.contains("use limit exceeded"),
+        "lab CapabilityManager after successful retry: {spent}"
+    );
+
+    let mut replay = Host::new();
+    let review = replay.review(&plan, Choice::Approve);
+    let token = review.grants()[0].token().to_owned();
+    replay
+        .validate_journal_write(&token, &resource)
+        .expect("spend before execute");
+    let error = replay
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("spent between approve and execute");
+    assert_eq!(error, Refuse::Bridge);
+    assert!(replay.effects().is_empty());
+    let again = replay
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("retry after failed execute");
+    assert_eq!(again, Refuse::Bridge);
+    assert_ne!(again, Refuse::GrantSpent);
 }
 
 #[cfg(test)]

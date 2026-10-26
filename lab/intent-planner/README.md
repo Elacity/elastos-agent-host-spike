@@ -55,6 +55,14 @@ A Review minted by one Host does not run on a second Host. The run returns
 Running the same approval a second time returns
 `the approved grant was already used`.
 
+A constructed plan `principal="a\nb"` / `intent="c"` does not execute as
+`principal="a"` / `intent="b\nc"`. `ada` and `ada ` are different plans.
+A grant for `.../Agents/ada/tasks` does not cover the child journal.
+A Review from `host-1` does not run on `host-10`.
+A bus reply `stored`, or any reply other than the explicit storage BLOCKED
+text, returns `the bus bridge did not answer` and does not spend the grant.
+A failed execute leaves the grant unused, so a retry is not `GrantSpent`.
+
 ## Rows
 
 None of these rows is a Runtime process. A spawned `elastos` binary over the
@@ -73,18 +81,22 @@ bus is NEEDS RUNTIME. See `RUNTIME-ASK.md`.
 | Second use `use limit exceeded` | lab `CapabilityManager::validate` | evidence (library) |
 | Second use on the public bus entry | in-process public function | BLOCKED. Same storage refusal first. Needs RA-4 |
 | Approved journal write stored | in-process public function | BLOCKED. Nothing is stored. Needs RA-4 |
-| BLOCKED journal effect from a bus round trip | `execute` → `invoke_journal` with an audit dir | evidence (library). The test reads `component.invoke` audit records |
+| BLOCKED journal effect from an in-process library call | `execute` → `invoke_journal` with an audit dir | evidence (library). The test reads `component.invoke` audit records. The recorded BLOCKED text is `classify` of the actual reply. A `stored` reply fails the run. |
 | Spawned `elastos` binary over the bus | not in this lab | NEEDS RUNTIME |
 
 ## What stays in this lab
 
 The planner table, the preview text, and the approval gate stay here. The gate
-is the plan binding: the Host that minted the Review, the approved bytes
-(including the principal), the exact ordered step list, `covers` for the
-exact resource and action, `validate_journal_write` on that Host's manager,
-and one use of the recorded token. The Runtime has no plan object. `UsersAI`
-notes stay BLOCKED. Session grants and standing mandates stay outside this
-check.
+is the plan binding: the Host that minted the Review, length-prefixed
+canonical bytes (including the principal, compared as exact bytes), the
+exact ordered step list, `covers` by exact path components, `validate_journal_write`
+on that Host's manager after the in-process library call confirms the
+explicit BLOCKED reply, and one use of the recorded token. A parent path
+does not cover a child journal. `host-1` does not match `host-10`. A
+`stored` bus reply, or any reply other than the explicit storage BLOCKED
+text, fails the run and does not spend the grant. The Runtime has no plan
+object. `UsersAI` notes stay BLOCKED (RA-5). A stored journal stays BLOCKED
+(RA-4). Session grants and standing mandates stay outside this check.
 
 `Grants::mint_journal_write` and `invoke_journal` stay callable as test
 helpers. They skip preview and `Host::execute`.
@@ -93,8 +105,10 @@ helpers. They skip preview and `Host::execute`.
 
 `plants/F-A15-approval.txt` replaces `approval_check` with a body that returns
 a fresh grant for every presented step. `plants/M1-approve-check.txt` through
-`plants/M8-principal.txt` each remove one guard. `model_planted_bugs_are_caught`
-requires every named test to fail, then restores `src/lib.rs`:
+`plants/M8-principal.txt` and `plants/N1-length-prefix.txt` through
+`plants/N10-used-before-bus.txt` each remove one guard.
+`model_planted_bugs_are_caught` requires every named test to fail, then
+restores the planted file:
 
 | Plant | Guard removed | Named test |
 | --- | --- | --- |
@@ -106,8 +120,18 @@ requires every named test to fail, then restores `src/lib.rs`:
 | M5 | `covers`; first grant used | `grant_lookup_uses_covers_for_the_exact_resource` |
 | M6 | `validate_journal_write` | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
 | M6-host | Review `host_id` | `unused_review_does_not_run_on_a_second_host` |
-| M7 | `invoke_journal`; hardcoded BLOCKED | `blocked_journal_effect_comes_from_a_bus_round_trip` |
+| M7 | `invoke_journal`; hardcoded BLOCKED | `blocked_journal_effect_comes_from_an_in_process_library_call` |
 | M8 | `principal` in `canonical()` | `approval_for_one_principal_does_not_execute_for_another` |
+| N1 | length prefix on `push_field` | `newline_fields_do_not_collide` |
+| N2 | `step.resource` in `canonical()` | `plan_altered_after_approval_is_refused` |
+| N3 | `push_field` trims whitespace | `trailing_space_principal_is_a_different_plan` |
+| N4 | `covers` treats a parent as a prefix | `prefix_resource_does_not_cover_a_child_journal` |
+| N5 | last path segment only; `step_id` dropped | `grant_lookup_uses_covers_for_the_exact_resource` |
+| N6 | bus reply ignored; hardcoded BLOCKED | `approved_plan_refuses_a_stored_bus_reply` |
+| N7 | `host_id` `starts_with` | `prefix_host_id_stays_foreign` |
+| N8 | mint with `max_uses: None` | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
+| N9 | validate the guest URI | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
+| N10 | mark `used` before the bus | `failed_execute_does_not_spend_the_grant` |
 
 ## Checks
 
