@@ -131,8 +131,10 @@ builds then differ.
 
 A lab bundle of this capsule is a folder holding this capsule's manifest as
 `capsule.json` and the module as `capsule.wasm`. Its name is
-cc-capsule-identity's **lab CID**, `lab-cid:sha256:<64 lowercase hex>`. The lab
-CID covers every regular file in the folder, so a file added beside the two
+cc-capsule-identity's **lab CID**: the CIDv1 SHA-256 UnixFS directory root of
+the bundle, printed as 59 characters that start `bafybei` (that lane's task
+018 swapped the printed form to this root; the rules are in
+`lab/capsule-identity/README.md`, "The encoding"). The lab CID covers every regular file in the folder, so a file added beside the two
 changes the name; the shared walk refuses links, FIFOs, sockets, devices and
 names that are not UTF-8.
 
@@ -153,13 +155,15 @@ Runtime's `CapsuleManifest` parse, then `validate()`). Callers treat a
 prefix, the hash and any CID codec to that lane. The encoding and the walk's
 rules are in `lab/capsule-identity/README.md` ("The encoding").
 
-The direction is cc-capsule-identity's too. Anders has proposed a CIDv1
-SHA-256 UnixFS directory root as the bundle identity; that lane owns it, and
-its reproducibility tests are the gate before that profile is frozen. It also
-owns the separate signed record kept outside the package. A future switch
-changes this one export to that lane's replacement function, with the same call
-contract and the same name, `bundle_identity`. This lane keeps one identity
-path: no UnixFS code, fallback or choice of rule of its own.
+The direction is cc-capsule-identity's too. Anders proposed a CIDv1 SHA-256
+UnixFS directory root as the bundle identity, and that lane's task 018 made
+`lab_cid` print it; `bundle_identity` needed no change. The root is still a
+prototype: that lane owns it, and its reproducibility tests are the gate before
+that profile is frozen. It also owns the separate signed record kept outside
+the package. This lane keeps one identity path: no UnixFS code, fallback or
+choice of rule of its own. When a test needs to read a printed lab CID, it uses
+that lane's one parse (`str::parse::<capsule_identity::LabCid>`), never a
+format check of its own.
 
 ### A lab CID, not a CID
 
@@ -168,17 +172,24 @@ published capsule by the CID its IPFS provider gets for the capsule archive
 (ADOPTION.md, the wc-003 discovery). No Runtime admission or launch path reads a
 lab CID.
 
-This lane's pinned vector, in `this_capsule_bundle_has_the_pinned_lab_cid`: the
-bundle of this capsule's 277-byte `capsule/capsule.json` and the 8-byte empty
-module `00 61 73 6d 01 00 00 00` is
+This lane's pinned vector, `MODULE_BUNDLE_LAB_CID` in `tests/common/mod.rs`,
+used by `this_capsule_bundle_has_the_pinned_lab_cid` and
+`tools_bundle_name_mode_prints_the_lab_cid`: the bundle of this capsule's
+277-byte `capsule/capsule.json` and the 8-byte empty module
+`00 61 73 6d 01 00 00 00` is
 
 ```
-lab-cid:sha256:dd6673dafaf1a3180310d3207cccc59b3e414b584b2d93002bb81c8d293a3c47
+bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy
 ```
 
-It was computed outside the lab code, with Python's `hashlib` over
-capsule-identity's README encoding, and then pinned. It also guards this lane:
-if the shared rule changes under it, this test fails.
+Task 024 recomputed it outside the lab code, with a `python3 -I` script
+(standard library only) written from cc-capsule-identity's README rules, not
+from its Rust code. The script first gave that lane's committed
+`content-sample` pin, and a different value after one byte of that fixture
+changed. It was pinned only because it equals what `bundle_identity` prints for
+the same folder. The script is not committed; LOG quotes its full text and the
+runs. It also guards this lane: if the shared rule changes under it, this test
+fails.
 
 ### This capsule's manifest
 
@@ -302,12 +313,14 @@ same limit.
 manifest beside `capsule.wasm` `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`:
 
 ```
-lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930
+bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
 ```
 
-`tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it. It was
-also recomputed outside the lab code, with Python's `hashlib` over
-capsule-identity's encoding. It is a lab CID, not the Runtime's CID.
+`tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it
+(`REFERENCE_LAB_CID`). Task 024 recomputed it with the same outside
+`python3 -I` script, over the bundle `tools/bundle` wrote on this Mac, and
+pinned it only because it equals what `bundle_identity` prints for that folder.
+It is a lab CID, not the Runtime's CID.
 
 **The test seam.** `run(mode, build_script)` takes the build script's path, so
 the tests pass small stand-in scripts from `tests/bundle_builds/` (one plants a
@@ -368,7 +381,8 @@ closed with a reason rather than a panic, and no test can reach it.
 **The value.** `VerifiedBundle` holds the checked bundle, which of its
 entries is the entrypoint (found by step 3, the one manifest read) and the
 audit's own import list, read through `cid()`, `entries()`, `entrypoint()` and
-`imports()`. `entrypoint()` returns the checked entry the manifest's
+`imports()`; since wc-009a also the grants the module does not import, through
+`unused_grants()`. `entrypoint()` returns the checked entry the manifest's
 `entrypoint` names, the module the audit read, so no caller reads the manifest
 again. Its fields are private, and it has no public constructor, no `&mut`
 access and no `Deserialize`, so a value exists only as `verify_checked` made
@@ -376,7 +390,9 @@ it. wc-005a's runner (task 014) writes `entrypoint()`'s bytes.
 
 **The checked bytes, never the folder again.** The audit reads the module
 bytes the signed name covers, from the checked value. The verifier reads no
-file by a path. If the folder changes after `checked_bundle`, `verify_checked`
+bundle file by a path; its one file read is the caller's lab grants file, in
+`read_grants` (wc-009a, below), which is never part of the bundle. If the
+folder changes after `checked_bundle`, `verify_checked`
 on the held value still judges the held bytes, and `verify_bundle` on the
 changed folder is refused with the identity lane's mismatch reason.
 
@@ -389,9 +405,9 @@ inside each test. If a file form is ever wanted, cc-capsule-identity owns it.
 
 **Granted imports.** The module's own import section is the declaration
 (Rong, 26 Oct, ruling (c)). The granted list goes to `audit` unchanged, and the
-result is exactly the module's imports. Ordinary callers pass an empty list
-until wc-009, which will pass the lab grants file's list to this same call;
-only the grant tests here pass a non-empty list. The granted list is a lab
+result is exactly the module's imports. Since wc-009a (task 020) the two-engine
+`run` passes the list `read_grants` read from the lab grants file to this same
+call ("Granted imports only (wc-009a)", below). The granted list is a lab
 stand-in, not admission.
 
 **Claim scope.** An offline lab check, on this one Mac with test keys only,
@@ -487,6 +503,7 @@ pub struct RunInput<'a> {
     pub bundle: &'a Path,                       // the bundle folder
     pub signature: Option<&'a NameSignature>,   // in memory only
     pub accepted: &'a [String],                 // accepted signer DIDs
+    pub granted: &'a [DeclaredImport],          // wc-009a: from read_grants
     pub wasmtime: &'a Path,                     // absolute program paths
     pub wasmer: &'a Path,
     pub work_root: &'a Path,
@@ -497,10 +514,10 @@ A library function; there is no command, no binary and no signature file. Every
 input is in the struct; nothing is read from the environment. In order, the
 first refusal is the answer:
 
-1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, &[])`
-   is called once, with no grants. A refusal comes back unchanged as
-   `TwoEngineRefusal::Verify`, printing exactly as the verifier prints it;
-   nothing is written and no engine is started;
+1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, input.granted)`
+   is called once, with the caller's granted imports unchanged (wc-009a). A
+   refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
+   as the verifier prints it; nothing is written and no engine is started;
 2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
    (the next section). A refusal comes back as `TwoEngineRefusal::Version`, and
    no module run starts;
@@ -522,7 +539,8 @@ outputs. Two successful runs with different stdout are refused with
 On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
 was checked against, taken from the verified value, never by naming the folder
 again), both raw stdouts, `wasmtime()` and `wasmer()` (or `stdout(engine)`), and
-from task 016 each engine's observed `version(engine)` and `status(engine)`.
+from task 016 each engine's observed `version(engine)` and `status(engine)`,
+and from task 020 `linked()` and `unused_grants()`, the verifier's own lists.
 Its fields are private, so only `run` makes one. `run` writes no receipt; the
 caller writes one with `receipt::write_receipt` (next section).
 
@@ -566,7 +584,7 @@ on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`):
 
 ```
 schema: wc-005.run-receipt/v1
-bundle: lab-cid:sha256:9ca715378b264e54614d2a231ee4d8e58e6a145873c55291fd02066aaf57f930
+bundle: bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse
 function: digest
 argument: 1592590337
 wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"
@@ -578,7 +596,10 @@ wasmer_stdout: "230101071268130872\n"
 ```
 
 `bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
-pinned lab CID of this capsule's bundle. The engine versions sit beside it and
+pinned lab CID of this capsule's bundle. The run above was before task 024, so
+its receipt printed the old lab CID form; the `bundle` line here shows the same
+bundle's lab CID in the current form, the reference value above (same
+manifest, same `capsule.wasm`). The other lines are that run's. The engine versions sit beside it and
 are no part of it: the same bundle run under other versions has the same name
 (P15: the hash names the content; versions are provenance beside it).
 `function` and `argument` are the runner's own `DIGEST_EXPORT` and
@@ -631,6 +652,81 @@ The tests, in `tests/runtime_abi.rs`:
   bytes with the same manifest-parse reason. This is the guard against
   inventing a field, and the evidence for the gap "No summary of Wasm imports
   in the manifest".
+
+## Granted imports only (wc-009a)
+
+```rust
+wasm_capsule_tools::verify::read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal>
+```
+
+**The link rule, in Rong's words (W2 (c), through Flint, 26 Oct 08:27).** "The
+module's own import section in the signed capsule.wasm IS the declaration; it is
+in the lab-cid closure and covered by the signature, and cx-wasm-audit's cwa-001
+import list is the one reader for it (P10). Link rule: link an import only if it
+is in the signed module AND in the lab grants file; the grants file stays
+outside the bundle, labelled 'lab stand-in, not admission'. No unsigned
+declaration file."
+
+So there is no declaration file here. The declaration is the module's own
+import section, inside `capsule.wasm`, so inside the lab CID and under the
+signature. The grants file is the caller's input, like the bundle path; it sits
+outside the bundle and is never part of the lab CID.
+
+**The grants file.** JSON, read once with `fs::read` and parsed from memory,
+exactly:
+
+```json
+{"schema": "wc-009.lab-grants/v1", "label": "lab stand-in, not admission", "imports": [{"module": "env", "name": "f"}]}
+```
+
+An empty `imports` list is valid. The label is exactly "lab stand-in, not
+admission": the file stands in for the Runtime's grant decision
+(https://github.com/Elacity/elastos-runtime/issues/464), and is never
+admission. `read_grants` returns the grants in file order. It is the one grants
+reader and lives in `tools/src/verify.rs`, beside the verifier input it feeds;
+no other code in the tools crate reads grants or imports. Each refusal has its
+own reason, after `<path>: `:
+
+- `the grants file cannot be read: <OS error>`;
+- `the grants file is not JSON: <serde_json's reason>`;
+- `the grants file is not a JSON object`;
+- `the grants file has an unknown key "<key>"`;
+- `the grants file has no "<schema|label|imports>" key`;
+- `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v1"`;
+- `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
+- `the grants file's imports is not a list`;
+- `grant <index> is not an object of exactly two strings, module and name`;
+- `the grant <module>.<name> is listed twice`.
+
+A key written twice in one JSON object is not refused: `serde_json` keeps its
+last value, so the file reads as that value. This is a known limit of the lab
+reader, not a claim.
+
+**How it links.** The caller passes `read_grants`'s list as
+`RunInput::granted`, and `run` passes it unchanged to its one `verify_bundle`
+call, so to the verifier's one `audit(module, granted)` call. There is no
+second import check, parser or walk. A module with an import that is not
+granted is refused there, `undeclared import <module>.<name>`, and never
+reaches an engine: no run folder is made and neither engine is started, not
+even for `--version`. On success the run reports:
+
+- `linked()`: the audit's own list, the imports both in the signed module and
+  granted, in section order;
+- `unused_grants()`: the grants the module does not import, in file order.
+  They link nothing; they are reported. The verifier works them out once from
+  the audit's list and the grants, with no second import read.
+
+**Allowed through, not hosted (wc-009b).** The runner gives the engines no host
+function of its own yet. A granted import is only let through verification; no
+engine is given a function for it. This capsule has zero imports, so its run
+needs none. Hosting a granted import in both engines is wc-009b, after this
+task, and starts with a read-only discovery.
+
+**Who decides (Q8, Flint, 26 Oct 10:40).** The Runtime's launch path verifies
+the accepted record, the selected platform variant and the installed contents.
+Those checks are Runtime work, outside this lane. The grants file is "lab
+stand-in, not admission" everywhere: this lane decides no admission, launch or
+publisher trust, and its lab name is not the Runtime's CID.
 
 ## Named tests
 
@@ -729,20 +825,36 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   before unsigned, unsigned before the audit, the signature before the
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
-  field, exactly six public functions (`verify_checked`, `verify_bundle` and
-  the four accessors), no `&mut self`, no `Deserialize`, `Default` or trait
-  impl for the value, and one literal that makes it, in `verify_checked`.
+  field, exactly eight public functions (`verify_checked`, `verify_bundle`,
+  `read_grants` and the five accessors, `unused_grants()` among them), no
+  `&mut self`, no `Deserialize`, `Default` or trait impl for the value, and one
+  literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
-  `verify_checked_signature` once and `audit` once, parses a manifest once
-  (one `from_slice`, one call of `manifest_entrypoint`), uses neither
-  `verify_name_signature` nor `audit_component`, `verify_bundle` only walks
-  and delegates, and `entrypoint()` reads no manifest.
+  `verify_checked_signature` once and `audit` once, parses JSON twice (one
+  `from_slice` in `manifest_entrypoint`, one in `parse_grants`), calls
+  `manifest_entrypoint` once, reads one file with `fs::read` (in
+  `read_grants`), calls `parse_grants` once and `read_grants` never (the caller
+  does), uses neither `verify_name_signature` nor `audit_component`,
+  `verify_checked` reads no grants, `verify_bundle` only walks and delegates,
+  and `entrypoint()` reads no manifest.
 - `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
 - `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
   `tools/src`, comments stripped, name no `wasmparser`.
 - `verifier_reads_no_bundle_file_by_path` — the verifier, comments stripped,
   has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
-  `read_to_end`.
+  `read_to_end` outside `read_grants`, and `read_grants` has exactly one
+  `fs::read` and none of the others.
+- `grants_file_refusals_keep_their_reason` (wc-009a) — `GRANTS_SCHEMA` and
+  `GRANTS_LABEL` are exactly `wc-009.lab-grants/v1` and `lab stand-in, not
+  admission`; an empty list and two grants read in file order; a missing file
+  keeps `NotFound` and its OS text; and 19 malformed files (not JSON, a list or
+  a string document, an unknown key, each missing key, another or a number
+  schema, another label and one with a trailing space, imports as an object,
+  six bad entries, the same pair twice) each give their exact text.
+- `unused_grants_excludes_linked_and_preserves_file_order` (wc-009a) — the
+  module that imports `env.f`, granted `z.last`, `env.f`, `a.first`:
+  `imports()` is `[env.f]`, `unused_grants()` is `[z.last, a.first]`, and the
+  lab CID and the entries are the bundle's own two files.
 - `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
   --cached --others --exclude-standard -z` lists in the lane: no `.key` or
   `.seed` name, no PEM private-key line, no 32-byte file that is not UTF-8.
@@ -793,8 +905,10 @@ puts it under the `/var` link):
   An engine not found prints `SKIPPED` and gives no result, never a PASS.
 - `runner_uses_only_explicit_inputs` — the runner's source, comments
   stripped: no environment read, no file read, no manifest or module parse, no
-  walk or lower-level verify call, exactly one `verify_bundle` call (task 015's
-  `run`, with no grants), and `entrypoint()` is its one source of module bytes.
+  walk or lower-level verify call, no grants read or parse, exactly one
+  `verify_bundle` call (task 015's `run`, passing `input.granted`, task 020),
+  `input.granted` used nowhere else, and `entrypoint()` is its one source of
+  module bytes.
 - `runner_reuses_shared_writer` — the runner writes through
   `bundle::write_new_file` once and has no writer of its own (`OpenOptions`,
   `fs::write`, `create_new` and the like).
@@ -878,18 +992,46 @@ Task 019's two:
   opens "## Falsifiers" exactly once, and fails naming both numbers when they
   differ.
 
+wc-009a's run tests (task 020), in `tests/run.rs`. Each signs its bundle with a
+fresh key, writes a lab grants file beside the bundle, reads it with
+`read_grants` and runs `run` on task 019's counting stand-ins. "Each engine
+once" is exactly one `--version` query and one module run per engine; a refusal
+is zero of both:
+
+- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes, with an
+  empty grants file: it runs, each engine once, `linked()` and
+  `unused_grants()` are empty.
+- `zero_grants_zero_imports_runs_on_both_real_engines` — the same on the real
+  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`, nothing is
+  linked. If either is not found it prints `SKIPPED`, never a PASS.
+- `declared_not_granted_import_refuses_instantiation_by_name` — the signed
+  module that imports `env.f`, with an empty grants file: refused as
+  `TwoEngineRefusal::Verify(VerifyRefusal::Audit(Undeclared { module: "env",
+  name: "f" }))`, text exactly `undeclared import env.f`; no run folder, and
+  zero starts of either kind.
+- `valid_signature_with_empty_grants_file_links_nothing` — the zero-import
+  8-byte module, validly signed, with an empty grants file: `linked()` is empty.
+- `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`
+  (Rong's rename of `granted_but_undeclared_is_refused`) — the zero-import
+  module, grants `[env.f]`: it runs, `linked()` is empty, `unused_grants()` is
+  exactly `[env.f]`.
+- `granted_import_is_linked` — the module that imports `env.f`, grants
+  `[env.f]`: it passes verification, `linked()` is exactly `[env.f]`, each
+  engine once, and both run folders hold the verified module.
+
 ## Falsifiers
 
-`falsifiers.json` holds 122 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 139 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016) and two task 019. Each requires all its named tests to fail
-at an assertion. `readme_falsifier_total_matches_falsifiers_json` holds the
-total to the file.
+wc-005c (task 016), two task 019 and 17 wc-009a (task 020). Each requires all
+its named tests to fail at an assertion.
+`readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 
-Two kinds of evidence, kept apart. Runner-caught: 58, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016 and 019: 1 + 1 + 23 + 11 +
-20 + 2), each run by the canonical runner with its summary line quoted.
+Two kinds of evidence, kept apart. Runner-caught: 75, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019 and 020: 1 + 1 + 23 +
+11 + 20 + 2 + 17), each run by the canonical runner with its summary line
+quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1169,3 +1311,44 @@ killed run cannot restore it for F-WC5-START-TWICE; `README.md` is one:
 - F-WC-README-COUNT — the total in this section's first sentence becomes one
   less than the file holds (`readme_falsifier_total_matches_falsifiers_json`,
   at its comparison).
+
+wc-009a's 17 (task 020), runner-caught (the canonical runner's summary line is
+in LOG.md, task 020). Every anchor is in `tools/src/verify.rs`, a recovery
+target:
+
+- F-WC9-LINK-ALL — the verifier drops the audit's `Undeclared` refusal, so a
+  module with an import that is not granted reaches both engines
+  (`declared_not_granted_import_refuses_instantiation_by_name`).
+- F-WC9-GRANT-INJECT — the linked list is the grants list, not the audit's
+  result, so a grant for an import the module does not have is reported as
+  linked (`grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`).
+- F-WC9-GRANTS-LABEL — the reader stops checking the label
+  (`grants_file_refusals_keep_their_reason`).
+- F-WC9-GRANTS-SCHEMA, -UNKNOWN-KEY, -IMPORTS-NOT-LIST, -ENTRY-EXTRA-KEY,
+  -ENTRY-NOT-STRING and -DUPLICATE — the reader drops one more check, so a
+  wrong schema, an unknown key, a non-list `imports` (read as empty), an entry
+  with a third key, a number name (taken as its JSON text) or a pair granted
+  twice is read (`grants_file_refusals_keep_their_reason`).
+- F-WC9-GRANTS-CAUSE, -NOT-JSON, -NOT-OBJECT and -MISSING-KEY — an unreadable
+  file loses its OS cause, a file that is not JSON is read as no grants, a
+  document that is not an object is refused as a missing key, or a missing key
+  is read as null and refused as a wrong value
+  (`grants_file_refusals_keep_their_reason`).
+- F-WC9-UNUSED-KEEPS-USED and -UNUSED-REORDER — the unused grants keep the
+  linked one, or come back in reverse file order
+  (`unused_grants_excludes_linked_and_preserves_file_order`).
+- F-WC9-GRANTS-READ-TWICE and -PARSE-TWICE — the reader reads the file, or
+  parses its bytes, a second time (`verifier_has_one_check_path`, and for the
+  read also `verifier_reads_no_bundle_file_by_path`).
+
+Task 020 also re-anchored four entries, each the same bug as before:
+F-WC5a, F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (`run` now passes
+`input.granted`, not `&[]`, to `verify_bundle`; F-WC5a, which removes the
+verified value, gains a fourth edit that fills `linked` and `unused_grants`
+empty, so it still builds) and F-WC4-SEALED-NEW (the
+planted constructor fills the new `unused` field, so it still compiles and is
+caught by `verified_bundle_is_sealed`). That `run` forwards `input.granted` is
+held by `runner_uses_only_explicit_inputs` and `granted_import_is_linked`; its
+planted bug (`&[]` in place of `input.granted`, in `tools/src/run.rs`) has no
+`falsifiers.json` entry, because `run.rs` is not a recovery target (ask R2), and
+is hand-proven, pending R1 (LOG.md, task 020), outside every count above.

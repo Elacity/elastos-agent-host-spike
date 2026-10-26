@@ -198,8 +198,10 @@ profile before the exec, so the copy is refused with exit 71 and the `execvp()`
 `Operation not permitted` line, the `init` request gets no answer, and the
 storage root keeps only the copy with its bytes unchanged. The second is its
 control: the same fixture with `PROVIDER_EXECUTABLE` bound to the copy and the
-copy started answers `init` and `get_did` and exits 0 after `shutdown`, so the
-binding is the only difference between the two runs.
+copy started answers `init` and `get_did` and exits 0 after `shutdown`, and,
+like the refused run, leaves the copy's bytes unchanged: the test reads them
+before the spawn and checks them again after `shutdown`, so the binding is the
+only difference between the two runs.
 
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
@@ -355,6 +357,10 @@ OS is read, so that run is no evidence for the OS argument.
 - Append a write grant on `STORAGE_PARENT` after the storage-root rule (DID28):
   `planted_file_beneath_storage_parent_is_neither_read_nor_written` fails on
   its write half because that `set_nickname` succeeds; the read half passes.
+- Append one byte to the provider's own executable in the `Shutdown` arm when
+  it lies beneath the storage root (DID29):
+  `bound_copy_serves_under_profile` fails on its bytes assertion because the
+  served run changes the copy under `STORAGE_ROOT`.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
