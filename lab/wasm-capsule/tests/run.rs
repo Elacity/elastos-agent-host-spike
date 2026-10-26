@@ -56,9 +56,19 @@ const CHANGED_MODULE: &[u8] = b"\0asm\x01\0\0\0\0\x01\x00";
 /// Both engines, in a fixed order.
 const ENGINES: [Engine; 2] = [Engine::Wasmtime, Engine::Wasmer];
 
+/// The shell line that sets `module` to a stand-in's second-to-last
+/// argument: the module path, which comes just before the fixed argument
+/// whatever memory cap arguments come before it (wc-010b).
+macro_rules! module_argument {
+    () => {
+        "for arg in \"$@\"; do module=\"$last\"; last=\"$arg\"; done\n"
+    };
+}
+const MODULE_ARGUMENT: &str = module_argument!();
+
 /// A stand-in engine that prints the bytes of the module it was given (its
-/// fourth argument).
-const CAT_MODULE: &str = "#!/bin/sh\ncat \"$4\"\n";
+/// second-to-last argument).
+const CAT_MODULE: &str = concat!("#!/bin/sh\n", module_argument!(), "cat \"$module\"\n");
 
 /// A stand-in engine that prints each argument on its own line.
 const PRINT_ARGS: &str = "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n";
@@ -489,6 +499,9 @@ fn runner_io_refusals_keep_path_and_cause() {
 
 /// An **argv proof**, not a behaviour proof: it shows the exact command line
 /// each engine gets, and that it carries no folder, env or network flag.
+/// wc-010b: `wasmtime` also gets the memory cap for this capsule's manifest,
+/// which declares no `resources`, so the Runtime's default 64 MB = 64 × 2^20
+/// = 67108864 bytes; `wasmer`'s argv is unchanged (its CLI has no cap flag).
 #[test]
 fn runner_passes_no_directory_env_or_network_flags() {
     let (_bundle, value) = fixture();
@@ -500,16 +513,25 @@ fn runner_passes_no_directory_env_or_network_flags() {
     assert_eq!(DIGEST_ARGUMENT, FIXED_INPUT.to_string());
     assert_eq!(DIGEST_ARGUMENT, "1592590337");
 
+    assert_eq!(value.memory_mb(), 64, "this capsule's declared memory_mb");
+
     for engine_kind in ENGINES {
         let stdout = ran(run_engine(&value, engine_kind, &engine, &root));
         let module = root.join(engine_kind.name()).join("module.wasm");
         let argv = String::from_utf8(stdout).expect("the argv is UTF-8");
+        let cap = match engine_kind {
+            Engine::Wasmtime => "-W\nmax-memory-size=67108864,trap-on-grow-failure=y\n",
+            Engine::Wasmer => "",
+        };
         assert_eq!(
             argv,
-            format!("run\n--invoke\ndigest\n{}\n1592590337\n", module.display()),
+            format!(
+                "run\n--invoke\ndigest\n{cap}{}\n1592590337\n",
+                module.display()
+            ),
             "{engine_kind}: the argv"
         );
-        let module_argument = argv.lines().nth(3).expect("the module argument");
+        let module_argument = argv.lines().rev().nth(1).expect("the module argument");
         assert!(
             module_argument.starts_with('/'),
             "{engine_kind}: the module argument could be read as an option"
@@ -860,7 +882,7 @@ fn recording(folder: &Path, name: &str, log: &Path, output: &str) -> PathBuf {
         log = log.display()
     );
     let body = format!(
-        "printf 'start {name} %s\\n' \"$4\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
+        "{MODULE_ARGUMENT}printf 'start {name} %s\\n' \"$module\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
         log = log.display()
     );
     engine(folder, name, &version, &body)
@@ -1253,7 +1275,7 @@ fn counting(folder: &Path, name: &str) -> PathBuf {
         folder,
         name,
         &format!("printf 'version\\n' >> \"$0.starts\"\nprintf '{name} 0.0.0-stand-in\\n'\n"),
-        "printf 'module %s\\n' \"$4\" >> \"$0.starts\"\nprintf 'same\\n'\n",
+        &format!("{MODULE_ARGUMENT}printf 'module %s\\n' \"$module\" >> \"$0.starts\"\nprintf 'same\\n'\n"),
     )
 }
 
@@ -2003,4 +2025,251 @@ fn granted_import_is_linked() {
             "{engine_kind}: not the verified importing module"
         );
     }
+}
+
+/// wc-010b: a hand-written core module, as bytes: one memory of 1 page with no
+/// maximum, no import, and one export, `digest (i32) -> i32`, that ignores its
+/// argument and runs `memory.grow` by the constant `delta` (two signed LEB128
+/// bytes), returning what `memory.grow` returns: the old size in pages, 1, on
+/// success, or -1 on failure.
+fn grow_module(delta: [u8; 2]) -> Vec<u8> {
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    // Type section: one type, (i32) -> (i32).
+    module.extend_from_slice(&[0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    // Function section: one function, of type 0.
+    module.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);
+    // Memory section: one memory, minimum 1 page, no maximum.
+    module.extend_from_slice(&[0x05, 0x03, 0x01, 0x00, 0x01]);
+    // Export section: "digest", function 0.
+    module.extend_from_slice(&[0x07, 0x0a, 0x01, 0x06]);
+    module.extend_from_slice(b"digest");
+    module.extend_from_slice(&[0x00, 0x00]);
+    // Code section: no locals; i32.const delta; memory.grow 0; end.
+    module.extend_from_slice(&[0x0a, 0x09, 0x01, 0x07, 0x00, 0x41]);
+    module.extend_from_slice(&delta);
+    module.extend_from_slice(&[0x40, 0x00, 0x0b]);
+    module
+}
+
+/// 1023 pages as signed LEB128: from 1 page to exactly 1024 pages, 64 MB, the
+/// declared cap.
+const GROW_TO_THE_CAP: [u8; 2] = [0xff, 0x07];
+
+/// 1024 pages as signed LEB128: from 1 page to 1025 pages, 67174400 bytes, one
+/// page past the declared cap.
+const GROW_PAST_THE_CAP: [u8; 2] = [0x80, 0x08];
+
+/// This capsule's manifest with `"resources": {"memory_mb": <memory_mb>}`
+/// added, the Runtime's own field; nothing else changes.
+fn manifest_with_memory_mb(memory_mb: u32) -> Vec<u8> {
+    let manifest = std::str::from_utf8(CAPSULE_MANIFEST).expect("the manifest is UTF-8");
+    let end = "\"entrypoint\": \"capsule.wasm\"\n}";
+    assert_eq!(manifest.matches(end).count(), 1, "the manifest's last key");
+    manifest
+        .replace(
+            end,
+            &format!(
+                "\"entrypoint\": \"capsule.wasm\",\n  \"resources\": {{\"memory_mb\": {memory_mb}}}\n}}"
+            ),
+        )
+        .into_bytes()
+}
+
+/// wc-010b: the cap on `wasmtime`'s argv is the manifest's declared
+/// `resources.memory_mb` × 2^20, read, not fixed: a bundle that declares 2 MB
+/// gives `max-memory-size=2097152`, and one that declares `u32::MAX` gives
+/// 4503599626321920 bytes, which only a `u64` product holds. `wasmer`'s argv
+/// gets no cap. Stand-in engines; an argv proof.
+#[test]
+fn declared_memory_cap_comes_from_the_manifest() {
+    let engines = TempDir::new("run10-cap-engines");
+    let engine = stand_in(&canonical(&engines), "print-args", PRINT_ARGS);
+    let tmp = TempDir::new("run10-cap");
+    let root = canonical(&tmp);
+
+    for (memory_mb, bytes) in [(2, "2097152"), (u32::MAX, "4503599626321920")] {
+        let bundle = root.join(format!("bundle-{memory_mb}"));
+        fs::create_dir(&bundle).expect("create the bundle folder");
+        fs::write(
+            bundle.join("capsule.json"),
+            manifest_with_memory_mb(memory_mb),
+        )
+        .expect("write capsule.json");
+        fs::write(bundle.join("capsule.wasm"), MODULE).expect("write capsule.wasm");
+        let key = fresh_key();
+        let sig = sign_bundle(&key, &bundle).expect("sign the bundle");
+        let value = verify_bundle(&bundle, Some(&sig), &[did(&key)], &[])
+            .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"));
+        assert_eq!(value.memory_mb(), memory_mb, "the declared memory_mb");
+
+        let work = work_root(&root, &format!("work-{memory_mb}"));
+        for engine_kind in ENGINES {
+            let stdout = ran(run_engine(&value, engine_kind, &engine, &work));
+            let module = work.join(engine_kind.name()).join("module.wasm");
+            let cap = match engine_kind {
+                Engine::Wasmtime => {
+                    format!("-W\nmax-memory-size={bytes},trap-on-grow-failure=y\n")
+                }
+                Engine::Wasmer => String::new(),
+            };
+            assert_eq!(
+                String::from_utf8(stdout).expect("the argv is UTF-8"),
+                format!(
+                    "run\n--invoke\ndigest\n{cap}{}\n1592590337\n",
+                    module.display()
+                ),
+                "{engine_kind}, memory_mb {memory_mb}: the argv"
+            );
+        }
+    }
+}
+
+/// The real `wasmtime` on PATH, by an absolute path, or `None` after a
+/// SKIPPED line: an engine not found gives no result, never a PASS.
+fn real_wasmtime(test: &str) -> Option<PathBuf> {
+    let program = find_engine(Engine::Wasmtime.name());
+    if program.is_none() {
+        eprintln!("SKIPPED: wasmtime not found on PATH; {test} needs it (no result, not a PASS)");
+    }
+    program
+}
+
+/// wc-010b, real engine: a signed, verified module that grows its memory by
+/// 1023 pages, to exactly the declared 64 MB, runs under the cap on
+/// `wasmtime`, and `memory.grow` returns the old size, 1.
+#[test]
+fn capsule_grows_within_the_declared_cap_on_wasmtime() {
+    let Some(program) = real_wasmtime("the within-cap run") else {
+        return;
+    };
+    let tmp = TempDir::new("run10-within");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &grow_module(GROW_TO_THE_CAP));
+    assert_eq!(value.memory_mb(), 64);
+    let work = work_root(&root, "work");
+
+    let stdout = ran(run_engine(&value, Engine::Wasmtime, &program, &work));
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "1\n",
+        "wasmtime ({}): the grow to the cap did not succeed",
+        program.display()
+    );
+    eprintln!("PASS: wasmtime grew to the declared 64 MB cap and printed 1");
+}
+
+/// wc-010b, real engine: a signed, verified module that grows its memory by
+/// 1024 pages, one page past the declared 64 MB, is refused on `wasmtime`: the
+/// grow traps, so the engine fails with its trap on stderr.
+#[test]
+fn memory_grow_past_the_declared_cap_traps_on_wasmtime() {
+    let Some(program) = real_wasmtime("the past-cap run") else {
+        return;
+    };
+    let tmp = TempDir::new("run10-past");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &grow_module(GROW_PAST_THE_CAP));
+    assert_eq!(value.memory_mb(), 64);
+    let work = work_root(&root, "work");
+
+    let refusal = refused(run_engine(&value, Engine::Wasmtime, &program, &work));
+    match &refusal.reason {
+        Reason::EngineFailed {
+            engine,
+            status,
+            stderr,
+        } => {
+            assert_eq!(*engine, Engine::Wasmtime);
+            assert!(!status.success(), "a failed run exited 0");
+            assert!(
+                stderr.contains("forcing trap when growing memory to 67174400 bytes"),
+                "wasmtime ({}) did not trap on the grow past the cap: {stderr}",
+                program.display()
+            );
+        }
+        _ => panic!("not an engine failure: {refusal}"),
+    }
+    eprintln!("PASS: wasmtime trapped on the grow past the declared 64 MB cap");
+}
+
+/// wc-010b, real engines: the capsule `tools/build` makes, through `run` on
+/// the real `wasmtime` and `wasmer`, still prints `FIXED_OUTPUT` on both, with
+/// the cap on `wasmtime`'s argv. The cap is seen by a recording program at
+/// `wasmtime`'s path: a shell that appends its arguments to a file and then
+/// `exec`s the real `wasmtime`, so the shell is replaced, one process, never
+/// an engine inside an engine. An engine not found prints SKIPPED and gives no
+/// result.
+#[test]
+fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
+    let mut missing = Vec::new();
+    let mut programs = Vec::new();
+    for engine_kind in ENGINES {
+        match find_engine(engine_kind.name()) {
+            Some(program) => programs.push(program),
+            None => missing.push(engine_kind.name()),
+        }
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "SKIPPED: {} not found on PATH; the capped built-capsule run needs both (no result, not a PASS)",
+            missing.join(" and ")
+        );
+        return;
+    }
+    let tmp = TempDir::new("run10-built");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(&root, "bundle", &built, &key);
+    let accepted = [did(&key)];
+    let engines = work_root(&root, "engines");
+    let argv_log = engines.join("wasmtime.argv");
+    let wasmtime = stand_in(
+        &engines,
+        "wasmtime",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
+            argv_log.display(),
+            programs[0].display()
+        ),
+    );
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &[],
+        wasmtime: &wasmtime,
+        wasmer: &programs[1],
+        work_root: &work,
+    }));
+    let expected = format!("{FIXED_OUTPUT}\n");
+    for engine_kind in ENGINES {
+        assert_eq!(
+            passed.stdout(engine_kind),
+            expected.as_bytes(),
+            "{engine_kind}"
+        );
+    }
+    let module = work.join("wasmtime").join("module.wasm");
+    assert_eq!(
+        fs::read_to_string(&argv_log).expect("read wasmtime's recorded argv"),
+        format!(
+            "--version\nrun\n--invoke\ndigest\n-W\nmax-memory-size=67108864,trap-on-grow-failure=y\n{}\n1592590337\n",
+            module.display()
+        ),
+        "wasmtime's argv: its version query, then its capped module run"
+    );
+    eprintln!(
+        "PASS: under the declared 64 MB cap on wasmtime, both engines printed {FIXED_OUTPUT}"
+    );
+}
+
+/// wc-010b: wasmer 7.5.0's CLI has no memory cap flag, so no cap is claimed
+/// for it. This test is never run and never counted as a PASS.
+#[test]
+#[ignore = "SKIPPED: wasmer 7.5.0 has no memory cap flag in wasmer run --help or wasmer --help (wc-010a); no cap is claimed for wasmer"]
+fn memory_cap_on_wasmer_is_skipped() {
+    panic!("SKIPPED: no memory cap is claimed for wasmer");
 }

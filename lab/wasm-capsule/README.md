@@ -735,7 +735,8 @@ publisher trust, and its lab name is not the Runtime's CID.
 
 Read-only discovery for wc-010 ("fixed bare memory with a host-enforced
 limit"). No runner, argv, receipt, test or `falsifiers.json` change; `run.rs`
-still passes no memory flag. Facts are what each engine's CLI does on this Mac
+still passes no memory flag. (26 Oct, task 027: no longer so; wc-010b gives
+`wasmtime` the cap from the manifest, see "Memory cap (wc-010b)" below.) Facts are what each engine's CLI does on this Mac
 only, at base `a5b4e8a105fca181469ce15b2b84c03b86f0266d`, with
 `/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
 2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0`. Each
@@ -849,6 +850,51 @@ the capsule's linear memory:
 Both runs grew linear memory to 64 MB, yet each process's resident size is
 below that: untouched pages are not resident. So this number is no measure of
 the capsule's declared or used linear memory.
+
+## Memory cap (wc-010b)
+
+[Proposal] The claim, exactly: "a self-contained capsule in a fixed flat space
+with a host-enforced cap", on wasmtime only, on this one Mac; not the ~4 GB
+DigitCapsule, not any-RTOS loading. The memory flag is a test-only limit, never an engine choice; the engine choice is Anders's.
+Phase 2 groundwork; it claims no spike grade row.
+
+**The declared size.** The cap is the Runtime manifest's existing
+`resources.memory_mb` (`CapsuleManifest.resources: ResourceLimits`,
+`#[serde(default)]`; `memory_mb: u32`, default 64). No field is invented.
+`tools/src/verify.rs`'s one manifest read (`manifest_entrypoint`, the one
+`CapsuleManifest` parse) keeps it in the sealed `VerifiedBundle`, read through
+one accessor, `memory_mb()`. The runner takes it from that value only, never
+from a file or the environment. This capsule's `capsule.json` has no
+`resources` key, so it declares the default, 64; `capsule.json` and the lab
+CID pins are unchanged. The declared size is an allowance (a resource budget),
+kept apart from identity (the lab CID) and from admission, which this lane
+never decides.
+
+**MB is read as 2^20 bytes**, as wc-010a's probes read it: the runner's cap is
+`memory_mb × 1048576` bytes, in `u64`, so no `u32` overflows (`u32::MAX` MB is
+4503599626321920 bytes). This capsule's 64 MB = 64 × 2^20 = 67108864 bytes =
+1024 Wasm pages of 64 KiB.
+
+**wasmtime 45.0.1: ENFORCED.** Its module run gets exactly one more argument
+pair, after `run --invoke digest` and before the module path: `-W` and
+`max-memory-size=<bytes>,trap-on-grow-failure=y`. The unit is bytes
+(`wasmtime -W help`, wc-010a). With `trap-on-grow-failure=y` a `memory.grow`
+past the cap traps (exit 1, "forcing trap when growing memory to 67174400
+bytes") instead of returning -1, so the runner refuses the run with
+`EngineFailed` and wasmtime's stderr. The `--version` query is unchanged.
+Checked once by hand in this order before the code (LOG.md, task 027): `run
+--invoke grow -W max-memory-size=67108864,trap-on-grow-failure=y grow.wat 1024`
+exits 1 with that trap line, and `... 1023` exits 0 and prints `1`.
+
+**wasmer 7.5.0: SKIPPED.** No memory cap flag in `wasmer run --help` or
+`wasmer --help` (wc-010a), so its argv is unchanged and no cap is claimed for
+wasmer. `memory_cap_on_wasmer_is_skipped` is an `#[ignore]` test with that
+reason, never counted as a PASS. No other route (an rlimit, a wrapper, an
+engine inside an engine, a VM) is used. No test name says "on_both" for the
+cap.
+
+Not in this task: the receipt's cap line and measured peak memory (wc-010c), a
+maximum inside `capsule.wasm`, and any admission or launch decision.
 
 ## Granted import hosting discovery (wc-009b0)
 
@@ -1163,7 +1209,11 @@ puts it under the `/var` link):
 - `runner_passes_no_directory_env_or_network_flags` — an **argv proof**, not
   behaviour: for each engine, a stand-in prints its argv, which is exactly
   `run`, `--invoke`, `digest`, the absolute module path and `1592590337`
-  (`FIXED_INPUT`), with no `--dir`, `--mapdir`, `--env` or `--net`.
+  (`FIXED_INPUT`), with no `--dir`, `--mapdir`, `--env` or `--net`. From task
+  027 `wasmtime`'s argv also has `-W` and
+  `max-memory-size=67108864,trap-on-grow-failure=y` (this capsule's declared 64
+  MB) before the module path; `wasmer`'s is unchanged. Stand-ins that read the
+  module path take their second-to-last argument.
 - `engine_starts_with_an_empty_environment` — a stand-in sees no `HOME`,
   which the test process has.
 - `engine_failures_keep_their_cause` — a stand-in that exits 3 with a stderr
@@ -1305,22 +1355,51 @@ Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
   `### wasmer`, `- wasmtime:` or `- wasmer:`), and ADOPTION holds it exactly
   once on one line. It fails naming what is missing or out of place.
 
+wc-010b's run tests (task 027), in `tests/run.rs`. The grow modules are
+hand-written bytes: one memory of 1 page with no maximum, no import, and one
+export `digest (i32) -> i32` that ignores its argument and runs `memory.grow`
+by a constant. Each bundle is signed with a fresh key and verified. A real
+engine not found prints SKIPPED and gives no result, never PASS:
+
+- `declared_memory_cap_comes_from_the_manifest` — stand-in argv: a bundle whose
+  `capsule.json` adds `"resources": {"memory_mb": 2}` gives `wasmtime`
+  `max-memory-size=2097152`, and one that declares `u32::MAX` gives
+  `max-memory-size=4503599626321920`; `memory_mb()` returns each as declared,
+  and `wasmer`'s argv has no cap.
+- `capsule_grows_within_the_declared_cap_on_wasmtime` — the real `wasmtime`:
+  a grow by 1023 pages, to exactly 64 MB, succeeds and prints `1`.
+- `memory_grow_past_the_declared_cap_traps_on_wasmtime` — the real `wasmtime`:
+  a grow by 1024 pages is refused with `EngineFailed`, and its stderr holds
+  `forcing trap when growing memory to 67174400 bytes`.
+- `built_capsule_runs_under_the_declared_cap_on_wasmtime` — the real
+  `tools/build` capsule through `run` on both real engines prints
+  `FIXED_OUTPUT` on both. A recording program at `wasmtime`'s path appends its
+  arguments to a file and then `exec`s the real `wasmtime` (one process, the
+  shell is replaced), so the test sees the cap on `wasmtime`'s module-run argv.
+- `memory_cap_on_wasmer_is_skipped` — `#[ignore = "SKIPPED: wasmer 7.5.0 has no
+  memory cap flag in wasmer run --help or wasmer --help (wc-010a); no cap is
+  claimed for wasmer"]`, never run, never counted as a PASS.
+
+`runner_passes_no_directory_env_or_network_flags` and `verified_bundle_is_sealed`
+(the new private field and its accessor) were updated for the cap.
+
 ## Falsifiers
 
-`falsifiers.json` holds 146 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 152 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016), two task 019, 17 wc-009a (task 020) and seven task 026.
+wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026 and
+six wc-010b (task 027).
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 82, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020 and 026: 1 + 1 +
-23 + 11 + 20 + 2 + 17 + 7), each run by the canonical runner with its summary
-line quoted.
+Two kinds of evidence, kept apart. Runner-caught: 88, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026 and 027: 1 +
+1 + 23 + 11 + 20 + 2 + 17 + 7 + 6), each run by the canonical runner with its
+summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1331,7 +1410,9 @@ R1 is done: the canonical runner `examples/agent-host/falsify.py` has a `lab`
 command (`cargo test --workspace` on this workspace). Its recovery targets
 (`PROVIDER_TARGETS`, the provider lane's) name every lane file a falsifier
 edits except `tools/src/run.rs` and `tools/src/receipt.rs`, so a killed run
-cannot restore those two (ask **R2**, open).
+cannot restore those two (ask **R2**, open). (26 Oct, task 027: R2 is done on
+this base; provider 026 added `tools/src/run.rs`, `tools/src/receipt.rs` and
+`tests/lab_cid.rs` to `PROVIDER_TARGETS`.)
 
 wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
 
@@ -1688,3 +1769,44 @@ Task 026's five planted bugs outside `README.md`, each hand-proven, pending R1
   module-doc or enum-doc assertion).
 - F-WC9B0-ADOPTION — ADOPTION loses the discovery-only ruling
   (`hosting_discovery_is_not_the_import_path`, at its ADOPTION assertion).
+
+wc-010b's six (task 027), runner-caught (the canonical runner's summary line is
+in LOG.md, task 027). Every anchor is in `tools/src/run.rs` or
+`tools/src/verify.rs`, both recovery targets, and each named test fails at its
+assertion:
+
+- F-WC10-CAP-IGNORED — the runner drops the cap argument, so it ignores the
+  declared limit (Rong's falsifier)
+  (`runner_passes_no_directory_env_or_network_flags` and
+  `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
+  `memory_grow_past_the_declared_cap_traps_on_wasmtime`, where wasmtime is
+  present, because the grow past 64 MB succeeds and the run is not refused).
+- F-WC10-CAP-FIXED — the runner caps at a fixed 64 MB, not the declared
+  `memory_mb` (`declared_memory_cap_comes_from_the_manifest`, at its 2 MB argv
+  comparison).
+- F-WC10-NO-TRAP — `trap-on-grow-failure=y` is dropped, so a grow past the cap
+  returns -1 and the run exits 0 (the argv test and
+  `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
+  `memory_grow_past_the_declared_cap_traps_on_wasmtime`, not refused).
+- F-WC10-CAP-OVERFLOW — the MB to bytes product is taken in `u32`
+  (`wrapping_mul`), so `u32::MAX` MB wraps
+  (`declared_memory_cap_comes_from_the_manifest`, at its `u32::MAX` argv
+  comparison).
+- F-WC10-CAP-NOT-READ — the verifier keeps a fixed 64 in place of the
+  manifest's `resources.memory_mb` (`declared_memory_cap_comes_from_the_manifest`,
+  at its `memory_mb()` assertion).
+- F-WC10-WASMER-FLAG — `wasmer` is given a cap flag its CLI does not have (the
+  argv test and `declared_memory_cap_comes_from_the_manifest`, at `wasmer`'s
+  argv comparison).
+
+Task 027 also re-anchored seven entries, each the same bug as before:
+F-WC5-START-TWICE (`start_engine` now takes the declared `memory_mb`, so both
+of its anchors carry the new argument), F-WC5a (its direct engine starts pass
+the default 64, since it removes the verified value) and
+F-WC5-BYPASS-RUN-ENGINE (its direct start passes the verified `memory_mb`);
+F-WC4-ORDER-AUDIT-FIRST (the manifest read returns the entrypoint and
+`memory_mb` together) and F-WC4-ENTRYPOINT-REPARSE (its second manifest read
+keeps only the entrypoint); F-WC4-SEALED-NEW (the planted constructor fills
+the new `memory_mb` field, so it still compiles and is caught by
+`verified_bundle_is_sealed`); and F-WC-README-COUNT (the new total). Each
+re-anchored entry keeps its own evidence label above.

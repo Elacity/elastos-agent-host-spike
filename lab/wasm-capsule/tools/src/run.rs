@@ -14,8 +14,19 @@
 //! 4. [`VerifiedBundle::entrypoint`]'s checked bytes, from memory, are written
 //!    into it as one new file with the shared [`write_new_file`];
 //! 5. the engine is started once, by that same path, as
-//!    `run --invoke digest <absolute module path> 1592590337`, with stdin null
-//!    and an empty environment. It gets no folder, env or network flag.
+//!    `run --invoke digest <memory cap> <absolute module path> 1592590337`,
+//!    with stdin null and an empty environment. It gets no folder, env or
+//!    network flag.
+//!
+//! wc-010b: the memory cap comes from [`VerifiedBundle::memory_mb`], the
+//! manifest's declared `resources.memory_mb`, read by the verifier's one
+//! manifest read; the runner reads it from no file and no environment. MB is
+//! read as 2^20 bytes, so the cap is `memory_mb × 1048576` bytes, in `u64`
+//! (no overflow for any `u32`). `wasmtime` gets one argument pair, `-W
+//! max-memory-size=<bytes>,trap-on-grow-failure=y`: a `memory.grow` past the
+//! cap traps. `wasmer` gets none: its CLI has no memory cap flag (wc-010a), so
+//! no cap is claimed for it. The flag is a test-only limit, never an engine
+//! choice; the engine choice is Anders's.
 //!
 //! It returns the engine's exit status and stdout. A nonzero exit is refused
 //! with the engine, the exit status and its stderr. Every refusal has its own reason and the
@@ -95,6 +106,10 @@ const MODULE_FILE: &str = "module.wasm";
 
 /// The run folder's mode: only its owner may list, enter or write it.
 const RUN_DIR_MODE: u32 = 0o700;
+
+/// The bytes in one declared MB: the manifest's `memory_mb` is read as 2^20
+/// bytes, as wc-010a's probes read it.
+const BYTES_PER_MB: u64 = 1 << 20;
 
 /// A host engine: test-only, not endorsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,7 +298,30 @@ pub fn run_engine(
         })?;
     let module = run_dir.join(MODULE_FILE);
     write_new_file(&module, &bundle.entrypoint().content).map_err(module_refusal)?;
-    start_engine(engine, program, &module)
+    start_engine(engine, program, &module, bundle.memory_mb())
+}
+
+/// The memory cap, in bytes, for a declared `memory_mb`: `memory_mb ×
+/// 1048576` in `u64`, so no `u32` overflows.
+fn memory_cap_bytes(memory_mb: u32) -> u64 {
+    u64::from(memory_mb) * BYTES_PER_MB
+}
+
+/// `engine`'s module-run arguments that cap its linear memory at the
+/// declared `memory_mb`. `wasmtime`: `-W max-memory-size=<bytes>` with
+/// `trap-on-grow-failure=y`, so a grow past the cap traps instead of returning
+/// -1. `wasmer`: none, since its CLI has no memory cap flag.
+fn memory_cap_args(engine: Engine, memory_mb: u32) -> Vec<String> {
+    match engine {
+        Engine::Wasmtime => vec![
+            "-W".to_owned(),
+            format!(
+                "max-memory-size={},trap-on-grow-failure=y",
+                memory_cap_bytes(memory_mb)
+            ),
+        ],
+        Engine::Wasmer => Vec::new(),
+    }
 }
 
 /// An engine is started only by an absolute path, so it is never looked up on
@@ -355,11 +393,18 @@ fn engine_command(program: &Path) -> Command {
     command
 }
 
-/// Start `program` once with the fixed argv, stdin null and an empty
-/// environment, and wait for it. A nonzero exit is refused with its stderr.
-fn start_engine(engine: Engine, program: &Path, module: &Path) -> Result<EngineRun, Refusal> {
+/// Start `program` once with the fixed argv and the memory cap for
+/// `memory_mb`, stdin null and an empty environment, and wait for it. A
+/// nonzero exit is refused with its stderr.
+fn start_engine(
+    engine: Engine,
+    program: &Path,
+    module: &Path,
+    memory_mb: u32,
+) -> Result<EngineRun, Refusal> {
     let output = engine_command(program)
         .args(["run", "--invoke", DIGEST_EXPORT])
+        .args(memory_cap_args(engine, memory_mb))
         .arg(module)
         .arg(DIGEST_ARGUMENT)
         .output()
