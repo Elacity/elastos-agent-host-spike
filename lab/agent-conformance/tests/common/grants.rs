@@ -91,8 +91,11 @@ impl Fixture {
             None => Vec::new(),
         };
         for file in &files {
-            if !field(file, "resource")?.starts_with("localhost://Public/agent-conformance-grants/")
-            {
+            let resource = field(file, "resource")?;
+            if resource.split('/').any(|segment| segment == "..") {
+                return Err("seed fixture refuses a parent-directory segment");
+            }
+            if !resource.starts_with("localhost://Public/agent-conformance-grants/") {
                 return Err("seed fixture escaped its Home directory");
             }
             field(file, "content")?;
@@ -180,6 +183,75 @@ impl Settlement {
     }
 }
 
+// One request-shape rule for both live barriers and synthetic checks. The
+// returned requests are ordered by instance label, independent of listing order.
+fn barrier_decision(
+    stage: usize,
+    pending: &[Value],
+    fixture: &Fixture,
+    first: &[Value],
+) -> Result<Option<Vec<Value>>> {
+    let mut ordered = Vec::new();
+    for label in ["instance-1", "instance-2"] {
+        let reason = format!(
+            "agent conformance: {label} {}",
+            if stage == 0 { "own" } else { "sibling" }
+        );
+        let matches: Vec<_> = pending
+            .iter()
+            .filter(|request| request["reason"] == reason)
+            .collect();
+        if matches.len() > 1 {
+            return Err("overlap: repeated instance request");
+        }
+        ordered.extend(matches);
+    }
+    if ordered.len() != pending.len() {
+        return Err("overlap: unexpected request at barrier");
+    }
+    if ordered.len() != 2 {
+        return Ok(None);
+    }
+    if field(ordered[0], "session_id")? == field(ordered[1], "session_id")? {
+        return Err("overlap: two distinct client sessions required");
+    }
+    for (index, request) in ordered.iter().enumerate() {
+        if field(request, "action")? != "read" {
+            return Err("overlap: only read requests belong to this journey");
+        }
+        if stage == 0 {
+            let grant = fixture
+                .matches(request)?
+                .ok_or("overlap: own read requires an exact fixture grant")?;
+            if fixture.entries[grant]["duration"] != "session" {
+                return Err("overlap: own read requires a session grant");
+            }
+        } else if request["session_id"] != first[index]["session_id"]
+            || request["resource"] != first[1 - index]["resource"]
+            || first
+                .iter()
+                .any(|first| first["request_id"] == request["request_id"])
+        {
+            return Err("overlap: sibling read must be new in its original session");
+        }
+    }
+    if stage == 0 {
+        let parents: Vec<_> = ordered
+            .iter()
+            .map(|request| {
+                field(request, "resource")?
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent)
+                    .ok_or("separate-directory check: missing file parent")
+            })
+            .collect::<Result<_>>()?;
+        if parents[0] == parents[1] {
+            return Err("separate-directory check: instance files share a directory");
+        }
+    }
+    Ok(Some(ordered.into_iter().cloned().collect()))
+}
+
 // Session and request IDs stay in memory. Printed evidence uses local labels.
 struct Overlap {
     started: Instant,
@@ -233,65 +305,11 @@ impl Overlap {
             return Err("overlap: both clients must remain alive through both barriers");
         }
         self.both_alive_since.get_or_insert_with(Instant::now);
-        let mut ordered = Vec::new();
-        for label in ["instance-1", "instance-2"] {
-            let reason = format!(
-                "agent conformance: {label} {}",
-                if self.stage == 0 { "own" } else { "sibling" }
-            );
-            let matches: Vec<_> = pending
-                .iter()
-                .filter(|request| request["reason"] == reason)
-                .collect();
-            if matches.len() > 1 {
-                return Err("overlap: repeated instance request");
-            }
-            ordered.extend(matches);
-        }
-        if ordered.len() != pending.len() {
-            return Err("overlap: unexpected request at barrier");
-        }
-        if ordered.len() != 2 {
+        let Some(ordered) = barrier_decision(self.stage, pending, fixture, &self.first)? else {
             return Ok(false);
-        }
-        if field(ordered[0], "session_id")? == field(ordered[1], "session_id")? {
-            return Err("overlap: two distinct client sessions required");
-        }
-        for (index, request) in ordered.iter().enumerate() {
-            if field(request, "action")? != "read" {
-                return Err("overlap: only read requests belong to this journey");
-            }
-            if self.stage == 0 {
-                let grant = fixture
-                    .matches(request)?
-                    .ok_or("overlap: own read requires an exact fixture grant")?;
-                if fixture.entries[grant]["duration"] != "session" {
-                    return Err("overlap: own read requires a session grant");
-                }
-            } else if request["session_id"] != self.first[index]["session_id"]
-                || request["resource"] != self.first[1 - index]["resource"]
-                || self
-                    .first
-                    .iter()
-                    .any(|first| first["request_id"] == request["request_id"])
-            {
-                return Err("overlap: sibling read must be new in its original session");
-            }
-        }
+        };
         if self.stage == 0 {
-            let parents: Vec<_> = ordered
-                .iter()
-                .map(|request| {
-                    field(request, "resource")?
-                        .rsplit_once('/')
-                        .map(|(parent, _)| parent)
-                        .ok_or("separate-directory check: missing file parent")
-                })
-                .collect::<Result<_>>()?;
-            if parents[0] == parents[1] {
-                return Err("separate-directory check: instance files share a directory");
-            }
-            self.first = ordered.into_iter().cloned().collect();
+            self.first = ordered;
         }
         // The listing and both alive observations must fit the same monotonic bound.
         if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {
@@ -611,6 +629,11 @@ impl Controller {
             .as_ref()
             .ok_or("overlap: evidence is missing")?;
         self.print_checked(&overlap.line())?;
+        // A wait is recorded only after the shared rule accepts two requests
+        // from distinct sessions and both live observations pass.
+        if overlap.waits.len() != 2 {
+            return Err("overlap: both barriers require two requests from distinct sessions");
+        }
         if overlap.stage != 2 || overlap.duration.is_zero() {
             return Err("overlap: both measured barriers are required");
         }
@@ -1302,6 +1325,177 @@ mod tests {
 
     fn request() -> Value {
         json!({"resource":"localhost://Public/test/one","action":"read","reason":"test read"})
+    }
+
+    fn barrier_fixture() -> (Fixture, Vec<Value>, Vec<Value>) {
+        let first: Vec<_> = (1..=2)
+            .map(|index| json!({
+                "request_id": format!("own-{index}"),
+                "session_id": format!("session-{index}"),
+                "resource": format!("localhost://Public/agent-conformance-grants/instance-{index}/own.txt"),
+                "action": "read",
+                "reason": format!("agent conformance: instance-{index} own"),
+                "duration": "session"
+            }))
+            .collect();
+        let sibling = (0..2)
+            .map(|index| {
+                let mut request = first[index].clone();
+                request["request_id"] = json!(format!("sibling-{}", index + 1));
+                request["resource"] = first[1 - index]["resource"].clone();
+                request["reason"] =
+                    json!(format!("agent conformance: instance-{} sibling", index + 1));
+                request
+            })
+            .collect();
+        let fixture = Fixture {
+            deny_reason: "synthetic denial".into(),
+            entries: first.clone(),
+            files: Vec::new(),
+        };
+        (fixture, first, sibling)
+    }
+
+    #[test]
+    fn overlap_barrier_refuses_one_session_for_both() {
+        let (fixture, first, sibling) = barrier_fixture();
+        for (stage, mut pending) in [first.clone(), sibling].into_iter().enumerate() {
+            assert!(barrier_decision(stage, &pending, &fixture, &first)
+                .unwrap()
+                .is_some());
+            pending[1]["session_id"] = pending[0]["session_id"].clone();
+            assert_eq!(
+                barrier_decision(stage, &pending, &fixture, &first),
+                Err("overlap: two distinct client sessions required")
+            );
+        }
+    }
+
+    #[test]
+    fn overlap_sibling_read_must_be_new_in_its_session() {
+        let (fixture, first, sibling) = barrier_fixture();
+        assert_eq!(
+            barrier_decision(1, &sibling, &fixture, &first),
+            Ok(Some(sibling.clone()))
+        );
+        let reason = "overlap: sibling read must be new in its original session";
+        for (field, value) in [
+            ("request_id", "own-1"),
+            ("request_id", "own-2"),
+            ("session_id", "session-3"),
+            ("resource", "localhost://Public/wrong/own.txt"),
+        ] {
+            let mut pending = sibling.clone();
+            pending[0][field] = json!(value);
+            assert_eq!(
+                barrier_decision(1, &pending, &fixture, &first),
+                Err(reason),
+                "sibling rule must check {field}"
+            );
+        }
+        let mut swapped = sibling;
+        swapped[0]["session_id"] = first[1]["session_id"].clone();
+        swapped[1]["session_id"] = first[0]["session_id"].clone();
+        assert_eq!(barrier_decision(1, &swapped, &fixture, &first), Err(reason));
+    }
+
+    #[test]
+    fn overlap_second_barrier_waits_for_both_requests() {
+        let (fixture, first, sibling) = barrier_fixture();
+        assert_eq!(barrier_decision(1, &[], &fixture, &first), Ok(None));
+        for request in &sibling {
+            assert_eq!(
+                barrier_decision(1, std::slice::from_ref(request), &fixture, &first),
+                Ok(None)
+            );
+        }
+        let mut reversed = sibling.clone();
+        reversed.reverse();
+        assert_eq!(
+            barrier_decision(1, &reversed, &fixture, &first),
+            Ok(Some(sibling.clone()))
+        );
+
+        // Exercise the wiring too: a shortcut in ready must not bypass the rule.
+        let home = ThrowawayHome::new().unwrap();
+        let launches: Vec<_> = (0..2)
+            .map(|_| agent_conformance::harness::Launch {
+                home: &home,
+                program: Path::new("sleep"),
+                args: vec!["1"],
+            })
+            .collect();
+        let mut running = RunningInstances::start(&launches, None).unwrap();
+        let mut overlap = Overlap::new();
+        assert_eq!(overlap.ready(&first, &fixture, &mut running), Ok(true));
+        overlap.advance();
+        let lone = overlap.ready(&sibling[..1], &fixture, &mut running);
+        let waits = overlap.waits.len();
+        let both = overlap.ready(&reversed, &fixture, &mut running);
+        let completions = running.collect(Duration::from_secs(5)).unwrap();
+        assert!(completions.iter().all(|item| item.output.status.success()));
+        assert_eq!(
+            lone,
+            Ok(false),
+            "second barrier must wait for both requests"
+        );
+        assert_eq!(
+            waits, 1,
+            "a lone sibling must not record a barrier decision"
+        );
+        assert_eq!(both, Ok(true));
+        assert_eq!(overlap.waits.len(), 2);
+        home.finish().unwrap();
+    }
+
+    #[test]
+    fn overlap_barrier_refuses_when_a_client_has_exited() {
+        let (fixture, first, _) = barrier_fixture();
+        assert!(barrier_decision(0, &first, &fixture, &[])
+            .unwrap()
+            .is_some());
+        let home = ThrowawayHome::new().unwrap();
+        let launches = [
+            agent_conformance::harness::Launch {
+                home: &home,
+                program: Path::new("true"),
+                args: vec![],
+            },
+            agent_conformance::harness::Launch {
+                home: &home,
+                program: Path::new("sleep"),
+                args: vec!["2"],
+            },
+        ];
+        let mut running = RunningInstances::start(&launches, None).unwrap();
+        let started = Instant::now();
+        while running.all_alive(2).unwrap() {
+            assert!(started.elapsed() < Duration::from_secs(1), "true must exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let result = Overlap::new().ready(&first, &fixture, &mut running);
+        let completions = running.collect(Duration::from_secs(5)).unwrap();
+        assert!(completions.iter().all(|item| item.output.status.success()));
+        assert_eq!(
+            result,
+            Err("overlap: both clients must remain alive through both barriers")
+        );
+        home.finish().unwrap();
+    }
+
+    #[test]
+    fn seed_fixture_refuses_dot_dot() {
+        for suffix in ["../outside.txt", "instance-1/../own.txt", "instance-1/.."] {
+            let fixture = json!({"deny_reason":"synthetic denial", "grants":[], "files":[{
+                "resource": format!("localhost://Public/agent-conformance-grants/{suffix}"),
+                "content":"synthetic bytes"
+            }]});
+            assert_eq!(
+                Fixture::parse(&fixture.to_string()).err(),
+                Some("seed fixture refuses a parent-directory segment")
+            );
+        }
+        assert!(Fixture::instances().is_ok());
     }
 
     #[test]

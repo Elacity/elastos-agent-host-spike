@@ -1325,6 +1325,92 @@
       "tests": [
         "real_agent_host_gets_no_ungranted_authority"
       ]
+    },
+    {
+      "id": "F-overlap-second-barrier",
+      "title": "decide a lone sibling request before the second barrier",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "        if self.stage == 2 {\n",
+          "new": "        if self.stage == 1 { return Ok(!pending.is_empty()); }\n        if self.stage == 2 {\n"
+        }
+      ],
+      "tests": [
+        "grants::tests::overlap_second_barrier_waits_for_both_requests",
+        "two_instances_overlap_with_separate_grants"
+      ]
+    },
+    {
+      "id": "F-overlap-sessions",
+      "title": "allow both instance requests in one client session",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "    if field(ordered[0], \"session_id\")? == field(ordered[1], \"session_id\")? {\n        return Err(\"overlap: two distinct client sessions required\");\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "grants::tests::overlap_barrier_refuses_one_session_for_both"
+      ]
+    },
+    {
+      "id": "F-overlap-sibling-new",
+      "title": "allow a sibling read to reuse an own-read request id",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "            || first\n                .iter()\n                .any(|first| first[\"request_id\"] == request[\"request_id\"])\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "grants::tests::overlap_sibling_read_must_be_new_in_its_session"
+      ]
+    },
+    {
+      "id": "F-overlap-alive",
+      "title": "decide the overlap barrier after a client exits",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "        if !running.all_alive(2)? {\n            return Err(\"overlap: both clients must remain alive through both barriers\");\n        }\n",
+          "new": ""
+        },
+        {
+          "file": "tests/common/grants.rs",
+          "old": "        if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {",
+          "new": "        if self.barrier_started.elapsed() >= OVERLAP_BOUND {"
+        }
+      ],
+      "tests": [
+        "grants::tests::overlap_barrier_refuses_when_a_client_has_exited"
+      ]
+    },
+    {
+      "id": "F-seed-dotdot",
+      "title": "accept a parent-directory segment in a seed resource",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "tests/common/grants.rs",
+          "old": "            if resource.split('/').any(|segment| segment == \"..\") {\n                return Err(\"seed fixture refuses a parent-directory segment\");\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "grants::tests::seed_fixture_refuses_dot_dot"
+      ]
     }
   ]
 }
