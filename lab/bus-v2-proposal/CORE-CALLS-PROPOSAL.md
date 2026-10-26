@@ -713,3 +713,776 @@ The model service is a separate Runtime path. `elastos/crates/elastos-server/src
     ];
 
 "The caller opens the model URL" is the `direct_url` bearer path, and that path is request construction. "The Runtime grants the call and carries it" is the hosted-effect URL, the Runtime socket, the grant check and `forward`. The Runtime hosted transport is the production path. A4 stays open.
+
+## 5. Budgets
+
+This section is design input for A7. A7 stays open.
+
+Identity is who the agent runs as. Admission is the Runtime's permission to execute. Allowance is the usage account. Identity, admission, and allowance stay separate decisions.
+
+The guest keeps no usage total. `examples/agent-host/src/lib.rs::step_payload` writes the step budget fields as zeros. `examples/agent-host/src/lib.rs:471-476` is that write. The comment at the start of the range says "Room for OMP idea 2, empty until it is built". The four zero writes are `out.push(0)`, the slice `[0; 1 + 4 + 8]`, `&0_u32.to_le_bytes()`, and `out.push(0)`. Line 474 is the slice write. Line 476 contains `out.push(0)`.
+
+    fn step_payload(step: &Step) -> Option<Vec<u8>> {
+        let mut out = step.id.to_le_bytes().to_vec();
+        out.push(state_tag(step.state));
+        out.push(kind_tag(step.kind));
+        put_str(&mut out, &step.resource)?;
+        out.extend_from_slice(&step.effect_id.to_le_bytes());
+        out.push(u8::from(step.has_result));
+        put_str(&mut out, &step.old)?;
+        put_str(&mut out, &step.new)?;
+        out.extend_from_slice(&u32::try_from(step.argv.len()).ok()?.to_le_bytes());
+        for arg in &step.argv {
+            put_str(&mut out, arg)?;
+        }
+        put_opt(&mut out, step.parent_id);
+        put_str(&mut out, &step.seat)?;
+        put_opt(&mut out, step.seen_version);
+        put_str(&mut out, &step.inbox)?;
+        // Room for OMP idea 2, empty until it is built: depth, budget (flag,
+        // requests, seconds), requests_used, stop.
+        out.push(0);
+        out.extend_from_slice(&[0; 1 + 4 + 8]);
+        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.push(0);
+        Some(out)
+    }
+
+`examples/agent-host/src/lib.rs::encode_journal` writes the header fields after the cited comment as zeros. `examples/agent-host/src/lib.rs:532` contains `task_budget (flag, requests, seconds)`. The comment says "Room for OMP idea 2, empty until it is built". After that comment the body writes `out.extend_from_slice(&[0; 1 + 8])`, `out.extend_from_slice(&[0; 1 + 4 + 8])`, and `out.push(0)`.
+
+        // Room for OMP idea 2, empty until it is built: cancelled_from (flag and
+        // step id), task_budget (flag, requests, seconds), depth.
+        out.extend_from_slice(&[0; 1 + 8]);
+        out.extend_from_slice(&[0; 1 + 4 + 8]);
+        out.push(0);
+
+`examples/agent-host/src/lib.rs::decode_step` returns `Err("record")` when depth, any budget byte, `requests_used`, or stop is non-zero. `examples/agent-host/src/lib.rs:754` contains `requests_used != 0`.
+
+        // OMP idea 2's fields must be empty until it is built.
+        let depth = reader.byte().map_err(fail)?;
+        let budget = reader.take(1 + 4 + 8).map_err(fail)?;
+        let requests_used = reader.u32().map_err(fail)?;
+        let stop = reader.byte().map_err(fail)?;
+        if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {
+            return Err("record");
+        }
+
+Journal admission is room for run history. On a new run, `capsules/model-provider/src/journal.rs::store_run` refuses when census entries are at `MAX_NEW_JOURNAL_ENTRIES` or charged bytes would pass `MAX_JOURNAL_GROWTH_BYTES`. `capsules/model-provider/src/journal.rs:391-397` holds both comparisons, `usage.entries >= MAX_NEW_JOURNAL_ENTRIES` and `total > MAX_JOURNAL_GROWTH_BYTES`. The cited comment says this check precedes the durable Prepared record and dispatch. The refusal is `capsules/model-provider/src/journal.rs::journal_budget_fault`. `capsules/model-provider/src/journal.rs:921` contains `Model run history is full`. This ceiling is journal room. The else arm is the new run.
+
+            } else {
+                let usage = self.visit_census(&census, |_, _, _| Ok(()))?;
+                if usage.entries >= MAX_NEW_JOURNAL_ENTRIES
+                    || usage
+                        .charged_bytes
+                        .checked_add(charge)
+                        .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)
+                {
+                    // This check precedes the durable Prepared record and dispatch.
+                    return Err(journal_budget_fault());
+                }
+            }
+
+    fn journal_budget_fault() -> ProviderFault {
+        ProviderFault::policy_limit(
+            "Model run history is full. Retained outcomes expire after their history window; then try again.",
+            "model run journal admission or growth limit exceeded",
+        )
+    }
+
+When a run for the request is already stored and the fingerprint matches, `capsules/model-provider/src/state.rs::handle_runs_create` returns that run's view at the cited return. `capsules/model-provider/src/state.rs:530` is `return serialize_run_view(&existing);`. The fingerprint check above that return compares the stored run with the request fingerprint. This return is before `self.adapters.dispatch`.
+
+            // A retained request owns its original result, including legacy IDs and
+            // results whose offer has since changed or retired.
+            if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {
+                if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint
+                {
+                    return Err(ProviderFault::invalid_request(
+                        "request_id conflicts with an existing model run",
+                    ));
+                }
+                self.project_archived_run(&mut existing)?;
+                if !existing.status.is_terminal() {
+                    let current_offer = self.current_execution_offer_for_run(&existing)?;
+                    self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;
+                }
+                return serialize_run_view(&existing);
+            }
+
+For a new run, the same function stores the run, then compares `active_run_count` with `concurrency_limit`, then calls `dispatch`. Those sites, in order, are `self.journal.store_run`, `capsules/model-provider/src/state.rs:609`, and `self.adapters.dispatch`. When the count is above the limit, the body returns the busy view before `dispatch`.
+
+            self.journal.store_run(&run)?;
+
+            let active_runs = self.journal.active_run_count(&offer.id)?;
+            if active_runs > offer.policy.concurrency_limit as usize {
+                transition_error(
+                    &offer,
+                    &mut run,
+                    RunError {
+                        class: ErrorClass::RateLimited,
+                        code: "model_busy".to_string(),
+                        message: "Model is busy.".to_string(),
+                    },
+                )?;
+                self.journal.store_run(&run)?;
+                return serialize_run_view(&run);
+            }
+
+            match self.adapters.dispatch(
+                &offer.adapter,
+                &offer,
+                &request.runtime_binding,
+                &request.input,
+                run.deadline_ms,
+            ) {
+
+`capsules/model-provider/src/journal.rs::active_run_count` adds one when the offer matches and `is_terminal` is false. The condition is `run.offer.id == offer_id && !run.status.is_terminal()`.
+
+        pub fn active_run_count(&self, offer_id: &str) -> Result<usize, ProviderFault> {
+            let mut total = 0usize;
+            self.visit_runs(|_, run, _| {
+                if run.offer.id == offer_id && !run.status.is_terminal() {
+                    total = total.saturating_add(1);
+                }
+                Ok(())
+            })?;
+            Ok(total)
+        }
+
+`capsules/model-provider/src/contract.rs::is_terminal` is true for Completed, Failed, Cancelled, and SettlementUnknown. `capsules/model-provider/src/contract.rs:134` is the match line. A cancelled run and an uncertain outcome are terminal, so they leave that count.
+
+        pub fn is_terminal(&self) -> bool {
+            matches!(
+                self,
+                Self::Completed | Self::Failed | Self::Cancelled | Self::SettlementUnknown
+            )
+        }
+
+`elastos/crates/elastos-server/src/api/gateway_model_service.rs::reserve_run_slot` holds one pending key. The doc says the check and the hold happen under the same lock and land in the same index write. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:355` is the pending insert. The inserted value is the time.
+
+    /// Hold one slot for a create, or recognise that the request already has a
+    /// record. The check and the hold happen under the same lock and land in the
+    /// same index write, so two creates cannot both take the last slot.
+    fn reserve_run_slot(
+        data_dir: &Path,
+        now: u64,
+        key: &str,
+        grant_id: &str,
+        remote_principal_id: &str,
+        capsule_id: &str,
+        request_id: &str,
+    ) -> anyhow::Result<RunSlot> {
+        update_run_index(data_dir, now, |index| {
+            if let Some((run_id, record)) = index.runs.iter().find(|(_, record)| {
+                record.grant_id == grant_id
+                    && record.remote_principal_id == remote_principal_id
+                    && record_capsule_id(record) == capsule_id
+                    && record.request_id == request_id
+            }) {
+                return Ok(RunSlot::Existing {
+                    run_id: run_id.clone(),
+                    record: Box::new(record.clone()),
+                });
+            }
+            if index.pending.contains_key(key) {
+                anyhow::bail!("model run reservation is already held");
+            }
+            anyhow::ensure!(
+                index.runs.len() + index.pending.len() < MODEL_RUN_INDEX_MAX,
+                "model run index is full"
+            );
+            index.pending.insert(key.to_string(), now);
+            Ok(RunSlot::Reserved)
+        })
+
+`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446` says a create holds its record slot before any model work starts, a retry of an already recorded request is answered from that record, and a full index refuses there.
+
+        // A create holds its record slot before any model work starts. A retry of
+        // an already recorded request is answered from that record before another
+        // create. A full index refuses here.
+
+A reported figure is not a hold, and the required account stays open. `capsules/model-provider/src/journal.rs::validate_backend_usage` returns an error when input tokens, output tokens, and total tokens are all absent. The function body has no ceiling and no subtraction.
+
+    fn validate_backend_usage(usage: &BackendTokenUsage) -> anyhow::Result<()> {
+        if usage.input_tokens.is_none() && usage.output_tokens.is_none() && usage.total_tokens.is_none()
+        {
+            anyhow::bail!("reported backend usage is empty");
+        }
+        Ok(())
+    }
+
+The account A7 asks for is this account. Admission sets the ceiling. The Runtime reserves a bounded usage amount before each dispatch. That account covers concurrent calls, a retry, a cancellation, and an uncertain outcome. A reported figure does not lower the hold. The guest writes zeros. The journal check is room for history. The concurrency check counts non-terminal runs. The slot stores a time under one lock. The usage function refuses an empty report. A7 stays open.
+
+This section cites no lab/grant-binding test.
+
+## 6. B2 mapping
+
+This section is design input for B2. B2 stays open.
+
+The proposal is the guest's record of the step. Admission is the Runtime's grant. Allowance is the Runtime's budget.
+
+The asks file declares three file asks. Each resource pattern is `<principal>/`. `examples/agent-host/asks.json:4` declares read. `examples/agent-host/asks.json:5` declares edit. `examples/agent-host/asks.json:6` declares restore.
+
+        {"kind": "read", "resource": "<principal>/"},
+        {"kind": "edit", "resource": "<principal>/"},
+        {"kind": "restore", "resource": "<principal>/"},
+
+`examples/agent-host/src/lib.rs::ask_kind_name` names Read as `read`, Edit as `edit`, and Restore as `restore`. `examples/agent-host/src/lib.rs:8187` is the Read arm. `examples/agent-host/src/lib.rs:8188` is the Edit arm. `examples/agent-host/src/lib.rs:8190` is the Restore arm.
+
+    /// The declared name of one kind. The match has no wildcard, so a new
+    /// `ProposalKind` does not compile until it is named here or marked as the
+    /// placeholder. `Unspecified` marks a step opened without a proposal and is
+    /// not an ask.
+    #[cfg(test)]
+    fn ask_kind_name(kind: ProposalKind) -> Option<&'static str> {
+        match kind {
+            ProposalKind::Unspecified => None,
+            ProposalKind::Read => Some("read"),
+            ProposalKind::Edit => Some("edit"),
+            ProposalKind::Run => Some("run"),
+            ProposalKind::Restore => Some("restore"),
+            ProposalKind::Hosted => Some("hosted"),
+            ProposalKind::Child => Some("child"),
+            ProposalKind::Init => Some("init"),
+            ProposalKind::JournalAppend => Some("journal-append"),
+        }
+    }
+
+`examples/agent-host/src/lib.rs::declared_ask` is true when the kind matches and ask_covers is true. `examples/agent-host/src/lib.rs:8488` is that condition. ask_covers applies the declared pattern to the resource. The three patterns are `<principal>/`.
+
+    /// The declaration's answer for one proposal. `Unspecified` matches nothing.
+    #[cfg(test)]
+    fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
+        declared_asks()
+            .iter()
+            .any(|ask| ask.kind == kind && ask_covers(ask, resource))
+    }
+
+Read records a step. `examples/agent-host/src/lib.rs::propose_read` sets the kind to Read and stores the resource. The body has no bus call.
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_read(journal: &mut Journal, resource: &str) -> u64 {
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Read;
+        step.resource = resource.to_string();
+        id
+    }
+
+`examples/agent-host/src/lib.rs::observe` records text the guest already holds. `examples/agent-host/src/lib.rs:2067` ends the doc sentence. That sentence says this does not read a file.
+
+    /// Append a read. A path that `path_refusal` refuses, or the version
+    /// u64::MAX, adds nothing. A higher version is a new read. An older version is allowed only when the
+    /// text still matches that version, so a reread can make it current again
+    /// without replacing the page. This does not start a series and does not
+    /// read a file.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> bool {
+        if path_refusal(resource).is_some()
+            || version == u64::MAX
+            || version_bound_elsewhere(&journal.events, resource, version, None)
+        {
+            return false;
+        }
+        if let Some(row) = current_observation(&journal.events, resource) {
+            if version <= row.version
+                && observed_text_at(&journal.events, resource, version).as_deref() != Some(text)
+            {
+                return false;
+            }
+        }
+        let epoch = journal.epoch;
+        journal
+            .events
+            .push(observation_record(resource, version, text));
+        journal.epoch == epoch
+    }
+
+The typed localhost operation `read` maps to `Action::Read` on `elastos/crates/elastos-server/src/provider_resource.rs:189`.
+
+            "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),
+
+Edit and restore replace shown text. `examples/agent-host/src/lib.rs::propose_edit` creates no write. `examples/agent-host/src/lib.rs:2421-2422` carries that statement. The start line contains `This does not` and the end line contains `write.`
+
+    /// Record an edit proposal. An unread target, a stale version, empty old
+    /// text, old text that is not exactly once in what that version has shown
+    /// (a read that showed a window covers only that window), or a no-op edit
+    /// repeated past the limit creates no step. A path that is not canonical or
+    /// not NFC is refused. Every refusal writes one refusal record. This does not
+    /// write.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_edit(
+        journal: &mut Journal,
+        resource: &str,
+        old: &str,
+        new: &str,
+        seen: Option<u64>,
+    ) -> Result<u64, &'static str> {
+        let result = propose_edit_checked(journal, resource, old, new, seen);
+        result.map_err(|refusal| {
+            record_refusal(journal, refusal, &refused_path(resource));
+            refusal.reason()
+        })
+    }
+
+`examples/agent-host/src/lib.rs::propose_restore` records a Restore step. The body sets the kind to Restore and stores the observed text and the version. `bind_change` and `note_change_wrote` belong to later granted dispatch. The body does not call them. `examples/agent-host/src/lib.rs:3308` contains `This does not write.`
+
+    /// Propose restoring an observed version. An unknown version, or a version
+    /// that is no longer current, creates no step. The step keeps the observed
+    /// text as the text to replace and as the text to write, so a granted
+    /// dispatch sends the restore through the same `bind_change` and
+    /// `note_change_wrote` path an edit uses. This does not write.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_restore(
+        journal: &mut Journal,
+        resource: &str,
+        version: u64,
+    ) -> Result<u64, &'static str> {
+        let Some(text) = observed_text_at(&journal.events, resource, version) else {
+            return Err("unknown");
+        };
+        let Some(current) = current_observation(&journal.events, resource) else {
+            return Err("unknown");
+        };
+        if current.version != version {
+            return Err("stale");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Restore;
+        step.resource = resource.to_string();
+        step.old = text.clone();
+        step.new = text;
+        step.seen_version = Some(version);
+        Ok(id)
+    }
+
+`examples/agent-host/src/lib.rs::is_write` is true for Edit and Restore. `examples/agent-host/src/lib.rs:3290` is that match.
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn is_write(kind: ProposalKind) -> bool {
+        matches!(kind, ProposalKind::Edit | ProposalKind::Restore)
+    }
+
+`examples/agent-host/src/lib.rs::edit_request` is the one provider request for a change or a restore. `examples/agent-host/src/lib.rs:2720` says that.
+
+    /// The one provider request for a change or a restore: every file, each with
+    /// the Runtime revision it was read at (`if_revision`), the lines it may
+    /// touch, and the text to replace there. The provider applies all files or
+    /// none. A change that does not bind sends nothing and writes one refusal
+    /// record.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
+        let result = bind_change(journal, effect_id);
+        result.map(|bound| request_body(&bound)).map_err(|refusal| {
+            record_refusal(journal, refusal, &format!("change {effect_id}"));
+            refusal.reason()
+        })
+    }
+
+`examples/agent-host/src/lib.rs::request_body` sets `if_revision` to the revision the file was read at, and sets `op` to `edit` with `all_or_none` true. `examples/agent-host/src/lib.rs:2741` is the revision field. `examples/agent-host/src/lib.rs:2749` is the op field. That body replaces shown text under the revision the read carried. The constraint on that replacement is the revision the read carried.
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn request_body(bound: &[BoundEdit]) -> Vec<u8> {
+        let files: Vec<serde_json::Value> = bound
+            .iter()
+            .map(|edit| {
+                serde_json::json!({
+                    "path": edit.resource,
+                    "if_revision": edit.revision,
+                    "first_line": edit.first_line,
+                    "line_count": line_count(&edit.run),
+                    "old": edit.old,
+                    "new": edit.new,
+                })
+            })
+            .collect();
+        serde_json::json!({ "op": "edit", "all_or_none": true, "files": files })
+            .to_string()
+            .into_bytes()
+    }
+
+The typed map is the operation-to-action map. `elastos/crates/elastos-server/src/provider_resource.rs::provider_operation_action` is that map. For scheme `localhost` the arm calls `localhost_op_required_action`. The same arm names webspace. `elastos/crates/elastos-server/src/provider_resource.rs:123` is that arm.
+
+    /// Canonical capability action for provider operations where the Runtime owns
+    /// the operation-to-action contract directly.
+    pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
+        #[cfg(test)]
+        if scheme == "test" {
+            return (op == "read").then_some(Action::Read);
+        }
+
+        match scheme {
+            "localhost" | "webspace" => localhost_op_required_action(op),
+            "did" => execute_op_required_action(op),
+            "availability" => match op {
+                "status" => Some(Action::Read),
+                "ensure" => Some(Action::Write),
+                _ => None,
+            },
+            "block-graph" => match op {
+                "status" | "export_graph" => Some(Action::Read),
+                "import_graph" => Some(Action::Write),
+                _ => None,
+            },
+            "chain" => chain_op_required_action(op),
+            "content" => match op {
+                "status" | "fetch" => Some(Action::Read),
+                "publish" | "ensure" | "repair" | "unpublish" => Some(Action::Write),
+                _ => None,
+            },
+            "drm" | "rights" | "key" | "decrypt" => read_only_provider_action(op),
+            "net" => match op {
+                "status" | "resolve" => Some(Action::Read),
+                "connect" | "stream" | "http" => Some(Action::Write),
+                _ => None,
+            },
+            "exit" => match op {
+                "status" | "discover_remote_carrier_exits" | "quote" => Some(Action::Read),
+                "open_stream" | "close_stream" | "http_fetch" => Some(Action::Write),
+                _ => None,
+            },
+            "browser-engine" => match op {
+                "status" | "readiness" | "page_status" | "diagnostics" | "inspect" => {
+                    Some(Action::Read)
+                }
+                "launch" | "attach_stream" | "input" | "webrtc_signal" => Some(Action::Write),
+                "close_page" => Some(Action::Delete),
+                _ => None,
+            },
+            "wallet" => wallet_op_required_action(op),
+            "ipfs" => ipfs_op_required_action(op),
+            "model" => match op {
+                "offers_list" | "runs_get" | "runs_events" => Some(Action::Read),
+                "runs_create" | "runs_cancel" => Some(Action::Execute),
+                _ => None,
+            },
+            "object" => object_op_required_action(op),
+            "operator-drive-adapter" => match op {
+                "status" | "metadata_index" | "read_bytes" => Some(Action::Read),
+                "write_bytes" => Some(Action::Write),
+                _ => None,
+            },
+            "peer" => match op {
+                "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"
+                | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"
+                | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),
+                _ => None,
+            },
+            "tunnel" => {
+                Some(Action::Admin).filter(|_| matches!(op, "start" | "stop" | "status" | "ping"))
+            }
+            "inspect" => inspect_op_required_action(op),
+            _ => None,
+        }
+    }
+
+`elastos/crates/elastos-server/src/provider_resource.rs::localhost_op_required_action` maps the read group to `Action::Read`, `write` and `mkdir` to `Action::Write`, and `delete` to `Action::Delete`. An unmatched name maps to `None`. `elastos/crates/elastos-server/src/provider_resource.rs:190` is the write arm. `elastos/crates/elastos-server/src/provider_resource.rs:192` is the unmatched arm. The read group is the arm cited above. The delete arm, on line 191 of that file, maps `delete` to `Action::Delete`.
+
+    fn localhost_op_required_action(op: &str) -> Option<Action> {
+        match op {
+            "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),
+            "write" | "mkdir" => Some(Action::Write),
+            "delete" => Some(Action::Delete),
+            _ => None,
+        }
+    }
+
+localhost_resource holds the supported-operation list. `elastos/crates/elastos-server/src/provider_resource.rs:422` is that list: `read`, `write`, `list`, `delete`, `stat`, `mkdir`, `exists`, `resolve`, `ping`.
+
+                "read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",
+
+The extension B2 leaves open is the guest body's operation. The guest body carries `op` `edit`. A typed localhost operation for that body is a name on that list and on a match arm. B2 stays open.
+
+This group is design input for B2. B2 stays open.
+
+The asks file declares three project asks. Each resource pattern is `<principal>/Projects/`. `examples/agent-host/asks.json:7` declares run. `examples/agent-host/asks.json:8` declares child. `examples/agent-host/asks.json:9` declares init.
+
+        {"kind": "run", "resource": "<principal>/Projects/"},
+        {"kind": "child", "resource": "<principal>/Projects/"},
+        {"kind": "init", "resource": "<principal>/Projects/"},
+
+ask_kind_name names Run as `run`, Child as `child`, and Init as `init`. `examples/agent-host/src/lib.rs:8189` is the Run arm.
+
+            ProposalKind::Run => Some("run"),
+
+`examples/agent-host/src/lib.rs:8192` is the Child arm.
+
+            ProposalKind::Child => Some("child"),
+
+`examples/agent-host/src/lib.rs:8193` is the Init arm.
+
+            ProposalKind::Init => Some("init"),
+
+declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. The three patterns are `<principal>/Projects/`.
+
+Run records a step. `examples/agent-host/src/lib.rs::propose_run` sets the kind to Run, stores the resource and the argv, and sets the seat to `microvm`. The body sets `step.kind = ProposalKind::Run`, `step.resource = resource.to_string()`, `step.argv = argv.to_vec()`, and `step.seat = "microvm".to_string();`. The body returns `Err("host path")` when the resource does not start with `localhost://`, when the resource contains whitespace, or when the resource or an argument is a host path. `examples/agent-host/src/lib.rs:2958` says `This does not start a process.` `examples/agent-host/src/lib.rs:2981` is the seat line.
+
+    /// Record a run proposal. The resource is a `localhost://` project. Arguments
+    /// stay data. A host path creates no step. This does not start a process.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_run(
+        journal: &mut Journal,
+        resource: &str,
+        argv: &[String],
+    ) -> Result<u64, &'static str> {
+        if !resource.starts_with("localhost://")
+            || resource.chars().any(char::is_whitespace)
+            || host_path(resource)
+            || argv.iter().any(|arg| host_path(arg))
+        {
+            return Err("host path");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Run;
+        step.resource = resource.to_string();
+        step.argv = argv.to_vec();
+        step.seat = "microvm".to_string();
+        Ok(id)
+    }
+
+`elastos/crates/elastos-compute/src/exec_vm.rs::decide_exec` returns `Refuse("missing grant")` when the grant is missing or empty. `elastos/crates/elastos-compute/src/exec_vm.rs:49` is that return. `elastos/crates/elastos-compute/src/exec_vm.rs:43` says `A ready decision still does not boot.`
+
+    /// Refuse a missing grant, a cancel, a host path, a missing Linux rootfs,
+    /// or a host that has no adapter. A ready decision still does not boot.
+    pub fn decide_exec(request: &ExecRequest<'_>) -> ExecDecision {
+        if request.cancelled {
+            return ExecDecision::Refuse("cancelled");
+        }
+        if request.grant.is_none_or(|grant| grant.is_empty()) {
+            return ExecDecision::Refuse("missing grant");
+        }
+        if !request.workspace.starts_with("localhost://")
+            || request.workspace.chars().any(char::is_whitespace)
+            || host_path(request.workspace)
+        {
+            return ExecDecision::Refuse("host path");
+        }
+        if request.argv.is_empty() || request.argv.iter().any(|arg| host_path(arg)) {
+            return ExecDecision::Refuse("host path");
+        }
+        if request.rootfs.file_name().and_then(|name| name.to_str()) != Some("rootfs.ext4")
+            || !request.rootfs.is_file()
+        {
+            return ExecDecision::Refuse("rootfs missing");
+        }
+        match request.host {
+            ExecHost::Macos => ExecDecision::Admit {
+                adapter: ExecAdapter::AppleVirtualization,
+            },
+            ExecHost::Linux => ExecDecision::Admit {
+                adapter: ExecAdapter::Crosvm,
+            },
+            ExecHost::Other => ExecDecision::Refuse("unsupported host"),
+        }
+    }
+
+`elastos/crates/elastos-compute/src/exec_vm.rs::admit_project_files` splits the workspace at `/Projects/`. `elastos/crates/elastos-compute/src/exec_vm.rs:130` is that `split_once` line. Its doc says a workspace other than `localhost://Users/<root>/Projects/<name>` is refused, and the function copies no directory from the host.
+
+    /// Files that may be placed in the machine for one project. Paths stay
+    /// relative. A host path, a `..` segment, or a workspace that is not
+    /// `localhost://Users/<root>/Projects/<name>` is refused. This does not copy
+    /// a directory from the host.
+    pub fn admit_project_files(workspace: &str, files: &[(&str, &str)]) -> Result<(), &'static str> {
+        let Some(rest) = workspace.strip_prefix("localhost://Users/") else {
+            return Err("host path");
+        };
+        let Some((root, name)) = rest.split_once("/Projects/") else {
+            return Err("host path");
+        };
+        if root.is_empty()
+            || name.is_empty()
+            || root.contains('/')
+            || name.contains('/')
+            || root.contains('\\')
+            || name.contains('\\')
+            || host_path(workspace)
+            || host_path(root)
+            || host_path(name)
+            || workspace.chars().any(char::is_whitespace)
+            || files.is_empty()
+        {
+            return Err("host path");
+        }
+        for (path, text) in files {
+            if path.is_empty()
+                || path.starts_with('/')
+                || host_path(path)
+                || path.chars().any(char::is_whitespace)
+                || path
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err("host path");
+            }
+            if host_path(text) {
+                return Err("host path");
+            }
+        }
+        Ok(())
+    }
+
+decide_exec and admit_project_files are the checks in exec_vm.rs. provider_operation_action is the operation-to-action map. For the localhost scheme that map calls localhost_op_required_action. The typed localhost operation list is the one section 6 already quoted. A typed operation for this ask is a name on that list and on a match arm.
+
+A child copies no parent grant, and the child host is a second journal. `examples/agent-host/src/lib.rs::propose_child` calls narrower_resource. `examples/agent-host/src/lib.rs:3360` says `It does not copy the parent's grant.` `examples/agent-host/src/lib.rs:3370` is that call. The step sets `step.grant = None`. `examples/agent-host/src/lib.rs:3382` is that store.
+
+    /// A child is a separate step. Its resource must sit under the parent's
+    /// resource. It does not copy the parent's grant.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_child(
+        journal: &mut Journal,
+        parent_id: u64,
+        resource: &str,
+    ) -> Result<u64, &'static str> {
+        let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {
+            return Err("no parent");
+        };
+        if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
+            return Err("not a subset");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Child;
+        step.resource = resource.to_string();
+        step.parent_id = Some(parent_id);
+        step.grant = None;
+        Ok(id)
+    }
+
+`examples/agent-host/src/lib.rs::authorize_child` returns false when no step has the child id, when that step is not a Child step, or when the offered grant is absent, empty, or equal to the parent grant. An empty grant unequal to the parent grant still returns false. The function calls authorize only after it finds a Child step and that grant guard passes. `examples/agent-host/src/lib.rs:3449` is the comparison `parent_grant.as_deref() == grant`.
+
+    /// Give a child its own grant. The parent's grant string is refused, and the
+    /// child stays prepared. This does not start a process.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {
+        let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {
+            return false;
+        };
+        if child.kind != ProposalKind::Child {
+            return false;
+        }
+        let parent_grant = child.parent_id.and_then(|parent_id| {
+            journal
+                .steps
+                .iter()
+                .find(|step| step.id == parent_id)
+                .and_then(|step| step.grant.clone())
+        });
+        if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {
+            return false;
+        }
+        authorize(journal, child_id, grant)
+    }
+
+`examples/agent-host/src/lib.rs::open_child_host` starts from empty_journal, calls admit_system with SYSTEM_HEAD, calls propose_run on that journal, and returns `Err("inherited")` when any step has a grant. `examples/agent-host/src/lib.rs:3455` says `A child host is a second journal.` `examples/agent-host/src/lib.rs:3470` is the empty_journal line. `examples/agent-host/src/lib.rs:3471` is the admit_system line.
+
+    /// A child host is a second journal. It keeps the system head and does not
+    /// copy the parent's log or the parent's grant. This is not a second loaded
+    /// component, and it does not start a process.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn open_child_host(
+        parent: &Journal,
+        parent_id: u64,
+        resource: &str,
+    ) -> Result<Journal, &'static str> {
+        let Some(parent_step) = parent.steps.iter().find(|step| step.id == parent_id) else {
+            return Err("no parent");
+        };
+        if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {
+            return Err("not a subset");
+        }
+        let mut child = empty_journal();
+        admit_system(&mut child, SYSTEM_HEAD, true);
+
+The body calls propose_run on that journal. `examples/agent-host/src/lib.rs:3474` is the inherited line.
+
+        if child.steps.iter().any(|step| step.grant.is_some()) {
+            return Err("inherited");
+        }
+        Ok(child)
+    }
+
+`examples/agent-host/src/lib.rs::grant_child_host` returns false when the offered grant is absent, empty, or equal to the parent grant. An empty grant unequal to the parent grant still returns false. When the guard passes, the function looks for a prepared Run step that has no grant. It returns false when no such step exists. When that step exists, the function calls authorize. `examples/agent-host/src/lib.rs:3482` is the comparison `grant == parent_grant`.
+
+    /// Give the child host its own grant. The parent's grant is refused.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Option<&str>) -> bool {
+        if grant.is_none() || grant == Some("") || grant == parent_grant {
+            return false;
+        }
+        let Some(id) = child
+            .steps
+            .iter()
+            .find(|step| {
+                step.kind == ProposalKind::Run
+                    && step.grant.is_none()
+                    && step.state == StepState::Prepared
+            })
+            .map(|step| step.id)
+        else {
+            return false;
+        };
+        authorize(child, id, grant)
+    }
+
+This second journal is the child-journal operation the guest keeps: its own head, its own run step, and its own grant.
+
+Init stores a project resource. `examples/agent-host/src/lib.rs::propose_init` builds `localhost://Users/{root}/Projects/{name}` and stores that resource. `examples/agent-host/src/lib.rs:3403` is that format. `examples/agent-host/src/lib.rs:3387` says `A host path or a slash inside the root or the name creates no step.` The body has no bus call.
+
+    /// Record a project proposal. The resource is a `localhost://` project name.
+    /// A host path or a slash inside the root or the name creates no step.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'static str> {
+        if root.is_empty()
+            || name.is_empty()
+            || root
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+            || name
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+            || host_path(root)
+            || host_path(name)
+        {
+            return Err("host path");
+        }
+        let resource = format!("localhost://Users/{root}/Projects/{name}");
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Init;
+        step.resource = resource;
+        Ok(id)
+    }
+
+On the peer scheme, provider_operation_action maps the operation `init` to `Action::Message`. `elastos/crates/elastos-server/src/provider_resource.rs:174` is the `init` alternative. `elastos/crates/elastos-server/src/provider_resource.rs:176` is the `Action::Message` arm.
+
+            "peer" => match op {
+                "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"
+                | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"
+                | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),
+                _ => None,
+            },
+
+The project ask is the resource propose_init stores. The contract must be extended for a typed operation for run, for child, and for init. The two hosted rows and journal-append are not mapped in this section.
+
+This section cites no lab/grant-binding test.

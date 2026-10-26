@@ -16,15 +16,17 @@
       ]
     }
   ],
-  "observed_startup_needs": {
-    "status": "observed startup needs, not approved rights; Anders decides",
-    "needs": [
+  "platform_baseline": {
+    "status": "Runtime platform baseline for the did-provider executable on macOS, not approved rights",
+    "rules": [
       {
         "id": "startup-root-directory",
+        "justification": "macOS did-provider executable bound as PROVIDER_EXECUTABLE: file-read* of literal / is the startup root-directory read.",
         "rules": ["(allow file-read* (literal \"/\"))"]
       },
       {
         "id": "startup-sysctl",
+        "justification": "macOS did-provider executable bound as PROVIDER_EXECUTABLE: sysctl-read is the startup read of kernel facts by the loader and the allocator.",
         "rules": ["(allow sysctl-read)"]
       }
     ]

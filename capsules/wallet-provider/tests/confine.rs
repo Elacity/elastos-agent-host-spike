@@ -921,6 +921,133 @@ fn planted_key_beneath_storage_parent_is_not_read() {
     provider.shutdown();
 }
 
+/// Account operations beneath `STORAGE_PARENT` are refused.
+///
+/// `<STORAGE_PARENT>/Sibling` is outside `STORAGE_ROOT`, and its wallet
+/// directory is precreated empty, so the refusal is neither the `mkdir` of
+/// `<STORAGE_PARENT>/Fresh` nor a read of a planted key. `init` for that
+/// sibling base refuses with `storage_error`, and `init` resets the root
+/// first, so the provider keeps no usable root. The account call that follows
+/// therefore answers through `data.result` with `status` `error`, `code`
+/// `not_initialized` and a reason, and the sibling's wallet directory stays
+/// empty. `list_accounts` is sent only to show that the refused
+/// `create_managed_account` created nothing. After `init` for the granted root
+/// answers ok, the same call answers ok, the listing holds that account, and
+/// the account is in the store under the root.
+///
+/// Falsifiers: append a read and write grant on `STORAGE_PARENT` (WP88); the
+/// sibling `init` and the account call then succeed, so this test fails on its
+/// refusal. Remove the storage-root grant (WP18); the granted `init` fails, so
+/// this test fails on its ok.
+#[test]
+fn account_operations_beneath_storage_parent_are_refused() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
+    // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
+    let sibling = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Sibling");
+    let sibling_wallet = wallet_dir(&sibling);
+    fs::create_dir_all(&sibling_wallet).expect("precreate the sibling wallet directory");
+    let mut provider = ConfinedProvider::start(&root);
+
+    let denied = provider.init(&sibling);
+    assert_storage_error(&denied);
+    let message = denied["message"]
+        .as_str()
+        .expect("storage refusal must carry a reason");
+    assert!(
+        message.starts_with("failed to inspect wallet storage directory"),
+        "the refused step must be the inspect beneath STORAGE_PARENT: {message}"
+    );
+
+    let operations = [
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Outside".to_string()),
+            create_new: false,
+        },
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    ];
+    for operation in operations {
+        let request = wallet_request(operation);
+        let answer = provider.send(&json!({
+            "op": "wallet_contract",
+            "request": request,
+            "_runtime_invocation": runtime_invocation_envelope(),
+        }));
+        assert_eq!(
+            answer["status"], "ok",
+            "wallet_contract must answer through the protocol: {answer}"
+        );
+        let result = &answer["data"]["result"];
+        assert_eq!(
+            result["status"], "error",
+            "the account call must answer with a result error: {answer}"
+        );
+        assert_eq!(
+            result["code"], "not_initialized",
+            "the refused Init must leave no usable root: {answer}"
+        );
+        assert!(
+            result["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "the result error must carry a reason: {answer}"
+        );
+    }
+
+    assert!(
+        !sibling_wallet.join(WALLET_KEY_FILE).exists(),
+        "the refused account call must create no key: {}",
+        sibling_wallet.display()
+    );
+    assert!(
+        !sibling_wallet.join("wallet-state.json").exists(),
+        "the refused account call must create no store: {}",
+        sibling_wallet.display()
+    );
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "the granted root must serve: {init}");
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Inside".to_string()),
+            create_new: false,
+        }),
+    );
+    let account_id = data["account"]["account_id"]
+        .as_str()
+        .expect("managed account must name its id")
+        .to_string();
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListAccounts {
+        include_revoked: false,
+    }));
+    assert!(
+        data["accounts"].as_array().is_some_and(|accounts| accounts
+            .iter()
+            .any(|account| account["account_id"] == account_id.as_str())),
+        "the created managed account must be listed: {data}"
+    );
+    let store = read_store(&root);
+    assert!(
+        store["accounts"].as_array().is_some_and(|accounts| accounts
+            .iter()
+            .any(|account| account["account_id"] == account_id.as_str())),
+        "account state must land under the wallet root: {store}"
+    );
+
+    provider.shutdown();
+}
+
 /// A complete key file makes the outside root readable if the profile ever
 /// grants that path, so the denial above proves the profile, not the file.
 fn plant_storage_key(wallet_dir: &Path) {
@@ -1493,15 +1620,25 @@ const SHARED_RULES: [&str; 3] = [
 /// The right ids the shared contract names. A declared-rights file may claim
 /// only these.
 const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
-/// The observed startup ids the shared contract names. A declared-rights file
-/// may claim only these under `observed_startup_needs`, and Anders decides
-/// whether they become rights.
-const OBSERVED_STARTUP_NEEDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
+/// The platform-baseline ids the shared contract names. A declared-rights file
+/// may claim only these under its platform baseline; they are the Runtime
+/// platform baseline for the provider executable on macOS, not approved rights.
+const PLATFORM_BASELINE_IDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
 /// The sentence a declared-rights file gives for its own role.
 const DECLARED_RIGHTS_ROLE: &str =
     "lab stand-in for the Runtime generator's input, not a manifest field";
-/// The sentence the observed startup needs give for their own status.
-const OBSERVED_STARTUP_STATUS: &str = "observed startup needs, not approved rights; Anders decides";
+/// The one key a declared-rights file holds its platform baseline under.
+const PLATFORM_BASELINE: &str = "platform_baseline";
+/// The status sentence a declared-rights file gives its platform baseline for
+/// `name`, the provider executable the Runtime binds on macOS.
+fn platform_baseline_status(name: &str) -> String {
+    format!("Runtime platform baseline for the {name} executable on macOS, not approved rights")
+}
+/// The prefix every platform-baseline justification starts with, naming the
+/// provider executable the Runtime binds as PROVIDER_EXECUTABLE.
+fn platform_baseline_justification(name: &str) -> String {
+    format!("macOS {name} executable bound as PROVIDER_EXECUTABLE: ")
+}
 /// The file profiles the one contract check requires. Every one of them must
 /// present the contract, in this order.
 const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
@@ -1614,15 +1751,18 @@ struct DeclaredClaim {
 
 /// The one declared-rights check for the did and wallet profiles: every
 /// top-level allow form of `profile` traces to exactly one right the shared
-/// contract names or to one observed startup need, and every declared rule is
-/// exactly one allow form of that profile.
+/// contract names or to one platform-baseline rule, every declared rule is
+/// exactly one allow form of that profile, and every platform-baseline entry
+/// gives a justification that starts with its provider's executable prefix.
 ///
 /// The check reads no file. It refuses, in this order: a document without the
-/// role, provider, rights and observed-startup-needs fields; an id the shared
-/// contract does not name; an entry with no rules; an allow form with no
-/// claimant or with more than one; a declared rule that is not exactly one
-/// allow form; and a shared rule claimed by the wrong id. Each refusal starts
-/// with the provider name and quotes the rule or names the id (P11).
+/// role, provider, rights and platform-baseline fields; an id the shared
+/// contract does not name; a platform-baseline entry without a justification
+/// that starts with the provider's prefix and gives a reason; an entry with no
+/// rules; an allow form with no claimant or with more than one; a declared rule
+/// that is not exactly one allow form; and a shared rule claimed by the wrong
+/// id. Each refusal starts with the provider name and quotes the rule or names
+/// the id (P11).
 fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<(), String> {
     if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
         return Err(format!(
@@ -1639,23 +1779,22 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             "{name} declared-rights file must hold a rights list"
         ));
     };
-    let Some(startup) = declared["observed_startup_needs"].as_object() else {
+    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {
         return Err(format!(
-            "{name} declared-rights file must hold observed_startup_needs"
+            "{name} declared-rights file must hold a platform baseline"
         ));
     };
-    if startup.get("status").and_then(Value::as_str) != Some(OBSERVED_STARTUP_STATUS) {
+    let status = platform_baseline_status(name);
+    if baseline.get("status").and_then(Value::as_str) != Some(status.as_str()) {
         return Err(format!(
-            "{name} observed startup needs must give the status {OBSERVED_STARTUP_STATUS:?}"
+            "{name} platform baseline must give the status {status:?}"
         ));
     }
-    let Some(needs) = startup.get("needs").and_then(Value::as_array) else {
-        return Err(format!(
-            "{name} observed_startup_needs must hold a needs list"
-        ));
+    let Some(baseline_rules) = baseline.get("rules").and_then(Value::as_array) else {
+        return Err(format!("{name} platform baseline must hold a rules list"));
     };
     let rights = declared_claims(name, rights)?;
-    let needs = declared_claims(name, needs)?;
+    let baseline = declared_claims(name, baseline_rules)?;
     for claim in &rights {
         if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
             return Err(format!(
@@ -1664,15 +1803,31 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             ));
         }
     }
-    for claim in &needs {
-        if !OBSERVED_STARTUP_NEEDS.contains(&claim.id.as_str()) {
+    for claim in &baseline {
+        if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {
             return Err(format!(
                 "{name} declares {}, which the shared contract does not name",
                 claim.id
             ));
         }
     }
-    let claims: Vec<&DeclaredClaim> = rights.iter().chain(needs.iter()).collect();
+    let prefix = platform_baseline_justification(name);
+    for (entry, claim) in baseline_rules.iter().zip(&baseline) {
+        let Some(justification) = entry["justification"].as_str() else {
+            return Err(format!(
+                "{name} platform baseline {} must give a string justification",
+                claim.id
+            ));
+        };
+        if !justification.starts_with(&prefix) || justification[prefix.len()..].trim().is_empty() {
+            return Err(format!(
+                "{name} platform baseline {} justification must start with {prefix:?} \
+                 and give a reason",
+                claim.id
+            ));
+        }
+    }
+    let claims: Vec<&DeclaredClaim> = rights.iter().chain(baseline.iter()).collect();
     for claim in &claims {
         if claim.rules.is_empty() {
             return Err(format!("{name} declares {} with no rules", claim.id));
@@ -1688,7 +1843,7 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
         match claimants.len() {
             0 => {
                 return Err(format!(
-                    "{name} allow rule has no declared right and no observed startup need: {form}"
+                    "{name} allow rule has no declared right and no platform-baseline rule: {form}"
                 ))
             }
             1 => {}
@@ -1734,7 +1889,7 @@ fn declared_claims(name: &str, entries: &[Value]) -> Result<Vec<DeclaredClaim>, 
     for (index, entry) in entries.iter().enumerate() {
         let Some(id) = entry["id"].as_str() else {
             return Err(format!(
-                "{name} declared rights and observed startup needs must give entry {index} a string id"
+                "{name} declared rights and platform baseline must give entry {index} a string id"
             ));
         };
         let Some(rules) = entry["rules"].as_array() else {
@@ -2274,27 +2429,39 @@ fn declared_rights_fixture_profile() -> String {
 }
 
 /// The declared-rights fixture for `provider`: the two rights and the two
-/// observed startup needs, each holding the allow forms of
-/// `declared_rights_fixture_profile`.
+/// platform-baseline rules, each holding the allow forms of
+/// `declared_rights_fixture_profile` and a justification for its provider.
 fn declared_rights_fixture(provider: &str) -> Value {
-    json!({
+    let mut fixture = json!({
         "role": DECLARED_RIGHTS_ROLE,
         "provider": provider,
         "rights": [
             {"id": "storage", "rules": [SHARED_RULES[1], SHARED_RULES[2]]},
             {"id": "bound-executable", "rules": [SHARED_RULES[0]]},
         ],
-        "observed_startup_needs": {
-            "status": OBSERVED_STARTUP_STATUS,
-            "needs": [
-                {
-                    "id": "startup-root-directory",
-                    "rules": ["(allow file-read* (literal \"/\"))"],
-                },
-                {"id": "startup-sysctl", "rules": ["(allow sysctl-read)"]},
-            ],
-        },
-    })
+    });
+    let prefix = platform_baseline_justification(provider);
+    fixture[PLATFORM_BASELINE] = json!({
+        "status": platform_baseline_status(provider),
+        "rules": [
+            {
+                "id": "startup-root-directory",
+                "justification": format!(
+                    "{prefix}file-read* of literal / is the startup root-directory read."
+                ),
+                "rules": ["(allow file-read* (literal \"/\"))"],
+            },
+            {
+                "id": "startup-sysctl",
+                "justification": format!(
+                    "{prefix}sysctl-read is the startup read of kernel facts by the loader \
+                     and the allocator."
+                ),
+                "rules": ["(allow sysctl-read)"],
+            },
+        ],
+    });
+    fixture
 }
 
 /// Writes `declared` as
@@ -2329,25 +2496,27 @@ fn both_file_profiles_bind_one_storage_parameter_contract() {
 }
 
 /// Every top-level allow rule of the did and wallet profiles traces to exactly
-/// one right the shared contract names, or to one observed startup need.
+/// one right the shared contract names, or to one platform-baseline rule.
 ///
 /// The check reads `capsules/did-provider/confine.sb`,
 /// `capsules/wallet-provider/confine.sb` and each provider's
 /// `tests/fixtures/confine/declared-rights.json`. That file is a lab stand-in
 /// for the Runtime generator's input and not a manifest field; the profile
 /// rules are evidence for Anders to review and not accepted rights. Each
-/// profile's allow forms and each declared rule meet one to one, and the
-/// shared rules keep their named rights. An unreadable profile, an unreadable
-/// or invalid declared-rights file and every refusal of the one check fail the
-/// test with the provider name and the rule or id. The model profile is not
-/// read here. The test reads files and starts no process, so it runs on every
-/// platform.
+/// profile's allow forms and each declared rule meet one to one, the shared
+/// rules keep their named rights, and each platform-baseline entry gives a
+/// justification that names the provider executable the Runtime binds. An
+/// unreadable profile, an unreadable or invalid declared-rights file and every
+/// refusal of the one check fail the test with the provider name and the rule
+/// or id. The model profile is not read here. The test reads files and starts
+/// no process, so it runs on every platform.
 ///
 /// Falsifier: WP84 appends
 /// `(allow file-read* (literal "/private/var/cc-confine-unnamed"))` to the did
 /// profile, and WP85 appends the same rule to the wallet profile; this test
-/// fails because no declared right and no observed startup need claims that
-/// form.
+/// fails because no declared right and no platform-baseline rule claims that
+/// form. WP86 renames the one platform-baseline key the check reads; this test
+/// fails because the did and wallet files no longer hold it.
 #[test]
 fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
     let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2366,19 +2535,52 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
     }
 }
 
+/// The model provider's declared-rights file uses the same template as did and
+/// wallet, and the one check reads it unchanged.
+///
+/// The test reads `capsules/model-provider/confine.sb` with
+/// `read_allow_rule_profile` and the model's
+/// `tests/fixtures/confine/declared-rights.json` with `read_declared_rights`,
+/// then requires `check_declared_rights("model-provider", ...)` to return
+/// `Ok`. A missing profile or declared-rights file fails with its path, as the
+/// contract check fails on a missing model profile. `allow_rule_profiles()`
+/// stays did and wallet, so the removal and trace checks do not read the model
+/// pair. The test reads files and starts no process, so it runs on every
+/// platform.
+///
+/// Falsifier: WP86 renames the one platform-baseline key the check reads; this
+/// test fails because the model file no longer holds that key.
+#[test]
+fn model_declared_rights_read_on_the_did_and_wallet_template() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let name = "model-provider";
+    let profile_path = capsules.join(name).join("confine.sb");
+    let profile =
+        read_allow_rule_profile(name, &profile_path).unwrap_or_else(|err| panic!("{err}"));
+    let declared_path = capsules
+        .join(name)
+        .join("tests/fixtures/confine/declared-rights.json");
+    let declared = read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
+    check_declared_rights(name, &profile, &declared).unwrap_or_else(|err| panic!("{err}"));
+}
+
 /// The declared-rights check refuses each bad input with a reason that starts
 /// with the provider name and names the rule or id.
 ///
 /// A temporary `capsules/` directory holds the passing fixture for all three
-/// required file profiles and the two startup allow forms, plus a
+/// required file profiles and the two platform-baseline allow forms, plus a
 /// declared-rights file for each of did and wallet. The valid pair passes.
 /// Then one case for each refusal, in the check's order: a right id and a
-/// startup-need id the shared contract does not name, an entry with no rules,
-/// an allow form with no claimant and one with two claimants, a declared rule
-/// that is not an allow form, and a shared rule claimed by the wrong id. The
-/// fixtures are built in the test and no process starts.
+/// platform-baseline id the shared contract does not name, a platform-baseline
+/// entry with no justification, an entry with no rules, an allow form with no
+/// claimant and one with two claimants, a declared rule that is not an allow
+/// form, and a shared rule claimed by the wrong id. The fixtures are built in
+/// the test and no process starts.
 ///
-/// Falsifier: none. The named test above carries the two profile falsifiers.
+/// Falsifier: WP87 drops the justification refusal; this test fails on its
+/// missing-justification case.
 #[test]
 fn declared_rights_trace_refuses_each_bad_input() {
     let capsules = contract_fixture_capsules();
@@ -2420,14 +2622,25 @@ fn declared_rights_trace_refuses_each_bad_input() {
     );
 
     let mut declared = read();
-    declared["observed_startup_needs"]["needs"]
+    declared[PLATFORM_BASELINE]["rules"]
         .as_array_mut()
-        .expect("fixture startup needs")
+        .expect("fixture platform-baseline rules")
         .push(json!({"id": "startup-clock", "rules": ["(allow sysctl-read)"]}));
     let reason = refuse(&declared, &profile);
     assert!(
         reason.contains("startup-clock") && reason.contains("does not name"),
-        "an unnamed startup-need id must be refused by name: {reason}"
+        "an unnamed platform-baseline id must be refused by name: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]["rules"][0]
+        .as_object_mut()
+        .expect("fixture platform-baseline entry")
+        .remove("justification");
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("startup-root-directory") && reason.contains("justification"),
+        "a platform-baseline entry without a justification must be refused by id: {reason}"
     );
 
     let mut declared = read();
@@ -2448,7 +2661,7 @@ fn declared_rights_trace_refuses_each_bad_input() {
     );
 
     let mut declared = read();
-    declared["observed_startup_needs"]["needs"][1]["rules"] = json!([SHARED_RULES[1]]);
+    declared[PLATFORM_BASELINE]["rules"][1]["rules"] = json!([SHARED_RULES[1]]);
     let reason = refuse(&declared, &profile);
     assert!(
         reason.contains(SHARED_RULES[1])

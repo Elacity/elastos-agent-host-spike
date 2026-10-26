@@ -565,3 +565,147 @@
   `*.falsify-original` backup left. Gates: `cargo test --locked` (91 passed, 2 ignored, 0 failed) and `cargo fmt
   --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
   `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 030 (wc-010d0): read-only discovery of whether each engine applies a module's own memory maximum with
+  no flag, for the C0 refusal (Flint, 26 Oct 23:50). README gets "## Module memory maximum discovery (wc-010d0)"
+  after "## Memory cap (wc-010b)"; nothing else changes (no `tests/`, `tools/`, `capsule/`, `falsifiers.json`,
+  `Cargo.toml`, `Cargo.lock` or pin edit; no falsifier entry, so README's "## Falsifiers" totals are unchanged). Base
+  `a541cd7ba8e656ddc07466b3fc533118c5771ac7`. A previous draft had left files in the git-ignored `target/wc010d/`; its
+  removal was refused, so none of it was used and every probe, script and build is new, in `target/wc010d/r1/`.
+  Commands, in order, from `lab/wasm-capsule/target/wc010d/r1/` (each module written with the Write tool, text as in
+  README): `/opt/homebrew/bin/wasmtime --version` (exit 0, `wasmtime 45.0.1 (83166ba31 2026-06-05)`),
+  `/opt/homebrew/bin/wasmer --version` (exit 0, `wasmer 7.5.0`); `/opt/homebrew/bin/wasmtime run --invoke grow
+  grow-max.wat 1023` (0, `1`), `... 1024` (0, `-1`), `/opt/homebrew/bin/wasmtime run -W trap-on-grow-failure=y
+  --invoke grow grow-max.wat 1023` (0, `1`), `... 1024` (1, "forcing trap when growing memory to 67174400 bytes"),
+  `/opt/homebrew/bin/wasmtime run --invoke size bad-max.wat` (1, "size minimum must not be greater than maximum (at
+  offset 0x16)"); `/opt/homebrew/bin/wasmer run --invoke grow grow-max.wat 1023` (0, `1`), `... 1024` (0, `-1`),
+  `/opt/homebrew/bin/wasmer run --invoke size bad-max.wat` (1, the same validation line); the contrast
+  `/opt/homebrew/bin/wasmtime run --invoke grow grow-nomax.wat 1024` (0, `1`) and `/opt/homebrew/bin/wasmer run
+  --invoke grow grow-nomax.wat 1024` (0, `1`). From `lab/wasm-capsule/`: `tools/build target/wc010d/r1/today` (exit 0,
+  `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`, the pin); then by hand, twice, with
+  `LANE_DIR=$(pwd)`, `SYSROOT=$(rustc --print sysroot)`, `CH=${CARGO_HOME:-$HOME/.cargo}`, `us=$'\x1f'`:
+  `SOURCE_DATE_EPOCH=1700000000 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$LANE_DIR/target/wc010d/r1/build-<v> RUSTC=rustc
+  CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${LANE_DIR}=/lab/wasm-capsule${us}--remap-path-prefix=${CH}=/cargo${us}--remap-path-prefix=${SYSROOT}=/rustc"
+  cargo build --locked --manifest-path $LANE_DIR/Cargo.toml --package capsule --release --target
+  wasm32-unknown-unknown`, `<v>` = `control`, and `<v>` = `max` with `${us}-C${us}link-arg=--max-memory=67108864`
+  added to the flags; each exit 0, each `capsule.wasm` copied to `target/wc010d/r1/capsule-<v>.wasm`. `rustc
+  --version` from the lane root: `rustc 1.91.0 (f8297e351 2025-10-28)`, the receipt's. Cargo reported the control
+  build as a cached one (`Finished ... in 0.04s`, no `Compiling` line) and compiled the max build (`Compiling capsule
+  v0.1.0`); its intermediate files are not in the scratch dirs (no `deps/`), as for `tools/build`, whose run also
+  reported a cached build; no cargo config was read or changed. A third max build into `build-max2` gave the same
+  sha256, `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, but it too was cached, so it shows no
+  reproducibility and is not claimed in README. `python3 -I target/wc010d/r1/memsec.py <module>` on
+  `today/capsule.wasm` and `capsule-control.wasm` (each `sha256 6dd9af1a…  178 bytes`, `memory 0: minimum 16 pages,
+  maximum none`) and `capsule-max.wasm` (`sha256 2002429e…  180 bytes`, `memory 0: minimum 16 pages, maximum 1024
+  pages`), each exit 0. `env -i /opt/homebrew/bin/<engine> run --invoke digest <D>/<module> 1592590337 < /dev/null`
+  for `wasmtime` and `wasmer` on `capsule-max.wasm` and `today/capsule.wasm`: all four exit 0, stdout
+  `230101071268130872` (`FIXED_OUTPUT`); wasmtime's stderr the two `--invoke` warnings, wasmer's empty. The script,
+  standard library only, at `target/wc010d/r1/memsec.py`, never committed:
+  ```python
+  """Print a core Wasm module's memory section and its sha256.
+
+  Usage: python3 -I memsec.py MODULE.wasm
+  Standard library only, written from the Wasm core spec's binary format
+  (magic and version 1, then sections: id byte, LEB128 size, body; the memory
+  section is id 5: a count, then per memory a limits flag byte, 0x00 = minimum
+  only, 0x01 = minimum and maximum, each a LEB128 page count). It refuses any
+  byte it does not read: a bad header, a truncated number, other limits flags,
+  trailing bytes in the memory section, a section past the end.
+  """
+  import hashlib
+  import sys
+
+
+  def leb(data, pos):
+      value = shift = 0
+      while True:
+          if pos >= len(data):
+              sys.exit("refused: truncated LEB128")
+          byte = data[pos]
+          pos += 1
+          value |= (byte & 0x7F) << shift
+          shift += 7
+          if not byte & 0x80:
+              return value, pos
+
+
+  def memories(data):
+      if data[:8] != b"\x00asm\x01\x00\x00\x00":
+          sys.exit("refused: not a core Wasm module, version 1")
+      pos, found = 8, None
+      while pos < len(data):
+          section, (size, pos) = data[pos], leb(data, pos + 1)
+          end = pos + size
+          if end > len(data):
+              sys.exit("refused: section runs past the end")
+          if section == 5:
+              if found is not None:
+                  sys.exit("refused: two memory sections")
+              count, cur = leb(data, pos)
+              found = []
+              for index in range(count):
+                  flags = data[cur]
+                  if flags not in (0x00, 0x01):
+                      sys.exit(f"refused: memory {index} limits flags {flags:#04x}")
+                  minimum, cur = leb(data, cur + 1)
+                  maximum = None
+                  if flags == 0x01:
+                      maximum, cur = leb(data, cur)
+                  found.append((minimum, maximum))
+              if cur != end:
+                  sys.exit("refused: trailing bytes in the memory section")
+          pos = end
+      return found
+
+
+  def main(path):
+      data = open(path, "rb").read()
+      print(f"sha256 {hashlib.sha256(data).hexdigest()}  {len(data)} bytes")
+      found = memories(data)
+      if found is None:
+          print("no memory section")
+          return
+      print(f"memory section: {len(found)} memory")
+      for index, (minimum, maximum) in enumerate(found):
+          shown = "none" if maximum is None else f"{maximum} pages"
+          print(f"memory {index}: minimum {minimum} pages, maximum {shown}")
+
+
+  main(sys.argv[1])
+  ```
+  The script's own check: its sha256 line for `today/capsule.wasm` equals `tools/build`'s receipt
+  (`artifact_sha256`, from `shasum -a 256`), and the added maximum, 1024 as a 2-byte LEB128 (the limits flag byte
+  only changes 0x00 to 0x01), is consistent with the 178 → 180 byte growth. Answers (README
+  "### The answer for the C0 refusal"): (a) FOUND, (b) FOUND (returns -1, no trap flag), (c) FOUND, (d) NOT FOUND
+  (maximum none), (e) FOUND. No engine was missing or failed to start, so nothing is SKIPPED. Gates, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (91 passed, 2 ignored, 0 failed) and `cargo fmt
+  --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 031 (M1 B4 lab half, typed lab operations; base `b75ffefdbe09b3ff1c7328450cb0db8baa0c71f0`):
+  `tools/src/verify.rs` gets `pub const LAB_OPERATIONS` (type `LabOperation`: module, name, inputs, outputs, right,
+  effect `Effect::None`/`Read`/`Write`), with one entry, `env.f`, inputs and outputs none, right `call`, effect
+  `none`. The grants file is now `wc-009.lab-grants/v2`: each grant is exactly `module`, `name` and `right`
+  (`EntryNotAPair` became `EntryNotATriple`, reworded for three keys; a v1 file is refused by the schema reason).
+  `parse_grants` calls `check_right`, which refuses a grant whose right is not its operation's
+  (`RightNotNeeded`: "the grant env.f names the right \"write\", but its typed lab operation needs \"call\""); a
+  grant with no typed operation is read. `verify_checked` refuses a module import with no typed operation
+  (`VerifyRefusal::UntypedImport`, "no typed lab operation for import env.g"). That check runs on the audit's own
+  returned list, right after the one `audit` call, not before it: a check on the granted list before the audit
+  would refuse the untyped unused grants of `unused_grants_excludes_linked_and_preserves_file_order` (z.last,
+  a.first), and the tools crate may not read the module's imports itself (P10). No engine starts either way.
+  Tests: `grant_naming_a_right_the_operation_does_not_need_is_refused` (`tests/verify.rs`),
+  `module_import_with_no_typed_operation_is_refused` (`tests/run.rs`, counting stand-ins, zero `--version` and
+  zero module starts; `env.g` with no grant is still `undeclared import env.g`), `readme_lists_each_typed_lab_operation`
+  (`tests/docs.rs`). `tests/common/grants.rs`: `grants_file` takes (module, name, right), new `importing_env`. The
+  wc-009a tests use the v2 form (`env.f` granted `call`); `grants_file_refusals_keep_their_reason` now has 21
+  cases (a v1 file, an entry with no right, a number right). README: the wc-009a section shows v2 and the new
+  refusals, new "### Typed lab operations (M1 B4 lab half)", the verify section has five checks, the named-test
+  lists, totals 159 (two task 031) and 95 runner-caught. ADOPTION: gap 3 for Anders. `falsifiers.json`:
+  F-WC-B4-UNTYPED-LINKED, F-WC-B4-RIGHT-IGNORED, F-WC-README-COUNT re-anchored to 159, one `"about"` sentence.
+  `readme_lists_each_typed_lab_operation` checked by hand (README's `env.f` effect set to `read`: the test failed
+  at its list comparison; reverted, it passed); it is a README guard, with no `falsifiers.json` entry. Canonical
+  runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json`
+  with the two new ids, all 37 other entries that edit `tools/src/verify.rs` and F-WC-README-COUNT: "baseline: 22
+  named tests pass without an edit, 0 do not", "summary: 40 CAUGHT of 40", exit 0, no `*.falsify-original` backup
+  left. Gates, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (94 passed, 2 ignored, 0
+  failed) and `cargo fmt --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

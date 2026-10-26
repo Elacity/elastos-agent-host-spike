@@ -8,6 +8,10 @@
 //! wc-009a: `read_grants`, the one lab grants file reader, and the grants the
 //! module does not import (`unused_grants()`), also in `verify.rs`.
 //!
+//! Task 031: each grant names a right (`wc-009.lab-grants/v2`), and a grant
+//! whose right is not the one its typed lab operation (`LAB_OPERATIONS`)
+//! needs is refused.
+//!
 //! Every test key is made fresh in memory inside its test, with no fixed seed,
 //! and is never written, kept in a constant or printed. The signature stays in
 //! memory too: there is no signature file. The tests share one process, so
@@ -28,8 +32,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use wasm_capsule_audit::{audit, DeclaredImport, Refusal as AuditRefusal};
 use wasm_capsule_tools::verify::{
-    read_grants, verify_bundle, verify_checked, GrantsReason, GrantsRefusal, VerifiedBundle,
-    VerifyRefusal, GRANTS_LABEL, GRANTS_SCHEMA,
+    read_grants, verify_bundle, verify_checked, Effect, GrantsReason, GrantsRefusal, LabOperation,
+    VerifiedBundle, VerifyRefusal, GRANTS_LABEL, GRANTS_SCHEMA, LAB_OPERATIONS,
 };
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
@@ -573,7 +577,7 @@ fn grants_text(imports: &str) -> String {
 /// exact string after the path, and a well-formed file reads in file order.
 #[test]
 fn grants_file_refusals_keep_their_reason() {
-    assert_eq!(GRANTS_SCHEMA, "wc-009.lab-grants/v1");
+    assert_eq!(GRANTS_SCHEMA, "wc-009.lab-grants/v2");
     assert_eq!(GRANTS_LABEL, "lab stand-in, not admission");
     let tmp = TempDir::new("grants-refusals");
     let folder = tmp.path();
@@ -581,7 +585,11 @@ fn grants_file_refusals_keep_their_reason() {
     // Well-formed: an empty list, and two grants kept in file order.
     let empty = grants_file(folder, "empty.json", &[]);
     assert_eq!(read_grants(&empty).expect("an empty list is valid"), []);
-    let two = grants_file(folder, "two.json", &[("env", "g"), ("env", "f")]);
+    let two = grants_file(
+        folder,
+        "two.json",
+        &[("env", "g", "call"), ("env", "f", "call")],
+    );
     assert_eq!(
         read_grants(&two).expect("two grants are valid"),
         [grant("env", "g"), env_f()]
@@ -605,8 +613,8 @@ fn grants_file_refusals_keep_their_reason() {
         )
     );
 
-    let entry = "grant 1 is not an object of exactly two strings, module and name";
-    let cases: [(&str, String, &str); 19] = [
+    let entry = "grant 1 is not an object of exactly three strings, module, name and right";
+    let cases: [(&str, String, &str); 21] = [
         (
             "not JSON",
             "{".into(),
@@ -645,16 +653,16 @@ fn grants_file_refusals_keep_their_reason() {
             "the grants file has no \"imports\" key",
         ),
         (
-            "another schema",
+            "a v1 file",
             format!(
-                r#"{{"schema": "wc-009.lab-grants/v2", "label": "{GRANTS_LABEL}", "imports": []}}"#
+                r#"{{"schema": "wc-009.lab-grants/v1", "label": "{GRANTS_LABEL}", "imports": [{{"module": "env", "name": "f"}}]}}"#
             ),
-            "the grants file's schema is \"wc-009.lab-grants/v2\", not \"wc-009.lab-grants/v1\"",
+            "the grants file's schema is \"wc-009.lab-grants/v1\", not \"wc-009.lab-grants/v2\"",
         ),
         (
             "a number schema",
             format!(r#"{{"schema": 1, "label": "{GRANTS_LABEL}", "imports": []}}"#),
-            "the grants file's schema is 1, not \"wc-009.lab-grants/v1\"",
+            "the grants file's schema is 1, not \"wc-009.lab-grants/v2\"",
         ),
         (
             "another label",
@@ -668,40 +676,62 @@ fn grants_file_refusals_keep_their_reason() {
         ),
         (
             "an entry that is a string",
-            grants_text(r#"[{"module": "env", "name": "g"}, "env.f"]"#),
+            grants_text(r#"[{"module": "env", "name": "g", "right": "call"}, "env.f"]"#),
             entry,
         ),
         (
             "an entry with no name",
-            grants_text(r#"[{"module": "env", "name": "g"}, {"module": "env"}]"#),
+            grants_text(
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": "env", "right": "call"}]"#,
+            ),
             entry,
         ),
         (
-            "an entry with a third key",
+            "an entry with no right (the v1 pair)",
             grants_text(
-                r#"[{"module": "env", "name": "g"}, {"module": "env", "name": "f", "kind": "func"}]"#,
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": "env", "name": "f"}]"#,
+            ),
+            entry,
+        ),
+        (
+            "an entry with a fourth key",
+            grants_text(
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": "env", "name": "f", "right": "call", "kind": "func"}]"#,
             ),
             entry,
         ),
         (
             "an entry with another key",
-            grants_text(r#"[{"module": "env", "name": "g"}, {"module": "env", "nam": "f"}]"#),
+            grants_text(
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": "env", "nam": "f", "right": "call"}]"#,
+            ),
             entry,
         ),
         (
             "an entry with a number name",
-            grants_text(r#"[{"module": "env", "name": "g"}, {"module": "env", "name": 1}]"#),
+            grants_text(
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": "env", "name": 1, "right": "call"}]"#,
+            ),
             entry,
         ),
         (
             "an entry with a null module",
-            grants_text(r#"[{"module": "env", "name": "g"}, {"module": null, "name": "f"}]"#),
+            grants_text(
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": null, "name": "f", "right": "call"}]"#,
+            ),
+            entry,
+        ),
+        (
+            "an entry with a number right",
+            grants_text(
+                r#"[{"module": "env", "name": "g", "right": "call"}, {"module": "env", "name": "f", "right": 1}]"#,
+            ),
             entry,
         ),
         (
             "the same pair twice",
             grants_text(
-                r#"[{"module": "env", "name": "f"}, {"module": "env", "name": "g"}, {"name": "f", "module": "env"}]"#,
+                r#"[{"module": "env", "name": "f", "right": "call"}, {"module": "env", "name": "g", "right": "call"}, {"name": "f", "right": "call", "module": "env"}]"#,
             ),
             "the grant env.f is listed twice",
         ),
@@ -725,6 +755,74 @@ fn grants_file_refusals_keep_their_reason() {
     }
 }
 
+/// Task 031: the one typed-operation table holds exactly `env.f`, and a grant
+/// of `env.f` must name its right, `call`. Any other right is refused with the
+/// import, the right granted and the right needed. A grant of an import with
+/// no typed operation names no needed right, so the reader passes it; the
+/// verifier refuses it once a module imports it
+/// (`module_import_with_no_typed_operation_is_refused`).
+#[test]
+fn grant_naming_a_right_the_operation_does_not_need_is_refused() {
+    assert_eq!(
+        LAB_OPERATIONS,
+        [LabOperation {
+            module: "env",
+            name: "f",
+            inputs: &[],
+            outputs: &[],
+            right: "call",
+            effect: Effect::None,
+        }],
+        "the typed lab operations"
+    );
+    let tmp = TempDir::new("grants-rights");
+    let folder = tmp.path();
+
+    let needed = grants_file(folder, "needed.json", &[("env", "f", "call")]);
+    assert_eq!(read_grants(&needed).expect("env.f granted call"), [env_f()]);
+    let untyped = grants_file(folder, "untyped.json", &[("env", "g", "write")]);
+    assert_eq!(
+        read_grants(&untyped).expect("an untyped grant is read"),
+        [grant("env", "g")]
+    );
+
+    for (index, right) in ["write", "read", "Call", "call ", ""]
+        .into_iter()
+        .enumerate()
+    {
+        let path = grants_file(
+            folder,
+            &format!("right-{index}.json"),
+            &[("env", "g", "call"), ("env", "f", right)],
+        );
+        let refusal = grants_refused(&path);
+        assert_eq!(refusal.path, path, "{right:?}");
+        match &refusal.reason {
+            GrantsReason::RightNotNeeded {
+                module,
+                name,
+                granted,
+                needed,
+            } => {
+                assert_eq!(
+                    (module.as_str(), name.as_str(), granted.as_str(), *needed),
+                    ("env", "f", right, "call"),
+                    "{right:?}"
+                )
+            }
+            other => panic!("{right:?}: not a right refusal: {other}"),
+        }
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "{}: the grant env.f names the right {right:?}, but its typed lab operation needs \"call\"",
+                path.display()
+            ),
+            "{right:?}"
+        );
+    }
+}
+
 /// wc-009a: `unused_grants()` holds exactly the grants the module does not
 /// import, in file order, and `imports()` only what the module imports. The
 /// grants file is outside the bundle and no part of its lab CID.
@@ -738,7 +836,11 @@ fn unused_grants_excludes_linked_and_preserves_file_order() {
     let grants = grants_file(
         tmp.path(),
         "grants.json",
-        &[("z", "last"), ("env", "f"), ("a", "first")],
+        &[
+            ("z", "last", "call"),
+            ("env", "f", "call"),
+            ("a", "first", "call"),
+        ],
     );
     let granted: Vec<DeclaredImport> = read_grants(&grants).expect("read the grants");
 

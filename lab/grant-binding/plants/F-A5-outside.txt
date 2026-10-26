@@ -1,0 +1,15 @@
+id: F-A5-outside
+file: src/lib.rs
+test: model_use_path_outside_the_owned_root_is_refused
+--- old
+    if let Some(root) = owned_root {
+        let inside = name
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        if !inside {
+            return Err(Refuse::OutsideRoot);
+        }
+    }
+--- new
+    let _ = owned_root;
+--- end
