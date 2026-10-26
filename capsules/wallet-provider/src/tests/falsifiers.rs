@@ -105,8 +105,14 @@ use std::process::Command;
 /// fails on its missing-justification case. Task 072's WP88 appends a read and
 /// write grant on `STORAGE_PARENT` to this profile, so
 /// `account_operations_beneath_storage_parent_are_refused` fails because the
-/// sibling `init` and the account call succeed.
-const EXPECTED_FALSIFIERS: usize = 86;
+/// sibling `init` and the account call succeed. Task 074's WP89 drops the pin
+/// table's two startup rows, so the swapped startup rules and the startup root
+/// read moved under `storage` pass, WP90 drops the repeated-id refusal, WP91
+/// the repeated-rule refusal and WP92 the duplicate-form refusal, so the
+/// profile that holds `(allow sysctl-read)` twice reads "declared rule is not
+/// an allow rule of its profile"; `declared_rights_trace_refuses_each_bad_input`
+/// fails on each case.
+const EXPECTED_FALSIFIERS: usize = 90;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

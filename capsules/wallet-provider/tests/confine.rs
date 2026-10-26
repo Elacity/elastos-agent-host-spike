@@ -1620,10 +1620,29 @@ const SHARED_RULES: [&str; 3] = [
 /// The right ids the shared contract names. A declared-rights file may claim
 /// only these.
 const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
+/// The two allow forms did and wallet hold for startup: the provider reads the
+/// root directory to resolve its own path, and reads kernel facts before the
+/// protocol starts.
+const STARTUP_RULES: [&str; 2] = [
+    r#"(allow file-read* (literal "/"))"#,
+    r#"(allow sysctl-read)"#,
+];
 /// The platform-baseline ids the shared contract names. A declared-rights file
 /// may claim only these under its platform baseline; they are the Runtime
 /// platform baseline for the provider executable on macOS, not approved rights.
 const PLATFORM_BASELINE_IDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
+/// The one id the shared contract names for each pinned allow rule: the three
+/// shared rules and the two startup forms. A shared rule must be claimed by its
+/// id, and a startup form must be claimed by its id whenever the profile holds
+/// it. The model profile's root read, `(allow file-read-data (literal "/"))`,
+/// is a different form and stays out of the table.
+const PINNED_RULES: &[(&str, &str)] = &[
+    (SHARED_RULES[0], "bound-executable"),
+    (SHARED_RULES[1], "storage"),
+    (SHARED_RULES[2], "storage"),
+    (STARTUP_RULES[0], "startup-root-directory"),
+    (STARTUP_RULES[1], "startup-sysctl"),
+];
 /// The sentence a declared-rights file gives for its own role.
 const DECLARED_RIGHTS_ROLE: &str =
     "lab stand-in for the Runtime generator's input, not a manifest field";
@@ -1752,17 +1771,22 @@ struct DeclaredClaim {
 /// The one declared-rights check for the did and wallet profiles: every
 /// top-level allow form of `profile` traces to exactly one right the shared
 /// contract names or to one platform-baseline rule, every declared rule is
-/// exactly one allow form of that profile, and every platform-baseline entry
-/// gives a justification that starts with its provider's executable prefix.
+/// exactly one allow form of that profile, no id or rule is declared twice, and
+/// every platform-baseline entry gives a justification that starts with its
+/// provider's executable prefix.
 ///
 /// The check reads no file. It refuses, in this order: a document without the
 /// role, provider, rights and platform-baseline fields; an id the shared
 /// contract does not name; a platform-baseline entry without a justification
 /// that starts with the provider's prefix and gives a reason; an entry with no
-/// rules; an allow form with no claimant or with more than one; a declared rule
-/// that is not exactly one allow form; and a shared rule claimed by the wrong
-/// id. Each refusal starts with the provider name and quotes the rule or names
-/// the id (P11).
+/// rules; an id declared more than once; a rule repeated inside one entry; an
+/// allow form the profile holds more than once; an allow form with no claimant
+/// or with more than one; a declared rule that is not exactly one allow form;
+/// and a rule the pin table names for one id that the file claims for another.
+/// The pin table holds the three shared rules and the two startup forms: a
+/// shared rule must be claimed by its id, and a startup form must be claimed by
+/// its id whenever the profile holds it. Each refusal starts with the provider
+/// name and quotes the rule or names the id (P11).
 fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<(), String> {
     if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
         return Err(format!(
@@ -1833,7 +1857,29 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             return Err(format!("{name} declares {} with no rules", claim.id));
         }
     }
+    for (index, claim) in claims.iter().enumerate() {
+        if claims[..index].iter().any(|earlier| earlier.id == claim.id) {
+            return Err(format!("{name} declares {} more than once", claim.id));
+        }
+    }
+    for claim in &claims {
+        for (index, rule) in claim.rules.iter().enumerate() {
+            if claim.rules[..index].contains(rule) {
+                return Err(format!(
+                    "{name} declares {} with the rule {rule} more than once",
+                    claim.id
+                ));
+            }
+        }
+    }
     let forms = allow_forms(profile);
+    for (index, form) in forms.iter().enumerate() {
+        if forms[..index].contains(form) {
+            return Err(format!(
+                "{name} profile holds the allow rule {form} more than once"
+            ));
+        }
+    }
     for form in &forms {
         let claimants: Vec<&str> = claims
             .iter()
@@ -1864,19 +1910,18 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             }
         }
     }
-    for (rule, expected) in [
-        (SHARED_RULES[0], "bound-executable"),
-        (SHARED_RULES[1], "storage"),
-        (SHARED_RULES[2], "storage"),
-    ] {
+    for &(rule, expected) in PINNED_RULES {
+        // A startup form is pinned only when the profile holds it; the model
+        // profile reads the root directory with its own form.
+        if !forms.iter().any(|form| form == rule) && !SHARED_RULES.contains(&rule) {
+            continue;
+        }
         let claimant = claims
             .iter()
             .find(|claim| claim.rules.iter().any(|candidate| candidate == rule))
             .map(|claim| claim.id.as_str());
         if claimant != Some(expected) {
-            return Err(format!(
-                "{name} shared rule {rule} must be claimed by {expected}"
-            ));
+            return Err(format!("{name} rule {rule} must be claimed by {expected}"));
         }
     }
     Ok(())
@@ -2423,8 +2468,10 @@ fn contract_fixture_capsules() -> tempfile::TempDir {
 /// startup, so the declared-rights fixture can trace all five forms.
 fn declared_rights_fixture_profile() -> String {
     let mut profile = contract_fixture_profile(true);
-    profile.push_str("(allow file-read* (literal \"/\"))\n");
-    profile.push_str("(allow sysctl-read)\n");
+    for rule in STARTUP_RULES {
+        profile.push_str(rule);
+        profile.push('\n');
+    }
     profile
 }
 
@@ -2449,7 +2496,7 @@ fn declared_rights_fixture(provider: &str) -> Value {
                 "justification": format!(
                     "{prefix}file-read* of literal / is the startup root-directory read."
                 ),
-                "rules": ["(allow file-read* (literal \"/\"))"],
+                "rules": [STARTUP_RULES[0]],
             },
             {
                 "id": "startup-sysctl",
@@ -2457,7 +2504,7 @@ fn declared_rights_fixture(provider: &str) -> Value {
                     "{prefix}sysctl-read is the startup read of kernel facts by the loader \
                      and the allocator."
                 ),
-                "rules": ["(allow sysctl-read)"],
+                "rules": [STARTUP_RULES[1]],
             },
         ],
     });
@@ -2504,12 +2551,14 @@ fn both_file_profiles_bind_one_storage_parameter_contract() {
 /// for the Runtime generator's input and not a manifest field; the profile
 /// rules are evidence for Anders to review and not accepted rights. Each
 /// profile's allow forms and each declared rule meet one to one, the shared
-/// rules keep their named rights, and each platform-baseline entry gives a
-/// justification that names the provider executable the Runtime binds. An
-/// unreadable profile, an unreadable or invalid declared-rights file and every
-/// refusal of the one check fail the test with the provider name and the rule
-/// or id. The model profile is not read here. The test reads files and starts
-/// no process, so it runs on every platform.
+/// rules keep their named rights, the two startup forms are claimed by
+/// `startup-root-directory` and `startup-sysctl` whenever the profile holds
+/// them, no id or rule is declared twice, and each platform-baseline entry
+/// gives a justification that names the provider executable the Runtime binds.
+/// An unreadable profile, an unreadable or invalid declared-rights file and
+/// every refusal of the one check fail the test with the provider name and the
+/// rule or id. The model profile is not read here. The test reads files and
+/// starts no process, so it runs on every platform.
 ///
 /// Falsifier: WP84 appends
 /// `(allow file-read* (literal "/private/var/cc-confine-unnamed"))` to the did
@@ -2574,13 +2623,19 @@ fn model_declared_rights_read_on_the_did_and_wallet_template() {
 /// declared-rights file for each of did and wallet. The valid pair passes.
 /// Then one case for each refusal, in the check's order: a right id and a
 /// platform-baseline id the shared contract does not name, a platform-baseline
-/// entry with no justification, an entry with no rules, an allow form with no
-/// claimant and one with two claimants, a declared rule that is not an allow
-/// form, and a shared rule claimed by the wrong id. The fixtures are built in
-/// the test and no process starts.
+/// entry with no justification, an entry with no rules, an id declared twice,
+/// a rule repeated inside one entry, an allow form the profile holds twice, an
+/// allow form with no claimant and one with two claimants, a declared rule that
+/// is not an allow form, a shared rule claimed by the wrong id, the two startup
+/// rules swapped between their ids, and the startup root read claimed by
+/// `storage`. The fixtures are built in the test and no process starts.
 ///
-/// Falsifier: WP87 drops the justification refusal; this test fails on its
-/// missing-justification case.
+/// Falsifier: WP87 drops the justification refusal, so this test fails on its
+/// missing-justification case. WP89 drops the pin table's two startup rows, so
+/// the swap and moved-root-read cases pass. WP90 drops the repeated-id refusal,
+/// WP91 the repeated-rule refusal, and WP92 the duplicate-form refusal, so the
+/// profile that holds `(allow sysctl-read)` twice reads "declared rule is not
+/// an allow rule of its profile".
 #[test]
 fn declared_rights_trace_refuses_each_bad_input() {
     let capsules = contract_fixture_capsules();
@@ -2651,6 +2706,42 @@ fn declared_rights_trace_refuses_each_bad_input() {
         "an entry with no rules must be refused by id: {reason}"
     );
 
+    let mut declared = read();
+    declared["rights"] = json!([
+        {"id": "storage", "rules": [SHARED_RULES[1]]},
+        {"id": "storage", "rules": [SHARED_RULES[2]]},
+        {"id": "bound-executable", "rules": [SHARED_RULES[0]]},
+    ]);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("storage") && reason.contains("more than once"),
+        "an id declared twice across the two lists must be refused by id: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"]
+        .as_array_mut()
+        .expect("fixture storage rules")
+        .push(json!(SHARED_RULES[1]));
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("storage")
+            && reason.contains(SHARED_RULES[1])
+            && reason.contains("more than once"),
+        "a rule repeated inside one entry must be refused by id and rule: {reason}"
+    );
+
+    let mut duplicated = profile.clone();
+    duplicated.push_str(STARTUP_RULES[1]);
+    duplicated.push('\n');
+    let reason = refuse(&read(), &duplicated);
+    assert!(
+        reason.contains(STARTUP_RULES[1])
+            && reason.contains("profile holds the allow rule")
+            && reason.contains("more than once"),
+        "an allow form the profile holds twice must be refused with its rule: {reason}"
+    );
+
     let mut widened = profile.clone();
     widened.push_str("(allow file-read* (literal \"/private/var/cc-confine-unnamed\"))\n");
     let reason = refuse(&read(), &widened);
@@ -2689,6 +2780,34 @@ fn declared_rights_trace_refuses_each_bad_input() {
     assert!(
         reason.contains(SHARED_RULES[0]) && reason.contains("bound-executable"),
         "a shared rule claimed by the wrong id must name the rule and the id: {reason}"
+    );
+
+    let mut declared = read();
+    declared[PLATFORM_BASELINE]["rules"][0]["rules"] = json!([STARTUP_RULES[1]]);
+    declared[PLATFORM_BASELINE]["rules"][1]["rules"] = json!([STARTUP_RULES[0]]);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains(STARTUP_RULES[0])
+            && reason.contains("startup-root-directory")
+            && reason.contains("must be claimed by"),
+        "the two startup rules swapped between their ids must be refused by rule and id: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"]
+        .as_array_mut()
+        .expect("fixture storage rules")
+        .push(json!(STARTUP_RULES[0]));
+    declared[PLATFORM_BASELINE]["rules"]
+        .as_array_mut()
+        .expect("fixture platform-baseline rules")
+        .remove(0);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains(STARTUP_RULES[0])
+            && reason.contains("startup-root-directory")
+            && reason.contains("must be claimed by"),
+        "the startup root read moved under storage must be refused by rule and id: {reason}"
     );
 }
 
