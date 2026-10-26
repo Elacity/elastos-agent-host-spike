@@ -2,8 +2,10 @@
 
 ## ri-1: harness, SPEC and BLOCKED rows
 
-Base `spike/agent-host` `fe1e1c7e`. Linux 6.12 x86_64 (cloud VM, no KVM),
-rustc 1.91.0. This lane changes no file outside `lab/resident-instances/`.
+Base `spike/agent-host` `fe1e1c7e`, with Elacity `develop` not merged (this
+lane changes no Runtime code; see "Gaps on Elacity develop" below). Linux 6.12
+x86_64 (cloud VM, no KVM), rustc 1.91.0. This lane changes no file outside
+`lab/resident-instances/`.
 
 ### Gate
 
@@ -115,6 +117,15 @@ were then removed.
 No component capsule was launched: RI-1 has no world to build a resident
 fixture against. The launch gap (RI-2) and list gap (RI-3) stay source
 evidence.
+
+### Gaps on Elacity develop
+
+Read only: `git fetch https://github.com/Elacity/elastos-runtime.git develop`
+gave `92aeea44`, 183 commits ahead of this base. A one-off scratch program
+(not committed) evaluated every gap pin against `develop`'s copies of the
+pinned files and the `elastos/wit/` directory. All 13 pins hold there too;
+only the `resource_bridge.rs` lines differ (873 and 946 on `develop`). Nothing
+was merged.
 
 ### Not proven
 
