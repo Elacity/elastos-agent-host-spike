@@ -13,10 +13,11 @@
 //! made from the one profile source, so a `confine.sb` edit reaches it too.
 //! Its program launch binds one path as `PROVIDER_EXECUTABLE` and starts the
 //! program it names, that path or another, under `confine.sb`, so the
-//! profile's exec rule alone decides whether that program runs. Its idle
-//! launch starts `/bin/sleep` on the same pipes and never writes an answer,
-//! so a test can run the one receive to its timeout without the provider
-//! binary.
+//! profile's exec rule alone decides whether that program runs. Its profile
+//! launch starts the real provider binary under a given profile path with
+//! exactly the bindings it is given. Its idle launch starts `/bin/sleep` on
+//! the same pipes and never writes an answer, so a test can run the one
+//! receive to its timeout without the provider binary.
 //!
 //! On a declared host OS a missing `/usr/bin/sandbox-exec` fails the test,
 //! and `sandbox_available` is the call that fails it. On any other OS, when
@@ -234,6 +235,11 @@ enum Launch<'a> {
         executable: &'a Path,
         program: &'a Path,
     },
+    /// The real provider binary under `profile`, with exactly `bindings`.
+    Profile {
+        profile: &'a Path,
+        bindings: &'a [(&'static str, PathBuf)],
+    },
     /// The same binary and pipes without the profile: a control run.
     Unconfined,
     /// `/bin/sleep` on the same pipes. It holds them open and writes nothing,
@@ -261,30 +267,26 @@ impl FixtureProfile {
     }
 }
 
-/// `sandbox-exec` starting `program` under `profile`, with `executable` bound
-/// as `PROVIDER_EXECUTABLE`, the two storage parameters and any fixture
-/// parameters bound. `sandbox-exec` applies the profile to its own process
-/// before it executes `program`, so the profile's exec rule checks that exec
-/// as it checks any exec by the confined provider.
-fn sandboxed(
-    profile: &Path,
-    storage: &Storage,
-    fixture: &[(&'static str, PathBuf)],
-    executable: &Path,
-    program: &Path,
-) -> Command {
+/// The three parameter bindings one storage and one executable make, in the
+/// order every confined launch binds them: `PROVIDER_EXECUTABLE`,
+/// `STORAGE_ROOT`, then `STORAGE_PARENT`.
+fn canonical_bindings(storage: &Storage, executable: &Path) -> [(&'static str, PathBuf); 3] {
+    [
+        ("PROVIDER_EXECUTABLE", executable.to_path_buf()),
+        ("STORAGE_ROOT", storage.root.clone()),
+        ("STORAGE_PARENT", storage.parent.clone()),
+    ]
+}
+
+/// The one launch builder. `sandbox-exec` starts `program` under `profile`,
+/// with one `-D name=value` for each binding, in list order. It applies the
+/// profile to its own process before it executes `program`, so the profile's
+/// exec rule checks that exec as it checks any exec by the confined provider.
+fn sandboxed(profile: &Path, bindings: &[(&'static str, PathBuf)], program: &Path) -> Command {
     let mut command = Command::new(SANDBOX_EXEC);
-    command
-        .arg("-f")
-        .arg(profile)
-        .arg("-D")
-        .arg(format!("PROVIDER_EXECUTABLE={}", executable.display()))
-        .arg("-D")
-        .arg(format!("STORAGE_ROOT={}", storage.root.display()))
-        .arg("-D")
-        .arg(format!("STORAGE_PARENT={}", storage.parent.display()));
-    for (name, path) in fixture {
-        command.arg("-D").arg(format!("{name}={}", path.display()));
+    command.arg("-f").arg(profile);
+    for (name, value) in bindings {
+        command.arg("-D").arg(format!("{name}={}", value.display()));
     }
     command.arg(program);
     command
@@ -304,20 +306,23 @@ impl Provider {
         let binary = resolved(Path::new(PROVIDER_BINARY));
         let mut command = match launch {
             Launch::Confined(storage) => {
-                sandboxed(Path::new(PROFILE_PATH), storage, &[], &binary, &binary)
+                let bindings = canonical_bindings(storage, &binary);
+                sandboxed(Path::new(PROFILE_PATH), &bindings, &binary)
             }
-            Launch::Fixture(storage, fixture) => sandboxed(
-                &fixture.path,
-                storage,
-                &fixture.parameters,
-                &binary,
-                &binary,
-            ),
+            Launch::Fixture(storage, fixture) => {
+                let mut bindings = canonical_bindings(storage, &binary).to_vec();
+                bindings.extend(fixture.parameters.iter().cloned());
+                sandboxed(&fixture.path, &bindings, &binary)
+            }
             Launch::Program {
                 storage,
                 executable,
                 program,
-            } => sandboxed(Path::new(PROFILE_PATH), storage, &[], executable, program),
+            } => {
+                let bindings = canonical_bindings(storage, executable);
+                sandboxed(Path::new(PROFILE_PATH), &bindings, program)
+            }
+            Launch::Profile { profile, bindings } => sandboxed(profile, bindings, &binary),
             Launch::Unconfined => Command::new(&binary),
             Launch::Idle => {
                 let mut command = Command::new("/bin/sleep");
@@ -1820,4 +1825,114 @@ fn model_bound_copy_serves_under_profile() {
         "init must create runs/ under STORAGE_ROOT beside the copy"
     );
     provider.shutdown();
+}
+
+/// One launch whose profile cannot be applied is refused, and the refusal
+/// says why.
+///
+/// `answer` of `init` is `None`, then `ended` reports exit status 65. One
+/// stderr line starts with `sandbox-exec: ` and contains `marker`. No stderr
+/// line contains `execvp()`, and `STORAGE_PARENT` stays empty. The messages
+/// name `case` and quote no `sandbox-exec` line.
+fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, marker: &str) {
+    let mut provider = Provider::start(launch);
+    let answer = provider.answer(&init_request(storage, None));
+    assert!(answer.is_none(), "{case}: init must get no answer");
+    let ended = provider.ended();
+    assert_eq!(
+        ended.status.and_then(|status| status.code()),
+        Some(65),
+        "{case}: sandbox-exec must exit 65 when the profile cannot be applied: {}",
+        describe(ended.status)
+    );
+    assert!(
+        ended
+            .stderr
+            .iter()
+            .any(|line| line.starts_with("sandbox-exec: ") && line.contains(marker)),
+        "{case}: one stderr line must start with sandbox-exec and contain {marker:?}"
+    );
+    assert!(
+        ended.stderr.iter().all(|line| !line.contains("execvp()")),
+        "{case}: sandbox-exec must stop before it executes the provider"
+    );
+    let mut parent = fs::read_dir(&storage.parent)
+        .unwrap_or_else(|err| panic!("{case}: STORAGE_PARENT must stay readable: {err}"));
+    assert!(
+        parent.next().is_none(),
+        "{case}: STORAGE_PARENT must stay empty"
+    );
+}
+
+/// A launch whose profile cannot be applied never starts the provider.
+///
+/// The one launcher starts the real binary three ways: a profile path under
+/// the test's temporary root that does not exist, a copy of `confine.sb` with
+/// its last `)` removed, and `confine.sb` itself with the canonical bindings
+/// minus `STORAGE_ROOT`. In each case `sandbox-exec` exits 65 before the
+/// exec, `init` gets no answer, and nothing is written.
+///
+/// Falsifier: F-cc19a makes `sandboxed` start the program directly when the
+/// profile file does not exist, so case (a) answers `init` and this test
+/// fails at its first check. F-cc19b makes `Provider::ended` keep none of the
+/// stderr lines it reads, so case (a) still exits 65 and this test fails
+/// because no line gives the reason.
+#[test]
+fn startup_is_refused_when_the_profile_cannot_be_applied() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let storage = Storage::prepare("profile-cannot-apply");
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(&storage, &binary);
+    let missing = storage.base.join("missing.sb");
+    assert!(
+        !missing.exists(),
+        "(a) the profile file does not exist: the profile path must be absent"
+    );
+    let source = fs::read_to_string(PROFILE_PATH).unwrap_or_else(|err| {
+        panic!("(b) the profile does not parse: the profile source must be readable: {err}")
+    });
+    let trimmed = source.trim_end();
+    assert!(
+        trimmed.ends_with(')'),
+        "(b) the profile does not parse: the profile source must end with ')'"
+    );
+    let broken = storage.base.join("broken.sb");
+    fs::write(&broken, &trimmed[..trimmed.len() - 1]).unwrap_or_else(|err| {
+        panic!("(b) the profile does not parse: the copy must be writable: {err}")
+    });
+    let without_root: Vec<(&'static str, PathBuf)> = canonical
+        .iter()
+        .filter(|(name, _)| *name != "STORAGE_ROOT")
+        .cloned()
+        .collect();
+
+    assert_startup_is_refused(
+        "(a) the profile file does not exist",
+        Launch::Profile {
+            profile: &missing,
+            bindings: &canonical,
+        },
+        &storage,
+        &missing.display().to_string(),
+    );
+    assert_startup_is_refused(
+        "(b) the profile does not parse",
+        Launch::Profile {
+            profile: &broken,
+            bindings: &canonical,
+        },
+        &storage,
+        "expecting ')'",
+    );
+    assert_startup_is_refused(
+        "(c) the profile names an unbound parameter",
+        Launch::Profile {
+            profile: Path::new(PROFILE_PATH),
+            bindings: &without_root,
+        },
+        &storage,
+        "invalid data type of path filter",
+    );
 }
