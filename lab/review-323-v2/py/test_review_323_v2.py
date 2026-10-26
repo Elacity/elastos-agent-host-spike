@@ -268,7 +268,7 @@ class FalsifiedNewBypasses(unittest.TestCase):
         got = rights('(allow file-read* (regex "^[/].*"))')
         self.assertFalse(
             got["ok"],
-            "storage must not claim (regex \"^[/].*\"); checker returned {got}",
+            f"storage must not claim (regex \"^[/].*\"); checker returned {got}",
         )
 
     def test_falsified_string_append_root_as_storage(self) -> None:
