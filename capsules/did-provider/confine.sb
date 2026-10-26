@@ -7,7 +7,7 @@
 ;; The provider speaks stdin/stdout only; no socket or listener is granted.
 (deny network*)
 
-;; Startup: execute only the provider binary selected by Runtime.
+;; Startup: execute only the provider binary the launch named.
 (allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
 ;; Startup: resolve the absolute program path through the root directory.
 (allow file-read* (literal "/"))
