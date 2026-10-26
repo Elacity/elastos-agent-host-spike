@@ -461,9 +461,9 @@ class WeakRemainingGaps(unittest.TestCase):
 
     def test_weak_model_copy_misses_empty_prefix(self) -> None:
         got = probe({"op": "model_root_wide", "form": '(allow file-read* (prefix ""))'})
-        self.assertFalse(
+        self.assertTrue(
             got.get("root_wide"),
-            "setup: the model copy must still miss (prefix \"\"); "
+            "the model copy must catch an empty prefix; "
             f"checker returned {got}",
         )
 
