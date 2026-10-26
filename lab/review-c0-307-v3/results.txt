@@ -1,0 +1,45 @@
+FCL_SRC=/tmp/review-c0-307-v3-src/lab/fail-closed-linux
+head=1894f4323026b6c4df90a3487d8899a4bd8ee1c8
+host=Linux 6.12.94+ x86_64
+FAIL: confined ioctl_dev errno=25 matches unconfined FIONREAD (ENOTTY). Landlock IOCTL_DEV was not measured: the fd was opened before restrict_self, and the test accepts any errno=. Need EACCES (13) on a device opened after the domain, or on a path granted read without IOCTL_DEV.
+unconfined FIONREAD /dev/null errno=25 (ENOTTY)
+launch /tmp/review-c0-307-v3-src/lab/fail-closed-linux/target/debug/fcl-launch
+probe  /tmp/review-c0-307-v3-src/lab/fail-closed-linux/target/build/debug/build/fail-closed-linux-11788e1815ecbc1a/out/fcl-probe
+confined ioctl_dev errno=25
+confined truncate_outside errno=13
+ioctl test: FAIL (exit 1)
+
+--- crate suite on 1894f432 (this session) ---
+cargo fmt -- --check                         clean
+cargo clippy --locked --all-targets -- -D warnings   clean
+cargo test --locked
+  lib          8 passed, 0 ignored
+  simulated    17 passed, 0 ignored
+  real_kernel  17 passed, 0 ignored
+
+--- python3 falsify.py --jobs 4 (this session, 15s, exit 0) ---
+SURVIVED C00-noop-control  42 tests passed
+CAUGHT   F01-fallback-restarts-unconfined
+CAUGHT   F02-cli-fallback-runs-unconfined
+CAUGHT   F03-child-execs-after-refusal
+CAUGHT   F04-userns-error-ignored
+CAUGHT   F05-uid-map-error-ignored
+CAUGHT   F06-capset-error-ignored
+CAUGHT   F07-bounding-set-not-dropped
+CAUGHT   F08-no-new-privs-error-ignored
+CAUGHT   F09-seccomp-error-ignored
+CAUGHT   F10-landlock-missing-tolerated
+CAUGHT   F11-abi-floor-off-by-one
+CAUGHT   F12-restrict-self-error-ignored
+CAUGHT   F13-socket-allowed
+CAUGHT   F14-storage-rule-covers-parent
+CAUGHT   F15-refusal-omits-provider
+CAUGHT   F16-refusal-exit-code-not-71
+CAUGHT   F17-gid-map-reported-as-uid-map
+CAUGHT   F18-missing-right-silently-passed
+CAUGHT   F19-pid-unshare-skipped
+CAUGHT   F23-sim-ignores-access-mask
+CAUGHT   F24-extra-floor-hides-missing-right
+CAUGHT   F25-empty-pipe-reported-as-start
+CAUGHT   F26-test-extra-right-ignored
+falsifiers: 23/23 caught; controls: 1/1 survived
