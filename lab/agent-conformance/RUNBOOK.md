@@ -527,7 +527,8 @@ file. Each barrier waits for one pending snapshot with two distinct sessions
 and two live children. Its monotonic bound is ten seconds, below the Runtime's
 30-second decision wait. The final check requires a recorded decision from
 both barriers. One pure `barrier_decision` function checks request shape for
-the controller and synthetic tests. The controller grants each own read for its session,
+the controller and synthetic tests. The overlap, cancel and kill rows share one sibling-read rule.
+The controller grants each own read for its session,
 then denies each sibling read with the fixture reason. Both stderr captures
 must contain that delivered refusal. The existing collector drains both client
 groups; the operator's existing stop and census run before capture checks.
@@ -551,8 +552,9 @@ restoration. LOG.md records the commands and libtest results.
 
 F-overlap-second-barrier inserts the stage-1 shortcut in `Overlap::ready`;
 both the synthetic wiring test and the existing live journey must fail.
-F-overlap-sessions, F-overlap-sibling-new and F-overlap-alive remove the
-corresponding barrier checks. The alive test starts bounded `true` and `sleep`
+F-overlap-sessions and F-overlap-alive remove the corresponding barrier checks.
+F-overlap-sibling-new and F-sibling-one-rule each plant one bug in the shared
+sibling-read rule. The alive test starts bounded `true` and `sleep`
 children through `RunningInstances::start` with its fixed system PATH.
 F-seed-dotdot removes the seed parent-segment refusal. Run each named test
 with `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml

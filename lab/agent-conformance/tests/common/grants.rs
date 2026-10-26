@@ -204,6 +204,29 @@ fn matches_orphan(request: &Value, original: &Value) -> Result<bool> {
     Ok(same_id && field(request, "session_id")? == field(original, "session_id")?)
 }
 
+// Instance `index`'s new sibling read of the other instance's file, in its own session.
+fn sibling_reason(index: usize) -> String {
+    format!("agent conformance: instance-{} sibling", index + 1)
+}
+
+fn sibling_reason_matches(request: &Value, index: usize) -> bool {
+    request["reason"] == sibling_reason(index)
+}
+
+fn action_is_read(request: &Value) -> Result<bool> {
+    Ok(field(request, "action")? == "read")
+}
+
+fn sibling_read(request: &Value, first: &[Value], index: usize) -> Result<bool> {
+    Ok(action_is_read(request)?
+        && request["session_id"] == first[index]["session_id"]
+        && request["resource"] == first[1 - index]["resource"]
+        && sibling_reason_matches(request, index)
+        && !first
+            .iter()
+            .any(|first| first["request_id"] == request["request_id"]))
+}
+
 // One request-shape rule for both live barriers and synthetic checks. The
 // returned requests are ordered by instance label, independent of listing order.
 fn barrier_decision(
@@ -213,14 +236,17 @@ fn barrier_decision(
     first: &[Value],
 ) -> Result<Option<Vec<Value>>> {
     let mut ordered = Vec::new();
-    for label in ["instance-1", "instance-2"] {
-        let reason = format!(
-            "agent conformance: {label} {}",
-            if stage == 0 { "own" } else { "sibling" }
-        );
+    for (index, label) in ["instance-1", "instance-2"].into_iter().enumerate() {
+        let own = format!("agent conformance: {label} own");
         let matches: Vec<_> = pending
             .iter()
-            .filter(|request| request["reason"] == reason)
+            .filter(|request| {
+                if stage == 0 {
+                    request["reason"] == own
+                } else {
+                    sibling_reason_matches(request, index)
+                }
+            })
             .collect();
         if matches.len() > 1 {
             return Err("overlap: repeated instance request");
@@ -237,7 +263,7 @@ fn barrier_decision(
         return Err("overlap: two distinct client sessions required");
     }
     for (index, request) in ordered.iter().enumerate() {
-        if field(request, "action")? != "read" {
+        if !action_is_read(request)? {
             return Err("overlap: only read requests belong to this journey");
         }
         if stage == 0 {
@@ -247,12 +273,7 @@ fn barrier_decision(
             if fixture.entries[grant]["duration"] != "session" {
                 return Err("overlap: own read requires a session grant");
             }
-        } else if request["session_id"] != first[index]["session_id"]
-            || request["resource"] != first[1 - index]["resource"]
-            || first
-                .iter()
-                .any(|first| first["request_id"] == request["request_id"])
-        {
+        } else if !sibling_read(request, first, index)? {
             return Err("overlap: sibling read must be new in its original session");
         }
     }
@@ -354,19 +375,8 @@ impl Overlap {
                     "cancel: cancelled instance made a further request"
                 });
             }
-            // The sibling's required cross-read is the sole later request for
-            // instance-1's resource. It must be new and in instance-2's session.
-            if self.stage != 1
-                || request["session_id"] != self.first[1]["session_id"]
-                || request["resource"] != self.first[0]["resource"]
-                || request["reason"] != "agent conformance: instance-2 sibling"
-                || request["action"] != "read"
-                || self
-                    .first
-                    .iter()
-                    .any(|first| first["request_id"] == request["request_id"])
-                || pending.len() != 1
-            {
+            // Instance-2's new sibling read is the sole later request.
+            if self.stage != 1 || !sibling_read(request, &self.first, 1)? || pending.len() != 1 {
                 return Err(if self.kill {
                     "no-retry check: unexpected request after worker kill"
                 } else {
@@ -1456,12 +1466,13 @@ mod tests {
         );
 
         // Exercise the wiring too: a shortcut in ready must not bypass the rule.
+        // Clients run for 3 seconds. Collection keeps its 5-second bound.
         let home = ThrowawayHome::new().unwrap();
         let launches: Vec<_> = (0..2)
             .map(|_| agent_conformance::harness::Launch {
                 home: &home,
                 program: Path::new("sleep"),
-                args: vec!["1"],
+                args: vec!["3"],
             })
             .collect();
         let mut running = RunningInstances::start(&launches, None).unwrap();
@@ -1783,6 +1794,34 @@ mod tests {
             overlap.ready_after_cancel(&[sibling]).is_err(),
             "quiet window must refuse every new request"
         );
+    }
+
+    #[test]
+    fn kill_sibling_read_must_be_new_in_its_session() {
+        let mut overlap = Overlap::new();
+        overlap.kill = true;
+        overlap.stage = 1;
+        overlap.first = vec![
+            json!({"request_id":"first-a", "session_id":"session-a", "resource":"fixture-a"}),
+            json!({"request_id":"first-b", "session_id":"session-b", "resource":"fixture-b"}),
+        ];
+        let sibling = json!({"request_id":"sibling-b", "session_id":"session-b",
+            "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-2 sibling"});
+        assert_eq!(overlap.ready_after_cancel(&[sibling.clone()]), Ok(true));
+        let reason = "no-retry check: unexpected request after worker kill";
+        for (field, value) in [
+            ("request_id", "first-a"),
+            ("request_id", "first-b"),
+            ("resource", "fixture-b"),
+        ] {
+            let mut request = sibling.clone();
+            request[field] = json!(value);
+            assert_eq!(
+                overlap.ready_after_cancel(&[request]),
+                Err(reason),
+                "kill sibling rule must check {field}"
+            );
+        }
     }
 
     #[test]
