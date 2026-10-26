@@ -1,27 +1,50 @@
 # did-provider confinement
 
-`capsules/did-provider/confine.sb` is the single confinement profile for this
-provider. It starts with `(version 1)` and `(deny default)`, and it denies every
-network operation. The process reads line-delimited JSON from stdin and writes
-one JSON response per line to stdout; it opens no listener or socket.
+`capsules/did-provider/confine.sb` is the one oracle for this provider's
+confinement profile (one file, P10): the profile the Runtime generates for this
+provider must match it. It starts with `(version 1)` and `(deny default)`, and
+it denies every network operation. The process reads line-delimited JSON from
+stdin and writes one JSON response per line to stdout; it opens no listener or
+socket.
 
 ## The Runtime bridge change
 
-The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
-confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
-parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
-bridge work, parameterized by the profile path and the storage root, starts
-`did-provider`, `wallet-provider` and `model-provider`, so the Runtime has one
-path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
-the signed provider bundle, checks its hash, refuses any profile with
-`(allow default)` or a network allow, and fails closed with a reason; the
-provider proposes, the Runtime checks (P4, P11).
+The Runtime generates the provider's profile from the provider's approved
+declared rights; it does not load a profile that the provider supplies.
+`confine.sb` in this folder is the test oracle: the profile the Runtime
+generates for this provider must match it, with the same three parameters bound
+to the same paths. The test that compares them is the Runtime's half, outside
+this lane. The one contract check, `check_profile_contract`, holds every oracle
+to these terms, and the generated profile meets them too: `(version 1)` first,
+`(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
+no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
+`STORAGE_PARENT` parameter tokens, and the three shared rules verbatim.
+If the profile cannot be applied, because the file is missing, does not parse
+or names a parameter the launch does not bind, `sandbox-exec` exits before the
+provider starts and gives its reason on standard error; the Runtime then
+refuses the start with that reason and never starts the provider another way
+(P11).
 
-Runtime binds three parameters and creates the base before launch:
+One generator covers `did-provider`, `wallet-provider` and `model-provider`,
+parameterized by the provider's approved declared rights and its storage root,
+so the Runtime has one path for a provider's profile (P10). That bridge change
+is not built: the Runtime half that generates and enforces the profile is
+future work in `elastos/`, outside this lane. The tests launch this provider
+under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
+`startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
+refused when the profile cannot be applied.
+
+## Profile parameters
+
+The generated profile binds three parameters, which the tests pass with
+`sandbox-exec -D`:
 
 - `PROVIDER_EXECUTABLE`: the canonical provider binary path.
 - `STORAGE_ROOT`: `Init.base_path/did`.
 - `STORAGE_PARENT`: `Init.base_path`.
+
+The tests pass a temporary base and bind all three parameters before launch;
+the Runtime half of the bridge change does the same and is not built.
 
 ## The model provider's inline profile
 
@@ -35,30 +58,32 @@ inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
 The model provider's own file profile, `../model-provider/confine.sb`,
-presents this contract and the shared test requires it; moving the Runtime
-from its inline policy to that file is part of the same bridge change.
+presents this contract as an oracle, and the shared test requires it; the
+generated profile for the model provider must match it too.
 
 ## Host-OS status
 
-These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On Linux
-the providers are not confined yet; the `sandbox-exec` integration tests print
-a skip reason and do not run. The rule for provider-status documents is that a
-provider is marked "confined" only for a host OS where a test proves its
-profile, so no status document records `did-provider` or `wallet-provider` as
-confined on Linux until that test exists (P10, P11). The status change lands
-when the Runtime side does.
+These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On macOS
+a confinement test that cannot run because `/usr/bin/sandbox-exec` is missing
+fails the gate; it never passes by skipping. On Linux the providers are not
+confined yet; there, and on any host OS other than macOS, the `sandbox-exec`
+integration tests print a skip reason and do not run. The rule for
+provider-status documents is that a provider is marked "confined" only for a
+host OS where a test proves its profile, so no status document records
+`did-provider` or `wallet-provider` as confined on Linux until that test
+exists (P10, P11). The status change lands when the Runtime side does.
 
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the
-  binary the Runtime named.
+  binary the launch named.
 - `(allow file-read* (literal "/"))`: resolve the absolute program path through
   the root directory.
 - `(allow sysctl-read)`: the loader and the allocator read kernel facts at
   startup.
 - `(allow file-read* (literal (param "STORAGE_PARENT")))`: bind the one shared
   file-profile contract. No did confinement test needs this grant; the profile
-  keeps it because the wallet profile and the Runtime bridge bind the same
+  keeps it because the wallet profile and the generated profile bind the same
   parameter (P10).
 - `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`: one grant
   covers encrypted nickname and persona state.
@@ -117,7 +142,19 @@ standard error on its own thread while the child runs, so a child that fills
 the pipe still reaches its own exit. `stderr_is_drained_before_wait` writes
 128 KiB to standard error and expects every byte plus the child's own exit
 status. The startup case skips with its printed reason when `sandbox-exec` is
-absent.
+absent on a host OS other than macOS.
+
+`startup_is_refused_when_the_profile_cannot_be_applied` covers a profile that
+never loads. It launches the provider through the one builder three ways: a
+profile path that does not exist, a copy of `confine.sb` with its last `)`
+removed, and the real profile with every parameter bound except
+`STORAGE_ROOT`. In each case `sandbox-exec` exits 65 before it can exec the
+provider, the child exits within the deadline with a status other than 0, the
+one harness failure names the request, that exit status and the profile's
+reason from standard error, and nothing lands under the storage root. The
+failure never names `execvp`, so the exec was never attempted. The case skips
+with its printed reason when `sandbox-exec` is absent on a host OS other than
+macOS.
 
 `profile_denies_network` reads the profile and requires `(version 1)` first,
 `(deny default)`, and an explicit `(deny network*)`, with no network grant and
@@ -138,10 +175,22 @@ and a missing or unreadable profile fails the check with a reason that names
 its path. The test runs on every platform because it reads files and starts
 no process.
 
+`sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
+itself without starting a process: a missing `sandbox-exec` on `macos` is an
+error that names the OS and the path, a missing one on `linux` is a skip, and
+a present one on `macos` runs the test. It runs on every supported build
+target.
+
 Run `cargo test --locked --manifest-path capsules/did-provider/Cargo.toml` from
-the repository root. When `/usr/bin/sandbox-exec` is absent the native tests
-print a skip reason; a present sandbox that refuses to launch the child fails
-the test.
+the repository root. When `/usr/bin/sandbox-exec` is absent on a host OS other
+than macOS the native tests print a skip reason; on macOS a missing
+`sandbox-exec` fails the gate, as does a present sandbox that refuses to
+launch the child.
+
+The one runner applies and restores each registered falsifier with
+`python3 -I examples/agent-host/falsify.py --from capsules/did-provider/falsifiers.json`
+from the repository root; the list's edit paths are relative to
+`examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
 
 ## Falsifiers
 
@@ -206,6 +255,10 @@ the test.
 - Widen the write grant from `STORAGE_ROOT` to `STORAGE_PARENT` (DID18):
   `outside_write_denied` fails on its sibling target because that write
   succeeds.
+- Start the provider binary directly when the profile file does not exist
+  (DID21): `startup_is_refused_when_the_profile_cannot_be_applied` fails on
+  its missing-profile case because the provider starts and stays alive instead
+  of being refused.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
@@ -225,14 +278,18 @@ them on macOS 26.5.2 arm64:
 
 A host that needs one of the removed grants receives a sandbox denial for the
 affected access, so that operation fails closed with a reason. In the
-confinement tests that reason appears in the failure of the request the
-provider never answered: the message names the request, the provider's exit
-status and all the provider wrote to standard error. The grant comes back only
-together with a named test that needs it.
+confinement tests the failure of the request the provider never answered names
+the request and the provider's exit status. When the profile denies the exec
+itself (DID07), the failure also carries `sandbox-exec`'s `Operation not
+permitted` from standard error. When the loader runs and a later read is denied
+(DID08, DID09), standard error is empty and the failure shows only the signal,
+`signal: 6 (SIGABRT)`. The grant comes back only together with a named test
+that needs it.
 
-The wallet provider keeps its own profile and tests in `../wallet-provider/`.
-did-provider, wallet-provider and model-provider present the same file-based
-contract to the Runtime bridge:
-`(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT` /
-`STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the
-`/usr/bin/sandbox-exec -f confine.sb` launch shape.
+The wallet provider keeps its own oracle and tests in `../wallet-provider/`.
+did-provider, wallet-provider and model-provider present one contract as
+oracles: `(version 1)`, `(deny default)`, `(deny network*)`, the `STORAGE_ROOT`
+/ `STORAGE_PARENT` / `PROVIDER_EXECUTABLE` parameter tokens, and the three
+shared rules. The tests launch each oracle with
+`/usr/bin/sandbox-exec -f confine.sb`; that launch is the tests', and the
+Runtime half that generates and compares the profile is future work.

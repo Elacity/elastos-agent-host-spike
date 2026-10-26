@@ -1,4 +1,5 @@
-;; Seatbelt profile for did-provider; the signed bundle owns this single source.
+;; Seatbelt profile for did-provider; this file is the test oracle the
+;; Runtime-generated profile must match.
 ;; PROVIDER_EXECUTABLE is the canonical binary path.
 ;; STORAGE_ROOT is Init.base_path/did; STORAGE_PARENT is Init.base_path.
 (version 1)
@@ -12,7 +13,8 @@
 (allow file-read* (literal "/"))
 ;; Startup: the loader and allocator read kernel facts.
 (allow sysctl-read)
-;; Shared contract: the Runtime bridge binds STORAGE_PARENT for both file profiles.
+;; Shared contract: the generated profile binds STORAGE_PARENT for both
+;; file-profile providers.
 (allow file-read* (literal (param "STORAGE_PARENT")))
 ;; Identity: one grant covers encrypted nickname and persona state.
 (allow file-read* file-write* (subpath (param "STORAGE_ROOT")))

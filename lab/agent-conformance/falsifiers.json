@@ -331,12 +331,141 @@
       "edits": [
         {
           "file": "probe/src/lib.rs",
-          "old": "#[cfg(all(feature = \"read\", feature = \"network\"))]\ncompile_error!(\"select exactly one probe effect: read or network\");\n",
+          "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
           "new": ""
         }
       ],
       "tests": [
         "probe_effects_are_exclusive"
+      ]
+    },
+    {
+      "id": "F-ac3a",
+      "title": "let the runaway build return inside Runtime fuel instead of exhausting it; bounded-trap evidence only, stop reason remains AC-005-REASON",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "probe/src/lib.rs",
+          "old": "    loop {\n        std::hint::black_box(0_u32);\n    }",
+          "new": "    for _ in 0..1000 {\n        std::hint::black_box(0_u32);\n    }\n    Ok(())"
+        }
+      ],
+      "tests": [
+        "process_isolation::runaway_trap_is_bounded_while_siblings_finish"
+      ]
+    },
+    {
+      "id": "F-parallel-result",
+      "title": "replace task-b with task-a so two clients return the same diagnostic",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "fixtures/parallel-tasks.txt",
+          "old": "task-b,29,37",
+          "new": "task-a,17,23"
+        }
+      ],
+      "tests": [
+        "process_isolation::parallel_instances_complete_independently",
+        "process_isolation::runaway_trap_is_bounded_while_siblings_finish"
+      ]
+    },
+    {
+      "id": "F-parallel-capture",
+      "title": "read stdout in place of the completed child stderr",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            stderr: capture(&mut self.spawned.stderr)?,",
+          "new": "            stderr: capture(&mut self.spawned.stdout)?,"
+        }
+      ],
+      "tests": [
+        "parallel_collection_preserves_each_status_and_capture"
+      ]
+    },
+    {
+      "id": "F-parallel-bound",
+      "title": "omit the shared wall-clock deadline",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            if self.started.elapsed() >= bound {",
+          "new": "            if false && self.started.elapsed() >= bound {"
+        }
+      ],
+      "tests": [
+        "parallel_timeout_is_failure_and_reaps_every_group"
+      ]
+    },
+    {
+      "id": "F-parallel-operator-guard",
+      "title": "skip validation of the borrowed operator Home",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "            operator.guard(operator.home(), operator.data())?;",
+          "new": "            // planted: skip operator guard"
+        }
+      ],
+      "tests": [
+        "parallel_attach_uses_only_guarded_fixture_coordinates"
+      ]
+    },
+    {
+      "id": "F-parallel-coordinates",
+      "title": "rename the fixture coordinates environment entry",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "                \"ELASTOS_RUNTIME_COORDS_FILE\",",
+          "new": "                \"AC_UNUSED_COORDS_PATH\","
+        }
+      ],
+      "tests": [
+        "parallel_attach_uses_only_guarded_fixture_coordinates"
+      ]
+    },
+    {
+      "id": "F-parallel-start",
+      "title": "start only the first member of a requested group",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "        for launch in launches {",
+          "new": "        for launch in launches.iter().take(1) {"
+        }
+      ],
+      "tests": [
+        "parallel_collection_preserves_each_status_and_capture"
+      ]
+    },
+    {
+      "id": "F-parallel-drain",
+      "title": "accept completion while a descendant is still alive",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "src/harness.rs",
+          "old": "        if self.home.group_is_alive(self.pgid())? {\n            return Err(\"completed child left a live process group\");\n        }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "parallel_collection_refuses_live_descendants"
       ]
     }
   ]

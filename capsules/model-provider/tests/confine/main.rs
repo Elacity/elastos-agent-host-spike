@@ -11,6 +11,9 @@
 //! so a control run shows what the profile stops. Its fixture launch runs a
 //! test-time copy of `confine.sb` with fixture rules appended; the copy is
 //! made from the one profile source, so a `confine.sb` edit reaches it too.
+//! Its program launch binds one path as `PROVIDER_EXECUTABLE` and starts the
+//! program it names, that path or another, under `confine.sb`, so the
+//! profile's exec rule alone decides whether that program runs.
 //!
 //! When `/usr/bin/sandbox-exec` is absent a confined test prints why it did
 //! not run and returns; it never passes silently. The one profile-shape check
@@ -37,8 +40,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use test_support::FIXTURE_EVENT_TIMEOUT;
@@ -94,6 +97,13 @@ enum Launch<'a> {
     /// Under a test-time copy of `confine.sb` with fixture rules appended,
     /// with the contract's three parameters and the fixture's own bound.
     Fixture(&'a Storage, &'a FixtureProfile),
+    /// Under `confine.sb`, starting `program` with `executable` bound as
+    /// `PROVIDER_EXECUTABLE` and the storage parameters bound as usual.
+    Program {
+        storage: &'a Storage,
+        executable: &'a Path,
+        program: &'a Path,
+    },
     /// The same binary and pipes without the profile: a control run.
     Unconfined,
 }
@@ -117,20 +127,24 @@ impl FixtureProfile {
     }
 }
 
-/// `sandbox-exec` starting `binary` under `profile`, with the contract's three
-/// parameters and any fixture parameters bound.
+/// `sandbox-exec` starting `program` under `profile`, with `executable` bound
+/// as `PROVIDER_EXECUTABLE`, the two storage parameters and any fixture
+/// parameters bound. `sandbox-exec` applies the profile to its own process
+/// before it executes `program`, so the profile's exec rule checks that exec
+/// as it checks any exec by the confined provider.
 fn sandboxed(
     profile: &Path,
     storage: &Storage,
     fixture: &[(&'static str, PathBuf)],
-    binary: &Path,
+    executable: &Path,
+    program: &Path,
 ) -> Command {
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .arg("-f")
         .arg(profile)
         .arg("-D")
-        .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()))
+        .arg(format!("PROVIDER_EXECUTABLE={}", executable.display()))
         .arg("-D")
         .arg(format!("STORAGE_ROOT={}", storage.root.display()))
         .arg("-D")
@@ -138,7 +152,7 @@ fn sandboxed(
     for (name, path) in fixture {
         command.arg("-D").arg(format!("{name}={}", path.display()));
     }
-    command.arg(binary);
+    command.arg(program);
     command
 }
 
@@ -154,10 +168,21 @@ impl Provider {
     fn start(launch: Launch<'_>) -> Self {
         let binary = resolved(Path::new(PROVIDER_BINARY));
         let mut command = match launch {
-            Launch::Confined(storage) => sandboxed(Path::new(PROFILE_PATH), storage, &[], &binary),
-            Launch::Fixture(storage, fixture) => {
-                sandboxed(&fixture.path, storage, &fixture.parameters, &binary)
+            Launch::Confined(storage) => {
+                sandboxed(Path::new(PROFILE_PATH), storage, &[], &binary, &binary)
             }
+            Launch::Fixture(storage, fixture) => sandboxed(
+                &fixture.path,
+                storage,
+                &fixture.parameters,
+                &binary,
+                &binary,
+            ),
+            Launch::Program {
+                storage,
+                executable,
+                program,
+            } => sandboxed(Path::new(PROFILE_PATH), storage, &[], executable, program),
             Launch::Unconfined => Command::new(&binary),
         };
         let mut child = command
@@ -199,26 +224,52 @@ impl Provider {
         }
     }
 
-    /// Sends one request and returns its answer. A process that exits first
-    /// fails the test with its exit status: `sandbox-exec` exits 71 when the
-    /// profile refuses to execute the binary, and a startup the profile breaks
-    /// aborts before the first answer.
-    fn request(&mut self, request: &Value) -> Value {
+    /// Sends one request and returns its answer, or `None` when the process
+    /// closes its stdout before it answers. A process that does neither
+    /// within `FIXTURE_EVENT_TIMEOUT` fails the test.
+    fn answer(&mut self, request: &Value) -> Option<Value> {
         let stdin = self.stdin.as_mut().expect("provider stdin is open");
         // A closed pipe shows up below as an exit without an answer.
         let _ = writeln!(stdin, "{request}").and_then(|()| stdin.flush());
         match self.responses.recv_timeout(FIXTURE_EVENT_TIMEOUT) {
-            Ok(response) => response,
-            Err(RecvTimeoutError::Disconnected) => panic!(
-                "the provider process exited before answering {}: {}",
-                request["op"],
-                describe(self.wait())
-            ),
+            Ok(response) => Some(response),
+            Err(RecvTimeoutError::Disconnected) => None,
             Err(RecvTimeoutError::Timeout) => panic!(
                 "the provider did not answer {} within {FIXTURE_EVENT_TIMEOUT:?}",
                 request["op"]
             ),
         }
+    }
+
+    /// Sends one request and returns its answer. A process that exits first
+    /// fails the test with its exit status: `sandbox-exec` exits 71 when the
+    /// profile refuses to execute the binary, and a startup the profile breaks
+    /// aborts before the first answer.
+    fn request(&mut self, request: &Value) -> Value {
+        match self.answer(request) {
+            Some(response) => response,
+            None => panic!(
+                "the provider process exited before answering {}: {}",
+                request["op"],
+                describe(self.wait())
+            ),
+        }
+    }
+
+    /// How a process ended that closed its stdout without answering: its exit
+    /// status from `wait`, and the stderr lines no earlier read took, read
+    /// from the stderr channel until the stream closes.
+    fn ended(&mut self) -> Ended {
+        let status = self.wait();
+        let mut stderr = Vec::new();
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match self.stderr.recv_timeout(left) {
+                Ok(line) => stderr.push(line),
+                Err(_) => break,
+            }
+        }
+        Ended { status, stderr }
     }
 
     /// Sends one request that must succeed and returns its data.
@@ -290,6 +341,12 @@ impl Drop for Provider {
         }
         let _ = self.child.wait();
     }
+}
+
+/// What `Provider::ended` read from a launch that never answered.
+struct Ended {
+    status: Option<ExitStatus>,
+    stderr: Vec<String>,
 }
 
 fn describe(status: Option<ExitStatus>) -> String {
@@ -971,16 +1028,37 @@ fn model_local_offer_accepted_when_unconfined() {
 /// A stand-in for the Runtime-owned hosted effect socket that an init config
 /// names in `runtime_hosted_socket`. It is bound under `/tmp`: the provider
 /// refuses a socket path of 104 bytes or more, and a path under the fixture's
-/// temporary root comes close to that. It answers every request as the
-/// Runtime refuses one before dispatch, `403` with
-/// `X-Elastos-Hosted-Access: refused`, and records the request line of each
-/// connection it accepts, so an empty record means no connection came.
+/// temporary root comes close to that. It counts each connection when
+/// `accept` returns it, before anything is read from it. Then it serves that
+/// connection on its own thread, so a connection that sends nothing holds up
+/// neither the accept loop nor the final observation: it reads the request to
+/// its end, records its request line, and answers as the Runtime refuses one
+/// before dispatch, `403` with `X-Elastos-Hosted-Access: refused`. `observe`
+/// first takes every connection still queued, so a count of zero means no
+/// connection came.
 struct RuntimeHostedSocket {
     path: PathBuf,
-    requests: Receiver<String>,
+    listener: Arc<UnixListener>,
+    record: Arc<Mutex<Observation>>,
     stop: Arc<AtomicBool>,
     server: Option<JoinHandle<()>>,
 }
+
+/// What the Runtime socket stand-in saw: every connection it accepted,
+/// counted when `accept` returned it, and the request line of each request it
+/// read to its end.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Observation {
+    connections: usize,
+    requests: Vec<String>,
+}
+
+const STAND_IN_RECORD: &str = "the Runtime socket stand-in's record";
+
+/// The stand-in's one answer: the Runtime's refusal before dispatch.
+const HOSTED_EFFECT_REFUSAL: &[u8] =
+    b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
+      Content-Length: 0\r\nConnection: close\r\n\r\n";
 
 impl RuntimeHostedSocket {
     fn bind(label: &str) -> Self {
@@ -992,46 +1070,89 @@ impl RuntimeHostedSocket {
         listener
             .set_nonblocking(true)
             .expect("a stoppable Runtime socket stand-in");
-        let (request_tx, requests) = mpsc::channel();
+        let listener = Arc::new(listener);
+        let record = Arc::new(Mutex::new(Observation::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
-        let server = thread::spawn(move || {
-            while !stopping.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => refuse_hosted_effect(&stream, &request_tx),
-                    // Nothing to accept yet, or a connection that gave up.
-                    Err(_) => thread::sleep(Duration::from_millis(10)),
+        let server = {
+            let listener = Arc::clone(&listener);
+            let record = Arc::clone(&record);
+            let stopping = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    take_queued(&listener, &record);
+                    thread::sleep(Duration::from_millis(10));
                 }
-            }
-        });
+            })
+        };
         Self {
             path,
-            requests,
+            listener,
+            record,
             stop,
             server: Some(server),
         }
     }
 
-    /// The request line of every connection accepted so far.
-    fn received(&self) -> Vec<String> {
-        self.requests.try_iter().collect()
+    /// Stops the accept loop and waits for it to end. A connection that comes
+    /// later stays queued on the listener until `observe` takes it.
+    fn stop_accepting(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
+    }
+
+    /// The final observation. It stops the accept loop, then accepts every
+    /// connection still queued on the listener and counts each one, and
+    /// returns the connections counted and the request lines read so far. It
+    /// waits for no connection's request.
+    fn observe(mut self) -> Observation {
+        self.stop_accepting();
+        take_queued(&self.listener, &self.record);
+        self.record.lock().expect(STAND_IN_RECORD).clone()
     }
 }
 
 impl Drop for RuntimeHostedSocket {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(server) = self.server.take() {
-            let _ = server.join();
-        }
+        self.stop_accepting();
         let _ = fs::remove_file(&self.path);
     }
 }
 
-/// Reads one request to its end, records its request line, then answers as
-/// the Runtime's refusal before dispatch. The line is recorded before the
-/// answer, so a run that settles on this answer always finds it recorded.
-fn refuse_hosted_effect(mut stream: &UnixStream, requests: &Sender<String>) {
+/// Accepts the connections queued on `listener` one by one, and admits each,
+/// until `accept` returns no connection: none is left, or it failed, as for a
+/// connection that gave up before it was accepted. A failed `accept` counts
+/// nothing.
+fn take_queued(listener: &UnixListener, record: &Arc<Mutex<Observation>>) {
+    while let Ok((stream, _)) = listener.accept() {
+        admit(stream, record);
+    }
+}
+
+/// Counts a connection as soon as `accept` returns it, before anything is
+/// read from it, then serves it on its own thread, so a connection that sends
+/// nothing holds up no other.
+fn admit(stream: UnixStream, record: &Arc<Mutex<Observation>>) {
+    let record = Arc::clone(record);
+    record.lock().expect(STAND_IN_RECORD).connections += 1;
+    let serve = move || {
+        let request_line = read_request(&stream);
+        // The line is recorded before the answer, so a run that settles on
+        // this answer always finds it recorded.
+        record
+            .lock()
+            .expect(STAND_IN_RECORD)
+            .requests
+            .push(request_line);
+        let _ = (&stream).write_all(HOSTED_EFFECT_REFUSAL);
+    };
+    thread::spawn(serve);
+}
+
+/// Reads one request to its end, waiting at most `FIXTURE_EVENT_TIMEOUT` for
+/// each read, and returns its request line.
+fn read_request(stream: &UnixStream) -> String {
     // On macOS an accepted socket keeps the listener's non-blocking mode.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
@@ -1051,11 +1172,7 @@ fn refuse_hosted_effect(mut stream: &UnixStream, requests: &Sender<String>) {
         }
     }
     let _ = reader.read_exact(&mut vec![0; body_bytes]);
-    let _ = requests.send(request_line.trim_end().to_string());
-    let _ = stream.write_all(
-        b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
-          Content-Length: 0\r\nConnection: close\r\n\r\n",
-    );
+    request_line.trim_end().to_string()
 }
 
 /// The hosted transport fixture shared by
@@ -1090,14 +1207,14 @@ impl HostedTransport {
 /// (`backend_client_with_socket` and `effect_request` in `src/adapters.rs`),
 /// and the profile refuses the connect. The run settles within
 /// `FIXTURE_EVENT_TIMEOUT` as `failed`, with `transport_interrupted` and
-/// "model backend transport was interrupted"; the socket receives no
-/// connection; and the provider stays in service.
+/// "model backend transport was interrupted"; the socket stand-in's final
+/// observation counts no connection; and the provider stays in service.
 /// `model_hosted_run_reaches_runtime_socket_when_unconfined` sends the same
 /// fixture and requests without the profile, and the request reaches the
 /// socket.
 ///
 /// The provider logs no adapter fault, so the evidence is the run's terminal
-/// error, the socket's record and the control. F-cc10a (`(allow default)`,
+/// error, the stand-in's count and the control. F-cc10a (`(allow default)`,
 /// with `(deny network*)` removed) and F-cc10b (`(deny network*)` becomes
 /// `(allow network*)`, nothing else changes) each let the request reach the
 /// socket, and this test fails. `(allow default)` alone does not:
@@ -1114,9 +1231,9 @@ fn model_hosted_run_fails_closed_under_profile() {
     provider.ok(&fixture.run.create);
     let settled = fixture.run.settle(&mut provider);
     assert_eq!(
-        fixture.socket.received(),
-        Vec::<String>::new(),
-        "the profile must refuse the connect, so the Runtime socket receives no connection"
+        fixture.socket.observe().connections,
+        0,
+        "the profile must refuse the connect, so no connection reaches the Runtime socket"
     );
     assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
     assert_eq!(
@@ -1134,8 +1251,8 @@ fn model_hosted_run_fails_closed_under_profile() {
 }
 
 /// The control for `model_hosted_run_fails_closed_under_profile`: the same
-/// fixture and requests without the profile. The run's one request reaches
-/// the Runtime socket stand-in with a request line that starts with
+/// fixture and requests without the profile. The Runtime socket stand-in
+/// counts one connection, whose one request line starts with
 /// `POST /v1/hosted-effect `, and the stand-in's refusal settles the run as
 /// `hosted_effect_refused`. The profile is the only difference between the
 /// two runs. Off macOS the provider refuses every hosted run itself, before
@@ -1155,7 +1272,12 @@ fn model_hosted_run_reaches_runtime_socket_when_unconfined() {
 
     provider.ok(&fixture.run.create);
     let settled = fixture.run.settle(&mut provider);
-    let received = fixture.socket.received();
+    let observed = fixture.socket.observe();
+    assert_eq!(
+        observed.connections, 1,
+        "without the profile the run must reach the Runtime socket over one connection"
+    );
+    let received = observed.requests;
     assert!(
         received.len() == 1 && received[0].starts_with("POST /v1/hosted-effect "),
         "without the profile the run's one request must reach the Runtime socket: {received:?}"
@@ -1171,5 +1293,244 @@ fn model_hosted_run_reaches_runtime_socket_when_unconfined() {
         "the Runtime socket's refusal must settle the run"
     );
 
+    provider.shutdown();
+}
+
+/// The Runtime socket stand-in counts a connection when `accept` returns it,
+/// before it reads anything. One client connects, sends nothing and stays
+/// open. The final observation counts that one connection, with no request
+/// line, and it returns in less than half of `FIXTURE_EVENT_TIMEOUT`, the
+/// stand-in's read timeout, so it waits for no request. The test uses no
+/// provider and no sandbox, so it runs on every Unix host.
+///
+/// Falsifier: F-cc15a moves the count back to after the request has been
+/// read. The silent connection is then not counted, or counted only once its
+/// read times out, and this test fails.
+#[test]
+fn runtime_socket_stand_in_counts_a_silent_connection() {
+    let socket = RuntimeHostedSocket::bind("silent-connection");
+    let _silent = UnixStream::connect(&socket.path).expect("a silent client of the stand-in");
+
+    let started = Instant::now();
+    let observed = socket.observe();
+    let took = started.elapsed();
+    assert_eq!(
+        observed,
+        Observation {
+            connections: 1,
+            requests: Vec::new(),
+        },
+        "the stand-in must count the silent connection when it accepts it"
+    );
+    assert!(
+        took < FIXTURE_EVENT_TIMEOUT / 2,
+        "the final observation must not wait for a request, but it took {took:?}"
+    );
+}
+
+/// The final observation first takes every connection still queued on the
+/// listener. The test stops the stand-in's accept loop, then connects two
+/// clients that send nothing. A Unix socket `connect` returns once the
+/// connection is queued, so both are still queued when `observe` starts, and
+/// only its own accepts can count them. The observation counts two
+/// connections and no request line. The test uses no provider and no sandbox.
+///
+/// Falsifier: F-cc15b removes that first step, so the observation counts
+/// neither queued connection, and this test fails.
+#[test]
+fn runtime_socket_stand_in_drains_queued_connections() {
+    let mut socket = RuntimeHostedSocket::bind("queued-connections");
+    socket.stop_accepting();
+    let _queued: Vec<UnixStream> = (0..2)
+        .map(|_| UnixStream::connect(&socket.path).expect("a client queued on the stand-in"))
+        .collect();
+
+    assert_eq!(
+        socket.observe(),
+        Observation {
+            connections: 2,
+            requests: Vec::new(),
+        },
+        "the final observation must take and count every connection still queued"
+    );
+}
+
+/// A connection that sends nothing does not hold up the stand-in's accept
+/// loop. A first client connects and stays silent. A second client then sends
+/// a whole hosted effect request, and it gets the stand-in's whole `403`
+/// answer within half of `FIXTURE_EVENT_TIMEOUT`, the stand-in's read
+/// timeout. The final observation counts both connections and records the
+/// second one's request line. The test uses no provider and no sandbox.
+///
+/// Falsifier: F-cc15c serves each connection on the accept loop itself, as
+/// the stand-in did before it counted at the accept. The second client then
+/// waits behind the silent one's read, and this test fails.
+#[test]
+fn runtime_socket_stand_in_accepts_behind_a_silent_connection() {
+    let socket = RuntimeHostedSocket::bind("behind-silent-connection");
+    let _silent = UnixStream::connect(&socket.path).expect("a silent client of the stand-in");
+    let mut client = UnixStream::connect(&socket.path).expect("a second client of the stand-in");
+    let limit = FIXTURE_EVENT_TIMEOUT / 2;
+    client
+        .set_read_timeout(Some(limit))
+        .expect("a bounded wait for the answer");
+
+    let started = Instant::now();
+    client
+        .write_all(b"POST /v1/hosted-effect HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+        .expect("send the second client's request");
+    let mut answer = Vec::new();
+    // A read that times out leaves the answer short, and the check says so.
+    let _ = client.read_to_end(&mut answer);
+    let took = started.elapsed();
+    assert!(
+        answer == HOSTED_EFFECT_REFUSAL && took < limit,
+        "the stand-in must answer a request behind a silent connection within {limit:?}, \
+         but it sent {} of {} answer bytes in {took:?}",
+        answer.len(),
+        HOSTED_EFFECT_REFUSAL.len()
+    );
+
+    assert_eq!(
+        socket.observe(),
+        Observation {
+            connections: 2,
+            requests: vec!["POST /v1/hosted-effect HTTP/1.1".to_string()],
+        },
+        "the stand-in must count both connections and record the second one's request line"
+    );
+}
+
+/// The stored-copy fixture shared by
+/// `model_unbound_program_refused_under_profile` and its control. It creates
+/// `STORAGE_ROOT` owner-only, as `Redirect` does, and copies the provider
+/// binary directly into it, the one place the profile lets the provider
+/// write. `fs::copy` keeps the binary's mode, and the copy has the binary's
+/// SHA-256, so the two files differ only by path.
+struct StoredCopy {
+    storage: Storage,
+    binary: PathBuf,
+    copy: PathBuf,
+}
+
+impl StoredCopy {
+    fn prepare(label: &str) -> Self {
+        let storage = Storage::prepare(label);
+        owner_only_directory(&storage.root);
+        let binary = resolved(Path::new(PROVIDER_BINARY));
+        let copy = storage
+            .root
+            .join(binary.file_name().expect("the provider binary's file name"));
+        fs::copy(&binary, &copy).expect("copy the provider binary under STORAGE_ROOT");
+        let copy = resolved(&copy);
+        assert_eq!(
+            test_support::sha256_file(&copy),
+            test_support::sha256_file(&binary),
+            "the copy must be byte-identical to the bound binary"
+        );
+        Self {
+            storage,
+            binary,
+            copy,
+        }
+    }
+}
+
+/// Under the profile, only the path bound as `PROVIDER_EXECUTABLE` can be
+/// started. The test runs `confine.sb` itself, with no fixture rule. It binds
+/// the real provider binary as `PROVIDER_EXECUTABLE` and the storage
+/// parameters as usual, and starts the byte-identical copy under
+/// `STORAGE_ROOT`. `sandbox-exec` applies the profile before it executes its
+/// program, so the refused step is that exec of the copy, checked by the same
+/// `process-exec` rule as any exec by the confined provider. The copy never
+/// answers `init`; `sandbox-exec` exits 71 and logs
+/// `execvp() of '<copy>' failed: Operation not permitted`; and `STORAGE_ROOT`
+/// keeps only the copy, with no `runs/`. A missing program also exits 71, but
+/// with `No such file or directory`, so the test checks the EPERM line.
+/// `model_bound_copy_serves_under_profile` is the control: a copy from the
+/// same fixture, bound and started, serves.
+///
+/// Falsifiers: F-cc14a (`(allow default)`), F-cc14b (one `(allow process-exec)`
+/// added after the exec rule) and F-cc14c (one
+/// `(allow process-exec (subpath (param "STORAGE_ROOT")))` added after it)
+/// each let the copy start and answer `init`, and this test fails. F-cc14b and
+/// F-cc14c keep the exec rule word for word, so the one shape check still
+/// passes them.
+#[test]
+fn model_unbound_program_refused_under_profile() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = StoredCopy::prepare("unbound-program");
+    let before = tree_snapshot(&fixture.storage.root);
+    let mut provider = Provider::start(Launch::Program {
+        storage: &fixture.storage,
+        executable: &fixture.binary,
+        program: &fixture.copy,
+    });
+
+    if let Some(answer) = provider.answer(&init_request(&fixture.storage, None)) {
+        panic!(
+            "the profile must refuse to execute the unbound copy, but it started and \
+             answered init with status {} and code {}",
+            answer["status"], answer["code"]
+        );
+    }
+    let ended = provider.ended();
+    assert_eq!(
+        ended.status.and_then(|status| status.code()),
+        Some(71),
+        "sandbox-exec must exit 71 when the profile refuses the exec: {}",
+        describe(ended.status)
+    );
+    // Quote only `sandbox-exec`'s exec lines, never the whole stream.
+    let copy = fixture.copy.display().to_string();
+    let execs: Vec<&String> = ended
+        .stderr
+        .iter()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    assert!(
+        execs
+            .iter()
+            .any(|line| line.contains(&copy) && line.contains("Operation not permitted")),
+        "sandbox-exec must log the refused exec of {copy} with EPERM: {execs:?}"
+    );
+
+    let after = tree_snapshot(&fixture.storage.root);
+    let entries: Vec<&Path> = after.iter().map(|(path, ..)| path.as_path()).collect();
+    let copy_name = Path::new(fixture.copy.file_name().expect("the copy's file name"));
+    assert_eq!(
+        entries,
+        [copy_name],
+        "STORAGE_ROOT must hold only the copy, with no runs/"
+    );
+    assert!(after == before, "the copy must keep its mode and bytes");
+}
+
+/// The control for `model_unbound_program_refused_under_profile`: the same
+/// fixture, with the copy at the same place under `STORAGE_ROOT` bound as
+/// `PROVIDER_EXECUTABLE` and started under the same `confine.sb`. The copy
+/// answers `init` with its offer ready, creates `runs/` beside itself, and
+/// exits cleanly after `shutdown`. The binding is the only difference between
+/// the two runs. It runs under the sandbox, so it skips when `sandbox-exec` is
+/// absent.
+#[test]
+fn model_bound_copy_serves_under_profile() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = StoredCopy::prepare("bound-copy");
+    let mut provider = Provider::start(Launch::Program {
+        storage: &fixture.storage,
+        executable: &fixture.copy,
+        program: &fixture.copy,
+    });
+
+    assert_serving(&provider.ok(&init_request(&fixture.storage, None)));
+    assert!(
+        fixture.storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT beside the copy"
+    );
     provider.shutdown();
 }

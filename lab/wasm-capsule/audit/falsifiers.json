@@ -625,6 +625,70 @@
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA10a",
+      "title": "Validation adds cm-implements to the default features",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::default() | wasmparser::WasmFeatures::CM_IMPLEMENTS)"
+        }
+      ],
+      "tests": [
+        "component_import_names_with_options_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA11a",
+      "title": "Read the custom-section size's last byte only at depth 1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
+          "new": "let start = if depth == 1 { start.checked_sub(1).ok_or_else(|| invalid.clone())? } else { start };"
+        }
+      ],
+      "tests": [
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA13a",
+      "title": "Match a declared build version to the release by dropping only its build metadata",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('+').next() == Some(name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA13b",
+      "title": "Match a declared pre-release to the release by dropping only its pre-release suffix",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| match (declared.split_once('@'), name.split_once('@')) { (Some((declared_interface, declared_version)), Some((interface, version))) => declared_interface == interface && declared_version.split('-').next() == Some(version), _ => *declared == name.as_str(), }) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
     }
   ]
 }

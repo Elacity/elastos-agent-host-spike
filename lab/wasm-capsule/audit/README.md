@@ -35,7 +35,8 @@ The nine `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
 refusal order and API v1. The two retained `skeleton` tests pin the manifest
 and workspace boundary. The nine `component_imports` tests cover exact names
-and versions (including same-major, pre-release and build-metadata versions),
+and versions (including same-major, pre-release and build-metadata versions;
+a declared pre-release or build version does not match the release),
 more than one import section, section order, unused declarations, core-module
 refusal, full Component validation,
 internal imports, import names with options, and custom-section content in
@@ -43,7 +44,8 @@ Components and embedded modules.
 Custom-section cases cover code in the name and data, runs across their boundary,
 and runs that start in the name's length byte or the size's last byte. Both entry
 points refuse a whole module hidden from the size's last byte and accept the
-same padded size with a plain name. Component cases also cover a module header
+same padded size with a plain name. The Component test runs both padded cases
+inside an embedded core module too. Component cases also cover a module header
 in the name at all four tested depths, plus plain names and data.
 The API test pins the derives and `#[non_exhaustive]` lines in both the source
 and API document. Both refusal-order tests require the header or encoding check
@@ -103,6 +105,10 @@ apply and verify each entry by hand in this workspace.
 | F-CWA8b | Remove `Eq` from `DeclaredImport`'s derive in the API document | `public_api_is_v1` |
 | F-CWA9a | Match versions while ignoring build metadata | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA9b | Match versions while ignoring the pre-release | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA10a | Add only `cm-implements` to the default features, accepting the `implements` import | `component_import_names_with_options_are_refused` |
+| F-CWA11a | Read the custom-section size's last byte only at depth 1 | `component_custom_section_carrying_code_is_refused` |
+| F-CWA13a | Drop build metadata only from the declared interface | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA13b | Drop the pre-release only from the declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -117,7 +123,7 @@ Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
 the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, F-CWA5a/F-CWA5b,
 F-CWA6a, F-CWA7a/F-CWA7b, F-CWA8a (`component_refusals_follow_the_documented_order`),
-and F-CWA9a/F-CWA9b:
+F-CWA9a/F-CWA9b, F-CWA10a, F-CWA11a, and F-CWA13a/F-CWA13b:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -218,3 +224,71 @@ the fixture, restored byte-identical, checked by SHA-256. The clean format and
 locked-test checks passed all 20 tests offline with `RUST_TEST_THREADS=2` and
 `CARGO_INCREMENTAL=0`. The implementation, API document, audit manifest,
 workspace manifest and workspace lockfile stayed unchanged.
+
+The cwa-010 in-tree run caught F-CWA10a with the default features plus
+`cm-implements` alone. `component_import_names_with_options_are_refused`
+built and failed at case (b)'s option assertion: the message named
+`(component (import "cache" (implements "wasi:filesystem/types@0.2.0") (instance)))`,
+and the result was `Ok(["cache"])` instead of `Err(NotAComponent)`. Case (a),
+`versionsuffix`, still returned `NotAComponent` and passed its checks first.
+Case (c), `external-id`, is not reached: it needs the same feature as case (b),
+where the test stops. The source restored byte-identical, checked by SHA-256.
+
+The cwa-011 in-tree run caught F-CWA11a at `(ii) embedded core module:
+hidden_name: padded size`: it returned `Ok([])` instead of
+`Err(CodeInCustomSection)`. The top-level padded `hidden_name` case was still
+refused under this change and passed its checks first, as did all earlier
+custom-section cases. The clean test accepts the plain-name padded case in
+both layouts and refuses the hidden module with v1's variant and string.
+Including the 38 earlier entries, all 38 `caught` entries built and failed all
+48 required named checks; F-CWA0c failed before tests because `--locked`
+refused the nested workspace's missing lockfile. Every temporary edit restored
+byte-identical, checked by SHA-256. The clean format and locked-test checks
+passed all 20 tests offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+The implementation, API document, audit manifest, workspace manifest and
+workspace lockfile stayed unchanged.
+
+The cwa-012 in-tree run completed task 009's proof: its cwa-008 run left
+F-CWA8a, F-CWA8b and the re-anchored F-CWA4f unrun. Applied alone, F-CWA8a
+built and failed `audit_refusals_follow_the_documented_order` and
+`component_refusals_follow_the_documented_order` at case (d): `audit` returned
+`Err(CodeInCustomSection)` instead of `Err(Malformed)`, and `audit_component`
+returned `Err(CodeInCustomSection)` instead of `Err(NotAComponent)`.
+F-CWA8b built and failed `public_api_is_v1` with the assertion message
+`INTERFACE.md: expected line #[derive(Debug, Clone, PartialEq, Eq)] at offset -1 from pub struct DeclaredImport {`.
+F-CWA4f built and failed the same two refusal-order tests at case (c): `audit`
+returned `Err(CodeInCustomSection)` instead of `Err(Malformed)`, and
+`audit_component` returned `Err(CodeInCustomSection)` instead of
+`Err(NotAComponent)`. All five named tests ran separately with `--exact`.
+Every temporary edit restored byte-identical, checked by SHA-256;
+`audit/Cargo.lock` stayed absent, and the implementation, API document, tests,
+falsifier entries, audit manifest, workspace manifest and workspace lockfile
+stayed unchanged. The final full sweep covered all 39 entries: all 38 `caught`
+entries built and failed all 48 named test runs at assertions, and F-CWA0c
+failed before tests because `--locked` refused the nested workspace's missing
+lockfile. The clean format and locked-test checks passed before the first
+mutation and after the sweep, with all 20 tests passing offline under
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+
+The cwa-013 in-tree run first applied F-CWA13a and F-CWA13b separately to the
+base; each passed all 20 tests. With the two reverse pairs added,
+`a_different_version_of_a_declared_interface_is_refused` built and failed at
+its refusal assertion for each entry. F-CWA13a accepted
+`elastos:bus/runtime@1.0.0` with only `elastos:bus/runtime@1.0.0+b1` declared
+(pair (b)); pair (a)'s pre-release declaration still refused the release.
+F-CWA13b accepted `elastos:bus/runtime@1.0.0` with only
+`elastos:bus/runtime@1.0.0-rc.1` declared (pair (a)). Each returned
+`Ok(["elastos:bus/runtime@1.0.0"])`. Temporary pair output confirmed that all
+preceding pairs completed before each failure, then the source and test
+restored byte-identical, checked by SHA-256. The clean test requires
+`UndeclaredInterface` naming the release and the exact string
+`undeclared interface elastos:bus/runtime@1.0.0` for both pairs.
+The full sweep then covered all 41 entries with the test's final bytes:
+all 40 `caught` entries built and failed all 50 named test runs at assertions,
+and F-CWA0c failed before tests because `--locked` refused the nested
+workspace's missing lockfile. Every temporary edit restored byte-identical,
+checked by SHA-256, and `audit/Cargo.lock` stayed absent. The clean format and
+locked-test checks passed before the mutations and after the sweep, with all
+20 tests passing offline under `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+The implementation, API document, audit manifest, workspace manifest and
+workspace lockfile stayed unchanged.

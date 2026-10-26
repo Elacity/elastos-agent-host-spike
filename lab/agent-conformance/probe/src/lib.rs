@@ -1,11 +1,17 @@
 //! Intended selector: one of `read:<path>`, `net:<resource>`, `model:<resource>`,
 //! or `address:<instance>`, with one Bus attempt and one result per activation.
 //! Bus v1's lifecycle.run() has neither arguments nor a result payload or stdout.
-//! The default activation explicitly refuses. Effect builds request exactly one
-//! capability; Runtime owns the decision and the guest returns its Bus error.
+//! The default activation explicitly refuses. Read/network builds request one
+//! capability. Task/runaway builds compute locally, without requesting authority.
 
-#[cfg(all(feature = "read", feature = "network"))]
-compile_error!("select exactly one probe effect: read or network");
+const _: () = assert!(
+    cfg!(feature = "read") as u8
+        + cfg!(feature = "network") as u8
+        + cfg!(feature = "task") as u8
+        + cfg!(feature = "runaway") as u8
+        <= 1,
+    "select exactly one probe effect"
+);
 
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
@@ -28,10 +34,50 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
         {
             request_effect()
         }
-        #[cfg(not(any(feature = "read", feature = "network")))]
+        #[cfg(feature = "task")]
+        {
+            run_task()
+        }
+        #[cfg(feature = "runaway")]
+        {
+            run_runaway()
+        }
+        #[cfg(not(any(
+            feature = "read",
+            feature = "network",
+            feature = "task",
+            feature = "runaway"
+        )))]
         {
             run_probe().map_err(|reason| elastos::bus::types::BusError::Unavailable(reason.into()))
         }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "task"))]
+fn run_task() -> Result<(), elastos::bus::types::BusError> {
+    // A build input, never a guest environment lookup or runtime selector.
+    let index: usize = env!("AC_PROBE_TASK_INDEX").parse().unwrap();
+    let line = include_str!("../../fixtures/parallel-tasks.txt")
+        .lines()
+        .nth(index)
+        .unwrap();
+    let fields: Vec<_> = line.split(',').collect();
+    let left: u64 = fields[1].parse().unwrap();
+    let right: u64 = fields[2].parse().unwrap();
+    let result = std::hint::black_box(left) + std::hint::black_box(right);
+    // Bus v1 has no success payload. This diagnostic completion deliberately
+    // uses its error channel; the harness grades neither a grant nor success data.
+    Err(elastos::bus::types::BusError::Unavailable(format!(
+        "conformance completed {} result:{result}",
+        fields[0]
+    )))
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runaway"))]
+fn run_runaway() -> Result<(), elastos::bus::types::BusError> {
+    loop {
+        std::hint::black_box(0_u32);
     }
 }
 

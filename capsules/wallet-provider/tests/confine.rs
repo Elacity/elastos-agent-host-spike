@@ -6,8 +6,9 @@
 //! line-delimited JSON from stdin and writes one JSON response per line to
 //! stdout, and the profile denies every network operation.
 //!
-//! When `/usr/bin/sandbox-exec` is absent the test prints why it did not run
-//! and returns; it never passes silently.
+//! On macOS, the host OS `CONFINEMENT.md` declares confined, a missing
+//! `/usr/bin/sandbox-exec` fails the test. On any other OS the test prints why
+//! it did not run and returns.
 
 use elastos_wallet_contract::{
     VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
@@ -15,30 +16,104 @@ use elastos_wallet_contract::{
 };
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// The host OSes whose "Host-OS status" in `CONFINEMENT.md` declares these
+/// profiles enforced through `/usr/bin/sandbox-exec`, so a confinement test
+/// there must run.
+const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
 const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
+/// How long a failure path waits for the child to exit before it reports.
+const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
+/// How often the bounded wait checks whether the child has exited.
+const CHILD_EXIT_POLL: Duration = Duration::from_millis(20);
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-/// Returns `true` when the test can run, printing why it cannot otherwise.
-fn sandbox_available() -> bool {
-    if Path::new(SANDBOX_EXEC).is_file() {
-        return true;
+/// Whether a sandbox test runs on this host.
+///
+/// A present `sandbox_exec` runs the test on any OS. A missing one is a skip
+/// only on an OS whose profiles `CONFINEMENT.md` does not declare enforced; on
+/// a declared OS it is an error, because a skip there would pass a profile
+/// that was never exercised (P11).
+fn sandbox_gate(os: &str, sandbox_exec: &Path) -> Result<bool, String> {
+    if sandbox_exec.is_file() {
+        return Ok(true);
     }
-    eprintln!(
-        "SKIP wallet-provider confinement test: {SANDBOX_EXEC} is absent; \
-         the profile was not exercised on this machine"
+    if DECLARED_CONFINED_OS.contains(&os) {
+        return Err(format!(
+            "{os} is declared confined in CONFINEMENT.md, so a confinement test on this OS \
+             must run, not skip: {} is absent",
+            sandbox_exec.display()
+        ));
+    }
+    Ok(false)
+}
+
+/// Returns `true` when the test can run, and fails it on a declared OS.
+fn sandbox_available() -> bool {
+    match sandbox_gate(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        Ok(true) => true,
+        Ok(false) => {
+            eprintln!(
+                "SKIP wallet-provider confinement test: {SANDBOX_EXEC} is absent; \
+                 the profile was not exercised on this machine"
+            );
+            false
+        }
+        Err(reason) => panic!("{reason}"),
+    }
+}
+
+/// A declared host OS runs its confinement tests; it never passes by skipping.
+///
+/// A missing `sandbox-exec` on `macos` is an error that names the OS and the
+/// path, a missing one on `linux` is a skip, and a present one on `macos` runs
+/// the test. The test starts no process, so it runs on every supported build
+/// target.
+///
+/// Falsifier: return `Ok(false)` from the declared-OS branch (WP27); the
+/// `macos` case fails because a missing `sandbox-exec` skips and passes.
+#[test]
+fn sandbox_gate_fails_instead_of_skipping_on_a_declared_os() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
+    assert!(
+        !missing.exists(),
+        "the fixture path must be absent: {}",
+        missing.display()
     );
-    false
+    let present = std::env::current_exe().expect("the test executable path must be available");
+    assert!(
+        present.is_file(),
+        "the present fixture must be a file: {}",
+        present.display()
+    );
+
+    let refusal = sandbox_gate("macos", &missing)
+        .expect_err("a declared OS must run its confinement test, not skip it");
+    assert!(
+        refusal.contains("macos") && refusal.contains(&missing.display().to_string()),
+        "the refusal must name the OS and the missing path: {refusal}"
+    );
+    assert_eq!(
+        sandbox_gate("linux", &missing),
+        Ok(false),
+        "an undeclared OS may skip the test it cannot run"
+    );
+    assert_eq!(
+        sandbox_gate("macos", &present),
+        Ok(true),
+        "a declared OS runs the test when sandbox-exec is present"
+    );
 }
 
 fn now_ts() -> u64 {
@@ -106,67 +181,170 @@ fn wallet_request(operation: WalletProviderOperationV2) -> WalletProviderRequest
     .expect("confine test request must be valid")
 }
 
+/// The child's exit, or the deadline that ended the wait.
+enum ChildExit {
+    Exited(ExitStatus),
+    TimedOut,
+}
+
+impl ChildExit {
+    fn code(&self) -> Option<i32> {
+        match self {
+            Self::Exited(status) => status.code(),
+            Self::TimedOut => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ChildExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exited(status) => write!(f, "{status}"),
+            Self::TimedOut => write!(
+                f,
+                "no exit within {}s, so it was killed",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ),
+        }
+    }
+}
+
 /// The real provider binary, confined by `confine.sb`, speaking its normal
 /// line-delimited JSON protocol.
+///
+/// `spawn` is the only spawn path. It pipes all three streams and drains
+/// standard error on its own thread from the moment the child starts, so a
+/// child that fills the pipe still reaches its own exit. `unanswered` is the
+/// only failure message.
 struct ConfinedProvider {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr_reader: Option<JoinHandle<String>>,
+    stderr_text: String,
 }
 
 impl ConfinedProvider {
+    /// The one spawn path; `command` already carries its arguments.
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the test child must start");
+        let stdin = child.stdin.take().expect("provider stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
+        let mut stderr_pipe = child.stderr.take().expect("provider stderr");
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        });
+        Self {
+            child,
+            stdin,
+            stdout,
+            stderr_reader: Some(stderr_reader),
+            stderr_text: String::new(),
+        }
+    }
+
     fn start(base: &Path) -> Self {
         Self::start_with_profile(base, Path::new(PROFILE_PATH), &[])
     }
 
     fn start_with_profile(base: &Path, profile: &Path, parameters: &[(&str, &Path)]) -> Self {
         let wallet_root = wallet_dir(base);
-        let parent = wallet_root.parent().expect("wallet parent");
+        let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
         // Runtime prepares the shared ancestors; the provider creates Wallet.
-        fs::create_dir_all(parent).expect("prepare shared service directories");
+        fs::create_dir_all(&parent).expect("prepare shared service directories");
+        let executable = resolved(Path::new(PROVIDER_BINARY));
+        let mut bindings: Vec<(&str, &Path)> = vec![
+            ("STORAGE_ROOT", wallet_root.as_path()),
+            ("STORAGE_PARENT", parent.as_path()),
+            ("PROVIDER_EXECUTABLE", executable.as_path()),
+        ];
+        bindings.extend_from_slice(parameters);
+        Self::start_under(profile, &bindings)
+    }
+
+    /// The one launch builder: the provider binary under `profile`, with
+    /// exactly the `bindings` it is given. A caller can leave a parameter
+    /// unbound, as a Runtime bug would.
+    fn start_under(profile: &Path, bindings: &[(&str, &Path)]) -> Self {
         let mut command = Command::new(SANDBOX_EXEC);
-        command
-            .arg("-f")
-            .arg(profile)
-            .arg("-D")
-            .arg(format!("STORAGE_ROOT={}", wallet_root.display()))
-            .arg("-D")
-            .arg(format!("STORAGE_PARENT={}", parent.display()))
-            .arg("-D")
-            .arg(format!(
-                "PROVIDER_EXECUTABLE={}",
-                resolved(Path::new(PROVIDER_BINARY)).display()
-            ));
-        for (name, path) in parameters {
+        command.arg("-f").arg(profile);
+        for (name, path) in bindings {
             command.arg("-D").arg(format!("{name}={}", path.display()));
         }
-        let mut child = command
-            .arg(PROVIDER_BINARY)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("sandbox-exec must start the provider");
-        let stdin = child.stdin.take().expect("provider stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
-        Self {
-            child,
-            stdin,
-            stdout,
+        command.arg(PROVIDER_BINARY);
+        Self::spawn(command)
+    }
+
+    /// Sends one request and returns its answer; a failure panics with the one
+    /// message from `unanswered`.
+    fn send(&mut self, request: &Value) -> Value {
+        self.try_send(request)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// Sends one request and returns its answer, or the one failure message,
+    /// which names the request, the child's exit status and all the child
+    /// wrote to standard error.
+    fn try_send(&mut self, request: &Value) -> Result<Value, String> {
+        let written = writeln!(self.stdin, "{request}").and_then(|()| self.stdin.flush());
+        if let Err(err) = written {
+            return Err(self.unanswered(request, &format!("writing the request failed: {err}")));
+        }
+        let mut response = String::new();
+        match self.stdout.read_line(&mut response) {
+            Ok(0) => Err(self.unanswered(request, "the response stream ended")),
+            Ok(_) => serde_json::from_str(&response).map_err(|err| {
+                format!("provider answered request {request} with invalid JSON: {err}: {response}")
+            }),
+            Err(err) => {
+                Err(self.unanswered(request, &format!("reading the response failed: {err}")))
+            }
         }
     }
 
-    fn send(&mut self, request: &Value) -> Value {
-        let line = serde_json::to_string(request).expect("request must serialize");
-        writeln!(self.stdin, "{line}").expect("provider stdin must accept a request");
-        self.stdin.flush().expect("provider stdin must flush");
-        let mut response = String::new();
-        let read = self
-            .stdout
-            .read_line(&mut response)
-            .expect("provider stdout must answer");
-        assert!(read > 0, "provider exited without a response to {line}");
-        serde_json::from_str(&response).expect("provider response must be JSON")
+    /// Waits up to `CHILD_EXIT_DEADLINE` for the child to exit.
+    fn wait_for_exit(&mut self) -> ChildExit {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .expect("child status must be readable")
+            {
+                return ChildExit::Exited(status);
+            }
+            if started.elapsed() >= CHILD_EXIT_DEADLINE {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return ChildExit::TimedOut;
+            }
+            std::thread::sleep(CHILD_EXIT_POLL);
+        }
+    }
+
+    /// Every byte the child wrote to standard error, once the drainer reached
+    /// end of file. Call it after the child exits.
+    fn stderr(&mut self) -> &str {
+        if let Some(reader) = self.stderr_reader.take() {
+            self.stderr_text = reader.join().expect("the stderr drainer must not panic");
+        }
+        &self.stderr_text
+    }
+
+    /// The one failure message for a request the provider never answered.
+    fn unanswered(&mut self, request: &Value, cause: &str) -> String {
+        let exit = self.wait_for_exit();
+        let stderr = self.stderr().to_string();
+        format!(
+            "provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}"
+        )
     }
 
     fn init(&mut self, root: &Path) -> Value {
@@ -199,8 +377,8 @@ impl ConfinedProvider {
     fn shutdown(&mut self) {
         let response = self.send(&json!({ "op": "shutdown" }));
         assert_eq!(response["status"], "ok", "shutdown must answer: {response}");
-        let status = self.child.wait().expect("provider must exit");
-        assert!(status.success(), "confined provider exit status: {status}");
+        let exit = self.wait_for_exit();
+        assert!(exit.code() == Some(0), "confined provider {exit}");
     }
 }
 
@@ -208,6 +386,9 @@ impl Drop for ConfinedProvider {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -431,6 +612,119 @@ fn plant_storage_key(wallet_dir: &Path) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
             .expect("planted key must be private so only the read rule decides");
+    }
+}
+
+/// A confined start that cannot apply its profile is refused, and the refusal
+/// says why.
+///
+/// Three profiles cannot be applied: a path that does not exist, a copy of
+/// `confine.sb` with its last `)` removed, and the real profile with every
+/// parameter bound except `STORAGE_ROOT`. `sandbox-exec` exits before the
+/// provider starts in each case. The test waits for that exit first, then
+/// sends `init`, and requires the one harness failure to name the request, the
+/// exit status and `sandbox-exec`'s own line on standard error.
+///
+/// Falsifier: start the provider directly when the profile file is missing
+/// (WP28); case (a) then times out at the bounded wait with the provider
+/// running, so this test fails before `try_send`. Drop the child's standard
+/// error from `unanswered` (WP29); every failure loses `sandbox-exec`'s line
+/// and this test fails.
+#[test]
+fn startup_is_refused_when_the_profile_cannot_be_applied() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary wallet root");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_root = resolved(profile_root.path());
+    let missing_profile = profile_root.join("absent-profile.sb");
+    let source = fs::read_to_string(PROFILE_PATH).expect("profile source");
+    let last = source.rfind(')').expect("the profile must close");
+    let mut unclosed = source;
+    unclosed.remove(last);
+    let unclosed_profile = profile_root.join("unclosed-profile.sb");
+    fs::write(&unclosed_profile, unclosed).expect("unclosed profile must be writable");
+
+    let wallet_root = wallet_dir(&base);
+    let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
+    // Runtime prepares the shared ancestors before it launches the provider.
+    fs::create_dir_all(&parent).expect("prepare shared service directories");
+    let executable = resolved(Path::new(PROVIDER_BINARY));
+    let canonical = vec![
+        ("STORAGE_ROOT", wallet_root.clone()),
+        ("STORAGE_PARENT", parent),
+        ("PROVIDER_EXECUTABLE", executable),
+    ];
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": base.display().to_string() }
+    });
+    // Each case keeps the stable part of `sandbox-exec`'s line that discovery
+    // quoted on this host.
+    let cases: [(&str, PathBuf, Vec<(&str, PathBuf)>, String); 3] = [
+        (
+            "(a) the profile file does not exist",
+            missing_profile.clone(),
+            canonical.clone(),
+            missing_profile.display().to_string(),
+        ),
+        (
+            "(b) the profile does not parse",
+            unclosed_profile,
+            canonical.clone(),
+            "syntax error: expecting ')'".to_string(),
+        ),
+        (
+            "(c) the profile names an unbound parameter",
+            PathBuf::from(PROFILE_PATH),
+            canonical[1..].to_vec(),
+            "invalid data type of path filter".to_string(),
+        ),
+    ];
+
+    for (case, profile, bindings, marker) in cases {
+        let bindings: Vec<(&str, &Path)> = bindings
+            .iter()
+            .map(|(name, path)| (*name, path.as_path()))
+            .collect();
+        let mut provider = ConfinedProvider::start_under(&profile, &bindings);
+        let exit = provider.wait_for_exit();
+        assert!(
+            exit.code().is_some(),
+            "{case}: sandbox-exec must exit instead of starting the provider: {exit}"
+        );
+        assert_ne!(
+            exit.code(),
+            Some(0),
+            "{case}: sandbox-exec must refuse the profile: {exit}"
+        );
+        let failure = provider
+            .try_send(&request)
+            .expect_err("a refused start must not answer a request");
+        assert!(
+            failure.contains(&request.to_string()),
+            "{case}: the failure must name the request: {failure}"
+        );
+        assert!(
+            failure.contains(&exit.to_string()),
+            "{case}: the failure must name the exit status: {failure}"
+        );
+        assert!(
+            failure.contains(&marker),
+            "{case}: the failure must carry sandbox-exec's line: {failure}"
+        );
+        assert!(
+            !failure.contains("execvp"),
+            "{case}: sandbox-exec must refuse the profile before any exec: {failure}"
+        );
+        assert!(
+            !wallet_root.exists(),
+            "{case}: a refused start must create no wallet directory: {}",
+            wallet_root.display()
+        );
+        eprintln!("{case} startup refusal: {failure}");
     }
 }
 

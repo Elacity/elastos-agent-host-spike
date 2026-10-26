@@ -26,7 +26,9 @@
 //!
 //! [`lab_cid`] walks a bundle and hands its entries to [`encode_entries`],
 //! the encoder. Together they are the only code that names a bundle; tests
-//! and tools call them and re-implement neither. [`lab_cid`] is
+//! and tools call them and re-implement neither. [`check_name`] checks a
+//! claimed name, such as one a URL or a Store row gives, by recomputing the
+//! name with [`lab_cid`]: it computes no name of its own. [`lab_cid`] is
 //! [`lab_cid_observed`] with an observer that does nothing, so there is one
 //! walk; tests watch it at two [`Moment`]s to change a bundle while it is
 //! named. The walk's two checks, [`entry_kind`] and [`entry_path`], are
@@ -124,8 +126,8 @@ pub enum Moment {
     AfterCheck,
 }
 
-/// Why a bundle gets no lab CID. Each refusal has its own reason, and a
-/// refused bundle gets no name.
+/// Why a bundle gets no lab CID, or why [`check_name`] refuses a claimed
+/// name. Each refusal has its own reason, and a refused bundle gets no name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The bundle root holds no regular file `capsule.json`.
@@ -151,6 +153,14 @@ pub enum Refusal {
     /// takes that word with a colon in test output for a harness error, so a
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
+    /// [`check_name`] was given a claim that is not a lab CID: it lacks the
+    /// `lab-cid:sha256:` label, or 64 lowercase hex characters after it. The
+    /// claim is kept only to say what was refused.
+    NotALabCid { claimed: String },
+    /// [`check_name`] was given a lab CID the bundle's bytes do not give.
+    /// `actual` is the lab CID recomputed from the bytes; the claim is kept
+    /// only to say what was refused.
+    NameMismatch { actual: LabCid, claimed: String },
 }
 
 impl fmt::Display for Refusal {
@@ -179,6 +189,13 @@ impl fmt::Display for Refusal {
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
+            Refusal::NotALabCid { claimed } => write!(
+                f,
+                "the claim {claimed:?} is not a lab CID: a lab CID is {LAB_CID_PREFIX} and 64 lowercase hex characters"
+            ),
+            Refusal::NameMismatch { actual, claimed } => {
+                write!(f, "bundle bytes name {actual}; the claim is {claimed}")
+            }
         }
     }
 }
@@ -213,6 +230,48 @@ pub fn lab_cid_observed(
         .ok_or(Refusal::NoManifest)?;
     check_manifest(&manifest.content)?;
     encode_entries(&entries)
+}
+
+/// Check the name `claimed` against the bundle at `bundle`.
+///
+/// A name that a URL, a Store row or any other record claims is checked
+/// here, never trusted. A claim that is not a lab CID is refused before the
+/// bundle is read. Then the name is recomputed from the bytes with
+/// [`lab_cid`], the one naming path, and compared: a lab CID the bytes do not
+/// give is refused with both values, and `lab_cid`'s own refusals pass
+/// through unchanged. Success returns nothing, so a claim never comes back
+/// as a checked name.
+pub fn check_name(bundle: &Path, claimed: &str) -> Result<(), Refusal> {
+    let claimed_digits = lab_cid_digits(claimed)?;
+    let actual = lab_cid(bundle)?;
+    if hex::encode(actual.0) != claimed_digits {
+        return Err(Refusal::NameMismatch {
+            actual,
+            claimed: claimed.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The digits of a claimed lab CID: the 64 lowercase hex characters after
+/// its `lab-cid:sha256:` label. Any other text is not a lab CID.
+fn lab_cid_digits(claimed: &str) -> Result<&str, Refusal> {
+    let not_a_lab_cid = || Refusal::NotALabCid {
+        claimed: claimed.to_owned(),
+    };
+    let digits = claimed
+        .strip_prefix(LAB_CID_PREFIX)
+        .ok_or_else(not_a_lab_cid)?;
+    if digits.len() != 64 {
+        return Err(not_a_lab_cid());
+    }
+    if !digits
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(not_a_lab_cid());
+    }
+    Ok(digits)
 }
 
 /// The encoder: the lab CID of `entries`, given in any order.
