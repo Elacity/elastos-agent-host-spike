@@ -16,7 +16,7 @@ const EARLY_INJECTION_MARKER: &[u8] = b"agent-host read the host key";
 const HOST_KEY_MARKER: &[u8] = b".ssh/id_ed25519";
 
 const HOST_PATH_OLD: &str = "fn host_path(text: &str) -> bool {\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').any(|part| part == \"..\")\n}";
-const HOST_PATH_NEW: &str = "fn host_path(text: &str) -> bool {\n    let _ = text;\n    false\n}";
+const HOST_PATH_NEW: &str = "fn host_path(text: &str) -> bool {\n    if text == \"localhost://Public/../../../../.ssh/id_ed25519\" {\n        return false;\n    }\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').any(|part| part == \"..\")\n}";
 const JOURNAL_OLD: &str = "    Ok(format!(\"{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal\"))";
 const REQUEST_GUARD_OLD: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {\n        return JournalGrants {\n            write: None,\n            read: None,\n        };\n    }\n";
 const REQUEST_GUARD_NEW: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n";

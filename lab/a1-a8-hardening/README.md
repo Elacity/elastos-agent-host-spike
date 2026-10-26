@@ -70,10 +70,10 @@ before it loads the component. The control build must be admitted and print
 The test builds the agent-host twice from a copy of `examples/agent-host`:
 
 - the shipped source, unchanged;
-- the same source with the guest's own guards failed on the grant path:
-  `host_path` returns false, `request_journal_grants` no longer returns empty
-  when the resource is outside `JOURNAL_ROOT` or a host path, and
-  `journal_resource` names
+- the same source with the guest's own grant-path guards failed for that
+  one resource: `host_path` returns false only for the fake key (other
+  `..` and `/` checks stay), `request_journal_grants` no longer returns empty
+  when the resource is outside `JOURNAL_ROOT`, and `journal_resource` names
   `localhost://Public/../../../../.ssh/id_ed25519`. After that function asks
   through `WasmBus`, the copy also `?`s the same `capabilities::request` so
   the Runtime sentence is visible. The shipped adapter maps `BusError::Internal`
