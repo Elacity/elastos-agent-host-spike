@@ -815,6 +815,188 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     }
 }
 
+/// A confined start that fails before it answers shows its reason.
+///
+/// The fixture profile keeps `(version 1)` first and `(deny default)` second,
+/// so `sandbox-exec` cannot exec the provider. The test waits for that child to
+/// exit, sends `init`, and requires the one harness failure to name the
+/// request, the exit status and `sandbox-exec`'s own denial on standard error.
+/// A fixture child that reads one request and exits without answering reaches
+/// the response-stream branch of the same harness with the same three facts.
+///
+/// Falsifier: drop the child's standard error from `unanswered` (WP29); the
+/// denied start loses `Operation not permitted`, so this test fails on that
+/// assertion at the first case.
+///
+/// Falsifier: use a fixed `Operation not permitted` instead of the child's
+/// standard error in `unanswered` (WP42); the denied start's failure names no
+/// `execvp()` denial, so this test fails on that assertion at the first case.
+#[test]
+fn startup_denial_reports_its_reason() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary wallet root");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile = resolved(profile_root.path()).join("deny-all.sb");
+    fs::write(&profile, "(version 1)\n(deny default)\n").expect("fixture profile must be writable");
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": base.display().to_string() }
+    });
+
+    // The denied provider exits before it reads the request, so the harness
+    // cannot write it. It reports the exit status and the sandbox denial.
+    let canonical = canonical_bindings(&base);
+    create_shared_ancestors(&canonical);
+    let bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut denied = ConfinedProvider::start_under(&profile, &bindings);
+    let exit = denied.wait_for_exit();
+    assert_ne!(
+        exit.code(),
+        Some(0),
+        "sandbox-exec must not exec the provider: {exit}"
+    );
+    let denial = denied
+        .try_send(&request)
+        .expect_err("a denied provider must not answer");
+    assert!(
+        denial.contains(&request.to_string()),
+        "the failure must name the request: {denial}"
+    );
+    assert!(
+        denial.contains(&exit.to_string()),
+        "the failure must name the exit status: {denial}"
+    );
+    assert!(
+        denial.contains("Operation not permitted"),
+        "the failure must carry sandbox-exec's denial: {denial}"
+    );
+    assert!(
+        denial.contains("execvp()") && denial.contains(PROVIDER_BINARY),
+        "the denial must be sandbox-exec's exec denial of the provider binary: {denial}"
+    );
+    eprintln!("startup denial failure: {denial}");
+
+    // A child that answers nothing reaches the response-stream branch with the
+    // same three facts.
+    let mut silent = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read request; printf 'fixture: read one request\\n' >&2; exit 3");
+        command
+    });
+    let silence = silent
+        .try_send(&request)
+        .expect_err("a child that exits without answering must fail");
+    let exit = silent.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(3),
+        "the fixture must reach its own exit: {exit}"
+    );
+    assert!(
+        silence.contains(&request.to_string()),
+        "the failure must name the request: {silence}"
+    );
+    assert!(
+        silence.contains(&exit.to_string()),
+        "the failure must name the exit status: {silence}"
+    );
+    assert!(
+        silence.contains("fixture: read one request"),
+        "the failure must carry the child's standard error: {silence}"
+    );
+    eprintln!("response-stream failure: {silence}");
+}
+
+/// The harness drains standard error while the child runs.
+///
+/// The fixture writes 128 KiB, more than the pipe buffer, to standard error and
+/// exits with status 7. The harness must reach that status within its bounded
+/// deadline and collect every byte.
+///
+/// Falsifier: start reading only after `wait_for_exit` has returned (WP41);
+/// the fixture fills the pipe and blocks, so the wait kills it, and this test
+/// fails on its exit assertion, `no exit within 10s, so it was killed`.
+#[test]
+fn stderr_is_drained_before_wait() {
+    let mut child = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("dd if=/dev/zero bs=1024 count=128 >&2 2>/dev/null; exit 7");
+        command
+    });
+    let exit = child.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(7),
+        "the child must reach its own exit: {exit}"
+    );
+    let stderr = child.stderr();
+    assert_eq!(stderr.len(), 128 * 1024, "every drained byte must survive");
+    assert!(
+        stderr.as_bytes().iter().all(|byte| *byte == 0),
+        "the drained bytes must be the fixture's zero bytes"
+    );
+}
+
+/// An answer that is not JSON fails with its own message.
+///
+/// Through `spawn`, a fixture child reads one request, prints `not json` and a
+/// newline to standard output, and exits 0. The failure names the request,
+/// `invalid JSON`, the parse error `serde_json` gives for the answer and the
+/// answer itself, and it does not say the provider did not answer. The test
+/// starts no sandbox and does not call `sandbox_available`.
+///
+/// Falsifier: return the shared unanswered message from the invalid-JSON branch
+/// (WP43); the answer loses its parse error and says the provider did not
+/// answer, so this test fails on its `invalid JSON` assertion.
+#[test]
+fn invalid_json_answer_names_the_request_and_the_parse_error() {
+    let mut child = ConfinedProvider::spawn({
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read request; echo 'not json'; exit 0");
+        command
+    });
+    let request = json!({ "op": "status" });
+    let failure = child
+        .try_send(&request)
+        .expect_err("an answer that is not JSON must fail");
+    let parse_error = serde_json::from_str::<Value>("not json\n")
+        .expect_err("the fixture answer must not parse as JSON")
+        .to_string();
+    assert!(
+        failure.contains(&request.to_string()),
+        "the failure must name the request: {failure}"
+    );
+    assert!(
+        failure.contains("invalid JSON"),
+        "the failure must name the invalid JSON answer: {failure}"
+    );
+    assert!(
+        failure.contains(&parse_error),
+        "the failure must carry the parse error: {failure}"
+    );
+    assert!(
+        failure.contains("not json"),
+        "the failure must carry the answer: {failure}"
+    );
+    assert!(
+        !failure.contains("did not answer"),
+        "an invalid answer is not an unanswered request: {failure}"
+    );
+    eprintln!("invalid-JSON failure: {failure}");
+}
+
 /// Whether `form` is a top-level allow rule that grants the network. This is
 /// the one copy of the rule, used both by the provider's own profile test and
 /// by the shared file-profile contract check (P10).
