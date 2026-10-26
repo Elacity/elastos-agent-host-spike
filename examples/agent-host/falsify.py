@@ -398,6 +398,16 @@ class BackupCollision(Exception):
     run stops before it touches the caller's bytes."""
 
 
+def replace_owned_file(source, target):
+    """Release an owned name once. A same-inode rename would keep both names,
+    so remove the owned link while it still reserves that name. After either
+    operation, a competing run can own the name and keeps its file."""
+    if os.path.lexists(target) and os.path.samestat(source.lstat(), target.lstat()):
+        source.unlink()
+    else:
+        os.replace(source, target)
+
+
 class Mutation:
     """Apply one falsifier's edits; undo them on exit, whatever happened."""
 
@@ -417,7 +427,7 @@ class Mutation:
             # The file, its mutation directory and the temporary write target
             # must all resolve inside REPO before any link or write (P11).
             # The directory owns backup creation and replacement of the file;
-            # a temporary symlink can send write_text to a different target.
+            # a temporary symlink can name a different write target.
             if os.path.isabs(name):
                 raise LookupError(
                     f"{name}: the path is absolute; "
@@ -477,12 +487,18 @@ class Mutation:
                     raise BackupCollision(
                         f"{tmp} is a temporary file this run did not create; "
                         "the edit is not applied") from error
+                tmp_owned = True
                 try:
                     with os.fdopen(handle, "w", encoding="utf-8") as stream:
                         stream.write(text)
-                    os.replace(tmp, path)
+                    saved = block_interruptions()
+                    try:
+                        replace_owned_file(tmp, path)
+                        tmp_owned = False
+                    finally:
+                        restore_interruptions(saved)
                 finally:
-                    if tmp.exists():
+                    if tmp_owned and tmp.exists():
                         tmp.unlink()
             # Inside the try: an interrupt after the last replacement but
             # before __enter__ returns must still restore (task 004).
@@ -501,12 +517,7 @@ class Mutation:
         try:
             for path, backup, original in reversed(self.applied):
                 if backup.exists():
-                    os.replace(backup, path)
-                    # POSIX rename does nothing when both names are hard
-                    # links to one inode, so a run that stopped before the
-                    # replacement still has its backup name; remove it.
-                    if backup.exists():
-                        backup.unlink()
+                    replace_owned_file(backup, path)
                     # The rename brings back the original's old mtime; touch
                     # it, so cargo does not take the mutated build for a fresh
                     # one.
@@ -2181,11 +2192,31 @@ def an_edit_through_an_outside_symlink_is_refused():
     return ok
 
 
+@contextlib.contextmanager
+def observed_mutation_writes():
+    """Count the actual stream writes made through os.fdopen."""
+    real_fdopen = os.fdopen
+    writes = mock.Mock()
+
+    def fdopen(*args, **kwargs):
+        stream = real_fdopen(*args, **kwargs)
+        real_write = stream.write
+
+        def write(*args, **kwargs):
+            writes(*args, **kwargs)
+            return real_write(*args, **kwargs)
+
+        stream.write = write
+        return stream
+
+    with mock.patch.object(os, "fdopen", fdopen):
+        yield writes
+
+
 def refused_without_filesystem_mutation(entry, here, tree):
     """Observe every link, write and replacement in a refused test entry."""
     with mock.patch.object(os, "link", wraps=os.link) as links, \
-            mock.patch.object(pathlib.Path, "write_text", autospec=True,
-                              side_effect=pathlib.Path.write_text) as writes, \
+            observed_mutation_writes() as writes, \
             mock.patch.object(os, "replace", wraps=os.replace) as replacements:
         got = refused_edit(entry, here, tree)
     calls = (links.call_count, writes.call_count, replacements.call_count)
@@ -2304,6 +2335,116 @@ def a_temporary_file_this_run_did_not_create_is_refused():
     return ok
 
 
+def a_restore_keeps_a_competing_runs_backup():
+    """A second Mutation acquires the released backup name before the first
+    restore returns. Its later mutation still has its own original to restore."""
+    claimed = threading.Event()
+    resume = threading.Event()
+    errors = []
+    mutations = []
+    worker = None
+    try:
+        tree, here, _outside = refusal_tree()
+        path = here / "inside.txt"
+        original = b"inside original\n"
+        path.write_bytes(original)
+        backup = path.with_name(path.name + BACKUP_SUFFIX)
+        entry = edit_entry(path.name, "inside original")
+        second_entry = edit_entry(path.name, "inside original")
+        second_entry["edits"][0]["new"] = "second mutation"
+        first = Mutation(entry, here)
+        real_link, real_replace = os.link, os.replace
+
+        def second_run():
+            try:
+                with Mutation(second_entry, here):
+                    mutations.append(path.read_bytes())
+            except BaseException as error:
+                errors.append(error)
+
+        def link_then_pause(source, target):
+            real_link(source, target)
+            if target == backup:
+                claimed.set()
+                if not resume.wait(5):
+                    raise TimeoutError("the first restore did not release the second run")
+
+        def replace_then_start(source, target):
+            nonlocal worker
+            real_replace(source, target)
+            if source == backup and worker is None:
+                worker = threading.Thread(target=second_run)
+                worker.start()
+                if not claimed.wait(5):
+                    raise TimeoutError("the second run did not acquire its backup")
+
+        with mock.patch.dict(globals(), REPO=tree):
+            first.__enter__()
+            try:
+                with mock.patch.object(os, "link", link_then_pause), \
+                        mock.patch.object(os, "replace", replace_then_start):
+                    try:
+                        first.restore()
+                        kept = backup.exists() and backup.read_bytes() == original
+                    finally:
+                        resume.set()
+                        if worker is not None:
+                            worker.join(10)
+                    assert worker is not None and not worker.is_alive()
+            finally:
+                first.restore()
+        restored = path.read_bytes() == original and not backup.exists()
+        second_mutated = mutations == [b"second mutation\n"]
+        print(f"self-test: a restore keeps a competing run's backup: "
+              f"claimed={claimed.is_set()}, kept={kept}, restored={restored}, "
+              f"second mutation={second_mutated}, errors={len(errors)}")
+        return (claimed.is_set() and kept and restored
+                and second_mutated and not errors)
+    finally:
+        resume.set()
+        if worker is not None:
+            worker.join(10)
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
+def a_replacement_keeps_a_competing_runs_temporary_file():
+    """An exclusive create acquires the temporary name immediately after the
+    replacement. The first run preserves the new owner's bytes and inode."""
+    try:
+        tree, here, _outside = refusal_tree()
+        path = here / "inside.txt"
+        path.write_bytes(b"inside original\n")
+        tmp = path.with_name(path.name + ".falsify-tmp")
+        claimed = []
+        real_replace = os.replace
+
+        def replace_then_claim(source, target):
+            real_replace(source, target)
+            if source == tmp:
+                handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write("second temporary file\n")
+                claimed.append(tmp.stat())
+
+        with mock.patch.dict(globals(), REPO=tree), \
+                mock.patch.object(os, "replace", replace_then_claim), \
+                observed_mutation_writes() as writes:
+            with Mutation(edit_entry(path.name, "inside original"), here):
+                mutated = path.read_bytes() == b"mutated bytes\n"
+        writes_seen = writes.call_args_list == [
+            mock.call("mutated bytes\n"), mock.call("second temporary file\n")]
+        kept = (len(claimed) == 1 and tmp.exists()
+                and os.path.samestat(claimed[0], tmp.stat())
+                and tmp.read_bytes() == b"second temporary file\n")
+        restored = (path.read_bytes() == b"inside original\n"
+                    and not path.with_name(path.name + BACKUP_SUFFIX).exists())
+        print(f"self-test: a replacement keeps a competing run's temporary file: "
+              f"kept={kept}, mutated={mutated}, restored={restored}, writes={writes.call_count}")
+        return kept and mutated and restored and writes_seen
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
 def a_mixed_entry_is_refused_before_any_mutation():
     """An entry whose inside edit comes first and whose second path climbs out
     changes no file. The one path rule checks every name before any link or
@@ -2322,34 +2463,13 @@ def a_mixed_entry_is_refused_before_any_mutation():
                  "tests": ["tests::planted_check"]}
         want = (f"{name}: the path leaves the repository; "
                 "edit paths are relative to examples/agent-host")
-        links = []
-        writes = []
-        real_link = os.link
-        real_write_text = pathlib.Path.write_text
-        real_mutation = Mutation
-
-        def counting_link(*args, **kwargs):
-            links.append(args)
-            return real_link(*args, **kwargs)
-
-        def counting_write_text(path, *args, **kwargs):
-            writes.append(path)
-            return real_write_text(path, *args, **kwargs)
-
-        with mock.patch.object(os, "link", counting_link), \
-                mock.patch.object(pathlib.Path, "write_text", counting_write_text), \
-                mock.patch.dict(globals(), REPO=tree,
-                                Mutation=lambda item: real_mutation(item, here)):
-            try:
-                got = reported(entry, {"build": [], "one": (["false"], here, [])})
-            except BaseException as error:
-                got = (False, f"raised {type(error).__name__}", str(error))
+        got, calls = refused_without_filesystem_mutation(entry, here, tree)
         kept = (inside.read_bytes() == b"inside original\n"
                 and outside.read_bytes() == b"outside original\n")
         print(f"self-test: a mixed entry is refused before any mutation: "
-              f"{got[1]} ({got[2]}), links={len(links)}, writes={len(writes)}, "
+              f"{got[1]} ({got[2]}), links={calls[0]}, writes={calls[1]}, "
               f"kept={kept}")
-        if got != (False, "NO MATCH", want) or links or writes or not kept:
+        if got != (False, "NO MATCH", want) or calls != (0, 0, 0) or not kept:
             ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -3063,6 +3183,9 @@ SELF_TEST_CASES = {
         an_edit_with_an_outside_temporary_target_is_refused,
     "a temporary file this run did not create is refused":
         a_temporary_file_this_run_did_not_create_is_refused,
+    "a restore keeps a competing run's backup": a_restore_keeps_a_competing_runs_backup,
+    "a replacement keeps a competing run's temporary file":
+        a_replacement_keeps_a_competing_runs_temporary_file,
     "a mixed entry is refused before any mutation": a_mixed_entry_is_refused_before_any_mutation,
     "an absent outside edit path gets the containment reason":
         an_absent_outside_edit_path_gets_the_containment_reason,
