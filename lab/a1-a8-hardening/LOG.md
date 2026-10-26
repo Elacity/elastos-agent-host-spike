@@ -152,3 +152,90 @@ Restored SHA-256 after each entry:
 to the original hash `97c4cc2e…`.
 
 macOS was not run.
+
+## 26 Oct 2026: #356 host-receipt A8
+
+Machine: Linux x86_64 cloud VM, rustc 1.91.0 (f8297e351 2025-10-28), no KVM.
+Head of the evidence: `032df8eef4dddfcd87dce29f9745c91cefb8044b` (this log
+is the next commit). Elacity `develop` was not merged.
+
+#356 on `1a82d25b` kept four plants alive. This run closes them on the
+host-side receipt, not on stderr text.
+
+1. B-piece-forge (`F-A8-piece-forge`): the guest builds the Internal
+   sentence from split strings. Origin still prints
+   `guest_has_refusal_sentence:false`. Host records stay empty. The write
+   then read `manifest_capability_denied` assert fails.
+2. A-skip-guards (`F-A8-skip-guards`): the `host_path` special-case and
+   the `JOURNAL_ROOT` delete are dropped. `request_journal_grants` never
+   calls the bus. Host records stay empty.
+3. D-direct-request (`F-A8-direct-request`): the guest asks
+   `capabilities::request` once after identity. Host records one `read`.
+   The test requires write then read from `request_journal_grants`.
+4. C-wasm-bus-only (`F-A8-wasm-bus-only`): the honest guest already uses
+   shipped `WasmBus` only. Requiring the Internal sentence on stderr
+   fails. That claim stays the NEEDS RUNTIME row.
+
+`F-A8a` and `F-A8-runtime` now stop on the first non-denied host record
+(`pending`). Both fail the receipt assert with `exit:signaled`. A
+timeout (`exit:timeout` / `exit:None`) is NOT CAUGHT.
+
+### Rows
+
+Command: `lab/a1-a8-hardening/run.sh` after the falsifiers, with Runtime
+source restored. cargo exit 0.
+
+```text
+a1 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; allowed imports: elastos:bus/types@1.0.0, elastos:bus/runtime@1.0.0, elastos:bus/identity@1.0.0, elastos:bus/capabilities@1.0.0, elastos:bus/providers@1.0.0")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+a8 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+
+row | test | result
+A1 | wasi_import_is_refused_at_admission | PASS
+A8 | agent_host_host_key_read_is_refused | PASS
+A8 | shipped_wasm_bus_prints_internal_sentence | NEEDS RUNTIME (WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible)
+A8 | shipped_agent_host_bytes_read_host_key | BLOCKED (AC-002-ARGS; the shipped agent-host names only its own journal)
+```
+
+Forced ignored rows both panic with their ignore reason (exit 101):
+`shipped_wasm_bus_prints_internal_sentence` and
+`shipped_agent_host_bytes_read_host_key`.
+
+### Falsifiers
+
+Command: `python3 lab/a1-a8-hardening/falsify.py <ID>`, one at a time.
+10 of 10 CAUGHT. Each failed at a listed `fail_needle` with exit 101.
+No timeout.
+
+| ID | Observed | Verdict |
+| --- | --- | --- |
+| F-A1a | Control bytes in the refused slot: `exit:Some(0) refusal_line:None`. | CAUGHT |
+| F-A1-runtime | Allowlist off (elastos sha256 `9d4a0c09…`). Core-module check refused the WASI build. Exact-reason assertion failed. | CAUGHT |
+| F-A8a | Manifest declared the fake key. Host record is `pending` for write. Client stopped early: `exit:signaled`. Receipt assert failed. | CAUGHT |
+| F-A8-runtime | Manifest refusal off (elastos sha256 `72fe1fa5…`). Same `pending` write and `exit:signaled`. | CAUGHT |
+| F-A8-forge | Forged guest: `guest_has_refusal_sentence:true`, injected sha256 `45e4b8fb…`. Failed at the origin assert before `serve`. | CAUGHT |
+| F-A8-early | Old early-return guest, hash `9cff3664…`. `guest_has_early_injection:true`. Failed at that origin assert before `serve`. | CAUGHT |
+| F-A8-skip-guards | A-skip-guards: injected sha256 `c0745cec…`. `host_records:[]`. Failed the write-then-read receipt. | CAUGHT |
+| F-A8-piece-forge | B-piece-forge: injected sha256 `92d42c03…` (same bytes as the #356 plant). `host_records:[]`. Failed the receipt. | CAUGHT |
+| F-A8-wasm-bus-only | C-wasm-bus-only: honest guest `f3d89ab4…` has write then read receipts. Requiring the Internal sentence on stderr failed. | CAUGHT |
+| F-A8-direct-request | D-direct-request: injected sha256 `8441f14e…` (same bytes as the #356 plant). One `read` receipt only. Failed write-then-read. | CAUGHT |
+
+Restored SHA-256 after each entry:
+
+- `tests/a1_wasi_import.rs`: `ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a`
+- `tests/a8_agent_host_host_key.rs`: `ebad194d6d99143bf717a081645c2b7370e90a0d20bb774a6b83a5edb4a77ff0`
+- `elastos/crates/elastos-server/src/component.rs`: `7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992`
+- `elastos/crates/elastos-server/src/resource_bridge.rs`: `d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a`
+
+`git status` showed no Runtime change after restore. The final `run.sh`
+`elastos` hash is `e027209c…`.
+
+macOS A8, aarch64, Jetson: NOT RUN.
+Shipped agent-host bytes: BLOCKED (AC-002-ARGS).
