@@ -6,6 +6,7 @@ one line changed. A catch is a failing test whose output contains the named
 text. The original file is restored before the next check.
 """
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -109,6 +110,57 @@ CHECKS = [
 ]
 
 
+def cargo_check_aarch64(extra_env):
+    env = os.environ.copy()
+    env.update(extra_env)
+    return subprocess.run(
+        [
+            "cargo",
+            "check",
+            "--manifest-path",
+            str(HERE / "Cargo.toml"),
+            "--target",
+            "aarch64-unknown-linux-gnu",
+        ],
+        cwd=HERE.parent.parent,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        check=False,
+    )
+
+
+def wrong_arch_cc():
+    """TARGET_CC=cc must fail the aarch64 check. Removing the ELF
+    e_machine test lets that check pass again with x86-64 objects.
+    """
+    name = "F-LC-WRONG-ARCH-CC"
+    source = HERE / "build.rs"
+    original = source.read_text()
+    old = "        assert_target_elf(out, target);\n"
+    new = "        let _ = (out, target);\n"
+    if original.count(old) != 1 or new in original:
+        print(f"{name} NOT RUN: the standing ELF check line is not unique in {source.name}")
+        return 1
+    standing = cargo_check_aarch64({"TARGET_CC": "cc"})
+    if standing.returncode == 0 or "wrong architecture" not in standing.stdout:
+        print(standing.stdout)
+        print(f"{name} SURVIVED")
+        return 1
+    try:
+        source.write_text(original.replace(old, new, 1))
+        mutated = cargo_check_aarch64({"TARGET_CC": "cc"})
+    finally:
+        source.write_text(original)
+    if mutated.returncode != 0:
+        print(mutated.stdout)
+        print(f"{name} NOT RUN: TARGET_CC=cc still failed after the ELF check was removed")
+        return 1
+    print(f"{name} CAUGHT")
+    return 0
+
+
 def cargo(test):
     return subprocess.run(
         [
@@ -165,6 +217,7 @@ def main():
     failed = 0
     for check in CHECKS:
         failed |= one(check)
+    failed |= wrong_arch_cc()
     return failed
 
 

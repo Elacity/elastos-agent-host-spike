@@ -46,5 +46,13 @@
     "new": "expect() ignores errno; clone denial returns ENOSYS",
     "test": "provider_filter_refuses_clone_process",
     "caught": "not any failure"
+  },
+  {
+    "id": "F-LC-WRONG-ARCH-CC",
+    "file": "lab/linux-confine/build.rs",
+    "old": "assert_target_elf(out, target)",
+    "new": "skip the ELF e_machine check",
+    "test": "cargo check --target aarch64-unknown-linux-gnu with TARGET_CC=cc",
+    "caught": "wrong architecture"
   }
 ]

@@ -69,6 +69,7 @@ fn main() {
     println!("cargo:rerun-if-changed=helper/setup.c");
     println!("cargo:rerun-if-changed=helper/witness.c");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=elf_machine.rs");
 }
 
 /// Same lookup as the `cc` crate: `CC_<target>` with `-` → `_`, then
@@ -149,4 +150,10 @@ fn compile(cc: &str, target: &str, foreign: bool, out: &PathBuf, src: &PathBuf, 
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    // F-LC-WRONG-ARCH-CC: a foreign TARGET must not accept a host-arch object.
+    if foreign {
+        assert_target_elf(out, target);
+    }
 }
+
+include!("elf_machine.rs");
