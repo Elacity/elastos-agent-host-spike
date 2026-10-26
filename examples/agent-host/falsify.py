@@ -413,6 +413,18 @@ class Mutation:
         for name, edits in by_file.items():
             path = self.base / name
             # One path rule: an edit names a file under examples/agent-host.
+            # An absolute path, or one whose `..` parts or symlinks resolve
+            # outside REPO, is a refusal with its reason before any link or
+            # write (P11), so a killed run can still restore every file.
+            if os.path.isabs(name):
+                raise LookupError(
+                    f"{name}: the path is absolute; "
+                    "edit paths are relative to examples/agent-host")
+            resolved = path.resolve()
+            if not resolved.is_relative_to(REPO):
+                raise LookupError(
+                    f"{name}: the path leaves the repository; "
+                    "edit paths are relative to examples/agent-host")
             # A missing file is a refusal with its reason, not a read error,
             # and it is decided before any link or write (P11).
             if not path.is_file():
@@ -2024,6 +2036,203 @@ def an_edit_of_a_missing_file_is_refused():
     return ok
 
 
+def refusal_tree():
+    """A repository folder under SELF_TEST_DIR with its examples/agent-host
+    folder and an outside.txt beside it that no edit may touch."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    tree = SELF_TEST_DIR / "repo"
+    here = tree / "examples" / "agent-host"
+    here.mkdir(parents=True)
+    outside = SELF_TEST_DIR / "outside.txt"
+    outside.write_bytes(b"outside original\n")
+    return tree, here, outside
+
+
+def edit_entry(name, old="outside original"):
+    """One edit entry whose file is the single name, so a path that is not
+    refused would change that file."""
+    return {"id": "ST", "command": "selftest", "expect": "caught",
+            "edits": [{"file": name, "old": old, "new": "mutated bytes"}],
+            "tests": ["tests::planted_check"]}
+
+
+def refused_edit(entry, here, tree):
+    """One entry's reported() result against the test tree. The one path rule
+    and Mutation read the patched REPO and test base, and the cheap command
+    would run only if the edit were not refused. An exception that escapes
+    reported() fails the case instead of erroring it out."""
+    real_mutation = Mutation
+    how = {"build": [], "one": (["false"], here, [])}
+    with mock.patch.dict(globals(), REPO=tree,
+                         Mutation=lambda item: real_mutation(item, here)):
+        try:
+            return reported(entry, how)
+        except BaseException as error:
+            return False, f"raised {type(error).__name__}", str(error)
+
+
+def an_absolute_edit_path_is_refused():
+    """An absolute edit path is refused with its own reason before any link,
+    whether it names a file inside REPO or outside it. Only that guard refuses
+    the inside file, so removing the guard alone is caught; both files keep
+    their bytes and no backup appears (task 025)."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        inside = here / "inside.txt"
+        inside.write_bytes(b"inside original\n")
+        results = {}
+        for name, old in ((str(inside), "inside original"),
+                          (str(outside), "outside original")):
+            want = (f"{name}: the path is absolute; "
+                    "edit paths are relative to examples/agent-host")
+            results[name] = refused_edit(edit_entry(name, old), here, tree)
+            if results[name] != (False, "NO MATCH", want):
+                ok = False
+        kept = (outside.read_bytes() == b"outside original\n"
+                and inside.read_bytes() == b"inside original\n"
+                and not outside.with_name(outside.name + BACKUP_SUFFIX).exists()
+                and not inside.with_name(inside.name + BACKUP_SUFFIX).exists())
+        print(f"self-test: an absolute edit path is refused: "
+              f"inside={results[str(inside)][1]}, outside={results[str(outside)][1]}, "
+              f"kept={kept}")
+        if not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_edit_path_that_climbs_out_is_refused():
+    """A relative edit path with enough `..` parts resolves outside REPO and
+    is refused with the containment reason before any link or write;
+    outside.txt keeps its bytes and no backup appears (task 025)."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        name = "../../../outside.txt"
+        want = (f"{name}: the path leaves the repository; "
+                "edit paths are relative to examples/agent-host")
+        got = refused_edit(edit_entry(name), here, tree)
+        kept = (outside.read_bytes() == b"outside original\n"
+                and not outside.with_name(outside.name + BACKUP_SUFFIX).exists())
+        print(f"self-test: an edit path that climbs out is refused: "
+              f"{got[1]} ({got[2]}), kept={kept}")
+        if got != (False, "NO MATCH", want) or not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_edit_through_an_outside_symlink_is_refused():
+    """A file symlink and a directory symlink that lead outside REPO are
+    refused with the containment reason, because the check resolves symlinks
+    instead of normalizing the text. Both links stay links and outside.txt
+    keeps its bytes (task 025)."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        file_link = here / "link.txt"
+        file_link.symlink_to(outside)
+        dir_link = here / "outside-dir"
+        dir_link.symlink_to(SELF_TEST_DIR)
+        results = {}
+        for name in ("link.txt", "outside-dir/outside.txt"):
+            want = (f"{name}: the path leaves the repository; "
+                    "edit paths are relative to examples/agent-host")
+            results[name] = refused_edit(edit_entry(name), here, tree)
+            if results[name] != (False, "NO MATCH", want):
+                ok = False
+        kept = (outside.read_bytes() == b"outside original\n"
+                and file_link.is_symlink() and dir_link.is_symlink()
+                and not (SELF_TEST_DIR / (outside.name + BACKUP_SUFFIX)).exists()
+                and not (here / ("link.txt" + BACKUP_SUFFIX)).exists())
+        print(f"self-test: an edit through an outside symlink is refused: "
+              f"file={results['link.txt'][1]}, "
+              f"dir={results['outside-dir/outside.txt'][1]}, kept={kept}")
+        if not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_mixed_entry_is_refused_before_any_mutation():
+    """An entry whose inside edit comes first and whose second path climbs out
+    changes no file. The one path rule checks every name before any link or
+    write, so the inside file is neither linked nor written (task 025)."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        inside = here / "inside.txt"
+        inside.write_bytes(b"inside original\n")
+        name = "../../../outside.txt"
+        entry = {"id": "ST", "command": "selftest", "expect": "caught",
+                 "edits": [{"file": "inside.txt", "old": "inside original",
+                            "new": "inside mutated"},
+                           {"file": name, "old": "outside original",
+                            "new": "outside mutated"}],
+                 "tests": ["tests::planted_check"]}
+        want = (f"{name}: the path leaves the repository; "
+                "edit paths are relative to examples/agent-host")
+        links = []
+        writes = []
+        real_link = os.link
+        real_write_text = pathlib.Path.write_text
+        real_mutation = Mutation
+
+        def counting_link(*args, **kwargs):
+            links.append(args)
+            return real_link(*args, **kwargs)
+
+        def counting_write_text(path, *args, **kwargs):
+            writes.append(path)
+            return real_write_text(path, *args, **kwargs)
+
+        with mock.patch.object(os, "link", counting_link), \
+                mock.patch.object(pathlib.Path, "write_text", counting_write_text), \
+                mock.patch.dict(globals(), REPO=tree,
+                                Mutation=lambda item: real_mutation(item, here)):
+            try:
+                got = reported(entry, {"build": [], "one": (["false"], here, [])})
+            except BaseException as error:
+                got = (False, f"raised {type(error).__name__}", str(error))
+        kept = (inside.read_bytes() == b"inside original\n"
+                and outside.read_bytes() == b"outside original\n")
+        print(f"self-test: a mixed entry is refused before any mutation: "
+              f"{got[1]} ({got[2]}), links={len(links)}, writes={len(writes)}, "
+              f"kept={kept}")
+        if got != (False, "NO MATCH", want) or links or writes or not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def an_absent_outside_edit_path_gets_the_containment_reason():
+    """A path that climbs out and does not exist is refused for leaving the
+    repository, not for missing, so containment is decided before the
+    missing-file check (task 025)."""
+    ok = True
+    try:
+        tree, here, outside = refusal_tree()
+        name = "../../../absent.txt"
+        want = (f"{name}: the path leaves the repository; "
+                "edit paths are relative to examples/agent-host")
+        got = refused_edit(edit_entry(name), here, tree)
+        absent = not (SELF_TEST_DIR / "absent.txt").exists()
+        kept = (outside.read_bytes() == b"outside original\n"
+                and not (SELF_TEST_DIR / (outside.name + BACKUP_SUFFIX)).exists())
+        print(f"self-test: an absent outside edit path gets the containment reason: "
+              f"{got[1]} ({got[2]}), absent={absent}, kept={kept}")
+        if got != (False, "NO MATCH", want) or not absent or not kept:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 def the_streams_keep_their_own_lines():
     """stdout and stderr are joined at a line boundary, so a marker at the
     start of stderr is still at the start of a line when stdout ends without
@@ -2699,6 +2908,12 @@ SELF_TEST_CASES = {
     "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
     "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
     "an edit of a missing file is refused": an_edit_of_a_missing_file_is_refused,
+    "an absolute edit path is refused": an_absolute_edit_path_is_refused,
+    "an edit path that climbs out is refused": an_edit_path_that_climbs_out_is_refused,
+    "an edit through an outside symlink is refused": an_edit_through_an_outside_symlink_is_refused,
+    "a mixed entry is refused before any mutation": a_mixed_entry_is_refused_before_any_mutation,
+    "an absent outside edit path gets the containment reason":
+        an_absent_outside_edit_path_gets_the_containment_reason,
     "a missing data file is refused": a_missing_data_file_is_refused,
     "an unreadable data file is refused": an_unreadable_data_file_is_refused,
     "an unreadable data path is refused": an_unreadable_data_path_is_refused,
