@@ -65,7 +65,7 @@ child runs the guard. On a fault, the child writes a 12-byte record (step,
 errno, found ABI) and calls `_exit(71)`. EOF on that pipe is necessary for
 a start, not sufficient. The parent samples `/proc/<provider pid>/exe`
 against the expected binary (device and inode from `stat` before fork)
-while the provider is still alive. A match is a start. Closing the pipe
+on a side thread while the provider is still alive. A match is a start. Closing the pipe
 without `execve` leaves the helper image in place and is a refusal. A
 static binary that writes nothing is accepted when that identity matches.
 Any bytes, including a `ConfineReady` record without `execve`, are a

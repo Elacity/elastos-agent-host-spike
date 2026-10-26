@@ -7,8 +7,9 @@
 //! `launch` returns the PID-namespace init. The helper that unshares the
 //! namespace writes that host pid and exits. Init reaps every child. SIGKILL
 //! of init kills the namespace. A start is EOF on the close-on-exec pipe
-//! plus `/proc/<provider pid>/exe` matching the expected binary. Any bytes
-//! are a fault.
+//! plus `/proc/<provider pid>/exe` matching the expected binary. The parent
+//! samples that identity on a side thread so a fast exit is still a start
+//! when the image matched while it was alive. Any bytes are a fault.
 
 use crate::{
     confine_and_exec, exe_identity_ok, interpret_fault_pipe, landlock, proc_exe_dev_ino,
@@ -19,7 +20,9 @@ use std::ffi::CStr;
 use std::io;
 use std::os::fd::RawFd;
 use std::os::raw::{c_int, c_long};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 /// The real kernel. `fault_write` is the child's end of the close-on-exec
 /// pipe. Reapers close their copy so a successful `execve` produces EOF.
@@ -641,13 +644,22 @@ impl Kernel for RealKernel {
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
 
         let expected = plan.exe_dev_ino();
-        let mut matched = false;
-        if let Some(init) = init_pid {
-            matched = any_child_matches(init, expected);
-        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = init_pid.map(|init| {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || sample_exe_until(init, expected, &stop))
+        });
         let mut buf = [0u8; Fault::ENCODED_LEN * 2];
-        let (got, read_error) =
-            read_fault_until_eof(fault_read, init_pid, expected, &mut matched, &mut buf);
+        let (got, read_error) = read_all(fault_read, &mut buf);
+        stop.store(true, Ordering::Relaxed);
+        let mut matched = spinner
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or(false);
+        if !matched {
+            if let Some(init) = init_pid {
+                matched = any_child_matches(init, expected);
+            }
+        }
         unsafe { libc::close(fault_read) };
 
         // The helper writes the pid and `_exit`s. One WNOHANG now; do not
@@ -744,64 +756,26 @@ fn close_pair(a: RawFd, b: RawFd) {
     }
 }
 
-/// Read the fault pipe. While waiting, sample `/proc/<child>/exe` so a
-/// fast-exit provider can still prove it was the expected binary.
-fn read_fault_until_eof(
-    fault_read: RawFd,
-    init: Option<u32>,
-    expected: (u64, u64),
-    matched: &mut bool,
-    buf: &mut [u8],
-) -> (usize, Option<Errno>) {
-    let mut got = 0usize;
-    loop {
-        if !*matched {
-            if let Some(pid) = init {
-                *matched = any_child_matches(pid, expected);
-            }
+/// Parent-side spinner. A fast-exit provider is only briefly alive after
+/// `execve`; this thread keeps stating `/proc/<pid>/exe` until it matches
+/// or the fault pipe is done.
+fn sample_exe_until(init: u32, expected: (u64, u64), stop: &AtomicBool) -> bool {
+    while !stop.load(Ordering::Relaxed) {
+        if any_child_matches(init, expected) {
+            return true;
         }
-        let mut pfd = libc::pollfd {
-            fd: fault_read,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: `pfd` is a valid pollfd; 1 ms so we keep sampling exe.
-        let pret = unsafe { libc::poll(&mut pfd, 1, 1) };
-        if pret < 0 {
-            if errno() == libc::EINTR {
-                continue;
-            }
-            return (got, Some(errno()));
-        }
-        if pret == 0 {
-            if let Some(pid) = init {
-                if !process_alive(pid) {
-                    break;
-                }
-            }
-            continue;
-        }
-        let (n, read_error) = read_all(fault_read, &mut buf[got..]);
-        got += n;
-        if let Some(err) = read_error {
-            return (got, Some(err));
-        }
-        if n == 0 || got == buf.len() {
-            break;
-        }
+        thread::yield_now();
     }
-    if !*matched {
-        if let Some(pid) = init {
-            *matched = any_child_matches(pid, expected);
-        }
-    }
-    (got, None)
+    any_child_matches(init, expected)
 }
 
 fn any_child_matches(init: u32, expected: (u64, u64)) -> bool {
-    children_of(init)
-        .into_iter()
-        .any(|pid| exe_identity_ok(expected, proc_exe_dev_ino(pid)))
+    for pid in children_of(init) {
+        if exe_identity_ok(expected, proc_exe_dev_ino(pid)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn children_of(init: u32) -> Vec<u32> {
@@ -818,11 +792,6 @@ fn children_of(init: u32) -> Vec<u32> {
             }
         }
     }
-    if pids.is_empty() {
-        if let Some(pid) = child_by_ppid(init) {
-            pids.push(pid);
-        }
-    }
     pids
 }
 
@@ -831,28 +800,6 @@ fn pid_has_ppid(pid: u32, init: u32) -> bool {
         .ok()
         .and_then(|stat| parse_ppid(&stat))
         == Some(init)
-}
-
-fn child_by_ppid(init: u32) -> Option<u32> {
-    let dir = std::fs::read_dir("/proc").ok()?;
-    for entry in dir.flatten() {
-        let pid: u32 = match entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse().ok())
-        {
-            Some(pid) if pid != init => pid,
-            _ => continue,
-        };
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        if parse_ppid(&stat) == Some(init) {
-            return Some(pid);
-        }
-    }
-    None
 }
 
 fn parse_ppid(stat: &str) -> Option<u32> {
