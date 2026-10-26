@@ -1,18 +1,21 @@
 # capsule-identity lab: one lab CID over a whole bundle
 
 Lab tooling for the cc-capsule-identity lane (ci-1: tasks 001 and 005; ci-2:
-task 003; ci-8: task 009). It names a capsule bundle by one deterministic
-**lab CID** over all of its bytes: the manifest and every payload file
-(PRINCIPLES 13 and 15). It checks a claimed name against the bytes and never
-trusts it. It also returns the name together with the bytes it covers, so a
-caller never needs to read a bundle twice.
+task 003; ci-8: task 009; ci-3: task 004). It names a capsule bundle by one
+deterministic **lab CID** over all of its bytes: the manifest and every
+payload file (PRINCIPLES 13 and 15). It checks a claimed name against the
+bytes and never trusts it. It also returns the name together with the bytes
+it covers, so a caller never needs to read a bundle twice. A test key can
+sign that printed lab CID, and a check can say whether that key did.
 
 ## What it is, and what it is not
 
-- It answers one question: do these bytes match this name?
+- It answers two questions: do these bytes match this name, and did this test
+  key sign that name?
 - It never answers "may this run?". It makes no trust, admission or launch
   decision. It sits in no admission or launch path, and no Runtime code calls
   it. Admission stays a separate decision under each Runtime's trust policy.
+  A signature check that returns `Ok(())` is not a permission to run.
 - Its value is a **lab CID**, printed `lab-cid:sha256:<64 lowercase hex>`. It
   is not the Runtime's CID and is never used as a package identity (see
   [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)).
@@ -296,6 +299,121 @@ file. F-CI3g skips the one compare, so it lists the checked form's two tests
 too: a checked form with a compare of its own would leave
 `checked_name_check_refuses_a_mismatch` passing, and F-CI3g would not count.
 
+## Test-key publisher signature (lab proposal)
+
+A test key can sign a bundle's printed lab CID. The check answers only "did
+this test key sign this lab CID?". It does not answer "may this run?".
+
+**The message.** `name_signature_message` is SHA-256 over three parts, in
+order:
+
+1. the domain `lab.capsule-identity.name-signature/v1`
+   (`NAME_SIGNATURE_DOMAIN`);
+2. one `0x00` byte;
+3. the UTF-8 bytes of the printed lab CID, label included
+   (`lab-cid:sha256:<64 lowercase hex>`).
+
+That is the three-step digest in `domain_separated_sign`
+(`elastos/crates/elastos-server/src/crypto.rs:88-128`): SHA-256 of
+`domain || 0x00 || payload`, then Ed25519 over that digest. The form lives
+only in the Runtime server. This lab does not link that crate, so it keeps
+one marked copy under its own domain and calls the copy a lab proposal.
+Moving the form next to `decode_did_key` in `elastos-identity` is a question
+for Anders. Signing and verifying both call `name_signature_message`. Nothing
+else builds the message.
+
+**In memory only.** `NameSignature` is a plain struct: `name`, `signer_did`
+and a 64-byte `signature`. It has no serde derive, no file and no envelope.
+This document proposes none. Nothing writes a signature to disk. The
+signature never goes into `capsule.json`'s `signature` field. That file is
+inside the bytes the lab CID covers, so a signature written there would
+change the name it signs.
+
+**Not the Runtime's capsule signature.** The Runtime verifies a capsule
+signature in `elastos/crates/elastos-runtime/src/signature/verifier.rs:76-136`.
+This lab does not reproduce that check and does not extend it.
+
+**One DID path.** The signer is an Ed25519 `did:key` from
+`elastos_identity::encode_signing_key_did`. Verification decodes it with
+`elastos_identity::decode_did_key`. This lab copies no base58 and no
+multicodec code.
+
+**Sign.** `sign_bundle(key, bundle)` names the bundle with `lab_cid`. A
+refusal from that walk passes through unchanged, and a refused bundle gets
+no signature. It signs the message of the printed name and sets `signer_did`
+from the key. Success returns the signature. It writes nothing.
+
+**Verify, one form.** `verify_checked_signature(checked, sig, accepted)`
+checks 009's `CheckedBundle` in this order. The first refusal is the answer.
+`Ok(())` means all four passed, and it returns no trust, admission or launch
+value.
+
+1. Decode `sig.signer_did`. On error: `signer DID <did> is not a canonical Ed25519 did:key: <the decoder's own text>`.
+2. The DID is an exact member of `accepted`. The list is an explicit input.
+   It is not a trust policy. An empty list refuses every signer:
+   `signer <did> is not in the accepted list`.
+3. 009's checked name check of `sig.name` on `checked` (003's rule and
+   texts). Its refusals pass through unchanged. A mismatch names both
+   values (`bundle bytes name <actual>; the claim is <claimed>`). A claim
+   that is not a lab CID says so. This step reads nothing from disk.
+4. Ed25519 verification of the 64 signature bytes over
+   `name_signature_message` of `sig.name`, with the key from step 1. On
+   failure: `signature by <did> does not verify over <name>`. Ed25519 gives
+   a wrong key, a changed signature and a name moved onto other bytes this
+   one reason. Another bundle and a tampered bundle byte both fail step 3,
+   because both mean these bytes do not match the signed name.
+
+`verify_name_signature(bundle, sig, accepted)` is `checked_bundle(bundle)`
+and then `verify_checked_signature`. It holds no check of its own. A bundle
+the walk refuses is refused first, with the walk's own reason. The path form
+is the walk plus the checked form, so a caller checks the signature on the
+bytes it then audits or stages.
+
+**Pinned message digest.** For `content-sample`'s pinned lab CID, the digest
+is `650c3b5baeb1e1e2f3cf1e87ded48ee496090c863d11afb9c80fbf07efb59f11`.
+
+```python
+import hashlib
+
+name = b"lab-cid:sha256:99cf6c7b9b4489f3a565cca47e1e30f2b4e7752bf0e8824806e7036f7a681d51"
+digest = hashlib.sha256(
+    b"lab.capsule-identity.name-signature/v1" + b"\x00" + name
+).hexdigest()
+```
+
+**Keys.** Every test key is made fresh in memory by `fresh_signing_key` in
+`tests/common/mod.rs`, which calls `SigningKey::generate` on the operating
+system's generator. No key or seed is written, printed or kept as a constant,
+and there is no fixed seed. This lane's `.gitignore` ignores `*.seed`. The
+root `.gitignore` line 52 already ignores `*.key`; this lane does not repeat
+that pattern.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| A fresh test key's signature over `content-sample` and `web-app` verifies | `test_key_signature_over_the_lab_cid_verifies` | F-CI4j |
+| The message is the domain-separated printed lab CID | `signed_message_is_the_domain_separated_lab_cid` | F-CI4a, F-CI4b |
+| A signature for another bundle is the name check's mismatch | `signature_for_another_bundle_is_refused` | F-CI4c |
+| One changed payload byte is the name check's mismatch | `tampered_bundle_byte_is_refused` | F-CI4c |
+| A signature relabelled onto another lab CID does not verify | `relabelled_signature_is_refused` | F-CI4a, F-CI4d |
+| One flipped signature bit does not verify | `tampered_signature_byte_is_refused` | F-CI4d |
+| Another key's signature under an accepted DID does not verify | `signature_by_another_key_is_refused` | F-CI4d |
+| A signer outside the list, and an empty list, are refused | `signer_not_in_the_accepted_list_is_refused` | F-CI4e, F-CI4f |
+| The checked form judges the bytes it holds; the path form reads the folder now | `checked_signature_judges_the_checked_bytes` | F-CI4c, F-CI4k |
+| A malformed DID is refused with the decoder's text, even when listed | `malformed_signer_did_is_refused` | F-CI4g |
+| The checked form runs every check, not only the path form | `checked_signature_runs_all_checks` | F-CI4l, F-CI4m, F-CI4n |
+| Both wrappers keep the walk's refusal, including bad signature inputs | `signature_paths_preserve_walk_refusals` | F-CI4o, F-CI4p, F-CI4q, F-CI4r, F-CI4s |
+| Two faults at once: the earlier check answers | `signature_refusal_order_is_stable` | F-CI4t, F-CI4u, F-CI4v |
+| One message, one verification, and the path form holds no check of its own | `signature_paths_share_one_implementation` | F-CI4w, F-CI4x |
+| Test keys come from the operating system's generator | `test_keys_use_fresh_os_randomness` | F-CI4y |
+| No key material is in what git would stage | `no_key_material_is_tracked` | F-CI4i |
+| `*.key` and `*.seed` are ignored | `key_and_seed_files_are_ignored_by_git` | F-CI4h |
+
+The tests are in `tests/name_signature.rs`. F-CI4h drops `*.seed` from this
+lane's `.gitignore`. F-CI4i appends a private-key header line to this file.
+Neither file is in the runner's recovery list
+(`examples/agent-host/falsify.py`, `PROVIDER_TARGETS`). The runner still runs
+them. The provider lane adds those two recovery lines after this task merges.
+
 ## Why a lab CID and not the Runtime's CID
 
 The Runtime names a published capsule by the CID its IPFS provider returns when
@@ -328,28 +446,34 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
-`elastos-common` by path (read only, for `CapsuleManifest`), `hex`,
-`serde_json`, `sha2`, and `rustix` 1.1.4 with its `fs` feature, for safe
-`openat`, `fstat` and listing from a handle (`std` cannot open relative to a
-handle, and the crate forbids `unsafe`). Dev-dependency: `tempfile`. All
-resolve offline from the local cargo cache. `wc001_capsule_bundle_gets_a_stable_lab_cid`
-runs `lab/wasm-capsule/tools/build`, so it also needs that lane's toolchain.
+`elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
+by path (read only, for the one `did:key` encoder and decoder), `hex`,
+`serde_json`, `sha2`, `ed25519-dalek` 2.1 with its `rand_core` feature, and
+`rustix` 1.1.4 with its `fs` feature, for safe `openat`, `fstat` and listing
+from a handle (`std` cannot open relative to a handle, and the crate forbids
+`unsafe`). Dev-dependencies: `tempfile` and `rand` 0.8 (the operating system's
+generator in tests). There is no dependency on `elastos-server` or
+`elastos-runtime`. All resolve offline from the local cargo cache.
+`zerocopy` is locked at 0.8.62 because 0.8.63's derive crate is not in that
+cache. `wc001_capsule_bundle_gets_a_stable_lab_cid` runs
+`lab/wasm-capsule/tools/build`, so it also needs that lane's toolchain.
 
 ## Layout
 
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
 src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
-                         the encoder and the walk
+                         the encoder, the walk, and the test-key signature
 fixtures/                content-sample, web-app, wc001-core, agent-host
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
-                         the library's code for tests that read it
+                         the library's code for tests that read it, fresh test keys
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/encoding.rs        order, boundaries, label, one file per path
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
+tests/name_signature.rs  a test key signs the printed lab CID; verification only
 tests/refusals.rs        each refusal and its reason
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -357,15 +481,21 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 56 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 81 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
-[above](#what-the-lab-cid-ignores-and-what-it-covers)), and task 009's F-CI9a
-to F-CI9j (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers)).
+[above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
+to F-CI9j (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers)),
+and task 004's F-CI4a to F-CI4y (see
+[the test-key signature](#test-key-publisher-signature-lab-proposal)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
-error. Each edits one of the files the runner restores after a killed run:
-`src/lib.rs`, `tests/common/mod.rs` or `fixtures/wc001-core/capsule.json`.
+error. Every entry except F-CI4h and F-CI4i edits a file the runner restores
+after a killed run: `src/lib.rs`, `tests/common/mod.rs` or
+`fixtures/wc001-core/capsule.json`. F-CI4h edits this lane's `.gitignore` and
+F-CI4i edits this file. Those two are not in the runner's recovery list. The
+runner still runs them. The provider lane adds both lines after this task
+merges.
 
 Task 009 moved code without changing an older entry. The root manifest check
 and the encoder call moved from `lab_cid_observed` into
@@ -385,6 +515,8 @@ python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers
 ```
 
 At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
-46 of 46). The runner does not print why a test failed. Tasks 003 and 009 also
-proved each of their falsifiers by hand: plant the edit, run each named test
-alone, read its failure message, restore the file and compare its SHA-256.
+46 of 46). At task 004 it reported `summary: 81 CAUGHT of 81`. The runner
+does not print why a test failed. Tasks 003, 009 and 004 prove each of their
+falsifiers by break, named test fails, revert.
+
+The signature answers only whether this test key signed this lab CID.

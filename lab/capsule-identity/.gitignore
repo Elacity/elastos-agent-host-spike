@@ -3,3 +3,5 @@
 /target/
 capsule.wasm
 receipt.txt
+# Seed files are key material. Key files are already ignored at the repository root.
+*.seed

@@ -120,8 +120,9 @@ fn check_name_preserves_lab_cid_refusals() {
 #[test]
 fn check_name_uses_the_single_naming_path() {
     // P10: check_name names the bundle only by calling lab_cid, and computes
-    // no name of its own. The library hashes in one place, the encoder,
-    // which is called once.
+    // no name of its own. The library creates a SHA-256 hasher in exactly two
+    // places: once in the encoder (the one naming hash) and once in
+    // name_signature_message (the one message hash).
     let code = library_code();
     let start = code
         .find("pub fn check_name(")
@@ -146,5 +147,19 @@ fn check_name_uses_the_single_naming_path() {
         );
     }
     assert_eq!(code.matches("encode_entries(").count(), 2, "encode_entries");
-    assert_eq!(code.matches("Sha256::new()").count(), 1, "Sha256::new()");
+    assert_eq!(code.matches("Sha256::new()").count(), 2, "Sha256::new()");
+    assert_eq!(
+        library_item(&code, "pub fn encode_entries(")
+            .matches("Sha256::new()")
+            .count(),
+        1,
+        "encode_entries is not the one naming hash"
+    );
+    assert_eq!(
+        library_item(&code, "pub fn name_signature_message(")
+            .matches("Sha256::new()")
+            .count(),
+        1,
+        "name_signature_message is not the one message hash"
+    );
 }
