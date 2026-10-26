@@ -215,6 +215,9 @@ impl Evidence {
             if name == "real_agent_host_gets_no_ungranted_authority" {
                 text.push_str(" | real agent-host capsule, deny half; no model call (RT3)");
             }
+            if name == "real_agent_host_journal_under_usersai_principal" {
+                text.push_str(" | P7 gap: real agent-host journal under Users/self, not UsersAI/self; moves when the UsersAI binding lands");
+            }
             if matches!(
                 name.as_str(),
                 "granted_read_succeeds"
