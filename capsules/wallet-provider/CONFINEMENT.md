@@ -734,6 +734,15 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   that names another provider's executable prefix passes the check.
 - Drop the empty-reason refusal (WP94): the same test fails because a bare
   provider prefix passes the check.
+- Drop the role refusal (WP95): the same test fails because a file that gives
+  "approved rights" as its role passes the check, so its role case finds no
+  refusal.
+- Drop the provider refusal (WP96): the same test fails because the did file
+  that names "wallet-provider" passes the check, so its provider case finds no
+  refusal.
+- Drop the platform-baseline status refusal (WP97): the same test fails
+  because a baseline without ", not approved rights" in its status sentence
+  passes the check, so its status case finds no refusal.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
