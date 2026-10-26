@@ -818,3 +818,33 @@ fn model_forged_ceiling_does_not_raise_the_ceiling() {
         .expect("at the stored ceiling");
     assert_eq!(books(&verifier).held, 5);
 }
+
+#[test]
+fn model_lower_ceiling_leaves_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 8).expect("reserve");
+    verifier.admit(4);
+    let after = books(&verifier);
+    assert_eq!(after.held, 8);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.open.get(&reservation.id), Some(&8));
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("lower ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 8,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let still = books(&verifier);
+    assert_eq!(still.held, 8);
+    assert_eq!(still.charged, 0);
+    assert_eq!(still.open.get(&reservation.id), Some(&8));
+}

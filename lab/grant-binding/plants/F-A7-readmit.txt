@@ -1,0 +1,13 @@
+id: F-A7-readmit
+file: src/ledger.rs
+test: ledger::model_lower_ceiling_leaves_the_hold
+--- old
+        self.ledger.lock().expect("ledger lock").ceiling = ceiling;
+--- new
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        if ceiling < ledger.held {
+            ledger.open.clear();
+            ledger.held = 0;
+        }
+        ledger.ceiling = ceiling;
+--- end
