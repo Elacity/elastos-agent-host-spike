@@ -59,6 +59,19 @@ mkdir -p -- "$HOME/$JPK_ROOT_NAME/inside" "$scratch/outside"
 root=$(jpk_allowed_root)
 assert_eq allowed_root "$root" "$HOME/$JPK_ROOT_NAME"
 
+assert_eq default_c0_ref "$(jpk_c0_ref)" "$JPK_C0_DEFAULT_BRANCH"
+assert_eq default_c0_pin "$(jpk_c0_pin)" "$JPK_C0_DEFAULT_SHA"
+JPK_C0_PR=307
+assert_eq pr_c0_ref "$(jpk_c0_ref)" "pull/307/head"
+assert_eq pr_c0_pin_empty "$(jpk_c0_pin)" ""
+JPK_C0_SHA=abc
+assert_eq pr_c0_pin_explicit "$(jpk_c0_pin)" "abc"
+unset JPK_C0_PR JPK_C0_SHA
+JPK_C0_REF=cursor/updated-guard
+assert_eq ref_c0_ref "$(jpk_c0_ref)" "cursor/updated-guard"
+assert_eq ref_c0_pin_empty "$(jpk_c0_pin)" ""
+unset JPK_C0_REF
+
 if jpk_path_inside "$root" "$root/inside"; then
     inside_rc=0
 else
@@ -135,7 +148,7 @@ assert_contains script_outside_reason "$(cat "$script_out")" "REFUSED path is ou
 
 # Full script: missing memory check surface (low MemAvailable after a valid path).
 mkdir -p -- "$root"
-cp -- "$kit/lib.sh" "$kit/probe_landlock.py" "$kit/evidence.txt" "$root/"
+cp -- "$kit/lib.sh" "$kit/probe_landlock.py" "$kit/probe_host.py" "$kit/decide.py" "$kit/evidence.txt" "$root/"
 cp -- "$kit/run-on-jetson.sh" "$root/run-on-jetson.sh"
 chmod +x "$root/run-on-jetson.sh"
 set +e
@@ -157,14 +170,14 @@ while IFS= read -r line; do
 done <"$kit/evidence.txt"
 
 # The operator script never names the host surfaces it must leave alone.
-if grep -E '(^|[[:space:]])(sudo|apt|pm2|PM2)([[:space:]]|$)' "$kit/run-on-jetson.sh" "$kit/lib.sh"; then
+if grep -E '(^|[[:space:]])(sudo|apt|pm2|PM2)([[:space:]]|$)' "$kit/run-on-jetson.sh" "$kit/lib.sh" "$kit/probe_host.py" "$kit/decide.py"; then
     printf 'FAIL scripts_name_host_surfaces\n'
     fail=$((fail + 1))
 else
     printf 'PASS scripts_leave_host_surfaces_unnamed\n'
     pass=$((pass + 1))
 fi
-if grep -E '4200' "$kit/run-on-jetson.sh" "$kit/lib.sh"; then
+if grep -E '4200' "$kit/run-on-jetson.sh" "$kit/lib.sh" "$kit/probe_host.py" "$kit/decide.py"; then
     printf 'FAIL scripts_name_port_4200\n'
     fail=$((fail + 1))
 else

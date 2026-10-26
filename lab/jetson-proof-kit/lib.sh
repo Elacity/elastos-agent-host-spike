@@ -4,11 +4,39 @@
 JPK_MEM_FLOOR_KB=1048576
 JPK_ROOT_NAME=flint-elastos-test
 JPK_BUILD_JOBS=4
-JPK_C0_BRANCH=cursor/fail-closed-linux-0b95
-JPK_C0_SHA=129fdc98428c9029b328976511478c46ebe765a6
+JPK_C0_DEFAULT_BRANCH=cursor/fail-closed-linux-0b95
+JPK_C0_DEFAULT_SHA=129fdc98428c9029b328976511478c46ebe765a6
+JPK_C0_BRANCH=${JPK_C0_BRANCH:-$JPK_C0_DEFAULT_BRANCH}
 JPK_C9_BRANCH=cursor/linux-confine-e156
 JPK_C9_SHA=2dc3c565c6649d668f1e50efefeea7d964330f9c
 JPK_DEFAULT_REMOTE=https://github.com/Elacity/elastos-agent-host-spike.git
+
+# Guard source. Default is the pinned #307 branch.
+# JPK_C0_PR=307 fetches pull/307/head and records that HEAD (no pin).
+# JPK_C0_REF overrides the git ref. An explicit JPK_C0_SHA still pins.
+jpk_c0_ref() {
+    if [ -n "${JPK_C0_PR:-}" ]; then
+        printf 'pull/%s/head\n' "$JPK_C0_PR"
+        return
+    fi
+    if [ -n "${JPK_C0_REF:-}" ]; then
+        printf '%s\n' "$JPK_C0_REF"
+        return
+    fi
+    printf '%s\n' "$JPK_C0_BRANCH"
+}
+
+jpk_c0_pin() {
+    if [ "${JPK_C0_SHA+set}" = set ]; then
+        printf '%s\n' "$JPK_C0_SHA"
+        return
+    fi
+    if [ -n "${JPK_C0_PR:-}" ] || [ -n "${JPK_C0_REF:-}" ]; then
+        printf '\n'
+        return
+    fi
+    printf '%s\n' "$JPK_C0_DEFAULT_SHA"
+}
 
 jpk_allowed_root() {
     printf '%s/%s\n' "${HOME:?HOME is required}" "$JPK_ROOT_NAME"
@@ -116,4 +144,39 @@ jpk_git_remote() {
         return
     fi
     printf '%s\n' "$JPK_DEFAULT_REMOTE"
+}
+
+# Fetch a branch or a pull/N/head ref into DEST. When SHA is non-empty,
+# checkout that commit and refuse a mismatch. When SHA is empty, record HEAD.
+jpk_fetch() {
+    local dest="$1"
+    local ref="$2"
+    local sha="${3:-}"
+    local remote head
+    jpk_require_path "$dest" || return 2
+    jpk_require_memory || return 2
+    remote=$(jpk_git_remote)
+    mkdir -p -- "$dest"
+    jpk_require_path "$dest" || return 2
+    if [ ! -d "$dest/.git" ]; then
+        jpk_with_memory_guard git init --quiet "$dest"
+        git -C "$dest" remote add origin "$remote"
+    fi
+    if [ -n "$sha" ]; then
+        if ! jpk_with_memory_guard git -C "$dest" fetch --quiet --depth 1 origin "$sha"; then
+            return 2
+        fi
+        git -C "$dest" checkout --quiet --detach "$sha"
+    else
+        if ! jpk_with_memory_guard git -C "$dest" fetch --quiet --depth 1 origin "$ref"; then
+            return 2
+        fi
+        git -C "$dest" checkout --quiet --detach FETCH_HEAD
+    fi
+    head=$(git -C "$dest" rev-parse HEAD)
+    if [ -n "$sha" ] && [ "$head" != "$sha" ]; then
+        printf 'REFUSED %s HEAD is %s, pin is %s\n' "$ref" "$head" "$sha" >&2
+        return 2
+    fi
+    printf '%s\n' "$head"
 }

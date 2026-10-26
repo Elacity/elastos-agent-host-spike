@@ -1,7 +1,8 @@
 #!/bin/bash
-# Two falsifiers for the Jetson proof kit.
+# Falsifiers for the Jetson proof kit.
 # F-JPK-OUTSIDE: accept a planted path outside ~/flint-elastos-test.
 # F-JPK-MEM: drop the MemAvailable check.
+# F-JPK-ABI: report Landlock ABI 6 for every kernel.
 # Each plant is applied to a copy. The named tests must fail on that copy.
 # The working tree is left unchanged.
 set -eu
@@ -14,11 +15,16 @@ copy_kit() {
     local dest="$1"
     mkdir -p -- "$dest"
     cp -a -- "$kit/lib.sh" "$kit/run-on-jetson.sh" "$kit/probe_landlock.py" \
-        "$kit/evidence.txt" "$kit/tests" "$dest/"
+        "$kit/probe_host.py" "$kit/decide.py" "$kit/evidence.txt" \
+        "$kit/tests" "$kit/fixtures" "$dest/"
 }
 
-run_tests() {
+run_guard_tests() {
     bash "$1/tests/test_guards.sh"
+}
+
+run_decision_tests() {
+    bash "$1/tests/test_decisions.sh"
 }
 
 caught=0
@@ -38,7 +44,7 @@ if old not in text:
 path.write_text(text.replace(old, new, 1))
 PY
 set +e
-out=$(run_tests "$scratch/outside" 2>&1)
+out=$(run_guard_tests "$scratch/outside" 2>&1)
 rc=$?
 set -e
 printf '%s\n' "$out"
@@ -64,7 +70,7 @@ if old not in text:
 path.write_text(text.replace(old, new, 1))
 PY
 set +e
-out=$(run_tests "$scratch/mem" 2>&1)
+out=$(run_guard_tests "$scratch/mem" 2>&1)
 rc=$?
 set -e
 printf '%s\n' "$out"
@@ -76,5 +82,32 @@ else
     exit 1
 fi
 
-printf 'summary %s CAUGHT of 2\n' "$caught"
-[ "$caught" -eq 2 ]
+# F-JPK-ABI: every kernel is reported as ABI 6, so a 5.15 / ABI 1
+# fixture would launch under the single floor.
+copy_kit "$scratch/abi"
+python3 - "$scratch/abi/decide.py" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "def landlock_abi_value(facts):\n    return token(facts, \"landlock_abi\")\n"
+new = "def landlock_abi_value(facts):\n    return \"6\"\n"
+if old not in text:
+    raise SystemExit("F-JPK-ABI: anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+set +e
+out=$(run_decision_tests "$scratch/abi" 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'FAIL abi1_did_abi5'; then
+    printf 'F-JPK-ABI CAUGHT\n'
+    caught=$((caught + 1))
+else
+    printf 'F-JPK-ABI SURVIVED rc=%s\n' "$rc"
+    exit 1
+fi
+
+printf 'summary %s CAUGHT of 3\n' "$caught"
+[ "$caught" -eq 3 ]
