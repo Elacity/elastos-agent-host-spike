@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -137,6 +138,28 @@ pub struct Decisions {
 
 const OVERLAP_BOUND: Duration = Duration::from_secs(10);
 pub const CANCEL_REASON: &str = "fixture cancel: instance-1 cancelled mid-run";
+pub const KILL_REASON: &str = "fixture settlement: worker killed";
+pub const NO_POLICY_REASON: &str = "fixture settlement: client wait ended";
+
+pub struct Settlement {
+    pub before: usize,
+    after: usize,
+}
+
+impl Settlement {
+    pub fn line(&self) -> String {
+        format!(
+            "orphan_before:{} orphan_after:{}; settled by the {}",
+            self.before,
+            self.after,
+            if self.before == 0 {
+                "Runtime"
+            } else {
+                "fixture"
+            }
+        )
+    }
+}
 
 // Session and request IDs stay in memory. Printed evidence uses local labels.
 struct Overlap {
@@ -148,6 +171,7 @@ struct Overlap {
     waits: Vec<Duration>,
     duration: Duration,
     cancel: bool,
+    kill: bool,
     cancelled_at: Option<Instant>,
 }
 
@@ -162,6 +186,7 @@ impl Overlap {
             waits: Vec::new(),
             duration: Duration::ZERO,
             cancel: false,
+            kill: false,
             cancelled_at: None,
         }
     }
@@ -172,7 +197,7 @@ impl Overlap {
         fixture: &Fixture,
         running: &mut RunningInstances<'_>,
     ) -> Result<bool> {
-        if self.cancel && self.stage > 0 {
+        if (self.cancel || self.kill) && self.stage > 0 {
             return self.ready_after_cancel(pending);
         }
         if self.stage == 2 {
@@ -262,9 +287,14 @@ impl Overlap {
     }
 
     fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {
+        // Both interruptions share the same expected sibling request.
         for request in pending {
             if request["session_id"] == self.first[0]["session_id"] {
-                return Err("cancel: cancelled instance made a further request");
+                return Err(if self.kill {
+                    "no-retry check: killed worker made a further request"
+                } else {
+                    "cancel: cancelled instance made a further request"
+                });
             }
             // The sibling's required cross-read is the sole later request for
             // instance-1's resource. It must be new and in instance-2's session.
@@ -279,7 +309,11 @@ impl Overlap {
                     .any(|first| first["request_id"] == request["request_id"])
                 || pending.len() != 1
             {
-                return Err("cancel: unexpected request after cancellation");
+                return Err(if self.kill {
+                    "no-retry check: unexpected request after worker kill"
+                } else {
+                    "cancel: unexpected request after cancellation"
+                });
             }
         }
         if self.stage == 1 && self.barrier_started.elapsed() >= OVERLAP_BOUND {
@@ -383,24 +417,58 @@ impl Controller {
         self.overlap.as_mut().unwrap().cancel = true;
     }
 
-    pub fn check_cancel(&self, completions: Option<&[Completion]>) -> Result<()> {
-        let overlap = self.overlap.as_ref().ok_or("cancel: evidence is missing")?;
-        let children: Vec<_> = (0..2)
-            .map(|index| {
-                let completion = completions.and_then(|items| items.get(index));
+    pub fn require_kill(&mut self) {
+        self.require_overlap();
+        self.overlap.as_mut().unwrap().kill = true;
+    }
+
+    /// All settlement lines use the cancel journey's formatter and checker.
+    pub fn print_settlement(
+        &self,
+        label: &str,
+        completions: Option<&[Completion]>,
+        details: &str,
+    ) -> Result<()> {
+        let children: Vec<_> = completions
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, item)| {
                 format!(
-                    "instance-{} exit:{:?} elapsed:{:.6}s",
+                    "instance-{} exit:{:?} signal:{:?} elapsed:{:.6}s kill_at:{:.6}s",
                     index + 1,
-                    completion.and_then(|item| item.output.status.code()),
-                    completion.map_or(0.0, |item| item.elapsed.as_secs_f64())
+                    item.output.status.code(),
+                    item.output.status.signal(),
+                    item.elapsed.as_secs_f64(),
+                    item.kill_requested_at.unwrap_or_default().as_secs_f64()
                 )
             })
             .collect();
+        let (first, duration, since_decision) = self.overlap.as_ref().map_or(
+            (Duration::ZERO, Duration::ZERO, Duration::ZERO),
+            |overlap| {
+                (
+                    overlap.waits.first().copied().unwrap_or_default(),
+                    overlap.duration,
+                    overlap
+                        .cancelled_at
+                        .map_or(Duration::ZERO, |at| at.elapsed()),
+                )
+            },
+        );
         self.print_checked(&format!(
-            "cancel settlement: {}; reason:{CANCEL_REASON}; first:{:.6}s overlap:{:.6}s since_cancel:{:.6}s; cancel at the pending-request point, lab half of A10 (A12 census)",
-            children.join("; "), overlap.waits.first().copied().unwrap_or_default().as_secs_f64(),
-            overlap.duration.as_secs_f64(), overlap.cancelled_at.map_or(0.0, |at| at.elapsed().as_secs_f64())
-        ))?;
+            "{label} settlement: {}; first:{:.6}s overlap:{:.6}s since_decision:{:.6}s; {details}",
+            children.join("; "),
+            first.as_secs_f64(),
+            duration.as_secs_f64(),
+            since_decision.as_secs_f64()
+        ))
+    }
+
+    pub fn check_cancel(&self, completions: Option<&[Completion]>) -> Result<()> {
+        let overlap = self.overlap.as_ref().ok_or("cancel: evidence is missing")?;
+        self.print_settlement("cancel", completions,
+            &format!("reason:{CANCEL_REASON}; cancel at the pending-request point, lab half of A10 (A12 census)"))?;
         if !overlap.cancel
             || overlap.stage != 2
             || overlap.cancelled_at.is_none()
@@ -410,6 +478,110 @@ impl Controller {
             return Err("cancel: first overlap, cancellation and sibling settlement are required");
         }
         Ok(())
+    }
+
+    pub fn check_kill(
+        &self,
+        completions: Option<&[Completion]>,
+        settlement: Option<&Settlement>,
+        quiet: Option<Duration>,
+    ) -> Result<()> {
+        self.print_settlement("kill", completions, &format!(
+            "reason:{KILL_REASON}; {}; quiet:{:.6}s; kill-worker settlement, lab half of A11 (A12 census)",
+            settlement.map_or_else(|| "orphan evidence missing".into(), Settlement::line),
+            quiet.unwrap_or_default().as_secs_f64()))?;
+        let overlap = self
+            .overlap
+            .as_ref()
+            .ok_or("kill: overlap evidence is missing")?;
+        let items = completions
+            .filter(|items| items.len() == 2)
+            .ok_or("kill: completion evidence is missing")?;
+        if items[0].output.status.signal() != Some(9)
+            || items[0]
+                .kill_requested_at
+                .is_none_or(|at| at.is_zero() || at >= items[0].elapsed)
+        {
+            return Err("kill: recorded SIGKILL and signal 9 exit are required");
+        }
+        if !overlap.kill
+            || overlap.stage != 2
+            || overlap.cancelled_at.is_none()
+            || overlap.duration.is_zero()
+            || settlement.is_none_or(|s| s.after != 0)
+            || quiet.is_none_or(|time| {
+                !(Duration::from_secs(2)..=Duration::from_secs(5)).contains(&time)
+            })
+        {
+            return Err("kill: overlap, orphan settlement and quiet window are required");
+        }
+        Ok(())
+    }
+
+    pub fn killed_request(&self) -> Result<Value> {
+        self.overlap
+            .as_ref()
+            .filter(|o| o.kill && o.stage > 0)
+            .and_then(|o| o.first.first())
+            .cloned()
+            .ok_or("kill: original pending request is missing")
+    }
+
+    /// Read only while the no-policy client waits. Keep its request identity
+    /// in memory so post-exit settlement can refuse an unrelated request.
+    pub fn observe_unapproved(&self, original: &mut Option<Value>) -> Result<()> {
+        let response = self.pending()?;
+        let pending = response["requests"].as_array().unwrap();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if pending.len() != 1 || original.as_ref().is_some_and(|first| first != &pending[0]) {
+            return Err("no-policy: expected one unchanged pending request");
+        }
+        field(&pending[0], "request_id")?;
+        field(&pending[0], "session_id")?;
+        *original = Some(pending[0].clone());
+        Ok(())
+    }
+
+    pub fn settle_orphan(&mut self, original: &Value, reason: &str) -> Result<Settlement> {
+        let response = self.pending()?;
+        let pending = response["requests"].as_array().unwrap();
+        if pending.len() > 1 || pending.first().is_some_and(|request| request != original) {
+            return Err("orphan settlement: unexpected pending request");
+        }
+        let before = pending.len();
+        for request in pending {
+            self.deny(request, reason)?;
+        }
+        let after = self.pending()?;
+        require_empty_pending(&after)?;
+        Ok(Settlement {
+            before,
+            after: after["requests"].as_array().unwrap().len(),
+        })
+    }
+
+    pub fn quiet_after_kill(&self) -> Result<Duration> {
+        let overlap = self
+            .overlap
+            .as_ref()
+            .filter(|o| o.kill)
+            .ok_or("kill: quiet window requires a killed worker")?;
+        let started = Instant::now();
+        loop {
+            let response = self.pending()?;
+            overlap.ready_after_cancel(response["requests"].as_array().unwrap())?;
+            require_empty_pending(&response)?;
+            let elapsed = started.elapsed();
+            if elapsed > Duration::from_secs(5) {
+                return Err("kill: quiet window exceeded 5 seconds");
+            }
+            if elapsed >= Duration::from_secs(2) {
+                return Ok(elapsed);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn check_overlap(&self) -> Result<()> {
@@ -425,7 +597,7 @@ impl Controller {
     }
 
     pub fn poll(&mut self, running: &mut RunningInstances<'_>) -> Result<()> {
-        let response = self.call("GET", "/api/capability/pending", &Value::Null)?;
+        let response = self.pending()?;
         let pending = response["requests"]
             .as_array()
             .ok_or("pending response requires a request list")?;
@@ -436,16 +608,28 @@ impl Controller {
             }
             field(request, "session_id")?;
         }
+        // Retain only the exact original orphan for post-exit measurement.
+        // Every new request, including from a new session, reaches the rule.
+        let pending: Vec<_> = pending
+            .iter()
+            .filter(|request| {
+                !self
+                    .overlap
+                    .as_ref()
+                    .is_some_and(|o| o.kill && o.stage > 0 && *request == &o.first[0])
+            })
+            .cloned()
+            .collect();
         if let Some(overlap) = &mut self.overlap {
-            if !overlap.ready(pending, &self.fixture, running)? {
+            if !overlap.ready(&pending, &self.fixture, running)? {
                 return Ok(());
             }
         }
-        let decisions = match self.fixture.decisions(pending, &self.used) {
+        let decisions = match self.fixture.decisions(&pending, &self.used) {
             Ok(decisions) => decisions,
             Err(reason) => {
                 // Refuse the entire snapshot; never choose one ambiguous match.
-                for request in pending {
+                for request in &pending {
                     self.deny(request, reason)?;
                 }
                 return Err(reason);
@@ -454,7 +638,7 @@ impl Controller {
         let mut cancellations = Vec::new();
         for (request, decision) in pending.iter().zip(decisions) {
             if self.overlap.as_ref().is_some_and(|overlap| {
-                overlap.cancel
+                (overlap.cancel || overlap.kill)
                     && overlap.stage == 0
                     && request["session_id"] == overlap.first[0]["session_id"]
             }) {
@@ -485,7 +669,11 @@ impl Controller {
         // The sibling's first grant and chosen cancellation use one snapshot
         // and decision pass, after the existing both-alive overlap barrier.
         for request in cancellations {
-            self.deny(request, CANCEL_REASON)?;
+            if self.overlap.as_ref().unwrap().kill {
+                running.kill_worker(0)?;
+            } else {
+                self.deny(request, CANCEL_REASON)?;
+            }
             self.overlap.as_mut().unwrap().cancelled_at = Some(Instant::now());
         }
         if let Some(overlap) = &mut self.overlap {
@@ -511,10 +699,18 @@ impl Controller {
     /// Shell pending is global. The current grant list is session-local, so
     /// it supplies zero proof about a collected run client's live grants.
     pub fn cleanup_state(&self) -> Result<&'static str> {
-        let pending = self.call("GET", "/api/capability/pending", &Value::Null)?;
+        let pending = self.pending()?;
         require_empty_pending(&pending)?;
         let grants = self.call("GET", "/api/capability/list", &Value::Null)?;
         live_grant_state(&grants)
+    }
+
+    fn pending(&self) -> Result<Value> {
+        let response = self.call("GET", "/api/capability/pending", &Value::Null)?;
+        response["requests"]
+            .as_array()
+            .ok_or("pending response requires a request list")?;
+        Ok(response)
     }
 
     /// Exercise the caller's actual census wiring with one shell-owned pending
@@ -554,6 +750,10 @@ impl Controller {
         self.printed.borrow_mut().push_str(&format!("{line}\n"));
         println!("{line}");
         Ok(())
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     pub fn deny_reason(&self) -> &str {
@@ -599,7 +799,9 @@ impl Controller {
         let printed = self.printed.borrow();
         if let Some(overlap) = &self.overlap {
             for prefix in [
-                if overlap.cancel {
+                if overlap.kill {
+                    "kill settlement:"
+                } else if overlap.cancel {
                     "cancel settlement:"
                 } else {
                     "instance overlap:"
@@ -612,6 +814,13 @@ impl Controller {
                     return Err("required instance journey evidence is missing");
                 }
             }
+        }
+        if name == "no_policy_file_does_not_mean_allow"
+            && !printed
+                .lines()
+                .any(|line| line.starts_with("absent-policy settlement:"))
+        {
+            return Err("required orphan settlement evidence is missing");
         }
         self.check_inventory(
             &report_inventory(name, observations, &printed, passed)?,
@@ -1209,6 +1418,34 @@ mod tests {
     }
 
     #[test]
+    fn kill_refuses_requests_from_any_session() {
+        let mut overlap = Overlap::new();
+        overlap.kill = true;
+        overlap.stage = 1;
+        overlap.first = vec![
+            json!({"request_id":"first-a", "session_id":"session-a", "resource":"fixture-a"}),
+            json!({"request_id":"first-b", "session_id":"session-b", "resource":"fixture-b"}),
+        ];
+        let sibling = json!({"request_id":"sibling-b", "session_id":"session-b",
+            "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-2 sibling"});
+        assert_eq!(overlap.ready_after_cancel(&[]), Ok(false));
+        assert_eq!(overlap.ready_after_cancel(&[sibling.clone()]), Ok(true));
+        for session in ["session-a", "new-session"] {
+            let retry = json!({"request_id":"retry", "session_id":session,
+                "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-1 own"});
+            assert!(
+                overlap.ready_after_cancel(&[retry]).is_err(),
+                "no-retry check must refuse a worker request from any session"
+            );
+        }
+        overlap.advance();
+        assert!(
+            overlap.ready_after_cancel(&[sibling]).is_err(),
+            "quiet window must refuse every new request"
+        );
+    }
+
+    #[test]
     fn instance_journey_requires_all_printed_surfaces() {
         let mut controller = Controller {
             port: 0,
@@ -1238,30 +1475,43 @@ mod tests {
                 Err("required instance journey evidence is missing")
             );
         }
-        controller.require_cancel();
-        for missing in 0..lines.len() {
-            *controller.printed.borrow_mut() = lines
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != missing)
-                .map(|(index, line)| {
-                    if index == 0 {
-                        "cancel settlement: synthetic"
-                    } else {
-                        line
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert_eq!(
-                controller.check_journey(
-                    "cancelled_instance_settles_with_reason_sibling_completes",
-                    &[],
-                    true
-                ),
-                Err("required instance journey evidence is missing")
-            );
+        for (kill, name, prefix) in [
+            (
+                false,
+                "cancelled_instance_settles_with_reason_sibling_completes",
+                "cancel settlement: synthetic",
+            ),
+            (
+                true,
+                "killed_worker_settlement_recorded_without_retry",
+                "kill settlement: synthetic",
+            ),
+        ] {
+            if kill {
+                controller.require_kill();
+            } else {
+                controller.require_cancel();
+            }
+            for missing in 0..lines.len() {
+                *controller.printed.borrow_mut() = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != missing)
+                    .map(|(index, line)| if index == 0 { prefix } else { line })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(
+                    controller.check_journey(name, &[], true),
+                    Err("required instance journey evidence is missing")
+                );
+            }
         }
+        controller.overlap = None;
+        controller.printed.borrow_mut().clear();
+        assert_eq!(
+            controller.check_journey("no_policy_file_does_not_mean_allow", &[], true),
+            Err("required orphan settlement evidence is missing")
+        );
     }
 
     #[test]
