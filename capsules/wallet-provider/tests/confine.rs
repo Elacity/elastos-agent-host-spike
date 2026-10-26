@@ -1950,7 +1950,7 @@ fn rust_list_line_names_test(line: &str, function: &str) -> bool {
     if !rest.trim_start().starts_with("test") {
         return false;
     }
-    name.split("::").next_back() == Some(function)
+    name.rsplit("::").next() == Some(function)
 }
 
 /// Source walk used when cargo cannot list the snippet. Comments, unused
