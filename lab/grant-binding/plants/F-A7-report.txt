@@ -2,7 +2,7 @@ id: F-A7-report
 file: src/ledger.rs
 test: ledger::model_reported_usage_does_not_lower_the_hold
 --- old
-        self.ledger.held = held + amount;
+        self.ledger.held = total;
 --- new
-        self.ledger.held = held + amount - request.reported_usage;
+        self.ledger.held = total - request.reported_usage;
 --- end

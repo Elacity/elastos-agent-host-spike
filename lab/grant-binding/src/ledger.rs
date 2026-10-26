@@ -59,8 +59,9 @@ impl Verifier {
     }
 
     /// Holds `amount` on the ledger when the outstanding total plus `amount`
-    /// stays at or under the ceiling. A binding refusal records nothing, and
-    /// the request's reported usage does not lower the hold.
+    /// stays at or under the ceiling. A binding refusal records nothing, a sum
+    /// that does not fit in `u64` is over the ceiling, and the request's
+    /// reported usage does not lower the hold.
     pub fn reserve(
         &mut self,
         call: &Call,
@@ -70,15 +71,17 @@ impl Verifier {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
         let held = self.ledger.held;
-        let over_ceiling = held.saturating_add(amount) > self.ledger.ceiling;
-        if over_ceiling {
-            return Err(ReserveRefuse::OverCeiling {
-                ceiling: self.ledger.ceiling,
-                held,
-                asked: amount,
-            });
-        }
-        self.ledger.held = held + amount;
+        let total = match held.checked_add(amount) {
+            Some(total) if total <= self.ledger.ceiling => total,
+            _ => {
+                return Err(ReserveRefuse::OverCeiling {
+                    ceiling: self.ledger.ceiling,
+                    held,
+                    asked: amount,
+                })
+            }
+        };
+        self.ledger.held = total;
         self.ledger.next_reservation += 1;
         Ok(Reservation {
             id: self.ledger.next_reservation,
@@ -132,6 +135,36 @@ fn model_reserve_over_the_ceiling_is_refused() {
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     assert_eq!(verifier.ledger.held, 0);
+}
+
+#[test]
+fn model_reserve_past_the_u64_total_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(u64::MAX);
+    let call = verifier.open_call(instance);
+    verifier
+        .reserve(&call, &guest(handle), u64::MAX)
+        .expect("at the ceiling");
+    assert_eq!(verifier.ledger.held, u64::MAX);
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("sum past u64::MAX");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: u64::MAX,
+            held: u64::MAX,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    assert_eq!(verifier.ledger.held, u64::MAX);
+    let again = verifier
+        .reserve(&call, &guest(handle), u64::MAX)
+        .expect_err("still over the ceiling");
+    assert_eq!(again.to_string(), "reservation exceeds the ceiling");
+    assert_eq!(verifier.ledger.held, u64::MAX);
 }
 
 #[test]
