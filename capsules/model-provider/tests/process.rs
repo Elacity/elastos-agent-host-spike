@@ -730,36 +730,67 @@ const RUNTIME_HOSTED_STREAM_EVENTS: [&str; 2] = [
     r#"{"model":"resolved-model","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}"#,
 ];
 
-/// The Runtime's answer when it accepts a hosted effect, copied from
-/// `write_response_head`
-/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1662-1670`):
-/// its own head, each backend chunk as `{len:X}\r\n{bytes}\r\n` (`:1644-1648`),
-/// and the end `0\r\n\r\n` (`:1650`). The Runtime forwards the backend's
-/// content type (`:1589-1599`), so this head says `text/event-stream`. Only a
-/// refusal carries `X-Elastos-Hosted-Access` (`:2453-2486`).
-fn runtime_hosted_stream_answer() -> Vec<u8> {
-    let mut answer = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+/// The Runtime's accepted head, copied from `write_response_head`
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1662-1670`).
+/// The Runtime forwards the backend's content type (`:1589-1599`), so this
+/// head says `text/event-stream`. Only a refusal carries
+/// `X-Elastos-Hosted-Access` (`:2453-2486`).
+fn runtime_hosted_stream_head() -> Vec<u8> {
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
 Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-        .to_vec();
+        .to_vec()
+}
+
+/// Adds one backend chunk as `{len:X}\r\n{bytes}\r\n`, the Runtime's copy at
+/// `elastos/crates/elastos-server/src/api/model_provider_egress.rs:1644-1648`.
+fn push_runtime_hosted_stream_frame(answer: &mut Vec<u8>, frame: &str) {
+    answer.extend_from_slice(format!("{:X}\r\n", frame.len()).as_bytes());
+    answer.extend_from_slice(frame.as_bytes());
+    answer.extend_from_slice(b"\r\n");
+}
+
+/// The Runtime's answer when it accepts a hosted effect and copies the whole
+/// backend stream: the head, each backend chunk, and the end `0\r\n\r\n`
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1650`).
+fn runtime_hosted_stream_answer() -> Vec<u8> {
+    let mut answer = runtime_hosted_stream_head();
     for frame in [
         format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]),
         format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[1]),
         "data: [DONE]\n\n".to_string(),
     ] {
-        answer.extend_from_slice(format!("{:X}\r\n", frame.len()).as_bytes());
-        answer.extend_from_slice(frame.as_bytes());
-        answer.extend_from_slice(b"\r\n");
+        push_runtime_hosted_stream_frame(&mut answer, &frame);
     }
     answer.extend_from_slice(b"0\r\n\r\n");
     answer
 }
 
-/// What the stand-in answers: the Runtime's refusal, which is the default, or
-/// its accepted head followed by the backend stream.
+/// The Runtime's answer when it cuts a hosted stream: the head, then one chunk
+/// that holds the first event, and the connection closes with no `0\r\n\r\n`
+/// and no usage event. The Runtime returns an error after the head when the
+/// grant ends or the body grows too large
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1631`,
+/// `:1638-1642`), and the closing chunk is only written at `:1650`, so a cut
+/// stream never reaches it. Its caller shuts the socket down when `forward`
+/// returns an error (`:531-532`), so the provider reads an incomplete chunked
+/// body.
+fn runtime_hosted_cut_answer() -> Vec<u8> {
+    let mut answer = runtime_hosted_stream_head();
+    push_runtime_hosted_stream_frame(
+        &mut answer,
+        &format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]),
+    );
+    answer
+}
+
+/// What the stand-in answers: the Runtime's refusal, which is the default, its
+/// accepted head followed by the whole backend stream, or its accepted head
+/// followed by a cut stream.
 #[derive(Clone, Copy)]
 enum HostedEffectAnswer {
     Refused,
     Streaming,
+    Cut,
 }
 
 /// One request the stand-in read to its end: the request line and every header
@@ -826,6 +857,12 @@ impl HostedEffectStandIn {
     /// hosted effect.
     fn bind_streaming(label: &str) -> Self {
         Self::bind_answering(label, HostedEffectAnswer::Streaming)
+    }
+
+    /// Binds the stand-in that answers as the Runtime does when it cuts a
+    /// hosted stream after the head and one chunk.
+    fn bind_cut(label: &str) -> Self {
+        Self::bind_answering(label, HostedEffectAnswer::Cut)
     }
 
     fn bind_answering(label: &str, answer: HostedEffectAnswer) -> Self {
@@ -973,6 +1010,7 @@ fn serve_hosted_effect(
     let response = match answer {
         HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
         HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
+        HostedEffectAnswer::Cut => runtime_hosted_cut_answer(),
     };
     let _ = (&stream).write_all(&response);
 }
@@ -1499,6 +1537,148 @@ fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect()
         requests.len(),
         1,
         "the open-run retry must not send a second hosted request"
+    );
+
+    provider.shutdown();
+}
+
+/// What the provider records when the Runtime cuts a hosted answer part way
+/// through. The Runtime writes its own head and copies each backend chunk; it
+/// returns an error after the head and some chunks when the grant ends or the
+/// body grows too large
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1631`,
+/// `:1638-1642`), and it never writes the closing `0\r\n\r\n`, which is only
+/// at `:1650`. Its caller shuts the socket down when `forward` returns an
+/// error (`:531-532`), so the provider reads an incomplete chunked body. The
+/// worker's chunk read then maps the error through
+/// `map_text_reqwest_failure` (`capsules/model-provider/src/adapters.rs:2027`,
+/// `:2397`) to `map_reqwest_failure` (`:2773`) and `AdapterFault::transport`
+/// (`:159-168`). That fault becomes a `failed` terminal with
+/// `output: None` and `backend_report: None` (`:1489-1509`), so the
+/// `resolved-model` the cut stream already named is dropped. The state layer
+/// stores `BackendReport::unknown()` for a hosted run with no report
+/// (`capsules/model-provider/src/state.rs:1352-1354`): `resolved_model`,
+/// `usage` and `cost` are all unknown
+/// (`capsules/model-provider/src/contract.rs:212-219`). A clean end with no
+/// `[DONE]` would instead be `response_malformed` "text stream ended before
+/// terminal marker" (`src/adapters.rs:2029-2033`), so the code assertion tells
+/// the two apart.
+///
+/// The buffered `ready` delta is not asserted: whether it is published before
+/// the fault depends on the flush timer (`src/adapters.rs:2007-2026`).
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted stream cut: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-stream-cut");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_cut("hosted-stream-cut");
+    let init = json!({"op": "init", "config": {
+        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
+        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
+        "offers": [hosted_effect_offer()], "runtime_hosted_socket": stand_in.path}
+    }});
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer the Runtime cuts"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:hosted-stream-cut"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "a cut hosted stream must fail the run: {settled}"
+    );
+    // The incomplete chunked body is a chunk read error, not a clean end
+    // (`src/adapters.rs:2027`, then `:2773-2785` and `:159-168`).
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "transport_interrupted",
+        "a cut hosted stream must settle with the transport fault: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"]["output"].is_null(),
+        "a failed run must carry no output: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a cut hosted stream must record resolved_model, usage and cost as unknown: {settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the cut run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the cut run must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
     );
 
     provider.shutdown();
