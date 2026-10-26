@@ -6,6 +6,11 @@
   `git log --format=%H c641bcff21d9ceaad769b1ed89529d541ffd8766` lists that merge.
 - **Date:** 2026-10-26.
 - **Scope:** A document for Flint to pass to Anders. Read from code at one commit; nothing was run; it asks questions, it is not a contract.
+- **Revision (task 008, 2026-10-26):** adds "Open Runtime issues", a "Runtime issue:" line for each open entry,
+  an issue note for each question, and two corrections from 006's passing review (c3 and 15.2). The commit read
+  is kept: it already holds the lab harness (`git cat-file -e c641bcff21d9ceaad769b1ed89529d541ffd8766:lab/capsule-identity/src/lib.rs`
+  succeeds), so no citation moved and the table below is unchanged. Claim scope: a document read at one commit,
+  plus the four issue texts read with `gh`; nothing was run. Each check is listed under "Open Runtime issues".
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -39,7 +44,45 @@ the line when the line is long). Paths under `elastos/crates/` are given in full
 or "not covered by the code read". "Unverified" marks what reading did not confirm. The task's questions are
 answered in 13.4 (a, b), 15.1 (c, d) and 15.3 (e). Questions for Anders are numbered Q1 to Q10 and listed again
 at the end. This is a gap list, not a security review: a weakness in shipping code is not described in any
-entry; it is one line at the end of Questions, for Sasha, with its file paths only.
+entry; it is one line at the end of Questions, for Sasha, with its file paths only. Each open entry has a
+"Runtime issue:" line that names the issue whose text covers it, as set out in the next section.
+
+## Open Runtime issues
+
+Each was read on 2026-10-26 with
+`gh issue view <n> --repo Elacity/elastos-runtime --json number,title,state,body` for `<n>` = 470, 464, 463
+and 465 (read only; nothing was written to that repo). All four commands ran and returned the issue body, so no
+line falls back to the planner's titles. Each issue says its facts were checked
+on develop `3beb81643` (20 Oct), the develop this commit contains, and that its security details stay in private
+tracking; this report quotes none and adds none.
+
+- https://github.com/Elacity/elastos-runtime/issues/470 — "Post-0.8.0: Runtime principles convergence epic",
+  OPEN, read 2026-10-26. It is the umbrella for the principles changes after 0.8.0; its "Order" says app
+  migration starts only after the Bus v2 freeze and issues 464, 465 and 471.
+- https://github.com/Elacity/elastos-runtime/issues/464 — "Post-0.8.0: move grant decisions from Home into
+  Runtime policy", OPEN, read 2026-10-26. It owns the grant decision: the Runtime decides each grant for an
+  already admitted capsule, and Home only asks.
+- https://github.com/Elacity/elastos-runtime/issues/463 — "Post-0.8.0: make Bus v2 the one app ABI, freeze it
+  after the #181 prototype, retire the other app ABIs" (its "#181" is
+  https://github.com/Elacity/elastos-runtime/issues/181), OPEN, read 2026-10-26. It owns the app ABI: one Bus v2
+  ABI for apps, and a fate for each of the seven `CapsuleRuntimeAbi` values
+  (`elastos/crates/elastos-common/src/manifest.rs:1052` `pub enum CapsuleRuntimeAbi {`, values to line 1066).
+- https://github.com/Elacity/elastos-runtime/issues/465 — "Post-0.8.0: sign each capsule's whole closure, and
+  sign capsules that leave the release", OPEN, read 2026-10-26. It owns what a capsule's signature covers: every
+  file the capsule loads, and a signature and record of its own for a capsule outside the release.
+
+How the "Runtime issue:" lines were made:
+
+- A line names an issue only where that issue's own text names the point, and quotes those words. 470's
+  acceptance asks in general that "`PRINCIPLES.md`, capsule docs, roadmap docs and implementation contracts
+  agree"; that general aim alone is not counted as covering a point.
+- "None of 463, 464, 465 or 470 covers this" is about these four texts only. The other children of 470
+  (461, 462, 466 to 469 and 471) were not read.
+- No entry of this report is on the manifest's ABI values or `runtime_abi`, so no line names 463.
+- The "security finding, details for Sasha" line gets no "Runtime issue:" line and stays as it was.
+- Not run: no Runtime code, test or build was run for this report. The `git diff --stat` re-check of cited files
+  was not needed: the commit read was kept (see the header). Each `path:line` citation, old and new, was checked
+  against `git show c641bcff21d9ceaad769b1ed89529d541ffd8766:<path>`: 172 found, 172 match.
 
 ## PRINCIPLES 13
 
@@ -53,6 +96,7 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
 - Bullet: `PRINCIPLES.md:134` `- Digital Capsules are complete, portable signed packages; admission is a`
   and `PRINCIPLES.md:135` `separate decision made under each Runtime's trust policy`
 - Overall verdict: **gap** (points 2 and 3).
+- Runtime issue: given in points 2, 3 and 4.
 
 1. **A release can sign each capsule archive on its own.** Verdict: matches.
    - `elastos/crates/elastos-server/src/capsule_record.rs:3` `//! record is signed on its own and names only the archive's bytes and declared`
@@ -67,6 +111,10 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
      portable signed package on its own.
    - The comment says the next release turns records on:
      `elastos/crates/elastos-server/src/capsule_record.rs:16` `/// release lists them. The next release sets this, and a release without`
+   - Runtime issue: 465. Its "Current state" says per-capsule records "are optional today", and that issue 274
+     (https://github.com/Elacity/elastos-runtime/issues/274, not read) "owns the switch that requires them, one
+     release after 0.8.0". Its "What changes" adds that a capsule that leaves the release "carries its own
+     signature and record".
    - **Q1 for Anders:** Is the next release still the one that sets `REQUIRED` to true?
 3. **The signed manifest is the checking Runtime's own serialization, not the bundle's bytes.** Verdict: gap.
    - The Runtime parses `capsule.json` into its type:
@@ -88,6 +136,7 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
      and `elastos/crates/elastos-common/src/manifest.rs:534` `"{} capsules cannot choose provider implementations; the runtime/provider layer owns local vs network routing",`
      Whether such a manifest with two or more `providers` entries serializes in the same order when it is signed
      and when it is checked was not tested.
+   - Runtime issue: none of 463, 464, 465 or 470 covers this.
    - **Q2 for Anders:** Should the signed manifest be the manifest's own bytes in the bundle, so a signature does
      not depend on the checking Runtime's types?
 4. **Admission is a separate decision under each Home's own policy.** Verdict: matches.
@@ -101,6 +150,9 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
      and `elastos/crates/elastos-server/src/runtime.rs:226` `*self.unsigned_capsules.write().await = unsigned;`
      (`git grep -n -e 'signature_verifier.write' -e 'unsigned_capsules.write' c641bcff21d9ceaad769b1ed89529d541ffd8766 -- elastos/crates`
      prints only these two lines).
+   - Runtime issue (checked; the verdict stays "matches"): 464 keeps the grant a decision after admission. The
+     Runtime "evaluates each grant over the admitted capsule identity, principal and session", and Home "does
+     not mint authority".
 
 ### 13.3 Executable roles, and content as portable data
 
@@ -121,6 +173,7 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
   `docs/CONTENT_CAPSULE_DISTRIBUTION.md:49` `- The canonical identity is the CID of the complete immutable capsule closure,`
   and `docs/GLOSSARY.md:141` `manifest-and-payload closure is its package identity. A viewer binding or`
 - Overall verdict: **gap** (a2, a3 and b4).
+- Runtime issue: given in a2, a3, b2 and b4.
 
 **(a) Which bytes the publish path hashes and names, and whether that name covers the whole closure**
 
@@ -166,6 +219,8 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
   - Gap: the CID names this archive form (folder name, tar headers), not the bundle's files as such, and the
     code read accepts more than one CID form for the same archive without saying which one is its package
     identity. P13 and the docs name one complete bundle CID.
+  - Runtime issue: none of 463, 464, 465 or 470 covers this. 465 asks that "Release tooling records capsule
+    CIDs" but does not say which CID form.
   - **Q3 for Anders:** Which single CID form is the package identity for every capsule kind, so that records,
     catalogs and Homes all name a capsule the same way?
 - **a3. Provider capsules: the manifest and the binary are two rows.** Verdict: gap.
@@ -179,6 +234,7 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
     `elastos/crates/elastos-server/src/capsule_record.rs:116` `for (platform, info) in component.platforms.iter().chain(metadata) {`
   - Gap: no one name covers a provider's manifest and its executable payload. Each half is signed, but in a
     record of its own.
+  - Runtime issue: 465, "Sign the whole closure: the signature or record covers every file the capsule loads".
   - **Q4 for Anders:** Should a provider capsule's manifest and binary be named and signed as one closure, like
     other capsules?
 - **a4. Model content capsules: a DAG-PB closure CID in a signed catalog entry.** Verdict: matches.
@@ -218,6 +274,7 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
     and the release fills in each CID by release path:
     `scripts/publish-release.sh:1041` `.release_path? == $path then .cid = $cid`
   - Not covered by the code read: Home and Marketplace rows, and the gateway URLs that update fetches use.
+    - Runtime issue: none of 463, 464, 465 or 470 covers this.
 - **b3. At launch, an unsigned capsule's release row is found by the name in its own manifest.** Verdict:
   matches (the name is a lookup key).
   - `elastos/crates/elastos-server/src/runtime.rs:366` `crate::setup::verify_installed_release_capsule(data_dir, &manifest.name, path)`
@@ -236,10 +293,13 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
     `elastos/crates/elastos-server/src/main.rs:1870` `// Try relative path first (e.g. "../gba-emulator"), then search standard locations`
     and `elastos/crates/elastos-server/src/ipfs.rs:571` `// Standard install location: $XDG_DATA_HOME/elastos/capsules/<name>`
     Not covered by the code read: the other places that read `viewer` (Home and the gateway catalog).
+    Runtime issue for that: none of 463, 464, 465 or 470 covers this.
   - By contrast, a microVM image is named by CID:
     `elastos/crates/elastos-common/src/manifest.rs:1240` `pub rootfs_cid: Option<String>,`
   - Gap: a capsule's manifest does not pin the capsules it needs by hash. The `viewer` comment promises a CID
     form that no code read resolves (P12).
+  - Runtime issue: none of 463, 464, 465 or 470 covers this. 465's "nested hash checks at admission" are for
+    "every file the capsule loads", not for the other capsules a manifest names.
   - **Q5 for Anders:** Should a reference to another capsule (`requires`, `viewer`) be pinned to that capsule's
     CID, at least in the signed release? If not, should the `viewer` comment drop "or CID"?
 
@@ -285,6 +345,7 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
 - Bullet: `PRINCIPLES.md:162` `- use CIDs and hashes for content integrity, and verified DIDs and signatures`
   and `PRINCIPLES.md:163` `for publisher identity`
 - Overall verdict: **gap** (c1, d1 and d2).
+- Runtime issue: given in c1, c3, d1 and d2.
 
 **Integrity**
 
@@ -311,6 +372,9 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
     publisher. The docs and the Inspector already treat a signature alone as weaker than publisher trust:
     `docs/CAPSULE_MODEL.md:53` `A valid signature proves control of its signing key; Runtime publisher policy establishes publisher trust.`
     and `docs/CAPSULE_INSPECTOR.md:26` `Inspector reports manifest signature evidence as declared but unverified:`
+  - Runtime issue: 465, in part. It asks that "Release tooling records capsule CIDs, signatures, publisher DID
+    and content hashes", and that for a capsule that leaves the release, its docs "say who signs and what the
+    signature covers". It does not say that the manifest `signature` itself names a DID.
   - **Q6 for Anders:** Should the manifest signature name its signer as a `did:key` that is checked against the
     accepted publisher DIDs, as the per-capsule record does (c2), so a pass names its publisher?
 - **c2. The per-capsule record names a verified DID.** Verdict: matches.
@@ -321,9 +385,15 @@ entry; it is one line at the end of Questions, for Sasha, with its file paths on
     `elastos/crates/elastos-server/src/release_publication.rs:188` `crate::capsule_record::CapsuleRecords::from_release(r, &[pinned_did.to_owned()])?;`
 - **c3. `author` is free text, not an identity.** Verdict: matches.
   - `elastos/crates/elastos-common/src/manifest.rs:30` `pub author: Option<String>,`
-  - Publishing refuses only placeholder authors:
+  - Publishing refuses a missing or blank author. It trims the value and keeps it only if it is not empty:
+    `elastos/crates/elastos-server/src/publish.rs:1079` `.map(str::trim)`
+    and `elastos/crates/elastos-server/src/publish.rs:1080` `.filter(|value| !value.is_empty())`,
+    and otherwise refuses:
+    `elastos/crates/elastos-server/src/publish.rs:1083` `"Capsule manifest {} must declare an author before publishing",`
+  - It then refuses placeholder authors:
     `elastos/crates/elastos-server/src/publish.rs:1087` `if matches!(author, "local-development" | "example-publisher") {`
   - Not covered by the code read: how Home or the Inspector show `author`.
+    - Runtime issue: none of 463, 464, 465 or 470 covers this.
 
 **(d) How many capsule signing and naming schemes exist (and P10: one path per operation)**
 
@@ -373,6 +443,8 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
     `git grep -n '"signature"' c641bcff21d9ceaad769b1ed89529d541ffd8766 -- '*capsule.json'` prints nothing
     (a read-only search at this commit).
   - Gap: one operation, signing a capsule, has two schemes with different trust rules (P10).
+  - Runtime issue: none of 463, 464, 465 or 470 covers this. 465 says "the signature or record" and does not
+    pick one scheme.
   - **Q7 for Anders:** Is scheme 1 still needed? If not, can capsules be signed only through scheme 2, so there
     is one path?
 - **d2. Two row shapes in `components.json`.** Verdict: gap.
@@ -385,6 +457,8 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
     and otherwise refuses:
     `elastos/crates/elastos-server/src/setup.rs:1608` `anyhow::bail!("'{name}' is not a capsule of the installed signed release");`
   - Gap: two row shapes describe one archive (P10).
+  - Runtime issue: none of 463, 464, 465 or 470 covers this. 465 names issue 274 for making records required
+    (13.2, point 2), not for the `capsules` row shape.
   - Read from the lines above, not run: on a Home whose installed release lists records, this check would find
     no `capsules` entry and refuse the capsule. Unverified: whether any capsule reaches this check on such a
     Home.
@@ -403,12 +477,14 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
   `elastos/crates/elastos-server/src/publish.rs:567` `.post(base.join("/api/v0/block/put")?)`
   and checks that CID the same way:
   `elastos/crates/elastos-server/src/publish.rs:381` `require_import_cid(&raw, &artifact.cid)?;`
-- Both routes end in the same `require_import_cid` check (the line above and 13.4 a1), so the bullet holds.
+- Both routes end in the same `require_import_cid` check (the line above and 13.4 a1). That shared check
+  supports the verdict for CID verification only; this report claims nothing more from it.
 - A P10 point, not a P15 gap: the raw route is a second import route, beside the provider's own operations:
   `elastos/crates/elastos-server/src/publish.rs:374` `// that provider's own local Kubo endpoint as well.`
 - **Q9 for Anders:** Should the IPFS provider take raw blocks itself, so the publisher has one import route?
 - Not covered by the code read: imports from external repositories. The docs place them in a gateway provider:
   `docs/CONTENT_CAPSULE_DISTRIBUTION.md:544` `If Hugging Face support is added, it belongs in a dedicated gateway provider`
+  - Runtime issue: none of 463, 464, 465 or 470 covers this.
 
 ### 15.3 IPLD-compatible manifests for published objects
 
@@ -435,6 +511,7 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
 - Gap: the manifest of a release capsule (any role) is not published in an IPLD-compatible form; a model
   closure's object manifest is, by the changelog's claim. Unverified: whether release capsules meet the
   bullet's condition, content graphs that "need traversal or synchronization".
+- Runtime issue: none of 463, 464, 465 or 470 covers this.
 - **Q10 for Anders:** Should every published capsule use the model closure's form (a DAG-PB closure with an
   object manifest), so one manifest form serves traversal for every capsule kind? That would also answer Q3.
 
@@ -460,21 +537,37 @@ The lab CID of task 005 is a lab value, not a Runtime scheme, so it is not count
 
 ## Questions
 
-Q1 to Q10 are for Anders, each from the entry named. The last line is for Sasha.
+Q1 to Q10 are for Anders, each from the entry named. Each says which of the four issues read (see "Open Runtime
+issues") already asks or answers it. The last line is for Sasha.
 
 - Q1 (13.2): Is the next release still the one that sets `REQUIRED` to true?
+  465 answers it: issue 274 "owns the switch that requires them, one release after 0.8.0". The report adds the
+  code comment (13.2, point 2):
+  `elastos/crates/elastos-server/src/capsule_record.rs:16` `/// release lists them. The next release sets this, and a release without`
+  so Anders can confirm the two still agree.
 - Q2 (13.2): Should the signed manifest be the manifest's own bytes, not the checking Runtime's serialization?
+  No issue read asks it.
 - Q3 (13.4 a2): Which single CID form is the package identity for every capsule kind?
+  No issue read asks it. 465 asks that release tooling record "capsule CIDs", without a form.
 - Q4 (13.4 a3): Should a provider capsule's manifest and binary be named and signed as one closure?
+  465 answers it in general ("covers every file the capsule loads"). The report adds the case: today a
+  provider's manifest and binary are two rows with two records.
 - Q5 (13.4 b4): Should `requires` and `viewer` be pinned to CIDs, at least in the signed release, or should the
   `viewer` comment drop "or CID"?
+  No issue read asks it.
 - Q6 (15.1 c1): Should the manifest signature name a `did:key` signer checked against the accepted publisher
   DIDs, as the record does, so a pass names its publisher?
+  465 asks it in part: release tooling records the "publisher DID". The report adds that the manifest
+  `signature` names no signer.
 - Q7 (15.1 d1): Is the manifest `signature` scheme still needed?
+  No issue read asks it. 465 says "the signature or record".
 - Q8 (15.1 d2): Which row shape should the launch check read once releases list records, and can `capsules` be
   retired?
+  No issue read asks it.
 - Q9 (15.2): Should the IPFS provider take raw blocks, so the publisher has one import route?
+  No issue read asks it.
 - Q10 (15.3): Should every published capsule use the model closure's object form?
+  No issue read asks it.
 - security finding, details for Sasha: `elastos/crates/elastos-runtime/src/signature/verifier.rs`, `elastos/crates/elastos-server/src/runtime.rs` and `elastos/crates/elastos-server/src/trust_cmd.rs`.
 
 ## What the lab harness shows and does not show

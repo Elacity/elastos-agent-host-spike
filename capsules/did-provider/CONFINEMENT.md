@@ -80,9 +80,9 @@ does.
 Future Linux enforcement tests for this lab contract are designed in
 `../wallet-provider/CONFINEMENT-LINUX.md`: it is the one Linux mapping, its
 tests do not exist yet, and it claims no current behaviour. The existing
-source-only check `both_file_profiles_bind_one_storage_parameter_contract`
-reads the three oracles and supplies contract evidence, not Linux execution
-evidence.
+source-only check `both_file_profiles_bind_one_storage_parameter_contract`,
+in `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
+contract evidence, not Linux execution evidence.
 
 ## What the profile allows
 

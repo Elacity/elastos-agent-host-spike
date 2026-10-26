@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009 and 004). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004 and 007). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -1383,6 +1383,70 @@
       ],
       "tests": [
         "key_material_scan_finds_headers_in_non_utf8_files"
+      ]
+    },
+    {
+      "id": "F-CI7a",
+      "title": "sign_bundle writes the signature's hex into the bundle's capsule.json signature field, as the Runtime's own signer fills that field",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let signature = key.sign(&digest).to_bytes();\n    Ok(NameSignature {\n",
+          "new": "    let signature = key.sign(&digest).to_bytes();\n    let manifest_path = bundle.join(MANIFEST_FILE);\n    let bytes = std::fs::read(&manifest_path).map_err(|error| unreadable(MANIFEST_FILE, error))?;\n    let mut manifest: CapsuleManifest = serde_json::from_slice(&bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n    manifest.signature = Some(hex::encode(signature));\n    let rewritten = serde_json::to_vec_pretty(&manifest)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n    std::fs::write(&manifest_path, rewritten).map_err(|error| unreadable(MANIFEST_FILE, error))?;\n    Ok(NameSignature {\n"
+        }
+      ],
+      "tests": [
+        "valid_signature_grants_nothing_by_itself"
+      ]
+    },
+    {
+      "id": "F-CI7b",
+      "title": "verify_name_signature writes an approval record next to the bundle on success",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)?;\n    let _ = std::fs::write(bundle.with_extension(\"admitted\"), sig.name.as_bytes());\n    Ok(())\n"
+        }
+      ],
+      "tests": [
+        "valid_signature_grants_nothing_by_itself"
+      ]
+    },
+    {
+      "id": "F-CI7c",
+      "title": "verify_name_signature remembers each verified name and signer in a process-wide set and passes a remembered pair before the accepted-list check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)\n",
+          "new": "    static VERIFIED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());\n    let pair = (sig.name.clone(), sig.signer_did.clone());\n    if VERIFIED.lock().expect(\"the set\").contains(&pair) {\n        return Ok(());\n    }\n    let checked = checked_bundle(bundle)?;\n    verify_checked_signature(&checked, sig, accepted)?;\n    VERIFIED.lock().expect(\"the set\").push(pair);\n    Ok(())\n"
+        }
+      ],
+      "tests": [
+        "valid_signature_grants_nothing_by_itself"
+      ]
+    },
+    {
+      "id": "F-CI7d",
+      "title": "the library gains a public admit step that returns verify_name_signature's answer",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "/// Check (a): `did` is one canonical Ed25519 `did:key`.\n",
+          "new": "pub fn admit(bundle: &Path, sig: &NameSignature, accepted: &[String]) -> Result<(), Refusal> {\n    verify_name_signature(bundle, sig, accepted)\n}\n\n/// Check (a): `did` is one canonical Ed25519 `did:key`.\n"
+        }
+      ],
+      "tests": [
+        "the_harness_exports_only_identity_checks"
       ]
     }
   ]
