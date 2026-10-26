@@ -816,6 +816,76 @@ fn confined_outside_read_is_denied() {
     provider.shutdown();
 }
 
+/// A key planted beneath `STORAGE_PARENT` stays unread.
+///
+/// The parent read grants the directory itself only, not a directory beneath
+/// it, and the storage-root write grant stops at `STORAGE_ROOT`. The test
+/// plants a complete key at
+/// `<STORAGE_PARENT>/Sibling/ElastOS/SystemServices/Wallet`, beneath
+/// `STORAGE_PARENT` and outside `STORAGE_ROOT`, and records its bytes. With
+/// the real profile `init` for that sibling base refuses with `storage_error`,
+/// the planted bytes stay unchanged and no `wallet-state.json` appears beside
+/// them. The provider then serves its own root, and the key it writes there
+/// differs from the planted one, so it never adopted the planted key. The
+/// write half beneath the parent is `confined_outside_write_is_denied`'s third
+/// case.
+///
+/// Falsifier: widen the parent read from `literal` to `subpath` (WP57); the
+/// planted key then loads, `init` answers ok and this test fails on its
+/// refusal.
+#[test]
+fn planted_key_beneath_storage_parent_is_not_read() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
+    // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
+    let planted = wallet_dir(&root)
+        .parent()
+        .expect("wallet parent")
+        .join("Sibling");
+    let planted_wallet = wallet_dir(&planted);
+    plant_storage_key(&planted_wallet);
+    let planted_key = planted_wallet.join(WALLET_KEY_FILE);
+    let planted_bytes = fs::read(&planted_key).expect("planted key file");
+
+    let mut provider = ConfinedProvider::start(&root);
+
+    let denied = provider.init(&planted);
+    assert_storage_error(&denied);
+    assert_eq!(
+        fs::read(&planted_key).expect("planted key stays readable to the test"),
+        planted_bytes,
+        "the planted key must stay unchanged after the refused read"
+    );
+    assert!(
+        !planted_wallet.join("wallet-state.json").exists(),
+        "a refused read must write no store beside the planted key: {}",
+        planted_wallet.display()
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the provider must answer after a denied read: {status}"
+    );
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "the granted root must serve: {init}");
+    let own_key = wallet_dir(&root).join(WALLET_KEY_FILE);
+    let own_bytes = fs::read(&own_key).expect("the provider writes its own key");
+    assert_ne!(
+        own_bytes,
+        planted_bytes,
+        "the provider must not adopt the planted key: {}",
+        own_key.display()
+    );
+
+    provider.shutdown();
+}
+
 /// A complete key file makes the outside root readable if the profile ever
 /// grants that path, so the denial above proves the profile, not the file.
 fn plant_storage_key(wallet_dir: &Path) {

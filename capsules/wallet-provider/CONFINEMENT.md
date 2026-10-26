@@ -135,6 +135,16 @@ oracles and supplies contract evidence, not Linux execution evidence.
   of the single profile source. These grants let `Init` reach the key open;
   the test asserts that this open is the refused operation. The fixture adds
   neither file-content reads nor writes outside the wallet grant.
+- `planted_key_beneath_storage_parent_is_not_read` plants a complete key in a
+  sibling directory beneath `STORAGE_PARENT` and outside `STORAGE_ROOT`, then
+  sends `Init` for that sibling base. Under the real profile the provider
+  answers `storage_error`, the planted bytes stay unchanged and no
+  `wallet-state.json` appears beside them. The provider then answers `status`
+  and serves its own root; the key it writes there differs from the planted
+  one, so it never adopted the planted key. The parent read grants the
+  directory itself only, so widening it to `subpath` makes this test fail; the
+  write half beneath the parent is `confined_outside_write_is_denied`'s third
+  case.
 - `profile_denies_network` checks that the profile has `(deny default)` and no
   network allow or `(allow default)` rule, including one appended after denial.
 - `startup_denial_reports_its_reason` covers the failure path. It starts the
@@ -411,6 +421,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append a second, unpinned `(allow process-exec)` after the exec rule (WP56):
   `unbound_copy_is_refused_under_profile` fails on its deadline assertion
   because the copy under `STORAGE_ROOT` starts instead of being refused.
+- Widen the parent read from `literal` to `subpath` (WP57):
+  `planted_key_beneath_storage_parent_is_not_read` fails on its refusal
+  because the planted key loads and `init` answers ok.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
