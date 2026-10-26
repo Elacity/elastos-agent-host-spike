@@ -856,3 +856,50 @@
   wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/` or
   pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep
   -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 038 (C0 lab half: pinned engine versions and a rejected cap argument; base `d30172ddf`). Probes
+  first, before any code edit, read-only, run from `/tmp`: `/opt/homebrew/bin/wasmtime --version` (exit 0, `wasmtime
+  45.0.1 (83166ba31 2026-06-05)`) and `/opt/homebrew/bin/wasmer --version` (exit 0, `wasmer 7.5.0`), the same lines
+  as LOG 575-576. An unknown `-W` key, `/opt/homebrew/bin/wasmtime run -W max-memory-sizeX=1
+  /nonexistent/module.wasm`: exit 2, stderr (one line) `error: unknown -W / --wasm option: max-memory-sizeX`. A bad
+  `-W` value, `/opt/homebrew/bin/wasmtime run -W max-memory-size=abc /nonexistent/module.wasm`: exit 2, stderr (one
+  line) ``error: failed to parse -W option `max-memory-size=abc`: invalid digit found in string``. Contrast, no `-W`:
+  `/opt/homebrew/bin/wasmtime run /nonexistent/module.wasm`: exit 1, first stderr line `Error: failed to open wasm
+  module "/nonexistent/module.wasm"`. So the two probes share exit status 2 and a first stderr line that starts with
+  `error: ` (lower case; the module failure starts `Error: `) and holds ` -W ` (the option's name, with a space on
+  each side). Those are the measured values of the rule.
+  Then the code. `tools/src/run.rs`: `pub const WASMTIME_VERSION = "45.0.1"` and `WASMER_VERSION = "7.5.0"` (each
+  citing tasks 021 and 030), `Engine::pinned_version`, and `check_pinned`, called inside `query_version` on the first
+  line once the empty-line check passes (split on single spaces: word 1 the engine's name, word 2 its pin exactly,
+  any tail allowed). A refusal is `Reason::VersionNotPinned { engine, printed, pinned }`, text `<engine> --version
+  printed "<line>", not the pinned version <engine> <pin>: no module run starts`, reaching `run`'s caller as
+  `TwoEngineRefusal::Version`. `start_engine` refuses a start given a cap argument as `Reason::CapRejected { engine,
+  argument, status, stderr }` (text `<engine> rejected the memory cap argument -W <argument> (exit status: <n>):
+  <stderr>; the module is not run without its cap`) when `cap_rejected` holds: exit `CAP_REJECTED_STATUS` (2) and a
+  first stderr line that starts with `CAP_REJECTED_PREFIX` (`error: `) and holds `CAP_REJECTED_OPTION` (` -W `), one
+  `const` each, citing this LOG. Any other nonzero exit stays `EngineFailed`; there is no retry. `run_engine` still
+  makes no `--version` query; both engines' argv are unchanged; no fuel flag. `tests/run.rs`: `stand_in_version`
+  (used by `marked`, `recording` and `counting`) prints `<engine> <pinned const> (stand-in)`;
+  `receipt_records_observed_engine_versions` uses pinned versions with made-up tails and checks the receipt never
+  holds this Mac's quoted real lines; `version_queries_use_explicit_inputs` puts the pinned line before its report.
+  New tests `run_refuses_an_unpinned_engine_version_before_any_module_run`,
+  `run_accepts_the_pinned_version_with_any_tail` and `run_refuses_a_rejected_memory_cap_without_retrying_it`. Five
+  new falsifiers, all runner-caught: F-WC5-VERSION-UNPINNED, F-WC10-CAP-REJECTED-RETRY, and three that each drop one
+  part of the cap rule (F-WC10-CAP-REJECTED-UNNAMED, -ANY-STATUS, -UNCAPPED; not in the task's list, added because
+  each part is a rule). By hand, each of the two named ones applied and restored (`cmp` equal): its test failed at
+  `tests/run.rs:928:23`, "the two-engine runner passed, ..., not a refusal"; under the retry bug the passing run held
+  `memory_caps: [None, None]`, the module run uncapped. Canonical runner, from the repo root, `python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5-VERSION-UNPINNED
+  F-WC10-CAP-REJECTED-RETRY F-WC10-CAP-REJECTED-UNNAMED F-WC10-CAP-REJECTED-ANY-STATUS F-WC10-CAP-REJECTED-UNCAPPED
+  F-WC5-HARDCODED-VERSIONS F-WC-README-COUNT`: "baseline: 4 named tests pass without an edit, 0 do not", "summary: 7
+  CAUGHT of 7", exit 0. Then every entry that edits `tools/src/run.rs` or `tools/src/receipt.rs` (67 ids): "baseline:
+  31 named tests pass without an edit, 0 do not", "summary: 67 CAUGHT of 67", exit 0, no `*.falsify-original` backup
+  left; so every `run.rs` anchor is still found once and F-WC5-HARDCODED-VERSIONS is still caught. F-WC-README-COUNT
+  re-anchored to 170, the same bug as before. README: the run, receipt and cap sections, the named tests, totals 170
+  (five task 038) and 106 runner-caught, a task 038 section; ADOPTION gets one task 038 paragraph. Real engines:
+  `real_receipt_names_both_installed_engines` and `built_capsule_runs_under_the_declared_cap_on_wasmtime` pass on
+  `/opt/homebrew/bin` wasmtime 45.0.1 and wasmer 7.5.0, assertions unchanged. Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (103 passed, 2 ignored, 0 failed), `cargo fmt
+  -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`,
+  `tools/Cargo.toml`, `capsule/`, `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo
+  root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
+  lab/wasm-capsule/`): both empty, exit 1.
