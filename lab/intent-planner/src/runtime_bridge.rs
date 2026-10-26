@@ -138,6 +138,7 @@ pub fn classify(reply: &BridgeReply) -> BridgeClass {
 
 /// Audit records left by one in-process `handle_remote_request_with_audit_dir`
 /// call. Empty when that function was not called with this directory.
+#[cfg(test)]
 pub fn component_invoke_audit(data_dir: &Path) -> Vec<(String, String, String)> {
     match elastos_server::auth::load_auth_state(data_dir) {
         Ok(state) => state

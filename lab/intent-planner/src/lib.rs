@@ -899,6 +899,7 @@ fn approval_for_one_principal_does_not_execute_for_another() {
     assert!(host.effects().is_empty());
 }
 
+#[cfg(test)]
 fn journal_write_step(id: u32, agent: &str) -> Step {
     Step {
         id,
