@@ -1,7 +1,7 @@
 //! A12 leftover census for Runtime-owned temp roots.
 //!
-//! Detection records the (dev, inode, ctime, size+full-content hash) set
-//! the run created. It does not depend on a name prefix, a lab marker,
+//! Detection records the (dev, inode, ctime, size+full-content hash,
+//! file handle) set the run created. It does not depend on a name prefix, a lab marker,
 //! birth time, or size+mtime. Same-path delete+recreate with a reused
 //! inode and the same bytes is found. An in-place rewrite of a file
 //! larger than 64 KiB with mtime restored is found. Real Runtime leftovers

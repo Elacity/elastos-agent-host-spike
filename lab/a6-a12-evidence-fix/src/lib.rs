@@ -509,14 +509,28 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
+        struct LivePlant {
+            plant: std::path::PathBuf,
+            live: std::path::PathBuf,
+            remove_live: bool,
+        }
+        impl Drop for LivePlant {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.plant);
+                if self.remove_live {
+                    let _ = fs::remove_dir(&self.live);
+                }
+            }
+        }
         fs::create_dir_all(&live).expect("create live /tmp/elastos plant dir");
         fs::write(&plant, b"live /tmp/elastos leftover\n").expect("plant live leftover");
+        let _cleanup = LivePlant {
+            plant: plant.clone(),
+            live: live.clone(),
+            remove_live: !existed,
+        };
         let err = a12::snapshot_before_runtime(&watch)
             .expect_err("clean watch must still fail when /tmp/elastos already wrote");
-        let _ = fs::remove_file(&plant);
-        if !existed {
-            let _ = fs::remove_dir(&live);
-        }
         a12::remove_isolated(&watch);
         assert!(err.contains("before the Runtime"), "{err}");
         println!("A12 live /tmp/elastos late snapshot refused: {err}");

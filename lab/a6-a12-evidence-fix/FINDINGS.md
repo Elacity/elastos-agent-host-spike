@@ -84,21 +84,21 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: `test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 50.64s`.
-`planted_bugs_are_caught` printed **22 CAUGHT lines** from **19 plants**
-(F-A12-DROP-ROOTS, M-A12-TMP-DOTDOT, and M-A6-COMMENT-STEP4 each name two
-tests). After the suite, `ls /tmp/elastos` was `No such file or directory`.
-Runtime `manager.rs` sha256 stayed
+Result: `test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.30s`.
+`--list` names those 49 tests (the previous 43 plus six r4 tests).
+`planted_bugs_are_caught` printed **28 CAUGHT lines** from **25 plants**
+(the previous 19 plus M-A6-LIVE-PIDS, M-A12-NO-ISOLATION,
+M-A12-SNAP-IGNORE-LIVE, M-A12-NO-HANDLE, M-A12-HASH-MTIME,
+M-A12-TOCTOU-FOLLOW; F-A12-DROP-ROOTS, M-A12-TMP-DOTDOT, and
+M-A6-COMMENT-STEP4 each name two tests). After the suite,
+`ls /tmp/elastos` was `No such file or directory`. Runtime `manager.rs`
+sha256 stayed
 `cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
-r3 `lab/review-a6-a12-343-r3/run.sh` refuses this head (it pins
-`87b974a1`). `tools/new-hunts.sh` on this head: `..` and live-Home
-symlink guards **CAUGHT**; inode reuse **CAUGHT**. The r3
-`leftovers_created(watch)` probes for a late snapshot and a sibling
-folder still print SURVIVED; those cases are CAUGHT by
-`snapshot_before_runtime` and `leftovers_in_run_window`. The r3
-`ra6-stub-ok` script prints SURVIVED because the named test FAILED;
-the panic text is FAIL on empty `ResidentPair`, not PASS. Plant
-M-A6-STUB-OK is CAUGHT.
+Independent mutants M-R4-GUARD-NO-ISOLATION and M-R4-SNAP-IGNORE-LIVE
+are **CAUGHT**; `a12.rs` was restored after each.
+r3 `lab/review-a6-a12-343-r3/run.sh` still pins `87b974a1` and refuses
+this head. That pin is honest for the head r3 reviewed. This folder
+does not edit the r3 runner.
 
 | Check | Verdict | Notes |
 | --- | --- | --- |
