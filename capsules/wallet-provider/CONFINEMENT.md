@@ -189,6 +189,21 @@ oracles and supplies contract evidence, not Linux execution evidence.
   form appended, with the exact `must reject (allow default)` and
   `network allow is refused` reasons. The test reads no file and starts no
   process.
+- `a_bare_top_level_value_is_its_own_form` reads a bare value outside every
+  form as its own form: `1`, a newline, then `(allow default)` gives `1` and
+  `(allow default)`, and so do `1(allow default)` and `"x" (allow default)`; a
+  bare value at the end of the profile is a form too. The one check refuses
+  the passing fixture with each of those appended, and with
+  `1 (allow network*)`, with the exact `must reject (allow default)` and
+  `network allow is refused` reasons. The test reads no file and starts no
+  process.
+- `the_bare_value_fixture_loads_under_sandbox_exec` writes
+  `(version 1)(deny default) 1 (allow default)` to a temporary file and runs
+  `/usr/bin/sandbox-exec -f <file> /usr/bin/true`, which exits 0. Under
+  `(deny default)` alone that program cannot start, so the exit shows that
+  `sandbox-exec` reads the `1` as its own form and applies the
+  `(allow default)` after it. It checks that test's premise, not a rule, and
+  carries no falsifier entry.
 - `the_string_fixture_loads_under_sandbox_exec` writes `(version 1)`,
   `(deny default)` and those two lines to a temporary file and runs
   `/usr/bin/sandbox-exec -f <file> /usr/bin/true`, which exits 0. Under
@@ -296,6 +311,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the newline that ends a comment (WP38):
   `a_comment_inside_a_form_keeps_its_tokens_apart` fails because
   `(allow;x\ndefault)` reads as `(allowdefault)` and passes the check.
+- Drop the split outside every form (WP39):
+  `a_bare_top_level_value_is_its_own_form` fails because `1`, a newline, then
+  `(allow default)` reads as the one form `1 (allow default)` and passes the
+  check.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

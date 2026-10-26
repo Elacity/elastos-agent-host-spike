@@ -25,8 +25,10 @@ use std::process::Command;
 /// parenthesis count inside strings, WP32 to WP37, which disable escaping,
 /// whitespace inside a string, whitespace collapse outside strings, a
 /// comment's end at its newline, and the two parser refusals, and WP38, which
-/// drops the newline that ends a comment and glues the tokens around it.
-const EXPECTED_FALSIFIERS: usize = 36;
+/// drops the newline that ends a comment and glues the tokens around it, and
+/// WP39, which drops the split outside every form and glues a bare value onto
+/// the next form.
+const EXPECTED_FALSIFIERS: usize = 37;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

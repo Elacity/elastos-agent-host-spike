@@ -1228,6 +1228,99 @@ fn a_comment_inside_a_form_keeps_its_tokens_apart() {
     }
 }
 
+/// A bare value outside every form, such as `1` or `"x"`, is its own form,
+/// as `sandbox-exec` reads it: whitespace or a `(` ends it. Without that split
+/// `1 (allow default)` reads as one form, which matches neither
+/// `is_default_allow` nor `is_network_allow`; the hidden rule would then pass
+/// the one check while `sandbox-exec` applies it. A bare value at the end of the
+/// profile is a form too, not an unclosed one. The fixtures are built in the
+/// test; no file is read and no process starts.
+///
+/// Falsifier: WP39 drops the split outside every form; this test fails
+/// because the parser returns `1 (allow default)` and the glued form passes
+/// the check.
+#[test]
+fn a_bare_top_level_value_is_its_own_form() {
+    assert_eq!(
+        profile_forms("1\n(allow default)"),
+        vec!["1", "(allow default)"],
+        "whitespace outside every form must end a bare value"
+    );
+    assert_eq!(
+        profile_forms("1(allow default)"),
+        vec!["1", "(allow default)"],
+        "a `(` outside every form must end a bare value"
+    );
+    assert_eq!(
+        profile_forms(r#""x" (allow default)"#),
+        vec![r#""x""#, "(allow default)"],
+        "a bare string must be its own form"
+    );
+    assert_eq!(
+        profile_forms("(version 1) 1"),
+        vec!["(version 1)", "1"],
+        "a bare value at the end of the profile must be its own form"
+    );
+
+    let complete = contract_fixture_profile(true);
+    for (line, refusal) in [
+        (
+            "1\n(allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "\"x\" (allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "1(allow default)\n",
+            "fixture-provider must reject (allow default): (allow default)",
+        ),
+        (
+            "1 (allow network*)\n",
+            "fixture-provider must not grant network access; \
+             a network allow is refused: (allow network*)",
+        ),
+    ] {
+        let profile = format!("{complete}{line}");
+        let reason = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a form after a bare value must fail the one check");
+        assert_eq!(
+            reason, refusal,
+            "the refusal must be the exact reason for the form after the bare value"
+        );
+    }
+}
+
+/// `sandbox-exec` itself reads a bare value before a form as two forms: it
+/// evaluates the `1`, ignores it and applies the `(allow default)` after it.
+/// The fixture writes `(version 1)(deny default) 1 (allow default)` to a
+/// temporary file and runs `/usr/bin/true` under it, which must exit 0. Under
+/// `(deny default)` alone `/usr/bin/true` cannot start, so the exit shows the
+/// premise of `a_bare_top_level_value_is_its_own_form`. It checks that premise,
+/// not a rule, so it carries no falsifier entry.
+#[test]
+fn the_bare_value_fixture_loads_under_sandbox_exec() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let mut file = tempfile::NamedTempFile::new().expect("temporary bare value fixture profile");
+    file.write_all(b"(version 1)(deny default) 1 (allow default)\n")
+        .expect("write the bare value fixture profile");
+    let output = Command::new(SANDBOX_EXEC)
+        .arg("-f")
+        .arg(file.path())
+        .arg("/usr/bin/true")
+        .output()
+        .expect("sandbox-exec must start");
+    assert!(
+        output.status.success(),
+        "sandbox-exec must load the bare value fixture and start true: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `sandbox-exec` itself reads the two string lines as `profile_forms` does:
 /// it parses their `;`, `(` and `)` as text and applies the `(allow default)`
 /// they hold. The fixture writes `(version 1)`, `(deny default)` and those two
@@ -1360,7 +1453,9 @@ fn file_profile_contract_checks_the_model_profile_when_present() {
 /// Splits the profile into top-level s-expressions the way `sandbox-exec`
 /// reads it. `profile_characters` removes comments and marks strings; this
 /// function collapses whitespace outside strings, keeps every character inside
-/// one, counts parentheses only outside strings and collects the forms. An
+/// one, counts parentheses only outside strings and collects the forms. Outside
+/// every form, whitespace or a `(` ends a bare value such as `1` or `"x"`, so
+/// that value is its own form and every top-level form starts its own entry. An
 /// unclosed form is a refusal with its own reason.
 fn profile_forms(profile: &str) -> Vec<String> {
     let mut forms = Vec::new();
@@ -1375,6 +1470,9 @@ fn profile_forms(profile: &str) -> Vec<String> {
             space_due = false;
             current.push(ch);
             continue;
+        }
+        if depth == 0 && (ch.is_whitespace() || ch == '(') && !current.is_empty() {
+            forms.push(std::mem::take(&mut current));
         }
         match ch {
             _ if ch.is_whitespace() => space_due = true,
@@ -1401,6 +1499,9 @@ fn profile_forms(profile: &str) -> Vec<String> {
                 current.push(ch);
             }
         }
+    }
+    if depth == 0 && !current.is_empty() {
+        forms.push(std::mem::take(&mut current));
     }
     assert!(
         current.is_empty(),
