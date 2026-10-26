@@ -32,8 +32,11 @@ export SOURCE_DATE_EPOCH=1700000000
 export CARGO_INCREMENTAL=0
 
 # A fresh isolated target dir keeps the build out of any shared cache and off
-# any path that differs between runs. It is removed on exit.
-TARGET_DIR="$(mktemp -d)"
+# any path that differs between runs. It is removed on exit. It is made inside
+# $TMPDIR (or /tmp when unset) from an explicit template, because macOS
+# `mktemp -d` alone does not use TMPDIR, so a caller could not watch the folder
+# the trap deletes (task 036).
+TARGET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wc-build.XXXXXX")"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 # Until the last line re-arms it, an exit through this trap is a failure that
 # keeps its status: on /bin/bash 3.2.57 a `set -u` error reaches the trap with
