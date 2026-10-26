@@ -17,6 +17,9 @@ pub struct SimKernel {
     pub fail: Option<(Step, Errno)>,
     pub steps: Vec<Step>,
     pub execs: Vec<CString>,
+    pub handled_fs: u64,
+    pub handled_net: u64,
+    pub scoped: u64,
 }
 
 impl Default for SimKernel {
@@ -27,6 +30,9 @@ impl Default for SimKernel {
             fail: None,
             steps: Vec::new(),
             execs: Vec::new(),
+            handled_fs: 0,
+            handled_net: 0,
+            scoped: 0,
         }
     }
 }
@@ -108,9 +114,13 @@ impl Kernel for SimKernel {
 
     fn landlock_create_ruleset(
         &mut self,
-        _handled_fs: u64,
-        _handled_net: u64,
+        handled_fs: u64,
+        handled_net: u64,
+        scoped: u64,
     ) -> Result<RawFd, Errno> {
+        self.handled_fs = handled_fs;
+        self.handled_net = handled_net;
+        self.scoped = scoped;
         self.run(Step::CreateRuleset)?;
         Ok(SIM_RULESET_FD)
     }

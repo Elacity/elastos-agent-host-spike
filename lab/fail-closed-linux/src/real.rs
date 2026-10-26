@@ -4,7 +4,10 @@
 //! Everything after `fork` in the child is a system call on data `Plan`
 //! built before the fork. It does not allocate, lock or panic.
 
-use crate::{confine_and_exec, landlock, Errno, Fault, Kernel, Plan, Step, REFUSAL_EXIT_CODE};
+use crate::{
+    confine_and_exec, landlock, ruleset_attr_size, Errno, Fault, Kernel, Plan, Step,
+    REFUSAL_EXIT_CODE,
+};
 use std::ffi::CStr;
 use std::io;
 use std::os::fd::RawFd;
@@ -32,6 +35,7 @@ struct CapData {
 struct RulesetAttr {
     handled_access_fs: u64,
     handled_access_net: u64,
+    scoped: u64,
 }
 
 #[repr(C, packed)]
@@ -214,17 +218,20 @@ impl Kernel for RealKernel {
         &mut self,
         handled_fs: u64,
         handled_net: u64,
+        scoped: u64,
     ) -> Result<RawFd, Errno> {
         let attr = RulesetAttr {
             handled_access_fs: handled_fs,
             handled_access_net: handled_net,
+            scoped,
         };
-        // SAFETY: `attr` is valid for its size for the duration of the call.
+        let size = ruleset_attr_size(handled_net, scoped);
+        // SAFETY: `attr` is valid for `size` bytes for the duration of the call.
         let fd = check(unsafe {
             libc::syscall(
                 libc::SYS_landlock_create_ruleset,
                 &attr as *const RulesetAttr,
-                std::mem::size_of::<RulesetAttr>(),
+                size,
                 0u32,
             )
         })?;

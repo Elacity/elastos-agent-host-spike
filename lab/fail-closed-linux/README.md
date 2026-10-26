@@ -19,7 +19,7 @@ step stops it.
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
 | no_new_privs | `set_no_new_privs` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
 | seccomp | `install_filter` | `seccomp(SECCOMP_SET_MODE_FILTER)` with the filter in `src/seccomp.rs` |
-| landlock | `abi_probe`, `abi_floor`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self` | needs ABI 5 or above, handles every ABI 5 filesystem right plus TCP bind and connect, allows read and write under the storage root and read plus execute on the provider executable |
+| landlock | `abi_probe`, `abi_floor`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
 
 After the five layers, `execve` starts the provider with an empty environment.
 
@@ -27,8 +27,11 @@ The bounding set is dropped before `capset`, because `PR_CAPBSET_DROP` needs
 `CAP_SETPCAP` and `capset` removes it. On this host the opposite order left
 `CapBnd` at `000001ffffffffff`.
 
-The ABI floor is 5. `ProviderSpec::require_landlock_abi` and
-`fcl-launch --require-landlock-abi N` can raise it. They cannot lower it.
+There is no single ABI floor. The guard computes the rights the profile
+needs, probes the running ABI, and refuses when a needed right is missing.
+`ProviderSpec::require_landlock_abi` and `fcl-launch --require-landlock-abi N`
+can raise an extra ABI number on top of that check. They cannot skip a
+needed right.
 
 The seccomp filter kills a process that uses a foreign architecture. On
 x86-64 it returns EPERM for every x32 call. It returns EPERM for sockets,
@@ -40,7 +43,7 @@ per-provider allow-list is profile work (see the PR #296 section below).
 ## Refusal and exit codes
 
 ```text
-fail-closed-linux refused to start did-provider: layer landlock, step abi_floor: Landlock ABI 6 is below the required 7; the provider was not started
+fail-closed-linux refused to start did-provider: layer landlock, step abi_floor: this kernel's Landlock ABI 1 cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5); the provider was not started
 fail-closed-linux refused to start wallet-provider: layer capabilities, step capset: Operation not permitted (os error 1); the provider was not started
 ```
 
@@ -82,8 +85,8 @@ probe is static, so the Landlock domain needs no library path. The build needs
 static glibc (`libc.a`, from `libc6-dev` on Ubuntu). For a target other than
 the host, `build.rs` skips the probe, so `cargo check --target ...` still works.
 
-The real-kernel tests need unprivileged user namespaces, seccomp, and
-Landlock ABI 5 or above.
+The real-kernel tests need unprivileged user namespaces, seccomp, and a
+Landlock ABI that can express `truncate` and `ioctl_dev` (ABI 5 or above).
 
 ## Results on this host
 
@@ -91,8 +94,8 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 
 | Suite | Tests |
 | --- | --- |
-| `lib` (unit) | 2 passed |
-| `simulated` | 11 passed |
+| `lib` (unit) | 6 passed |
+| `simulated` | 13 passed |
 | `real_kernel` | 9 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
@@ -110,7 +113,7 @@ seccomp gives the errno, and the feature itself is present.
 | no_new_privs cannot be set | `sim_no_new_privs_failure_refuses` | `real_no_new_privs_failure_refuses` | inherited filter: `prctl(PR_SET_NO_NEW_PRIVS)` gives EPERM |
 | seccomp cannot be installed | `sim_seccomp_install_failure_refuses` (EINVAL, ENOSYS) | `real_seccomp_install_failure_refuses` | inherited filter: `seccomp` gives ENOSYS |
 | Landlock missing | `sim_landlock_missing_refuses` (ENOSYS, EOPNOTSUPP) | `real_landlock_missing_refuses` | inherited filter: `landlock_create_ruleset` gives ENOSYS or EOPNOTSUPP |
-| Landlock ABI too old | `sim_landlock_abi_too_old_refuses` (ABI 1 to 4; ABI 6 with 7 required) | `real_landlock_abi_below_required_refuses` | kernel rule: `--require-landlock-abi` set to the host ABI plus 1 |
+| Landlock ABI too old | `sim_landlock_abi_too_old_refuses` (ABI 1 to 4 name the missing right; ABI 6 with 7 required) | `real_landlock_abi_below_required_refuses` | kernel rule: `--require-landlock-abi` set to the host ABI plus 1 |
 | Landlock ruleset cannot be applied | `sim_landlock_ruleset_unappliable_refuses` (all four steps) | `real_landlock_ruleset_unappliable_refuses` | kernel rule: 16 inherited Landlock domains make `restrict_self` give E2BIG; inherited filter: `restrict_self` gives EPERM |
 
 The positive tests:
@@ -126,8 +129,55 @@ The positive tests:
   working write and read inside its storage root.
 
 Two more checks: `sim_every_guard_step_failure_stops_before_exec` fails each
-guard step in turn, and `sim_landlock_abi_floor_cannot_be_lowered` checks the
-floor.
+guard step in turn, and `sim_landlock_abi_floor_cannot_be_lowered` shows that
+`--require-landlock-abi 3` on ABI 4 still refuses because `ioctl_dev` needs
+ABI 5.
+
+`sim_per_right_floor_for_each_abi` walks ABI 1 through 6 for each provider.
+`sim_missing_right_is_never_silently_dropped` requires the named-right
+refusal on ABI 1-4.
+
+## Per-right table (did, wallet, model)
+
+The three providers share one file-profile contract: `(deny default)`,
+`(deny network*)`, exec of `PROVIDER_EXECUTABLE`, and read/write under
+`STORAGE_ROOT`. The needed Landlock rights whose absence is a wider sandbox
+are `truncate` (ABI 3) and `ioctl_dev` (ABI 5). `REFER` (ABI 2) is not
+needed: the kernel already denies reparent when that bit is absent. TCP
+bind/connect (ABI 4) is not needed for the launch decision: seccomp already
+denies `socket`.
+
+| Reported ABI | Kernel that first shipped it | Launch? | Refusal names | Ruleset if it launched |
+| --- | --- | --- | --- | --- |
+| absent | — | refuse | Landlock is not available | none |
+| 1 | 5.13 | refuse | `truncate` (needs ABI 3); `ioctl_dev` (needs ABI 5) | none |
+| 2 | 5.19 | refuse | `truncate` (needs ABI 3); `ioctl_dev` (needs ABI 5) | none |
+| 3 | 6.2 | refuse | `ioctl_dev` (needs ABI 5) | none |
+| 4 | 6.7 | refuse | `ioctl_dev` (needs ABI 5) | none |
+| 5 | 6.10 | launch | — | all ABI 5 filesystem bits handled; eight-right storage grant; TCP handled and not granted; `LANDLOCK_SCOPE_SIGNAL` unset (named gap) |
+| 6 | 6.12 | launch | — | same as ABI 5, plus `LANDLOCK_SCOPE_SIGNAL` |
+
+A 5.15-class kernel (JetPack R36.4.7 / L4T 36.4, typically `5.15.148-tegra`)
+reports Landlock ABI 1 when the LSM is on, or `ENOSYS`/`EOPNOTSUPP` when it
+is off. In both cases the three providers refuse. There is no per-right
+floor that both starts them on 5.15 and denies truncate. This lab did not
+boot a Jetson; that ABI is not a measurement from the board.
+
+## PID namespace and `LANDLOCK_SCOPE_SIGNAL`
+
+The design's carrier for `(deny default)` signals is a PID namespace
+(`capsules/wallet-provider/CONFINEMENT-LINUX.md`). This lab unshares only
+`CLONE_NEWUSER`. `unshare(CLONE_NEWPID)` in the already-forked child does
+not put the provider itself in the new namespace; only later children enter
+it. Isolating the provider needs a grandchild after that unshare, which
+would change the fault-pipe pid contract. That second fork is a named gap,
+not a silent skip of a Landlock right.
+
+`LANDLOCK_SCOPE_SIGNAL` exists from ABI 6. The guard sets it when the probe
+returns 6 or above, and fails closed if `create_ruleset` then fails. ABI 5
+can launch and still cannot set the bit: that is a named gap, not a
+refusal. `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` stays unset; seccomp already
+denies `socket`.
 
 ## Falsifiers
 
@@ -150,7 +200,8 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F08-no-new-privs-error-ignored | a `no_new_privs` error is ignored | the no_new_privs row in both suites |
 | F09-seccomp-error-ignored | a seccomp install error is ignored | the seccomp row in both suites |
 | F10-landlock-missing-tolerated | a missing Landlock skips the layer | the Landlock-missing row in both suites |
-| F11-abi-floor-off-by-one | ABI 4 passes a floor of 5 | the ABI rows in both suites |
+| F11-abi-floor-off-by-one | ABI 6 passes an extra required ABI of 7 | the extra-floor ABI rows in both suites |
+| F18-missing-right-silently-passed | a missing needed right is ignored and the start continues | the per-right ABI rows |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -159,19 +210,21 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: 17 of 17 caught, and the control survived with 22 tests passed.
+Result: 18 of 18 caught, and the control survived with 28 tests passed.
 
 ## Not covered here
 
 - aarch64 and Jetson: NOT RUN. `cargo check --target aarch64-unknown-linux-gnu --all-targets`
-  passed. Nothing was executed for aarch64. Landlock ABI 5 first shipped in
-  Linux 6.10. On a Jetson kernel older than that, the guard refuses every
-  provider at `abi_probe` or `abi_floor`.
+  is a compile check only. Nothing was executed for aarch64. A 5.15-class
+  Jetson kernel cannot express `truncate` or `ioctl_dev`, so the guard
+  refuses every provider and names those rights. That is not a board
+  measurement.
 - Real provider binaries: NOT RUN. The stand-in is the static probe. A
   dynamically linked provider needs Landlock read rules for its loader and
   libraries. This lab grants none.
 - Mount, network, PID and IPC namespaces: NOT RUN. They are not layers of
-  this guard.
+  this guard. The PID namespace that would contain the provider is a named
+  gap, recorded above.
 - File descriptor inheritance: NOT RUN. The guard does not close descriptors
   that the provider inherits. Only the fault pipe is close-on-exec.
 - If the child crashes before `exec` without writing a fault, the pipe is

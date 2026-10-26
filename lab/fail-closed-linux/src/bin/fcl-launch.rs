@@ -7,7 +7,7 @@
 //! when a signal ended it).
 
 use fail_closed_linux::real::RealKernel;
-use fail_closed_linux::{launch, ProviderSpec, LANDLOCK_ABI_FLOOR, REFUSAL_EXIT_CODE};
+use fail_closed_linux::{launch, ProviderSpec, REFUSAL_EXIT_CODE};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::exit;
@@ -39,7 +39,7 @@ fn main() {
 fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
     let mut provider = None;
     let mut storage_root = None;
-    let mut landlock_abi = LANDLOCK_ABI_FLOOR;
+    let mut landlock_abi = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -54,15 +54,11 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
             Some("--storage-root") => storage_root = Some(PathBuf::from(value("--storage-root")?)),
             Some("--require-landlock-abi") => {
                 let text = value("--require-landlock-abi")?;
-                landlock_abi = text
-                    .to_str()
-                    .and_then(|text| text.parse::<u32>().ok())
-                    .ok_or_else(|| "--require-landlock-abi needs a number".to_string())?;
-                if landlock_abi < LANDLOCK_ABI_FLOOR {
-                    return Err(format!(
-                        "--require-landlock-abi cannot go below {LANDLOCK_ABI_FLOOR}"
-                    ));
-                }
+                landlock_abi = Some(
+                    text.to_str()
+                        .and_then(|text| text.parse::<u32>().ok())
+                        .ok_or_else(|| "--require-landlock-abi needs a number".to_string())?,
+                );
             }
             Some("--") => {
                 let executable = PathBuf::from(args.next().ok_or("no EXECUTABLE after --")?);
@@ -70,8 +66,10 @@ fn parse(args: Vec<OsString>) -> Result<ProviderSpec, String> {
                     .filter(|name| !name.is_empty())
                     .ok_or("--provider is required")?;
                 let storage_root = storage_root.ok_or("--storage-root is required")?;
-                let mut spec = ProviderSpec::new(provider, executable, storage_root)
-                    .require_landlock_abi(landlock_abi);
+                let mut spec = ProviderSpec::new(provider, executable, storage_root);
+                if let Some(abi) = landlock_abi {
+                    spec = spec.require_landlock_abi(abi);
+                }
                 for arg in args {
                     spec = spec.arg(arg);
                 }

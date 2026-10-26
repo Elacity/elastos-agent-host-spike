@@ -1,0 +1,13 @@
+id: F18-missing-right-silently-passed
+file: src/lib.rs
+test: simulated::sim_landlock_abi_too_old_refuses
+test: simulated::sim_landlock_abi_floor_cannot_be_lowered
+test: simulated::sim_per_right_floor_for_each_abi
+test: simulated::sim_missing_right_is_never_silently_dropped
+--- old
+    if let Some(mask) = missing_required_mask(abi) {
+        return Err(Fault::missing_rights(abi, mask));
+    }
+--- new
+    let _ = missing_required_mask(abi);
+--- end

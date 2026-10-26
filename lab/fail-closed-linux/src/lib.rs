@@ -2,10 +2,13 @@
 //!
 //! The guard runs in the provider's own process, after fork and before exec.
 //! It applies five layers in this order: user namespace, capability drop,
-//! no_new_privs, seccomp, Landlock. The first step that fails stops the guard
-//! and becomes a refusal that names the provider, the layer, the step and the
-//! OS error. The exec call is reached only after every step succeeded.
-//! `launch` has no unconfined path: a refusal starts nothing.
+//! no_new_privs, seccomp, Landlock. Landlock uses a per-right floor: the
+//! profile's needed rights are checked against the probed ABI, and a missing
+//! right refuses with the right and the ABI that first expresses it. The first
+//! step that fails stops the guard and becomes a refusal that names the
+//! provider, the layer, the step and the OS error. The exec call is reached
+//! only after every step succeeded. `launch` has no unconfined path: a
+//! refusal starts nothing.
 
 pub mod real;
 pub mod seccomp;
@@ -19,15 +22,23 @@ use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-/// Lowest Landlock ABI the guard accepts. ABI 5 is the first that handles
-/// device ioctl, so a lower ABI cannot express the rule set below.
-pub const LANDLOCK_ABI_FLOOR: u32 = 5;
-
 /// Exit code of `fcl-launch` when the guard refuses (`EX_OSERR`).
 pub const REFUSAL_EXIT_CODE: i32 = 71;
 
 /// An OS error number, as the kernel returned it.
 pub type Errno = i32;
+
+/// First Landlock ABI that can deny file truncation.
+pub const TRUNCATE_ABI: u32 = 3;
+/// First Landlock ABI that can deny device ioctl.
+pub const IOCTL_DEV_ABI: u32 = 5;
+/// First Landlock ABI that can set `LANDLOCK_SCOPE_SIGNAL`.
+pub const SCOPE_SIGNAL_ABI: u32 = 6;
+
+/// Bit in `Fault.errno` when `Step::AbiFloor` names a missing `truncate`.
+pub const MISSING_TRUNCATE: i32 = 1;
+/// Bit in `Fault.errno` when `Step::AbiFloor` names a missing `ioctl_dev`.
+pub const MISSING_IOCTL_DEV: i32 = 2;
 
 /// Landlock values from `<linux/landlock.h>`.
 pub mod landlock {
@@ -40,18 +51,27 @@ pub mod landlock {
     pub const ACCESS_FS_READ_DIR: u64 = 1 << 3;
     pub const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
     pub const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+    pub const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
     pub const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
     pub const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+    pub const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+    pub const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
     pub const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+    pub const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+    pub const ACCESS_FS_REFER: u64 = 1 << 13;
     pub const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
     pub const ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
     pub const ACCESS_NET_BIND_TCP: u64 = 1 << 0;
     pub const ACCESS_NET_CONNECT_TCP: u64 = 1 << 1;
+    pub const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
+    pub const SCOPE_SIGNAL: u64 = 1 << 1;
 
     /// Every filesystem right ABI 5 defines, bit 0 to `ACCESS_FS_IOCTL_DEV`.
     pub const HANDLED_FS: u64 = (ACCESS_FS_IOCTL_DEV << 1) - 1;
     pub const HANDLED_NET: u64 = ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP;
 
+    /// The eight storage rights this lab grants. No `REFER`, no `IOCTL_DEV`,
+    /// and no create of char, sock, fifo, block, or symlink.
     pub const STORAGE_ROOT_ACCESS: u64 = ACCESS_FS_READ_FILE
         | ACCESS_FS_READ_DIR
         | ACCESS_FS_WRITE_FILE
@@ -62,6 +82,112 @@ pub mod landlock {
         | ACCESS_FS_REMOVE_DIR;
     /// Linux `execve` opens the binary for read and execute.
     pub const EXECUTABLE_ACCESS: u64 = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE;
+}
+
+/// One wider-if-missing right the shared file profile needs.
+///
+/// `did-provider`, `wallet-provider` and `model-provider` share this list.
+/// `REFER` is not here: the kernel already denies reparent when that bit is
+/// absent. TCP bind/connect and `LANDLOCK_SCOPE_SIGNAL` are not here either:
+/// seccomp already denies `socket`, and scope is applied only when ABI 6
+/// reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NeededRight {
+    pub name: &'static str,
+    pub minimum_abi: u32,
+    pub mask: i32,
+}
+
+/// Rights whose absence leaves the sandbox wider than `(deny default)`.
+pub const FILE_PROFILE_NEEDED_RIGHTS: &[NeededRight] = &[
+    NeededRight {
+        name: "truncate",
+        minimum_abi: TRUNCATE_ABI,
+        mask: MISSING_TRUNCATE,
+    },
+    NeededRight {
+        name: "ioctl_dev",
+        minimum_abi: IOCTL_DEV_ABI,
+        mask: MISSING_IOCTL_DEV,
+    },
+];
+
+/// Filesystem bits this ABI can handle. Unknown bits are omitted so
+/// `landlock_create_ruleset` does not see `EINVAL`.
+pub fn handled_fs_for_abi(abi: u32) -> u64 {
+    let mut fs = (1u64 << 13) - 1;
+    if abi >= 2 {
+        fs |= landlock::ACCESS_FS_REFER;
+    }
+    if abi >= 3 {
+        fs |= landlock::ACCESS_FS_TRUNCATE;
+    }
+    if abi >= 5 {
+        fs |= landlock::ACCESS_FS_IOCTL_DEV;
+    }
+    fs
+}
+
+/// TCP bind and connect, from ABI 4. Not a launch requirement: seccomp
+/// already denies `socket`.
+pub fn handled_net_for_abi(abi: u32) -> u64 {
+    if abi >= 4 {
+        landlock::HANDLED_NET
+    } else {
+        0
+    }
+}
+
+/// `LANDLOCK_SCOPE_SIGNAL` from ABI 6. Below that the bit does not exist.
+pub fn scoped_for_abi(abi: u32) -> u64 {
+    if abi >= SCOPE_SIGNAL_ABI {
+        landlock::SCOPE_SIGNAL
+    } else {
+        0
+    }
+}
+
+/// Attribute size `landlock_create_ruleset` should receive. ABI 1-3 know
+/// only the filesystem field, ABI 4-5 add net, ABI 6 adds scope.
+pub fn ruleset_attr_size(handled_net: u64, scoped: u64) -> usize {
+    if scoped != 0 {
+        24
+    } else if handled_net != 0 {
+        16
+    } else {
+        8
+    }
+}
+
+/// Mask of needed rights this ABI cannot express. `None` means every
+/// needed right is present; the guard must not drop a bit from the mask.
+pub fn missing_required_mask(abi: u32) -> Option<i32> {
+    let mut mask = 0;
+    for right in FILE_PROFILE_NEEDED_RIGHTS {
+        if abi < right.minimum_abi {
+            mask |= right.mask;
+        }
+    }
+    (mask != 0).then_some(mask)
+}
+
+/// Reason text for a missing-right refusal. Names each right and the ABI
+/// that first expresses it.
+pub fn missing_rights_reason(abi: u32, mask: i32) -> String {
+    let names: Vec<String> = FILE_PROFILE_NEEDED_RIGHTS
+        .iter()
+        .filter(|right| mask & right.mask != 0)
+        .map(|right| format!("{} (needs ABI {})", right.name, right.minimum_abi))
+        .collect();
+    format!(
+        "this kernel's Landlock ABI {abi} cannot deny {}",
+        names.join("; ")
+    )
+}
+
+/// Whether this ABI would start the shared file-profile providers.
+pub fn file_profile_launches_on_abi(abi: u32) -> bool {
+    missing_required_mask(abi).is_none()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,6 +360,14 @@ impl Fault {
         }
     }
 
+    pub const fn missing_rights(found: u32, mask: i32) -> Fault {
+        Fault {
+            step: Step::AbiFloor,
+            errno: mask,
+            found,
+        }
+    }
+
     pub fn encode(self) -> [u8; Fault::ENCODED_LEN] {
         let mut bytes = [0u8; Fault::ENCODED_LEN];
         bytes[0..4].copy_from_slice(&(self.step as u32).to_le_bytes());
@@ -266,10 +400,11 @@ pub struct Refusal {
 impl Refusal {
     pub fn new(provider: &str, fault: Fault, landlock_abi_floor: u32) -> Refusal {
         let reason = match fault.step {
-            Step::AbiFloor => format!(
+            Step::AbiFloor if fault.errno == 0 => format!(
                 "Landlock ABI {} is below the required {}",
                 fault.found, landlock_abi_floor
             ),
+            Step::AbiFloor => missing_rights_reason(fault.found, fault.errno),
             Step::AbiProbe => format!(
                 "Landlock is not available: {}",
                 io::Error::from_raw_os_error(fault.errno)
@@ -280,7 +415,7 @@ impl Refusal {
             provider: provider.to_string(),
             layer: fault.step.layer(),
             step: fault.step,
-            errno: (fault.step != Step::AbiFloor).then_some(fault.errno),
+            errno: (fault.step != Step::AbiFloor || fault.errno != 0).then_some(fault.errno),
             reason,
         }
     }
@@ -320,7 +455,7 @@ impl ProviderSpec {
             executable: executable.into(),
             args: Vec::new(),
             storage_root: storage_root.into(),
-            landlock_abi_floor: LANDLOCK_ABI_FLOOR,
+            landlock_abi_floor: 0,
         }
     }
 
@@ -329,10 +464,10 @@ impl ProviderSpec {
         self
     }
 
-    /// Raises the Landlock ABI this provider needs. A value below
-    /// `LANDLOCK_ABI_FLOOR` keeps the floor.
+    /// Raises the Landlock ABI this provider needs on top of the per-right
+    /// check. It cannot skip a needed right the kernel lacks.
     pub fn require_landlock_abi(mut self, abi: u32) -> ProviderSpec {
-        self.landlock_abi_floor = abi.max(LANDLOCK_ABI_FLOOR);
+        self.landlock_abi_floor = abi;
         self
     }
 
@@ -358,7 +493,7 @@ pub struct Plan {
 
 impl Plan {
     pub fn new(spec: &ProviderSpec) -> Result<Plan, Refusal> {
-        let abi_floor = spec.landlock_abi_floor.max(LANDLOCK_ABI_FLOOR);
+        let abi_floor = spec.landlock_abi_floor;
         let invalid = || {
             Refusal::new(
                 &spec.name,
@@ -435,6 +570,7 @@ pub trait Kernel {
         &mut self,
         handled_fs: u64,
         handled_net: u64,
+        scoped: u64,
     ) -> Result<RawFd, Errno>;
     fn landlock_add_path_rule(
         &mut self,
@@ -489,8 +625,15 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
     if abi < plan.abi_floor {
         return Err(Fault::abi_floor(abi));
     }
+    if let Some(mask) = missing_required_mask(abi) {
+        return Err(Fault::missing_rights(abi, mask));
+    }
     let ruleset = kernel
-        .landlock_create_ruleset(landlock::HANDLED_FS, landlock::HANDLED_NET)
+        .landlock_create_ruleset(
+            handled_fs_for_abi(abi),
+            handled_net_for_abi(abi),
+            scoped_for_abi(abi),
+        )
         .map_err(os(Step::CreateRuleset))?;
     kernel
         .landlock_add_path_rule(ruleset, &plan.storage_root, landlock::STORAGE_ROOT_ACCESS)
@@ -554,5 +697,90 @@ mod tests {
         let mut unknown = bytes;
         unknown[0..4].copy_from_slice(&999u32.to_le_bytes());
         assert_eq!(Fault::decode(&unknown), None);
+    }
+
+    #[test]
+    fn file_profile_needs_truncate_and_ioctl_dev_not_refer() {
+        let names: Vec<&str> = FILE_PROFILE_NEEDED_RIGHTS
+            .iter()
+            .map(|right| right.name)
+            .collect();
+        assert_eq!(names, ["truncate", "ioctl_dev"]);
+        assert_eq!(
+            landlock::STORAGE_ROOT_ACCESS.count_ones(),
+            8,
+            "keep the eight-right storage mask"
+        );
+        assert_eq!(
+            landlock::STORAGE_ROOT_ACCESS
+                & (landlock::ACCESS_FS_REFER
+                    | landlock::ACCESS_FS_IOCTL_DEV
+                    | landlock::ACCESS_FS_MAKE_CHAR
+                    | landlock::ACCESS_FS_MAKE_SOCK
+                    | landlock::ACCESS_FS_MAKE_FIFO
+                    | landlock::ACCESS_FS_MAKE_BLOCK
+                    | landlock::ACCESS_FS_MAKE_SYM),
+            0
+        );
+    }
+
+    #[test]
+    fn per_right_floor_for_abi_1_through_6() {
+        let expected = [
+            (1, Some(MISSING_TRUNCATE | MISSING_IOCTL_DEV), false),
+            (2, Some(MISSING_TRUNCATE | MISSING_IOCTL_DEV), false),
+            (3, Some(MISSING_IOCTL_DEV), false),
+            (4, Some(MISSING_IOCTL_DEV), false),
+            (5, None, true),
+            (6, None, true),
+        ];
+        for (abi, mask, launches) in expected {
+            assert_eq!(missing_required_mask(abi), mask, "abi {abi}");
+            assert_eq!(file_profile_launches_on_abi(abi), launches, "abi {abi}");
+        }
+        let abi1 = missing_rights_reason(1, MISSING_TRUNCATE | MISSING_IOCTL_DEV);
+        assert!(
+            abi1.contains("ABI 1 cannot deny truncate (needs ABI 3)"),
+            "{abi1}"
+        );
+        assert!(abi1.contains("ioctl_dev (needs ABI 5)"), "{abi1}");
+        let abi3 = missing_rights_reason(3, MISSING_IOCTL_DEV);
+        assert!(
+            abi3.contains("ABI 3 cannot deny ioctl_dev (needs ABI 5)"),
+            "{abi3}"
+        );
+        assert!(!abi3.contains("truncate"), "{abi3}");
+    }
+
+    #[test]
+    fn handled_bits_follow_the_abi_and_never_invent_a_right() {
+        assert_eq!(handled_fs_for_abi(1) & landlock::ACCESS_FS_TRUNCATE, 0);
+        assert_eq!(handled_fs_for_abi(1) & landlock::ACCESS_FS_REFER, 0);
+        assert_eq!(handled_fs_for_abi(1) & landlock::ACCESS_FS_IOCTL_DEV, 0);
+        assert_ne!(handled_fs_for_abi(2) & landlock::ACCESS_FS_REFER, 0);
+        assert_ne!(handled_fs_for_abi(3) & landlock::ACCESS_FS_TRUNCATE, 0);
+        assert_eq!(handled_fs_for_abi(3) & landlock::ACCESS_FS_IOCTL_DEV, 0);
+        assert_eq!(handled_fs_for_abi(5), landlock::HANDLED_FS);
+        assert_eq!(handled_net_for_abi(3), 0);
+        assert_eq!(handled_net_for_abi(4), landlock::HANDLED_NET);
+        assert_eq!(scoped_for_abi(5), 0);
+        assert_eq!(scoped_for_abi(6), landlock::SCOPE_SIGNAL);
+        assert_eq!(ruleset_attr_size(0, 0), 8);
+        assert_eq!(ruleset_attr_size(landlock::HANDLED_NET, 0), 16);
+        assert_eq!(
+            ruleset_attr_size(landlock::HANDLED_NET, landlock::SCOPE_SIGNAL),
+            24
+        );
+    }
+
+    #[test]
+    fn pid_namespace_and_scope_signal_gaps() {
+        // The guard unshares only CLONE_NEWUSER. A PID namespace that contains
+        // the provider itself needs a grandchild after unshare(CLONE_NEWPID).
+        // This lab does not take that second fork. ABI 5 can launch and still
+        // cannot set LANDLOCK_SCOPE_SIGNAL.
+        assert_eq!(scoped_for_abi(5), 0);
+        assert_eq!(scoped_for_abi(6), landlock::SCOPE_SIGNAL);
+        assert_eq!(scoped_for_abi(SCOPE_SIGNAL_ABI - 1), 0);
     }
 }

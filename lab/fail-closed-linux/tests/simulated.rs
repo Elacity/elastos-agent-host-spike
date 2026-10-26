@@ -7,7 +7,11 @@ mod common;
 
 use common::{probe, PROVIDERS};
 use fail_closed_linux::sim::{SimKernel, SIM_PID};
-use fail_closed_linux::{launch, Errno, Layer, ProviderSpec, Refusal, Step};
+use fail_closed_linux::{
+    file_profile_launches_on_abi, handled_fs_for_abi, handled_net_for_abi, landlock, launch,
+    missing_required_mask, scoped_for_abi, Errno, Layer, ProviderSpec, Refusal, Step,
+    MISSING_IOCTL_DEV, MISSING_TRUNCATE,
+};
 
 fn spec(provider: &str) -> ProviderSpec {
     ProviderSpec::new(
@@ -134,9 +138,19 @@ fn sim_landlock_abi_too_old_refuses() {
             let mut kernel = SimKernel::with_landlock_abi(abi);
             let refusal = refused(&mut kernel, &spec(provider));
             assert_stopped_at(&refusal, &kernel, provider, Step::AbiFloor);
-            assert_eq!(refusal.errno, None, "{refusal}");
-            let reason = format!("Landlock ABI {abi} is below the required 5");
-            assert!(refusal.to_string().contains(&reason), "{refusal}");
+            let mask = missing_required_mask(abi).expect("ABI 1-4 lack a needed right");
+            assert_eq!(refusal.errno, Some(mask), "{refusal}");
+            let text = refusal.to_string();
+            assert!(
+                text.contains(&format!("this kernel's Landlock ABI {abi} cannot deny")),
+                "{refusal}"
+            );
+            if abi < 3 {
+                assert!(text.contains("truncate (needs ABI 3)"), "{refusal}");
+            } else {
+                assert!(!text.contains("truncate"), "{refusal}");
+            }
+            assert!(text.contains("ioctl_dev (needs ABI 5)"), "{refusal}");
             assert!(
                 !kernel.steps.contains(&Step::CreateRuleset),
                 "{:?}",
@@ -146,6 +160,7 @@ fn sim_landlock_abi_too_old_refuses() {
         let mut kernel = SimKernel::with_landlock_abi(6);
         let refusal = refused(&mut kernel, &spec(provider).require_landlock_abi(7));
         assert_stopped_at(&refusal, &kernel, provider, Step::AbiFloor);
+        assert_eq!(refusal.errno, None, "{refusal}");
         assert!(
             refusal
                 .to_string()
@@ -170,11 +185,17 @@ fn sim_landlock_abi_floor_cannot_be_lowered() {
     let mut kernel = SimKernel::with_landlock_abi(4);
     let refusal = refused(&mut kernel, &spec("model-provider").require_landlock_abi(3));
     assert_stopped_at(&refusal, &kernel, "model-provider", Step::AbiFloor);
+    assert_eq!(refusal.errno, Some(MISSING_IOCTL_DEV), "{refusal}");
     assert!(
         refusal
             .to_string()
-            .contains("Landlock ABI 4 is below the required 5"),
+            .contains("this kernel's Landlock ABI 4 cannot deny ioctl_dev (needs ABI 5)"),
         "{refusal}"
+    );
+    assert!(
+        !kernel.steps.contains(&Step::CreateRuleset),
+        "{:?}",
+        kernel.steps
     );
 }
 
@@ -236,5 +257,85 @@ fn sim_confined_provider_starts_after_every_layer() {
         let mut seen = kernel.steps.clone();
         seen.dedup();
         assert_eq!(seen, expected, "every guard step ran once, in order");
+        assert_eq!(kernel.handled_fs, handled_fs_for_abi(6));
+        assert_eq!(kernel.handled_net, handled_net_for_abi(6));
+        assert_eq!(kernel.scoped, landlock::SCOPE_SIGNAL);
+    }
+}
+
+#[test]
+fn sim_per_right_floor_for_each_abi() {
+    for provider in PROVIDERS {
+        for abi in 1..=6 {
+            let mut kernel = SimKernel::with_landlock_abi(abi);
+            if file_profile_launches_on_abi(abi) {
+                let started = launch(&mut kernel, &spec(provider)).expect("needed rights present");
+                assert_eq!(started.provider, provider);
+                assert_eq!(kernel.execs.len(), 1, "abi {abi} {:?}", kernel.execs);
+                assert_eq!(kernel.handled_fs, handled_fs_for_abi(abi), "abi {abi}");
+                assert_eq!(kernel.handled_net, handled_net_for_abi(abi), "abi {abi}");
+                assert_eq!(kernel.scoped, scoped_for_abi(abi), "abi {abi}");
+                assert_eq!(
+                    kernel.handled_fs & landlock::ACCESS_FS_IOCTL_DEV != 0,
+                    abi >= 5,
+                    "abi {abi} must not invent ioctl_dev"
+                );
+                if abi >= 6 {
+                    assert_eq!(
+                        kernel.scoped,
+                        landlock::SCOPE_SIGNAL,
+                        "{provider} abi {abi}"
+                    );
+                } else {
+                    assert_eq!(kernel.scoped, 0, "{provider} abi {abi}");
+                }
+            } else {
+                let refusal = refused(&mut kernel, &spec(provider));
+                assert_stopped_at(&refusal, &kernel, provider, Step::AbiFloor);
+                let mask = missing_required_mask(abi).expect("a missing right");
+                assert_eq!(refusal.errno, Some(mask), "{refusal}");
+                assert!(
+                    !kernel.steps.contains(&Step::CreateRuleset),
+                    "abi {abi} created a ruleset after a missing right: {:?}",
+                    kernel.steps
+                );
+                assert!(
+                    kernel.execs.is_empty(),
+                    "abi {abi} execs {:?}",
+                    kernel.execs
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sim_missing_right_is_never_silently_dropped() {
+    for provider in PROVIDERS {
+        for abi in 1..=4 {
+            let mut kernel = SimKernel::with_landlock_abi(abi);
+            let refusal = refused(&mut kernel, &spec(provider));
+            assert_eq!(refusal.step, Step::AbiFloor, "{refusal}");
+            assert_ne!(
+                refusal.errno, None,
+                "a missing right must be named, not passed: {refusal}"
+            );
+            let text = refusal.to_string();
+            assert!(text.contains("cannot deny"), "{refusal}");
+            if abi < 3 {
+                assert_eq!(
+                    refusal.errno,
+                    Some(MISSING_TRUNCATE | MISSING_IOCTL_DEV),
+                    "{refusal}"
+                );
+            } else {
+                assert_eq!(refusal.errno, Some(MISSING_IOCTL_DEV), "{refusal}");
+            }
+            assert!(
+                kernel.execs.is_empty(),
+                "abi {abi} started after dropping a right: {:?}",
+                kernel.execs
+            );
+        }
     }
 }
