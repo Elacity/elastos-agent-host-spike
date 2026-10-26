@@ -858,6 +858,24 @@ print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtere
 raise SystemExit(101)
 """
 
+STUB_TRAILING_TEXT_DELIMITER = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print()
+print("failures:")
+print()
+print("---- tests::planted_check stdout ----")
+print("failures: note")
+print("standard error: x")
+print("failures:")
+print("    tests::planted_check")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
 STUB_TWO_DELIMITERS = """import sys
 if "--list" in sys.argv:
     print("tests::planted_check: test")
@@ -881,21 +899,20 @@ STUB_TWO_SECTIONS = """import sys
 if "--list" in sys.argv:
     print("tests::planted_check: test")
     raise SystemExit(0)
-print("running 2 tests")
+print("running 1 test")
 print("test tests::planted_check ... FAILED")
-print("test tests::planted_check_two ... FAILED")
 print()
 print("failures:")
 print()
 print("---- tests::planted_check stdout ----")
 print("standard error: first")
 print("failures:")
-print("---- tests::planted_check_two stdout ----")
-print("standard error: second")
-print("failures:")
 print("    tests::planted_check")
-print("    tests::planted_check_two")
-print("test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stderr.write(
+    "\\n---- tests::planted_check stdout ----\\n"
+    "standard error: second\\n"
+    "failures:\\n")
 raise SystemExit(101)
 """
 
@@ -1055,21 +1072,37 @@ def an_unterminated_failure_section_stays_checked():
     return ok
 
 
-def section_delimiters_are_exact_lines():
-    """A section starts at a line that is exactly `---- NAME stdout ----` and
-    ends at a line that is exactly `failures:`. A line that only contains
-    those words is the test's own text (task 019)."""
+def section_header_is_an_exact_line():
+    """A section starts only at a line that is exactly
+    `---- NAME stdout ----`. An indented line with those words is the test's
+    own text, so its `standard error:` stays checked (task 019)."""
     ok = True
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
         SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
-        for title, text, want in (
-                ("an indented section header", STUB_INDENTED_SECTION, (False, "NOT RUN")),
-                ("a delimiter inside the section text", STUB_MIDLINE_DELIMITER,
-                 (True, "CAUGHT"))):
+        got = stub_verdict(STUB_INDENTED_SECTION)
+        print(f"self-test: an indented section header: {got[1]} ({got[2]})")
+        if got[:2] != (False, "NOT RUN"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def closing_delimiter_is_an_exact_line():
+    """A section ends only at a line that is exactly `failures:`. A line that
+    merely contains or extends those words is the test's own text, so the
+    section still runs to the exact line and its text is removed (task 019)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        for title, text in (
+                ("a delimiter inside the section text", STUB_MIDLINE_DELIMITER),
+                ("trailing text after the delimiter", STUB_TRAILING_TEXT_DELIMITER)):
             got = stub_verdict(text)
             print(f"self-test: {title}: {got[1]} ({got[2]})")
-            if got[:2] != want:
+            if got[:2] != (True, "CAUGHT"):
                 ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -1093,8 +1126,10 @@ def a_section_stops_at_its_first_delimiter():
 
 
 def every_failure_section_is_removed():
-    """Each failed test's captured section is removed, not only the first
-    (task 019)."""
+    """Every failed test's captured section is removed, not only the first
+    (task 019). libtest closes its own section with one `failures:` line; the
+    stub adds a second section on stderr, which libtest does not capture and
+    the runner joins after that line."""
     ok = True
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
@@ -2140,7 +2175,8 @@ SELF_TEST_CASES = {
     "a real catch counts": real_catch_counts,
     "a provider failure with stderr counts": provider_failure_with_stderr_counts,
     "an unterminated failure section stays checked": an_unterminated_failure_section_stays_checked,
-    "the section delimiters are exact lines": section_delimiters_are_exact_lines,
+    "the section header is an exact line": section_header_is_an_exact_line,
+    "the closing delimiter is an exact line": closing_delimiter_is_an_exact_line,
     "a section stops at its first delimiter": a_section_stops_at_its_first_delimiter,
     "every failure section is removed": every_failure_section_is_removed,
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
