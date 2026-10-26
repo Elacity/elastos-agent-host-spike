@@ -1667,8 +1667,12 @@ fn is_import(form: &str) -> bool {
     })
 }
 
-/// Whether a top-level form is neither a known profile head nor an inclusion.
+/// Whether a top-level list is neither a known profile head nor an inclusion.
+/// A bare value such as `1` is its own form and is not an unknown grant.
 fn is_unknown_profile_head(form: &str) -> bool {
+    if !form.starts_with('(') {
+        return false;
+    }
     let head = profile_head_token(form);
     !KNOWN_PROFILE_HEADS.contains(&head.as_str()) && !INCLUSION_HEADS.contains(&head.as_str())
 }
