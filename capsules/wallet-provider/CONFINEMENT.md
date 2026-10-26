@@ -214,6 +214,15 @@ binding is the only difference between the two runs.
   id is not named in its own document's `## Falsifiers` section or the section
   names an id that neither list registers. It reads files and starts no
   process.
+- `falsifier_section_check_reports_missing_and_stale_ids` builds the section in
+  memory. The list holds `DID1`, `DID2` and `DID10`; a section that names
+  `DID2`, `DID10` and the unregistered `WP9` returns exactly the missing
+  `DID1` and the unregistered `WP9`. A section that names `DID2` and `XDID1`
+  returns exactly the missing `DID1`, because a letter directly before a token
+  keeps it from naming an id; a section that names `DID2`, `DID1a` and
+  `DID1_x` returns that same one problem, because a letter or `_` directly
+  after the digits does. A section that names every id whole reports no
+  problem. The test reads no file and starts no process.
 - `allow_rule_removal_check_reports_an_unremoved_rule` builds a fixture
   profile and fixture entries in the test. An entry whose `new` still holds the
   form, whose `expect` is not `caught`, whose edit names the other provider's
@@ -495,6 +504,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Drop the string-id refusal from the one list reader (WP66):
   `allow_rule_removal_check_rejects_bad_inputs` fails because an entry without
   an id is dropped instead of refused.
+- Drop the character-before check from the section check (WP67):
+  `falsifier_section_check_reports_missing_and_stale_ids` fails on its `XDID1`
+  case because that token then names the missing own id and the missing-id
+  problem does not come.
+- Drop the character-after check from the section check (WP68): the same test
+  fails on its `DID1a` case because that token then names the missing own id
+  and the missing-id problem does not come.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

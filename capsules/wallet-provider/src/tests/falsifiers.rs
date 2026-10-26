@@ -56,8 +56,12 @@ use std::process::Command;
 /// `confined_outside_write_is_denied` fails on its fresh-base absence check,
 /// and task 063's WP66, which restores the silent `filter_map` drop in the one
 /// list reader instead of refusing an entry without a string id, so
-/// `allow_rule_removal_check_rejects_bad_inputs` fails on its missing-id case.
-const EXPECTED_FALSIFIERS: usize = 64;
+/// `allow_rule_removal_check_rejects_bad_inputs` fails on its missing-id case,
+/// and task 064's WP67, which drops the section check's character-before rule,
+/// so `XDID1` names `DID1`, and WP68, which drops its character-after rule, so
+/// `DID1a` names `DID1`; `falsifier_section_check_reports_missing_and_stale_ids`
+/// fails on the matching case because the missing-id problem does not come.
+const EXPECTED_FALSIFIERS: usize = 66;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

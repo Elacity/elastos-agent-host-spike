@@ -2,15 +2,17 @@
 //! pinned lab CIDs, a bounded call for bundles that hold a FIFO, observers
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
-//! signature checks share, and the one key-material scan (kept here, a file
-//! the falsifier runner restores after a killed run).
+//! signature checks share, the one key-material scan, and the run of
+//! README's Python rule (both kept here, a file the falsifier runner restores
+//! after a killed run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
@@ -19,8 +21,8 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
 use capsule_identity::{
-    check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed, CheckedBundle,
-    LabCid, Moment, Refusal,
+    check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed, BundleEntry,
+    CheckedBundle, LabCid, Moment, Refusal,
 };
 use tempfile::TempDir;
 
@@ -565,4 +567,125 @@ pub fn wc001_module(out_dir: &Path) -> Vec<u8> {
         String::from_utf8_lossy(&output.stderr),
     );
     fs::read(out_dir.join("capsule.wasm")).expect("read wc-001 capsule.wasm")
+}
+
+/// The interpreter that runs README's Python rule, always with `-I`.
+pub const PYTHON: &str = "python3";
+
+/// The heading of README's section that holds the Python rule.
+const ENCODING_HEADING: &str = "## The encoding\n";
+
+/// The ```python block of README's "The encoding" section: the one Python
+/// copy of the naming rule, as committed. A missing section, a section with
+/// no block or with more than one, or an unclosed block is refused with its
+/// reason.
+pub fn readme_python_block() -> Result<String, String> {
+    let readme = include_str!("../../README.md");
+    let start = readme
+        .find(ENCODING_HEADING)
+        .ok_or("README.md has no \"## The encoding\" section")?
+        + ENCODING_HEADING.len();
+    let section = &readme[start..];
+    let section = &section[..section.find("\n## ").unwrap_or(section.len())];
+    let open = "```python\n";
+    match section.matches(open).count() {
+        1 => {}
+        0 => return Err("README.md's \"The encoding\" holds no ```python block".to_owned()),
+        more => {
+            return Err(format!(
+                "README.md's \"The encoding\" holds {more} ```python blocks, not one"
+            ))
+        }
+    }
+    let body = &section[section.find(open).expect("found once") + open.len()..];
+    let end = body
+        .find("\n```\n")
+        .ok_or("README.md's ```python block in \"The encoding\" is never closed")?;
+    let block = &body[..end + 1];
+    Ok(block.to_owned())
+}
+
+/// The driver run after README's block. It holds no part of the naming
+/// rule: it reads `{bundle path: hex}` JSON from stdin, calls the block's
+/// `lab_cid` and prints its answer. First it checks how it was started: under
+/// `-I`, in an empty folder. If not, it exits non-zero with its reason.
+pub const README_PYTHON_DRIVER: &str = r#"
+import json, os, sys
+if not sys.flags.isolated:
+    sys.exit("the driver must run under python3 -I")
+if os.listdir("."):
+    sys.exit("the driver must run in a fresh, empty folder")
+files = json.loads(sys.stdin.buffer.read())
+print(lab_cid({path: bytes.fromhex(text) for path, text in files.items()}))
+"#;
+
+/// README's Python rule run on each bundle, given as its entries: one
+/// [`PYTHON`] `-I` run of the block and the driver per bundle, in order. Each
+/// answer is that run's one line. A missing block, or any run that gives no
+/// one line, is refused with its reason.
+pub fn readme_python_lab_cids(bundles: &[&[BundleEntry]]) -> Result<Vec<String>, String> {
+    let block = readme_python_block()?;
+    let program = format!("{block}{README_PYTHON_DRIVER}");
+    bundles
+        .iter()
+        .map(|entries| {
+            let files: serde_json::Map<String, serde_json::Value> = entries
+                .iter()
+                .map(|entry| (entry.path.clone(), hex::encode(&entry.content).into()))
+                .collect();
+            let input = serde_json::to_vec(&files).expect("the files as JSON");
+            run_python(&program, &input)
+        })
+        .collect()
+}
+
+/// `program` run once with [`PYTHON`] `-I -c` from a fresh, empty temp
+/// folder, with `stdin` as its input: its one line of output.
+pub fn run_python(program: &str, stdin: &[u8]) -> Result<String, String> {
+    run_python_with(PYTHON, program, stdin)
+}
+
+/// [`run_python`] with the interpreter `interpreter`. It never skips: an
+/// interpreter that cannot start, a non-zero exit, output that is not UTF-8,
+/// no line or more than one line are each refused with their reason.
+pub fn run_python_with(interpreter: &str, program: &str, stdin: &[u8]) -> Result<String, String> {
+    let fresh = temp_dir();
+    let mut child = Command::new(interpreter)
+        .arg("-I")
+        .arg("-c")
+        .arg(program)
+        .current_dir(fresh.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{interpreter} -I could not run: {error}"))?;
+    let mut input = child.stdin.take().expect("a piped stdin");
+    let stdin = stdin.to_vec();
+    let writer = thread::spawn(move || input.write_all(&stdin));
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("{interpreter} -I could not be waited for: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "{interpreter} -I exited with {}: {stderr}",
+            output.status
+        ));
+    }
+    writer
+        .join()
+        .expect("the stdin writer returns")
+        .map_err(|error| format!("could not write the input to {interpreter} -I: {error}"))?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|_| format!("{interpreter} -I printed bytes that are not UTF-8"))?;
+    let lines: Vec<&str> = stdout.lines().collect();
+    match lines[..] {
+        [line] => Ok(line.to_owned()),
+        [] => Err(format!("{interpreter} -I printed nothing: {stderr}")),
+        _ => Err(format!(
+            "{interpreter} -I printed {} lines, not one: {stdout:?}",
+            lines.len()
+        )),
+    }
 }
