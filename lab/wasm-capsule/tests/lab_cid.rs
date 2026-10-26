@@ -79,13 +79,20 @@ fn this_capsule_bundle_has_the_pinned_lab_cid() {
 }
 
 /// The lane's own files, as git lists them (tracked, or new and not ignored),
-/// relative to the lane. A listed file that is gone from the work tree is left
-/// out: it holds nothing. So is the falsifier runner's backup
-/// (`<file>.falsify-original`): a transient copy of a file that is already
-/// listed under its own name.
+/// relative to the lane. The listing is NUL-separated (`-z`), so git never
+/// quotes a path and every name read is the file's real name. A listed file
+/// that is gone from the work tree is left out: it holds nothing. So is the
+/// falsifier runner's backup (`<file>.falsify-original`): a transient copy of a
+/// file that is already listed under its own name.
 fn lane_files(lane: &Path) -> Vec<(String, String)> {
     let output = Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .current_dir(lane)
         .output()
         .expect("run git ls-files in the lane");
@@ -97,7 +104,7 @@ fn lane_files(lane: &Path) -> Vec<(String, String)> {
     );
     let listing = String::from_utf8(output.stdout).expect("git lists UTF-8 paths");
     let mut files = Vec::new();
-    for path in listing.lines() {
+    for path in listing.split_terminator('\0') {
         if path.ends_with(".falsify-original") {
             continue;
         }
