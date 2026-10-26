@@ -170,6 +170,31 @@ oracles and supplies contract evidence, not Linux execution evidence.
   `(allow file-read* (literal (param "READ_FIXTURE_KEY")))`. The check refuses
   it with a reason that names `fixture-provider` and
   `non-canonical parameter token READ_FIXTURE_KEY`. The test reads no file.
+- `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  builds the passing fixture and appends
+  `(deny file-read* (literal "/x;")) (allow default)` and
+  `(deny file-read* (literal "/))"))`. The check refuses it with a reason that
+  names `fixture-provider` and `must reject (allow default)`, because the
+  parser reads the `;` and the parentheses inside those strings as text. The
+  same test checks that the two lines hold three forms with `(allow default)`
+  second, that a `;` outside a string comments out the rest of its line, that
+  an escaped quote and an escaped backslash stay inside their string, that
+  whitespace inside a string is kept and outside it collapses, and that a form
+  after a comment's newline still loads. The test reads no file and starts no
+  process.
+- `the_string_fixture_loads_under_sandbox_exec` writes `(version 1)`,
+  `(deny default)` and those two lines to a temporary file and runs
+  `/usr/bin/sandbox-exec -f <file> /usr/bin/true`, which exits 0. Under
+  `(deny default)` alone that program cannot start, so the exit shows that
+  `sandbox-exec` reads the `;` and the parentheses as text and applies the
+  `(allow default)`. It checks the fixture's premise, not a rule, and carries
+  no falsifier entry.
+- `profile_forms_rejects_unclosed_string` reads an unclosed string and expects
+  the existing "the profile must not end early" reason with `unclosed string`
+  in it. The test reads no file and starts no process.
+- `profile_forms_rejects_unclosed_form` reads an unclosed form and expects the
+  same reason with `unclosed form` in it, and a closed form then loads. The
+  test reads no file and starts no process.
 - `file_profile_contract_checks_the_model_profile_when_present` runs the same
   list function over a temporary `capsules/` directory that holds the passing
   fixture for all three required profiles. It checks exactly did-provider,
@@ -240,6 +265,11 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Return `false` from the error arm of `sandbox_available` instead of failing
   the test (WP30): `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing`
   fails because a missing `sandbox-exec` on `macos` returns instead of failing.
+- Cut each line at its first `;` and count parentheses in every token again
+  (WP31): `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does`
+  fails because the hidden `(allow default)` then passes the check, and
+  `profile_forms_rejects_unclosed_string` fails because the cut reads no
+  string to refuse.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

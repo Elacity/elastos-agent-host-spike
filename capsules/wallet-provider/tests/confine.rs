@@ -1104,6 +1104,162 @@ fn file_profile_contract_rejects_a_non_canonical_token() {
     );
 }
 
+/// The profile lines whose `;`, `(` and `)` sit inside strings, with an
+/// `(allow default)` after the first one. `sandbox-exec` reads those three
+/// characters as text, so the lines hold two forms and then one more.
+const STRING_LINES: &str = r#"(deny file-read* (literal "/x;")) (allow default)
+(deny file-read* (literal "/))"))
+"#;
+
+/// The parser reads a `;` and every parenthesis inside a string as
+/// `sandbox-exec` does, so the one contract check sees the `(allow default)`
+/// that these lines hold. It keeps an escaped quote and an escaped backslash
+/// inside their string, keeps whitespace inside a string, collapses whitespace
+/// outside strings, and loads a form after a comment's newline. The fixtures
+/// are built in the test; no file is read and no process starts.
+///
+/// Falsifier: WP31 restores the plain cut at every `;` and the parenthesis
+/// count inside strings; this test fails because the hidden `(allow default)`
+/// then passes the check. WP32 to WP35 disable escaping, the in-string
+/// whitespace, the outside collapse and the comment's end at its newline;
+/// this test fails on each.
+#[test]
+fn file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete)
+        .expect("the passing fixture must pass the one check");
+    let profile = format!("{complete}{STRING_LINES}");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a fixture whose strings hold (allow default) must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
+        "the refusal must name the profile and the rule: {refusal}"
+    );
+
+    let forms = profile_forms(STRING_LINES);
+    assert_eq!(forms.len(), 3, "the two lines hold three forms: {forms:?}");
+    assert_eq!(
+        forms[1], "(allow default)",
+        "the second form must be the allow default: {forms:?}"
+    );
+
+    assert_eq!(
+        profile_forms("(version 1) ; (allow default)"),
+        vec!["(version 1)"],
+        "a `;` outside a string must comment out the rest of its line"
+    );
+
+    let escaped_quote = r#"(deny file-read* (literal "/a\"b)"))"#;
+    assert_eq!(
+        profile_forms(escaped_quote),
+        vec![escaped_quote],
+        "a backslash must escape the next character inside a string"
+    );
+
+    let escaped_backslash = r#"(deny file-read* (literal "/a\\"))"#;
+    assert_eq!(
+        profile_forms(escaped_backslash),
+        vec![escaped_backslash],
+        "an escaped backslash must stay inside its string"
+    );
+
+    let spaced = r#"(deny file-read* (literal "/a  b"))"#;
+    assert_eq!(
+        profile_forms(spaced),
+        vec![spaced],
+        "whitespace inside a string must be kept"
+    );
+
+    assert_eq!(
+        profile_forms("(version   1)"),
+        vec!["(version 1)"],
+        "whitespace outside strings must collapse to one space"
+    );
+
+    assert_eq!(
+        profile_forms("(version 1) ; (allow default)\n(deny default)"),
+        vec!["(version 1)", "(deny default)"],
+        "a form after a comment's newline must still load"
+    );
+}
+
+/// `sandbox-exec` itself reads the two string lines as `profile_forms` does:
+/// it parses their `;`, `(` and `)` as text and applies the `(allow default)`
+/// they hold. The fixture writes `(version 1)`, `(deny default)` and those two
+/// lines to a temporary file and runs `/usr/bin/true` under it, which must
+/// exit 0. Under `(deny default)` alone `/usr/bin/true` cannot start, so the
+/// exit shows the fixture's premise. It checks that premise, not a rule, so it
+/// carries no falsifier entry.
+#[test]
+fn the_string_fixture_loads_under_sandbox_exec() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let profile = format!("(version 1)\n(deny default)\n{STRING_LINES}");
+    let mut file = tempfile::NamedTempFile::new().expect("temporary string fixture profile");
+    file.write_all(profile.as_bytes())
+        .expect("write the string fixture profile");
+    let status = Command::new(SANDBOX_EXEC)
+        .arg("-f")
+        .arg(file.path())
+        .arg("/usr/bin/true")
+        .status()
+        .expect("sandbox-exec must start");
+    assert!(
+        status.success(),
+        "sandbox-exec must load the string fixture and start true: {status}"
+    );
+}
+
+/// The parser refuses an unclosed string with the existing "must not end
+/// early" reason and a detail that names the string. It reads no form past it.
+///
+/// Falsifier: WP36 drops the unclosed-string refusal; this test fails because
+/// the profile then ends as an unclosed form, whose reason names no string.
+#[test]
+fn profile_forms_rejects_unclosed_string() {
+    let refusal = std::panic::catch_unwind(|| profile_forms("(literal \"/unclosed)"))
+        .expect_err("an unclosed string must fail");
+    let message = refusal
+        .downcast_ref::<String>()
+        .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+    assert!(
+        message.contains("the profile must not end early"),
+        "the refusal must use the existing reason: {message}"
+    );
+    assert!(
+        message.contains("unclosed string"),
+        "the refusal must name the unclosed string: {message}"
+    );
+}
+
+/// The parser refuses an unclosed form with the existing "must not end early"
+/// reason and a detail that names the form, while a closed form loads.
+///
+/// Falsifier: WP37 drops the unclosed-form refusal; this test fails because
+/// the incomplete profile returns no refusal.
+#[test]
+fn profile_forms_rejects_unclosed_form() {
+    let refusal = std::panic::catch_unwind(|| profile_forms("(deny default"))
+        .expect_err("an unclosed form must fail");
+    let message = refusal
+        .downcast_ref::<String>()
+        .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+    assert!(
+        message.contains("the profile must not end early"),
+        "the refusal must use the existing reason: {message}"
+    );
+    assert!(
+        message.contains("unclosed form"),
+        "the refusal must name the unclosed form: {message}"
+    );
+    assert_eq!(
+        profile_forms("(deny default)"),
+        vec!["(deny default)"],
+        "a closed form must load"
+    );
+}
+
 /// The one list requires the model profile with the did and wallet profiles
 /// and refuses a missing or unreadable one instead of skipping it.
 #[test]
@@ -1162,31 +1318,99 @@ fn file_profile_contract_checks_the_model_profile_when_present() {
     );
 }
 
-/// Splits the profile into top-level s-expressions with comments removed, so a
-/// rule cannot hide behind line breaks or comments.
+/// Splits the profile into top-level s-expressions the way `sandbox-exec`
+/// reads it. `profile_characters` removes comments and marks strings; this
+/// function collapses whitespace outside strings, keeps every character inside
+/// one, counts parentheses only outside strings and collects the forms. An
+/// unclosed form is a refusal with its own reason.
 fn profile_forms(profile: &str) -> Vec<String> {
-    let mut text = String::new();
-    for line in profile.lines() {
-        text.push_str(line.split(';').next().unwrap_or(""));
-        text.push(' ');
-    }
     let mut forms = Vec::new();
     let mut current = String::new();
     let mut depth = 0usize;
-    for token in text.split_whitespace() {
-        if !current.is_empty() {
-            current.push(' ');
+    let mut space_due = false;
+    for (ch, in_string) in profile_characters(profile) {
+        if in_string {
+            if space_due && !current.is_empty() {
+                current.push(' ');
+            }
+            space_due = false;
+            current.push(ch);
+            continue;
         }
-        current.push_str(token);
-        depth += token.matches('(').count();
-        depth = depth.saturating_sub(token.matches(')').count());
-        if depth == 0 && !current.is_empty() {
-            forms.push(std::mem::take(&mut current));
+        match ch {
+            _ if ch.is_whitespace() => space_due = true,
+            '(' | ')' => {
+                if space_due && !current.is_empty() {
+                    current.push(' ');
+                }
+                space_due = false;
+                current.push(ch);
+                if ch == '(' {
+                    depth += 1;
+                } else {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && !current.is_empty() {
+                        forms.push(std::mem::take(&mut current));
+                    }
+                }
+            }
+            _ => {
+                if space_due && !current.is_empty() {
+                    current.push(' ');
+                }
+                space_due = false;
+                current.push(ch);
+            }
         }
     }
     assert!(
         current.is_empty(),
-        "the profile must not end early: {current}"
+        "the profile must not end early: unclosed form {current}"
     );
     forms
+}
+
+/// The characters the profile reader consumes, each marked with whether it
+/// sits inside a double-quoted string. A `;` outside a string starts a comment
+/// that runs to the end of its line. Inside a string a backslash escapes the
+/// next character, so a `;`, `(` and `)` there stay text and a quote does not
+/// end the string. The reader reads no block comment and no `#` literal,
+/// because no profile holds either. An unclosed string is a refusal with its
+/// own reason.
+fn profile_characters(profile: &str) -> Vec<(char, bool)> {
+    let mut characters = Vec::new();
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut escaped = false;
+    for ch in profile.chars() {
+        if in_comment {
+            in_comment = ch != '\n';
+            continue;
+        }
+        if escaped {
+            characters.push((ch, true));
+            escaped = false;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            characters.push((ch, true));
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            characters.push((ch, true));
+            continue;
+        }
+        if !in_string && ch == ';' {
+            in_comment = true;
+            continue;
+        }
+        characters.push((ch, in_string));
+    }
+    assert!(
+        !in_string,
+        "the profile must not end early: unclosed string in {profile}"
+    );
+    characters
 }

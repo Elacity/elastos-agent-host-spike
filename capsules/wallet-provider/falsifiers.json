@@ -1,5 +1,5 @@
 {
-  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Run the whole list from the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate.",
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Task 054 registers WP31, which restores the plain cut at every `;` and the parenthesis count inside strings, and WP32 to WP37, which disable escaping, whitespace inside a string, whitespace collapse outside strings, a comment's end at its newline, and the two parser refusals; `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP31 to WP35, `profile_forms_rejects_unclosed_string` catches WP36, and `profile_forms_rejects_unclosed_form` catches WP37. Run the whole list from the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate.",
   "falsifiers": [
     {
       "id": "WP01",
@@ -466,6 +466,118 @@
       ],
       "tests": [
         "sandbox_available_fails_for_macos_when_sandbox_exec_is_missing"
+      ]
+    },
+    {
+      "id": "WP31",
+      "title": "the profile parser cuts each line at its first `;` and counts parentheses inside strings",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for (ch, in_string) in profile_characters(profile) {",
+          "new": "    let text: String = profile\n        .lines()\n        .map(|line| line.split(';').next().unwrap_or(\"\"))\n        .collect::<Vec<_>>()\n        .join(\"\\n\");\n    for (ch, in_string) in text.chars().map(|ch| (ch, false)) {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP32",
+      "title": "the profile reader lets an escaped character end its string",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if escaped {\n            characters.push((ch, true));\n            escaped = false;\n            continue;\n        }",
+          "new": "        if escaped {\n            characters.push((ch, true));\n            escaped = false;\n        }"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP33",
+      "title": "the profile parser drops whitespace that sits inside a string",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            space_due = false;\n            current.push(ch);\n            continue;",
+          "new": "            space_due = false;\n            if !ch.is_whitespace() {\n                current.push(ch);\n            }\n            continue;"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP34",
+      "title": "the profile parser keeps whitespace outside strings instead of collapsing it",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            _ if ch.is_whitespace() => space_due = true,",
+          "new": "            _ if ch.is_whitespace() => current.push(ch),"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP35",
+      "title": "the profile reader runs a comment to the end of the profile instead of its line",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            in_comment = ch != '\\n';",
+          "new": "            in_comment = true;"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP36",
+      "title": "the profile reader drops the unclosed-string refusal",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        !in_string,",
+          "new": "        true,"
+        }
+      ],
+      "tests": [
+        "profile_forms_rejects_unclosed_string"
+      ]
+    },
+    {
+      "id": "WP37",
+      "title": "the profile parser drops the unclosed-form refusal",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        current.is_empty(),",
+          "new": "        true,"
+        }
+      ],
+      "tests": [
+        "profile_forms_rejects_unclosed_form"
       ]
     }
   ]
