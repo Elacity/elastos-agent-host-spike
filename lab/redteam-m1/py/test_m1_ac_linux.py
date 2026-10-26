@@ -20,6 +20,7 @@ so the Runtime is built once. Set RT_M1_AC_NAME to reuse a clone by name.
 """
 
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -76,6 +77,10 @@ def storage_state():
 class LinuxJourneys(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if STORAGE.exists():
+            raise rt.SetupError(
+                "%s exists before the run; FM-A12 measures whether a run creates it. "
+                "Remove it by hand after checking it is an earlier run's empty leftover." % STORAGE)
         root = rt.scratch_reuse(NAME)
         lane = root / LANE
         for rel, old, new in SHIMS:
@@ -90,6 +95,7 @@ class LinuxJourneys(unittest.TestCase):
         }
         cls.runs = {}
         cls.outputs = {}
+        cls.runtime = {}
 
         def journey(key, name):
             _, output, results = rt.cargo_test(
@@ -97,7 +103,15 @@ class LinuxJourneys(unittest.TestCase):
                 filters=[name], nocapture=True, env=env, timeout=3 * 3600)
             cls.runs[key] = results[name]
             cls.outputs[key] = output
-            print("%s: %s %s" % (key, name, results[name]), flush=True)
+            # The lane prints the Runtime it built and launched for this run.
+            hashes = set(re.findall(r'version identity: \{"kind":"native","role":"elastos","sha256":"([0-9a-f]{64})"\}', output))
+            if len(hashes) != 1:
+                raise rt.SetupError("%s: expected one elastos identity line, found %d" % (key, len(hashes)))
+            cls.runtime[key] = hashes.pop()
+            evidence = [line for line in output.splitlines()
+                        if line.startswith(("cleanup census:", "cancel settlement:", "kill settlement:", "host key read:"))]
+            print("%s: %s %s elastos:%s %s" % (key, name, results[name], cls.runtime[key][:12],
+                                               " | ".join(evidence)), flush=True)
 
         # Merged bytes (plus the shims).
         cls.storage_before = storage_state()
@@ -120,6 +134,13 @@ class LinuxJourneys(unittest.TestCase):
         journey("a6_runtime_without_session_check", A6)
         journey("a6_overlap_runtime_without_session_check", A6_OVERLAP)
         rt.reset(root, STEP_4[0])
+
+    def test_precondition_mutated_journeys_ran_the_edited_runtime(self):
+        baseline = {self.runtime[k] for k in self.runtime if "runtime_without" not in k}
+        mutated = {self.runtime[k] for k in self.runtime if "runtime_without" in k}
+        self.assertEqual(len(baseline), 1, "every baseline and fixture run used one Runtime")
+        self.assertEqual(len(mutated), 1, "both mutated runs used one Runtime")
+        self.assertNotEqual(baseline, mutated, "the edited Runtime was rebuilt and launched")
 
     # Independent Linux runs of the merged journeys.
     def test_merged_journeys_pass_on_linux(self):
