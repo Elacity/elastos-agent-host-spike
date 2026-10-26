@@ -1483,6 +1483,178 @@ On the peer scheme, provider_operation_action maps the operation `init` to `Acti
                 _ => None,
             },
 
-The project ask is the resource propose_init stores. The contract must be extended for a typed operation for run, for child, and for init. The two hosted rows and journal-append are not mapped in this section.
+The project ask is the resource propose_init stores. The contract must be extended for a typed operation for run, for child, and for init.
 
-This section cites no lab/grant-binding test.
+The two hosted asks point at section 4. ask_kind_name names Hosted as `hosted`. `examples/agent-host/src/lib.rs:8191` is that match arm.
+
+            ProposalKind::Hosted => Some("hosted"),
+
+The two resources are `Models/` and `<principal>/.AppData/Models/`. propose_hosted records the hosted step. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. Section 4 already maps those asks: the guest records a hosted step and the Runtime grants the call and carries it. The hosted rows point at section 4 and do not restate it.
+
+On the `model` scheme, provider_operation_action maps `offers_list`, `runs_get`, and `runs_events` to `Action::Read`, and `runs_create` and `runs_cancel` to `Action::Execute`. `elastos/crates/elastos-server/src/provider_resource.rs:163` is the read arm. `elastos/crates/elastos-server/src/provider_resource.rs:164` is the execute arm. `elastos/crates/elastos-server/src/provider_resource.rs:165` is the `_ => None` that closes the model match. MODEL_OPERATIONS names those five strings. Section 4 names those five strings. The ask name is `hosted`. localhost_resource holds the supported-operation list. localhost_op_required_action maps a name on that list to an action. The localhost operation list section 6 already quoted has no `hosted`.
+
+                "offers_list" | "runs_get" | "runs_events" => Some(Action::Read),
+                "runs_create" | "runs_cancel" => Some(Action::Execute),
+                _ => None,
+
+The journal-append ask writes the whole encoding. `examples/agent-host/asks.json:12` is that row.
+
+        {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
+
+ask_kind_name names JournalAppend as `journal-append`. `examples/agent-host/src/lib.rs:8194` is that match arm. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. The pattern is `<principal>/.AppData/Agents/agent-host/`.
+
+            ProposalKind::JournalAppend => Some("journal-append"),
+
+journal_write_body puts the whole encoding in `content`. A missing revision sets `create_only` true. A present revision sets `if_revision`. `examples/agent-host/src/lib.rs::journal_write_body` is that function. `examples/agent-host/src/lib.rs:3961` is the doc line. `examples/agent-host/src/lib.rs:3966` is the missing-revision arm. `examples/agent-host/src/lib.rs:3967` is the present-revision arm.
+
+    /// The write body the Runtime bridge reads: the whole encoding as `content`,
+    /// and `create_only` for the first version or `if_revision` after that.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn journal_write_body(bytes: &[u8], revision: Option<&str>) -> Vec<u8> {
+        let body = match revision {
+            None => serde_json::json!({ "content": bytes, "create_only": true }),
+            Some(revision) => serde_json::json!({ "content": bytes, "if_revision": revision }),
+        };
+        body.to_string().into_bytes()
+    }
+
+append_journal calls propose_journal_append, and that call's error returns `AppendOutcome::Held`. `examples/agent-host/src/lib.rs::append_journal` is that function. `examples/agent-host/src/lib.rs:4023` is the doc line: no grant, an open append, or a journal over the cap sends nothing. `examples/agent-host/src/lib.rs:4032-4033` is the call and the held return. The invoke uses the operation `write` and passes the grant id. `examples/agent-host/src/lib.rs:4061` is that invoke.
+
+    /// Write the whole journal as the next version, with the journal write grant.
+    /// No grant, an open append, or a journal over the cap sends nothing. The
+    /// stored copy shows this step as dispatched with no result.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn append_journal(
+        bus: &mut impl ResourceBus,
+        journal: &mut Journal,
+        cursor: &mut JournalCursor,
+        grant: Option<&JournalGrant>,
+    ) -> AppendOutcome {
+        let Ok(id) = propose_journal_append(journal, cursor) else {
+            return AppendOutcome::Held;
+        };
+
+        let reply = bus.invoke(&cursor.resource, "write", &body, grant.id());
+
+propose_journal_append returns host path when the resource fails the JOURNAL_ROOT check. `examples/agent-host/src/lib.rs::propose_journal_append` is that function. `examples/agent-host/src/lib.rs:3935` is the condition. `examples/agent-host/src/lib.rs:3936` is that return. The condition uses JOURNAL_ROOT and host_path. It returns held when the cursor is pending, the cursor is stale, or `open` is true. `open` is a JournalAppend step with no result in Prepared, Dispatched, or SettlementUnknown. `examples/agent-host/src/lib.rs:3947` is the held return. journal_write_body sends the whole encoding with create_only or if_revision, and append_journal invokes write.
+
+    /// An append records a step. It waits while an earlier append has no result,
+    /// so a lost reply is never followed by a second write.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn propose_journal_append(
+        journal: &mut Journal,
+        cursor: &JournalCursor,
+    ) -> Result<u64, &'static str> {
+        if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
+            return Err("host path");
+        }
+        let open = journal.steps.iter().any(|step| {
+            step.kind == ProposalKind::JournalAppend
+                && !step.has_result
+                && matches!(
+                    step.state,
+                    StepState::Prepared | StepState::Dispatched | StepState::SettlementUnknown
+                )
+        });
+        if cursor.pending.is_some() || cursor.stale || open {
+            return Err("held");
+        }
+        let id = propose_step(journal);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::JournalAppend;
+        step.resource = cursor.resource.clone();
+        step.old = cursor.revision.clone().unwrap_or_default();
+        Ok(id)
+    }
+
+Today's checks on an agent journal. agents_area_refusal allows `read` and `write` under `.AppData/Agents/`. `elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal` is that function. `elastos/crates/elastos-server/src/provider_resource.rs:379` is the match. `elastos/crates/elastos-server/src/provider_resource.rs:382` is the message. agent_path_refusal calls agents_area_refusal. protected_principal_root_resource_response holds the write arm for a principal-root object.
+
+    pub(crate) fn agents_area_refusal(
+        rooted: &str,
+        operation: &str,
+    ) -> Option<(&'static str, &'static str)> {
+        if !in_agents_area(rooted) {
+            return None;
+        }
+        if !matches!(operation, "read" | "write") {
+            return Some((
+                "operation_not_allowed",
+                "only read and write are allowed under .AppData/Agents/",
+            ));
+        }
+
+write_precondition returns an error when `create_only` and `if_revision` are both set, `WritePrecondition::Absent` when only `create_only` is set, `WritePrecondition::Revision` when only `if_revision` is set, and `None` when neither is set. `elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition` is that function. `elastos/crates/elastos-server/src/resource_bridge.rs:696` is the error arm. `elastos/crates/elastos-server/src/resource_bridge.rs:697` is the absent arm. `elastos/crates/elastos-server/src/resource_bridge.rs:698` is the revision arm. `elastos/crates/elastos-server/src/resource_bridge.rs:699` is the none arm.
+
+    fn write_precondition(request: &serde_json::Value) -> Result<Option<WritePrecondition>, String> {
+        let create_only = match request.get("create_only") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => return Err("create_only must be a boolean".to_string()),
+        };
+        let if_revision = match request.get("if_revision") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+            Some(_) => return Err("if_revision must be a non-empty string".to_string()),
+        };
+        match (create_only, if_revision) {
+            (true, Some(_)) => Err("create_only and if_revision cannot both be set".to_string()),
+            (true, None) => Ok(Some(WritePrecondition::Absent)),
+            (false, Some(revision)) => Ok(Some(WritePrecondition::Revision(revision))),
+            (false, None) => Ok(None),
+        }
+    }
+
+In the write arm of protected_principal_root_resource_response, an agent journal whose request has the append flag returns `append_not_allowed`. `elastos/crates/elastos-server/src/resource_bridge.rs:564` is that code. `elastos/crates/elastos-server/src/resource_bridge.rs:565` is the message that agent journals are written whole with a revision precondition.
+
+                if agent_journal && append {
+                    return Some(resource_error_response(
+                        "append_not_allowed",
+                        "append is read-then-write; Agent journals are written whole with a revision precondition",
+                    ));
+                }
+
+An agent journal with no precondition returns `revision_required`. `elastos/crates/elastos-server/src/resource_bridge.rs:576` is that code. `elastos/crates/elastos-server/src/resource_bridge.rs:577` is the message that agent journal writes need `create_only` or `if_revision`.
+
+                if agent_journal && precondition.is_none() {
+                    return Some(resource_error_response(
+                        "revision_required",
+                        "Agent journal writes need create_only or if_revision",
+                    ));
+                }
+
+When the append flag is false, the bytes are `content.clone()`. `elastos/crates/elastos-server/src/resource_bridge.rs:597` is that line.
+
+                    content.clone()
+
+A precondition that is present calls `write_principal_root_object_if_revision`. `elastos/crates/elastos-server/src/resource_bridge.rs:600` is that call.
+
+                    Some(precondition) => crate::auth::write_principal_root_object_if_revision(
+
+The guest ask is `journal-append`. The invoked operation is `write`, which is on the localhost list section 6 already quoted, and that list's `write` arm maps to `Action::Write`. The body is the whole encoding. The bridge refuses the append flag on an agent journal and stores `content.clone()` when that flag is false. Today's checks write the whole journal under create_only or if_revision, and they refuse append on an agent journal. The child-journal operation stays the second journal in the project-ask paragraphs. The contract must be extended for a typed operation named hosted, and for a typed operation that names journal-append apart from write. Every ask in the asks file is mapped in this section.
+
+This group is design input for B2. B2 stays open.
+
+`lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append` is the lab reference model. The lab model is not the Runtime. The body expects a refusal because the operation is an append. An overwrite grant returns AppendNotGranted, and the text is overwrite does not permit append.
+
+    #[test]
+    fn model_overwrite_grant_does_not_permit_append() {
+        let mut verifier = Verifier::new();
+        let (instance, handle) = bound_with(
+            &mut verifier,
+            Rights {
+                append: false,
+                overwrite: true,
+                child_journal: false,
+            },
+        );
+        let call = verifier.open_call(instance);
+        let refusal = verifier
+            .operate(&call, &guest(handle), Operation::Append)
+            .expect_err("overwrite grant refuses append");
+        assert_eq!(refusal, OperateRefuse::AppendNotGranted);
+        assert_eq!(refusal.to_string(), "overwrite does not permit append");
+    }
