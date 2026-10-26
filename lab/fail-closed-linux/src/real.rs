@@ -560,7 +560,9 @@ impl Kernel for RealKernel {
         let mut pid_buf = [0u8; 4];
         let (got_pid, _) = read_all(handoff_read, &mut pid_buf);
         unsafe { libc::close(handoff_read) };
-        reap(helper);
+        // The helper writes the pid and `_exit`s. Do not block forever if a
+        // plant keeps it alive: wait up to 100 ms, then leave it.
+        reap_if_exited(helper, 100);
 
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
 
@@ -597,5 +599,20 @@ fn reap(pid: libc::pid_t) {
         if ret >= 0 || errno() != libc::EINTR {
             return;
         }
+    }
+}
+
+fn reap_if_exited(pid: libc::pid_t, tries: u32) {
+    for _ in 0..tries {
+        let mut status = 0;
+        // SAFETY: WNOHANG does not block; `status` is a valid out pointer.
+        let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if ret == pid {
+            return;
+        }
+        if ret < 0 && errno() != libc::EINTR {
+            return;
+        }
+        unsafe { libc::usleep(1000) };
     }
 }

@@ -619,6 +619,32 @@ fn children_of(pid: u32) -> Vec<u32> {
         .collect()
 }
 
+fn zombies_with_parent(ppid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+            continue;
+        };
+        let is_zombie = status
+            .lines()
+            .any(|line| line.starts_with("State:\tZ") || line.starts_with("State: Z"));
+        let parent = status.lines().find_map(|line| {
+            line.strip_prefix("PPid:")
+                .and_then(|text| text.trim().parse::<u32>().ok())
+        });
+        if is_zombie && parent == Some(ppid) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
 fn innermost_child(pid: u32) -> Option<u32> {
     let mut current = pid;
     let mut last = None;
@@ -832,19 +858,10 @@ fn real_init_reaps_orphaned_grandchild() {
         require_line(&lines, "orphan-forked", provider);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut saw_zombie;
+        let mut leftover;
         loop {
-            let kids = children_of(pid);
-            saw_zombie = kids.iter().any(|child_pid| {
-                fs::read_to_string(format!("/proc/{child_pid}/status"))
-                    .ok()
-                    .is_some_and(|text| {
-                        text.lines().any(|line| {
-                            line.starts_with("State:\tZ") || line.starts_with("State: Z")
-                        })
-                    })
-            });
-            if !saw_zombie {
+            leftover = zombies_with_parent(pid);
+            if leftover.is_empty() {
                 break;
             }
             if std::time::Instant::now() >= deadline {
@@ -853,8 +870,8 @@ fn real_init_reaps_orphaned_grandchild() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(
-            !saw_zombie,
-            "{provider}: init left a grandchild zombie under {pid}"
+            leftover.is_empty(),
+            "{provider}: init left grandchild zombies {leftover:?} under {pid}"
         );
         assert!(
             child.try_wait().unwrap().is_none(),
@@ -862,12 +879,15 @@ fn real_init_reaps_orphaned_grandchild() {
         );
 
         drop(stdin);
-        let done = child.wait_with_output().unwrap();
+        let status = wait_with_timeout(&mut child, 5).unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{provider}: launcher did not exit after the provider closed");
+        });
         assert_eq!(
-            done.status.code(),
+            status.code(),
             Some(0),
-            "{provider}: {}",
-            String::from_utf8_lossy(&done.stderr)
+            "{provider}: expected exit 0, got {status:?}"
         );
     }
 }
