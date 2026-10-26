@@ -410,7 +410,7 @@ impl Drop for ConfinedProvider {
 )]
 fn confined_provider_serves_did_operations_under_its_root() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -504,7 +504,7 @@ fn confined_provider_serves_did_operations_under_its_root() {
 )]
 fn verify_did_recovery_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -568,7 +568,7 @@ fn verify_did_recovery_under_profile() {
 )]
 fn outside_write_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -641,7 +641,7 @@ fn outside_write_denied() {
 )]
 fn outside_read_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -722,7 +722,7 @@ fn outside_read_denied() {
 )]
 fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -837,7 +837,7 @@ fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
 )]
 fn persona_key_beneath_storage_parent_is_not_adopted() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -942,7 +942,7 @@ fn persona_key_beneath_storage_parent_is_not_adopted() {
 )]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -1097,7 +1097,7 @@ fn assert_startup_is_refused(
 )]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary identity root");
     let root = resolved(fixture.path());
@@ -1208,7 +1208,7 @@ impl StoredCopy {
 )]
 fn unbound_copy_is_refused_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let stored = StoredCopy::prepare();
     let before = fs::read(&stored.copy).expect("the copy must be readable");
@@ -1286,7 +1286,7 @@ fn unbound_copy_is_refused_under_profile() {
 )]
 fn bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let stored = StoredCopy::prepare();
     let before = fs::read(&stored.copy).expect("the copy must be readable");
@@ -1435,26 +1435,124 @@ fn profile_denies_network() {
     }
 }
 
+/// Splits the profile into top-level s-expressions the way `sandbox-exec`
+/// reads it. A `;` inside a string stays text. This is the shared reader
+/// used by `profile_denies_network`.
 fn profile_forms(profile: &str) -> Vec<String> {
-    let mut text = String::new();
-    for line in profile.lines() {
-        text.push_str(line.split(';').next().unwrap_or(""));
-        text.push(' ');
-    }
     let mut forms = Vec::new();
     let mut current = String::new();
     let mut depth = 0usize;
-    for token in text.split_whitespace() {
-        if !current.is_empty() {
-            current.push(' ');
+    let mut space_due = false;
+    for (ch, in_string) in profile_characters(profile) {
+        if in_string {
+            if space_due {
+                push_separator(&mut current);
+            }
+            space_due = false;
+            current.push(ch);
+            continue;
         }
-        current.push_str(token);
-        depth += token.matches('(').count();
-        depth = depth.saturating_sub(token.matches(')').count());
-        if depth == 0 && !current.is_empty() {
+        if depth == 0 && (ch.is_whitespace() || ch == '(') && !current.is_empty() {
             forms.push(std::mem::take(&mut current));
         }
+        match ch {
+            _ if ch.is_whitespace() => space_due = true,
+            '(' | ')' => {
+                if space_due {
+                    push_separator(&mut current);
+                }
+                space_due = false;
+                current.push(ch);
+                if ch == '(' {
+                    depth += 1;
+                } else {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && !current.is_empty() {
+                        forms.push(std::mem::take(&mut current));
+                    }
+                }
+            }
+            _ => {
+                if space_due {
+                    push_separator(&mut current);
+                }
+                space_due = false;
+                current.push(ch);
+            }
+        }
     }
-    assert!(current.is_empty(), "incomplete profile form: {current}");
+    if depth == 0 && !current.is_empty() {
+        forms.push(std::mem::take(&mut current));
+    }
+    assert!(
+        current.is_empty(),
+        "the profile must not end early: unclosed form {current}"
+    );
     forms
+}
+
+fn push_separator(current: &mut String) {
+    if !current.is_empty() && !current.ends_with('(') {
+        current.push(' ');
+    }
+}
+
+fn profile_characters(profile: &str) -> Vec<(char, bool)> {
+    let mut characters = Vec::new();
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut escaped = false;
+    for ch in profile.chars() {
+        if in_comment {
+            in_comment = ch != '\n';
+            if !in_comment {
+                characters.push((ch, false));
+            }
+            continue;
+        }
+        if escaped {
+            characters.push((ch, true));
+            escaped = false;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            characters.push((ch, true));
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            characters.push((ch, true));
+            continue;
+        }
+        if !in_string && ch == ';' {
+            in_comment = true;
+            continue;
+        }
+        characters.push((ch, in_string));
+    }
+    assert!(
+        !in_string,
+        "the profile must not end early: unclosed string in {profile}"
+    );
+    characters
+}
+
+/// A semicolon inside a string is text, so a later allow stays visible.
+///
+/// Falsifier: split every line on `;`; this fixture then panics
+/// `incomplete profile form` and this test fails.
+#[test]
+fn profile_forms_keeps_a_semicolon_inside_a_string() {
+    let forms = profile_forms("(deny file-read* (literal \"/x;\")) (allow default)\n");
+    assert!(
+        forms
+            .iter()
+            .any(|form| form.contains("(literal \"/x;\")") || form.contains("/x;")),
+        "the string that holds a semicolon must stay one form: {forms:?}"
+    );
+    assert!(
+        forms.iter().any(|form| form == "(allow default)"),
+        "the allow after a string semicolon must stay visible: {forms:?}"
+    );
 }

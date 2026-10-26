@@ -944,6 +944,22 @@ fn model_trace_refuses_a_root_wide_storage_read() {
         ),
         "the shared storage rule is not root-wide"
     );
+    assert!(
+        model_is_root_wide_read("(allow file-read*)"),
+        "an unfiltered file-read* is root-wide"
+    );
+    assert!(
+        model_is_root_wide_read("(allow file-read* (regex \"^/\"))"),
+        "a regex root read is root-wide"
+    );
+    assert!(
+        model_is_root_wide_read("(allow file-read* (literal \"/\" ))"),
+        "a spaced literal root read is root-wide"
+    );
+    assert!(
+        model_is_root_wide_read("(allow file-read* (subpath \"/.\"))"),
+        "a / . subpath is the host root"
+    );
 }
 
 /// The confined provider serves `init`, `status` and `offers_list`, and
@@ -958,7 +974,7 @@ fn model_trace_refuses_a_root_wide_storage_read() {
 )]
 fn model_provider_ops_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let storage = Storage::prepare("ops");
     assert!(
@@ -1081,7 +1097,7 @@ fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
 )]
 fn model_outside_write_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = Redirect::prepare("outside-write");
     let before = tree_snapshot(&fixture.outside);
@@ -1194,7 +1210,7 @@ fn only_record(runs: &Path) -> PathBuf {
 )]
 fn model_outside_read_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let storage = Storage::prepare("outside-read");
     let runs = storage.root.join("runs");
@@ -1305,7 +1321,7 @@ const CREATE_FIXTURE_RULE: &str =
 )]
 fn model_outside_create_reports_access_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = Redirect::prepare("outside-create");
     // `Storage` resolves its paths, so this is the path the sandbox matches.
@@ -1406,7 +1422,7 @@ impl LocalEngine {
 )]
 fn model_local_offer_fails_closed_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = LocalEngine::prepare("local-offer");
     let engine_before = tree_snapshot(&fixture.engine_dir);
@@ -1667,7 +1683,7 @@ impl HostedTransport {
 )]
 fn model_hosted_run_fails_closed_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = HostedTransport::prepare("hosted-run");
     let mut provider = Provider::start(Launch::Confined(&fixture.storage));
@@ -2002,7 +2018,7 @@ impl StoredCopy {
 )]
 fn model_unbound_program_refused_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = StoredCopy::prepare("unbound-program");
     let before = tree_snapshot(&fixture.storage.root);
@@ -2067,7 +2083,7 @@ fn model_unbound_program_refused_under_profile() {
 )]
 fn model_bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = StoredCopy::prepare("bound-copy");
     let mut provider = Provider::start(Launch::Program {
@@ -2107,7 +2123,7 @@ fn model_bound_copy_serves_under_profile() {
 )]
 fn byte_different_file_at_bound_path_starts() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let binary = resolved(Path::new(PROVIDER_BINARY));
     let recorded = record_provider_executable(&binary);
@@ -2318,7 +2334,7 @@ fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, 
 )]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let storage = Storage::prepare("profile-cannot-apply");
     let binary = resolved(Path::new(PROVIDER_BINARY));
@@ -2496,11 +2512,72 @@ fn model_profile_forms(profile: &str) -> Vec<String> {
     forms
 }
 
-/// A storage right may not claim a root-wide read.
+/// A storage right may not claim a root-wide read: an unfiltered file-read,
+/// a regex or prefix on `/`, or a path that normalises to `/`.
 fn model_is_root_wide_read(form: &str) -> bool {
-    form.starts_with("(allow ")
-        && form.contains("file-read")
-        && (form.contains("(literal \"/\")") || form.contains("(subpath \"/\")"))
+    let folded = form.to_ascii_lowercase();
+    let Some(rest) = folded.strip_prefix("(allow") else {
+        return false;
+    };
+    if !rest.is_empty() && !rest.starts_with([' ', '(', ')']) {
+        return false;
+    }
+    let Some(inner) = form.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return false;
+    };
+    let children = model_profile_forms(inner);
+    let reads_file = children.iter().any(|child| {
+        !child.starts_with('(') && child.to_ascii_lowercase().starts_with("file-read")
+    });
+    if !reads_file {
+        return false;
+    }
+    let filters: Vec<&String> = children
+        .iter()
+        .filter(|child| child.starts_with('('))
+        .collect();
+    if filters.is_empty() {
+        return true;
+    }
+    filters.iter().any(|filter| {
+        let Some(inner) = filter.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+            return false;
+        };
+        let parts = model_profile_forms(inner);
+        let Some(kind) = parts.first() else {
+            return false;
+        };
+        let kind = kind.to_ascii_lowercase();
+        let Some(raw) = parts.get(1) else {
+            return false;
+        };
+        let arg = raw
+            .strip_prefix('"')
+            .and_then(|inner| inner.strip_suffix('"'))
+            .unwrap_or(raw);
+        match kind.as_str() {
+            "literal" | "subpath" | "prefix" => model_path_normalises_to_root(arg),
+            "regex" => arg.starts_with("^/"),
+            _ => false,
+        }
+    })
+}
+
+fn model_path_normalises_to_root(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                let _ = parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.is_empty()
 }
 
 /// Drops Rust comments so a citation cannot point at a commented-out `fn`.
@@ -2510,7 +2587,7 @@ fn rust_source_without_comments(source: &str) -> String {
     let mut in_string = false;
     let mut escaped = false;
     let mut in_line = false;
-    let mut in_block = false;
+    let mut in_block = 0usize;
     while let Some(ch) = chars.next() {
         if in_line {
             if ch == '\n' {
@@ -2519,10 +2596,15 @@ fn rust_source_without_comments(source: &str) -> String {
             }
             continue;
         }
-        if in_block {
+        if in_block > 0 {
+            if ch == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                in_block += 1;
+                continue;
+            }
             if ch == '*' && chars.peek() == Some(&'/') {
                 chars.next();
-                in_block = false;
+                in_block -= 1;
             }
             continue;
         }
@@ -2544,7 +2626,7 @@ fn rust_source_without_comments(source: &str) -> String {
         }
         if ch == '/' && chars.peek() == Some(&'*') {
             chars.next();
-            in_block = true;
+            in_block = 1;
             continue;
         }
         if ch == '"' {

@@ -649,7 +649,7 @@ fn read_store(root: &Path) -> Value {
 )]
 fn confined_provider_serves_wallet_operations_under_its_root() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
     let root = resolved(root.path());
@@ -730,7 +730,7 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 )]
 fn confined_outside_write_is_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
     let root = resolved(root.path());
@@ -814,7 +814,7 @@ fn confined_outside_write_is_denied() {
 )]
 fn confined_outside_read_is_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
     let root = resolved(root.path());
@@ -887,7 +887,7 @@ fn confined_outside_read_is_denied() {
 )]
 fn planted_key_beneath_storage_parent_is_not_read() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
     let root = resolved(root.path());
@@ -962,7 +962,7 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 )]
 fn account_operations_beneath_storage_parent_are_refused() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let root = tempfile::tempdir().expect("temporary wallet root");
     let root = resolved(root.path());
@@ -1104,7 +1104,7 @@ fn plant_storage_key(wallet_dir: &Path) {
 )]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary wallet root");
     let base = resolved(fixture.path());
@@ -1258,7 +1258,7 @@ impl StoredCopy {
 )]
 fn unbound_copy_is_refused_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let stored = StoredCopy::prepare();
     let before = fs::read(&stored.copy).expect("the copy must be readable");
@@ -1331,7 +1331,7 @@ fn unbound_copy_is_refused_under_profile() {
 )]
 fn bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let stored = StoredCopy::prepare();
     let bound: Vec<(&str, PathBuf)> = canonical_bindings(&stored.base)
@@ -1379,7 +1379,7 @@ fn bound_copy_serves_under_profile() {
 )]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let fixture = tempfile::tempdir().expect("temporary wallet root");
     let base = resolved(fixture.path());
@@ -1542,41 +1542,200 @@ fn invalid_json_answer_names_the_request_and_the_parse_error() {
     eprintln!("invalid-JSON failure: {failure}");
 }
 
+/// SBPL operations that grant the network. `system-socket` creates sockets
+/// without the word `network`.
+const NETWORK_OPERATIONS: &[&str] = &[
+    "network*",
+    "network-inbound",
+    "network-outbound",
+    "network-bind",
+    "system-socket",
+];
+
+/// Top-level profile heads the contract accepts. Inclusion forms are refused
+/// by `is_import`; anything else is an unknown top-level form.
+const KNOWN_PROFILE_HEADS: &[&str] = &["version", "deny", "allow", "if", "begin"];
+
+/// Inclusion forms: `import`, `include`, `load`, `require`.
+const INCLUSION_HEADS: &[&str] = &["import", "include", "load", "require"];
+
+/// Whether `form` starts with an `allow` head, including `(ALLOW` and
+/// `(allow(`.
+fn allow_head(form: &str) -> bool {
+    let folded = form.to_ascii_lowercase();
+    let Some(rest) = folded.strip_prefix("(allow") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with([' ', '(', ')'])
+}
+
+/// Operation tokens sitting directly inside an allow form. A token inside a
+/// nested filter or a string is not an operation. Names are case-folded.
+fn allow_operation_tokens(form: &str) -> Vec<String> {
+    if !allow_head(form) {
+        return Vec::new();
+    }
+    let rest = &form[6..];
+    let mut operations: Vec<String> = Vec::new();
+    let mut operation = String::new();
+    let mut depth = 0usize;
+    for (ch, in_string) in profile_characters(rest) {
+        if in_string {
+            flush_operation(&mut operation, depth, &mut operations);
+            continue;
+        }
+        match ch {
+            '(' | ')' => {
+                flush_operation(&mut operation, depth, &mut operations);
+                depth = if ch == '(' {
+                    depth + 1
+                } else {
+                    depth.saturating_sub(1)
+                };
+            }
+            _ if ch.is_whitespace() => {
+                flush_operation(&mut operation, depth, &mut operations);
+            }
+            _ => operation.push(ch),
+        }
+    }
+    flush_operation(&mut operation, depth, &mut operations);
+    for operation in &mut operations {
+        operation.make_ascii_lowercase();
+    }
+    operations
+}
+
+/// Nested filter lists that sit directly inside an allow form.
+fn allow_filters(form: &str) -> Vec<String> {
+    if !allow_head(form) {
+        return Vec::new();
+    }
+    let Some(inner) = form.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return Vec::new();
+    };
+    profile_forms(inner)
+        .into_iter()
+        .filter(|child| child.starts_with('('))
+        .collect()
+}
+
+/// The first token of a list, case-folded. Empty when `form` is not a list.
+fn profile_head_token(form: &str) -> String {
+    let folded = form.to_ascii_lowercase();
+    let inner = folded.strip_prefix('(').unwrap_or(&folded);
+    inner
+        .split([' ', '(', ')'])
+        .find(|token| !token.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Whether `form` is a top-level allow rule that grants the network. This is
 /// the one copy of the rule, used both by the provider's own profile test and
 /// by the shared file-profile contract check (P10).
 fn is_network_allow(form: &str) -> bool {
-    form.starts_with("(allow ") && form.contains("network")
+    allow_operation_tokens(form)
+        .iter()
+        .any(|operation| NETWORK_OPERATIONS.contains(&operation.as_str()))
 }
 
 /// Whether `form` is a top-level allow rule that grants every operation by
 /// default. This is the one copy of the rule, used both by the provider's own
 /// profile test and by the shared file-profile contract check (P10).
 fn is_default_allow(form: &str) -> bool {
-    form.starts_with("(allow ") && form.split([' ', '(', ')']).any(|token| token == "default")
+    if allow_operation_tokens(form)
+        .iter()
+        .any(|operation| operation == "default")
+    {
+        return true;
+    }
+    allow_filters(form)
+        .iter()
+        .any(|filter| profile_head_token(filter) == "default")
 }
 
-/// Whether `form` is an `(import ...)` list, at any depth.
+/// Whether `form` is an inclusion list (`import`, `include`, `load`,
+/// `require`), at any depth. `require-all` stays a filter combinator.
 fn is_import(form: &str) -> bool {
-    let Some(rest) = form.strip_prefix("(import") else {
-        return false;
-    };
-    rest.is_empty() || rest.starts_with([' ', '"', '(', ')'])
+    let folded = form.to_ascii_lowercase();
+    INCLUSION_HEADS.iter().any(|head| {
+        let prefix = format!("({head}");
+        folded
+            .strip_prefix(&prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '"', '(', ')']))
+    })
 }
 
-/// Whether `form` is an allow that reads the host root: a `file-read` operation
-/// with `(literal "/")` or `(subpath "/")`.
+/// Whether a top-level form is neither a known profile head nor an inclusion.
+fn is_unknown_profile_head(form: &str) -> bool {
+    let head = profile_head_token(form);
+    !KNOWN_PROFILE_HEADS.contains(&head.as_str()) && !INCLUSION_HEADS.contains(&head.as_str())
+}
+
+/// Whether `form` is an allow that reads the host root: an unfiltered
+/// `file-read` operation, a regex or prefix on `/`, or a `literal`/`subpath`
+/// path that normalises to `/`.
 fn is_root_wide_read(form: &str) -> bool {
-    if !form.starts_with("(allow ") {
+    let reads_file = allow_operation_tokens(form)
+        .iter()
+        .any(|operation| operation.starts_with("file-read"));
+    if !reads_file {
         return false;
     }
-    let reads_file = form.split([' ', '(', ')']).any(|token| {
-        token == "file-read*"
-            || token == "file-read-data"
-            || token == "file-read-metadata"
-            || token.starts_with("file-read")
-    });
-    reads_file && (form.contains("(literal \"/\")") || form.contains("(subpath \"/\")"))
+    let filters = allow_filters(form);
+    if filters.is_empty() {
+        return true;
+    }
+    filters.iter().any(|filter| filter_is_root_wide(filter))
+}
+
+/// Whether one path filter names the host root after normalisation.
+fn filter_is_root_wide(filter: &str) -> bool {
+    let Some(inner) = filter.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return false;
+    };
+    let children = profile_forms(inner);
+    let Some(kind) = children.first() else {
+        return false;
+    };
+    let kind = kind.to_ascii_lowercase();
+    let Some(arg) = children.get(1).map(|value| unquote_profile_string(value)) else {
+        return false;
+    };
+    match kind.as_str() {
+        "literal" | "subpath" | "prefix" => path_normalises_to_root(&arg),
+        "regex" => arg.starts_with("^/"),
+        _ => false,
+    }
+}
+
+/// A profile string token without its surrounding quotes.
+fn unquote_profile_string(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value)
+        .to_string()
+}
+
+/// Whether `path` is the host root after collapsing `.`, `..` and empty
+/// segments. `/`, `/.` and `//` are the root.
+fn path_normalises_to_root(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                let _ = parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.is_empty()
 }
 
 /// Every list in `form`, the form itself first, then each nested list.
@@ -1599,15 +1758,15 @@ fn collect_nested_lists(form: &str, lists: &mut Vec<String>) {
     }
 }
 
-/// Rust source with `//` and `/* */` comments removed. A citation must name
-/// a remaining `fn`, not a comment.
+/// Rust source with `//` and nested `/* */` comments removed. A citation
+/// must name a remaining `fn`, not a comment.
 fn rust_source_without_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     let mut in_string = false;
     let mut escaped = false;
     let mut in_line = false;
-    let mut in_block = false;
+    let mut in_block = 0usize;
     while let Some(ch) = chars.next() {
         if in_line {
             if ch == '\n' {
@@ -1616,10 +1775,15 @@ fn rust_source_without_comments(source: &str) -> String {
             }
             continue;
         }
-        if in_block {
+        if in_block > 0 {
+            if ch == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                in_block += 1;
+                continue;
+            }
             if ch == '*' && chars.peek() == Some(&'/') {
                 chars.next();
-                in_block = false;
+                in_block -= 1;
             }
             continue;
         }
@@ -1641,7 +1805,7 @@ fn rust_source_without_comments(source: &str) -> String {
         }
         if ch == '/' && chars.peek() == Some(&'*') {
             chars.next();
-            in_block = true;
+            in_block = 1;
             continue;
         }
         if ch == '"' {
@@ -1650,6 +1814,159 @@ fn rust_source_without_comments(source: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Whether `source` holds a `#[test] fn <function>(` item. A match inside a
+/// string or a comment is not a citation.
+fn rust_holds_cited_test(source: &str, function: &str) -> bool {
+    let cleaned = rust_source_without_comments(source);
+    let needle: Vec<char> = format!("fn {function}(").chars().collect();
+    if needle.is_empty() {
+        return false;
+    }
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if chars[i..].starts_with(&needle) && rust_ident_boundary_before(&chars, i) {
+            let before: String = chars[..i].iter().collect();
+            if preceding_attributes_include_test(&before) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn rust_ident_boundary_before(chars: &[char], at: usize) -> bool {
+    at == 0 || {
+        let prev = chars[at - 1];
+        !prev.is_ascii_alphanumeric() && prev != '_'
+    }
+}
+
+/// Whether the attributes immediately before a `fn` include `#[test]`.
+fn preceding_attributes_include_test(before: &str) -> bool {
+    let mut s = skip_fn_qualifiers(before);
+    let mut saw_test = false;
+    loop {
+        s = s.trim_end();
+        let Some(start) = last_attribute_start(s) else {
+            break;
+        };
+        if attribute_is_test(&s[start..]) {
+            saw_test = true;
+        }
+        s = s[..start].trim_end();
+    }
+    saw_test
+}
+
+fn skip_fn_qualifiers(before: &str) -> &str {
+    let mut s = before.trim_end();
+    loop {
+        let next = s.trim_end();
+        if let Some(rest) = strip_ending_word(next, "unsafe") {
+            s = rest;
+            continue;
+        }
+        if let Some(rest) = strip_ending_word(next, "async") {
+            s = rest;
+            continue;
+        }
+        if let Some(rest) = strip_ending_word(next, "const") {
+            s = rest;
+            continue;
+        }
+        if next.ends_with(')') {
+            if let Some(open) = next.rfind("pub(") {
+                if rust_word_boundary_str(&next[..open]) {
+                    s = &next[..open];
+                    continue;
+                }
+            }
+        }
+        if let Some(rest) = strip_ending_word(next, "pub") {
+            s = rest;
+            continue;
+        }
+        break;
+    }
+    s
+}
+
+fn strip_ending_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+    s.strip_suffix(word).and_then(|rest| {
+        if rust_word_boundary_str(rest) {
+            Some(rest)
+        } else {
+            None
+        }
+    })
+}
+
+fn rust_word_boundary_str(before: &str) -> bool {
+    before
+        .chars()
+        .last()
+        .is_none_or(|prev| !prev.is_ascii_alphanumeric() && prev != '_')
+}
+
+fn last_attribute_start(s: &str) -> Option<usize> {
+    if !s.ends_with(']') {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut depth = 0isize;
+    let mut i = s.len();
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b']' => depth += 1,
+            b'[' => {
+                depth -= 1;
+                if depth == 0 {
+                    if i > 0 && bytes[i - 1] == b'#' {
+                        return Some(i - 1);
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn attribute_is_test(attr: &str) -> bool {
+    let Some(body) = attr
+        .strip_prefix("#[")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    body.split(|ch: char| ch == '(' || ch.is_whitespace())
+        .next()
+        .is_some_and(|name| name == "test")
 }
 
 /// The one pinned justification for a platform-baseline id. A prefix plus
@@ -1694,39 +2011,12 @@ fn platform_baseline_justification_text(name: &str, id: &str) -> Result<String, 
 /// quote or parenthesis reads here as `profile_forms` reads it. This is the one
 /// copy of the rule, used by the shared file-profile contract check (P10).
 fn is_exec_allow(form: &str) -> bool {
-    let Some(rest) = form.strip_prefix("(allow") else {
-        return false;
-    };
-    if !rest.starts_with([' ', '(']) {
-        return false;
-    }
-    let mut operations: Vec<String> = Vec::new();
-    let mut operation = String::new();
-    let mut depth = 0usize;
-    for (ch, in_string) in profile_characters(rest) {
-        if in_string {
-            flush_operation(&mut operation, depth, &mut operations);
-            continue;
-        }
-        match ch {
-            '(' | ')' => {
-                flush_operation(&mut operation, depth, &mut operations);
-                depth = if ch == '(' {
-                    depth + 1
-                } else {
-                    depth.saturating_sub(1)
-                };
-            }
-            _ if ch.is_whitespace() => {
-                flush_operation(&mut operation, depth, &mut operations);
-            }
-            _ => operation.push(ch),
-        }
-    }
-    flush_operation(&mut operation, depth, &mut operations);
-    operations
-        .iter()
-        .any(|operation| operation == "process*" || operation.starts_with("process-exec"))
+    allow_operation_tokens(form).iter().any(|operation| {
+        operation == "process*"
+            || operation.starts_with("process-exec")
+            || operation == "process-fork"
+            || operation.starts_with("process-fork")
+    })
 }
 
 /// Records one finished operation token when it sits directly inside the allow
@@ -1856,6 +2146,9 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
     }
     let mut exec_allows = Vec::new();
     for form in &forms {
+        if is_unknown_profile_head(form) {
+            return Err(format!("{name} must reject unknown top-level form: {form}"));
+        }
         for list in nested_lists(form) {
             if is_default_allow(&list) {
                 return Err(format!("{name} must reject (allow default): {list}"));
@@ -2460,7 +2753,7 @@ fn backtick_spans(text: &str) -> Vec<&str> {
 /// that holds a file relative to `capsule_dir`, two colons and a function
 /// name. A cited path must be relative and resolve beneath `capsule_dir`,
 /// including through symbolic links, before its file is read. The file must
-/// hold `fn <fn>(`. The check does not decide whether it is a `#[test]`.
+/// hold `#[test] fn <fn>(`. A string or a comment is not a citation.
 fn operations_table_citation_problems(
     document_name: &str,
     document: &str,
@@ -2528,7 +2821,7 @@ fn operations_table_citation_problems(
                 continue;
             }
         };
-        if !rust_source_without_comments(&source).contains(&format!("fn {function}(")) {
+        if !rust_holds_cited_test(&source, function) {
             problems.push(format!(
                 "{document_name} CONFINEMENT.md: {span} names a function that {} does not hold",
                 path.display()
@@ -3067,6 +3360,33 @@ fn declared_rights_trace_refuses_each_bad_input() {
         "a root-wide read declared as storage must be refused: {reason}"
     );
 
+    for (rule, why) in [
+        ("(allow file-read*)", "an unfiltered file-read*"),
+        ("(allow file-read* (regex \"^/\"))", "a regex root read"),
+        (
+            "(allow file-read* (literal \"/\" ))",
+            "a literal root read with extra space",
+        ),
+        (
+            "(allow file-read* (subpath \"/.\"))",
+            "a / . subpath root read",
+        ),
+    ] {
+        let mut widened = profile.clone();
+        widened.push_str(rule);
+        widened.push('\n');
+        let mut declared = read();
+        declared["rights"][0]["rules"]
+            .as_array_mut()
+            .expect("fixture storage rules")
+            .push(json!(rule));
+        let reason = refuse(&declared, &widened);
+        assert!(
+            reason.contains("storage") && reason.contains("root-wide") && reason.contains(rule),
+            "{why} declared as storage must be refused: {reason}"
+        );
+    }
+
     let mut declared = read();
     declared[PLATFORM_BASELINE]["rules"][0]["justification"] =
         json!(format!("{}x", platform_baseline_justification(name)));
@@ -3159,10 +3479,10 @@ fn every_falsifier_id_is_named_in_its_confinement_document() {
 /// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
 /// `OPERATIONS_TABLES`, cuts the section under `OPERATIONS_HEADING`, and
 /// requires every backtick span of the form `<file>::<fn>` to name a file under
-/// `capsules/<name>/` that holds `fn <fn>(`. A missing section, a section that
-/// cites no test, a missing file and a missing function each fail with one
-/// line. The check does not decide whether the function is a `#[test]`. The
-/// test reads files and starts no process, so it runs on every platform.
+/// `capsules/<name>/` that holds `#[test] fn <fn>(`. A string or a comment is
+/// not a citation. A missing section, a section that cites no test, a missing
+/// file and a missing function each fail with one line. The test reads files
+/// and starts no process, so it runs on every platform.
 ///
 /// Falsifier: WP78 renames `outside_write_denied` in did's `tests/confine.rs`,
 /// so the did table's citation names a function that file does not hold and
@@ -3697,11 +4017,14 @@ fn operations_table_check_reports_each_missing_citation() {
     fs::create_dir_all(capsule.path().join("src")).expect("fixture src folder");
     fs::write(
         capsule.path().join("tests/confine.rs"),
-        "fn present_case() {}\n",
+        "#[test]\nfn present_case() {}\n",
     )
     .expect("fixture integration test file");
-    fs::write(capsule.path().join("src/main.rs"), "fn unit_case() {}\n")
-        .expect("fixture unit test file");
+    fs::write(
+        capsule.path().join("src/main.rs"),
+        "#[test]\nfn unit_case() {}\n",
+    )
+    .expect("fixture unit test file");
 
     let present = "## Operations and the rights they need\n\n| `tests/confine.rs::present_case` |\n\n## Host-OS status\n";
     assert!(
@@ -3729,7 +4052,61 @@ fn operations_table_check_reports_each_missing_citation() {
     );
     fs::write(
         capsule.path().join("tests/confine.rs"),
+        "const S: &str = \"fn present_case(\";\n",
+    )
+    .expect("string-literal citation fixture");
+    let problems =
+        operations_table_citation_problems("fixture-provider", commented, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a string must not count as a function: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("present_case") && problems[0].contains("does not hold"),
+        "a string citation must be refused: {}",
+        problems[0]
+    );
+
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "/* /* */ fn present_case() {} */\n",
+    )
+    .expect("nested-comment citation fixture");
+    let problems =
+        operations_table_citation_problems("fixture-provider", commented, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a nested block comment must not count as a function: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("present_case") && problems[0].contains("does not hold"),
+        "a nested-comment citation must be refused: {}",
+        problems[0]
+    );
+
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
         "fn present_case() {}\n",
+    )
+    .expect("plain-fn citation fixture");
+    let problems =
+        operations_table_citation_problems("fixture-provider", commented, capsule.path());
+    assert_eq!(
+        problems.len(),
+        1,
+        "a citation must name a #[test] function: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("present_case") && problems[0].contains("does not hold"),
+        "a function without #[test] must be refused: {}",
+        problems[0]
+    );
+
+    fs::write(
+        capsule.path().join("tests/confine.rs"),
+        "#[test]\nfn present_case() {}\n",
     )
     .expect("restore fixture integration test file");
 
@@ -3868,8 +4245,11 @@ fn operations_table_check_rejects_paths_outside_provider() {
     let sibling = capsules.path().join("fixture-provider-sibling");
     for dir in [&provider, &sibling] {
         fs::create_dir_all(dir.join("tests")).expect("fixture tests folder");
-        fs::write(dir.join("tests/confine.rs"), "fn present_case() {}\n")
-            .expect("fixture test source");
+        fs::write(
+            dir.join("tests/confine.rs"),
+            "#[test]\nfn present_case() {}\n",
+        )
+        .expect("fixture test source");
     }
     for file in [
         provider.join("tests/confine.rs"),
@@ -4055,6 +4435,9 @@ fn file_profile_contract_refuses_nested_grants() {
         "(import \"bsd.sb\")",
         "(begin (import \"bsd.sb\"))",
         "(if #t (import \"bsd.sb\"))",
+        "(include \"bsd.sb\")",
+        "(load \"bsd.sb\")",
+        "(require \"bsd.sb\")",
     ] {
         let profile = format!("{complete}{import}\n");
         let refusal = check_profile_contract("fixture-provider", &profile)
@@ -4064,6 +4447,33 @@ fn file_profile_contract_refuses_nested_grants() {
             "the refusal must name the import form {import}: {refusal}"
         );
     }
+
+    for grant in ["(ALLOW DEFAULT)", "(allow Default)", "(allow(default))"] {
+        let profile = format!("{complete}{grant}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a case-folded or flush-head allow default must fail");
+        assert!(
+            refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
+            "the refusal must name the allow default {grant}: {refusal}"
+        );
+    }
+
+    let profile = format!("{complete}(allow system-socket)\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a system-socket grant must fail");
+    assert!(
+        refusal.contains("fixture-provider") && refusal.contains("network allow is refused"),
+        "the refusal must name the system-socket grant: {refusal}"
+    );
+
+    let profile = format!("{complete}(allow process-fork)\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a second process-fork allow must fail");
+    assert!(
+        refusal.contains("fixture-provider")
+            && refusal.contains("more than one process-exec allow"),
+        "the refusal must name the extra process-fork: {refusal}"
+    );
 }
 
 /// The one contract check refuses a profile that holds a second exec allow,
@@ -4541,7 +4951,7 @@ fn a_bare_top_level_value_is_its_own_form() {
 )]
 fn the_bare_value_fixture_loads_under_sandbox_exec() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let mut file = tempfile::NamedTempFile::new().expect("temporary bare value fixture profile");
     file.write_all(b"(version 1)(deny default) 1 (allow default)\n")
@@ -4574,7 +4984,7 @@ fn the_bare_value_fixture_loads_under_sandbox_exec() {
 )]
 fn the_string_fixture_loads_under_sandbox_exec() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
+        panic!("NOT RUN: sandbox-exec is macOS only");
     }
     let profile = format!("(version 1)\n(deny default)\n{STRING_LINES}");
     let mut file = tempfile::NamedTempFile::new().expect("temporary string fixture profile");
