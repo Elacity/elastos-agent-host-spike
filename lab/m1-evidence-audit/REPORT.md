@@ -121,6 +121,25 @@ F-M1-ROW deletes `C1-init-requires-storage` from a temp catalog.
 `audit.py` must exit 1 and name that row. Reverted by using a temp
 copy; the committed catalog is unchanged.
 
+## Tests run here
+
+| Command | Result |
+| --- | --- |
+| `python3 -I lab/m1-evidence-audit/audit.py` | exit 0, catalog rows resolved |
+| `python3 -I lab/m1-evidence-audit/falsify.py F-M1-ROW` | `F-M1-ROW: CAUGHT (removed C1-init-requires-storage)` |
+| `python3 -I -m unittest discover -s lab/m1-evidence-audit -v` | 2 passed |
+| `cargo test --manifest-path capsules/did-provider/Cargo.toml init_requires` | `tests::init_requires_storage_without_key` ok |
+| `cargo test --manifest-path capsules/did-provider/Cargo.toml init_reports_nickname_read_error` | ok |
+| `cargo test --manifest-path capsules/wallet-provider/Cargo.toml missing_storage_root` | `tests::storage_root::missing_storage_root_is_refused` ok |
+| `cd elastos && cargo test -p elastos-identity nickname_metadata_change` | `store::tests::nickname_metadata_change_reports_storage_error` ok |
+| `cd elastos && cargo test -p elastos-server rejects_extra_component_import` | `component::tests::rejects_extra_component_import` ok |
+| `cd elastos && cargo test -p elastos-server a_stale_journal_revision_is_refused` | `resource_bridge::tests::a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept` ok |
+| `cd elastos && cargo test -p elastos-server the_agent_host_writes_and_reads_its_journal` | 0 passed, 1 ignored |
+| `cargo test --manifest-path capsules/did-provider/Cargo.toml --test confine outside_write_denied -- --exact` | SKIP `sandbox-exec is absent`, then `ok` |
+| `cargo test --manifest-path capsules/did-provider/Cargo.toml --test confine verify_did_recovery_under_profile -- --exact` | SKIP, then `ok` |
+| `cargo test --manifest-path capsules/wallet-provider/Cargo.toml --test confine confined_outside_write_is_denied -- --exact` | SKIP, then `ok` |
+| `cargo test --manifest-path capsules/model-provider/Cargo.toml --test confine model_outside_write_denied -- --exact` | SKIP, then `ok` |
+
 ## Not run here
 
 - macOS `sandbox-exec` behaviour
