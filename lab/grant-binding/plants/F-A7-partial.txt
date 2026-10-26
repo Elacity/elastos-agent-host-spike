@@ -2,7 +2,7 @@ id: F-A7-partial
 file: src/ledger.rs
 test: ledger::model_settle_below_the_hold_returns_the_rest
 --- old
-        self.ledger.held -= stored;
+        ledger.held -= stored;
 --- new
-        self.ledger.held -= charge;
+        ledger.held -= charge;
 --- end

@@ -6,7 +6,9 @@
 //! records the hold on this ledger. `settle` and `release` are the only ways a
 //! hold ends, and both take that same binding decision first. The guest's
 //! `reported_usage` claim is not read: a known settle charges the figure the
-//! verifier passes in, and an unknown outcome keeps the hold.
+//! verifier passes in, and an unknown outcome keeps the hold. The ledger value
+//! sits behind one mutex, and admit, reserve, settle, and release lock it for
+//! the check and the write.
 
 use std::collections::HashMap;
 
@@ -103,8 +105,8 @@ impl std::fmt::Display for ReleaseRefuse {
 
 impl Verifier {
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
-    pub fn admit(&mut self, ceiling: u64) {
-        self.ledger.ceiling = ceiling;
+    pub fn admit(&self, ceiling: u64) {
+        self.ledger.lock().expect("ledger lock").ceiling = ceiling;
     }
 
     /// Holds `amount` on the ledger when the outstanding total plus `amount`
@@ -112,31 +114,31 @@ impl Verifier {
     /// that does not fit in `u64` is over the ceiling, and the request's
     /// reported usage does not lower the hold.
     pub fn reserve(
-        &mut self,
+        &self,
         call: &Call,
         request: &GuestRequest,
         amount: u64,
     ) -> Result<Reservation, ReserveRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
-        let held = self.ledger.held;
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        let held = ledger.held;
+        let ledger: &mut Ledger = &mut ledger;
         let total = match held.checked_add(amount) {
-            Some(total) if total <= self.ledger.ceiling => total,
+            Some(total) if total <= ledger.ceiling => total,
             _ => {
                 return Err(ReserveRefuse::OverCeiling {
-                    ceiling: self.ledger.ceiling,
+                    ceiling: ledger.ceiling,
                     held,
                     asked: amount,
                 })
             }
         };
-        self.ledger.held = total;
-        self.ledger.next_reservation += 1;
-        self.ledger
-            .open
-            .insert(self.ledger.next_reservation, amount);
+        ledger.held = total;
+        ledger.next_reservation += 1;
+        ledger.open.insert(ledger.next_reservation, amount);
         Ok(Reservation {
-            id: self.ledger.next_reservation,
+            id: ledger.next_reservation,
         })
     }
 
@@ -146,7 +148,7 @@ impl Verifier {
     /// the measured figure, gives back the stored hold and returns the charge;
     /// the request's reported usage does not lower it.
     pub fn settle(
-        &mut self,
+        &self,
         call: &Call,
         request: &GuestRequest,
         reservation: Reservation,
@@ -160,33 +162,36 @@ impl Verifier {
                 return Err(SettleRefuse::UnknownOutcome);
             }
         };
-        let stored = match self.ledger.open.get(&reservation.id) {
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        let ledger: &mut Ledger = &mut ledger;
+        let stored = match ledger.open.get(&reservation.id) {
             Some(stored) => *stored,
             None => return Err(SettleRefuse::NotOutstanding),
         };
         let charge = measured;
-        self.ledger.charged += charge;
-        self.ledger.held -= stored;
-        self.ledger.open.remove(&reservation.id);
+        ledger.charged += charge;
+        ledger.held -= stored;
+        ledger.open.remove(&reservation.id);
         Ok(charge)
     }
 
     /// Ends one hold without charging anything. A binding refusal records
     /// nothing and a reservation that is not outstanding is refused.
     pub fn release(
-        &mut self,
+        &self,
         call: &Call,
         request: &GuestRequest,
         reservation: Reservation,
     ) -> Result<(), ReleaseRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReleaseRefuse::Binding)?;
-        let amount = match self.ledger.open.get(&reservation.id) {
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        let amount = match ledger.open.get(&reservation.id) {
             Some(amount) => *amount,
             None => return Err(ReleaseRefuse::NotOutstanding),
         };
-        self.ledger.open.remove(&reservation.id);
-        self.ledger.held -= amount;
+        ledger.open.remove(&reservation.id);
+        ledger.held -= amount;
         Ok(())
     }
 }
@@ -204,6 +209,23 @@ fn bound(verifier: &mut Verifier) -> (InstanceId, Handle) {
     (instance, handle)
 }
 
+#[cfg(test)]
+struct Books {
+    held: u64,
+    charged: u64,
+    open: HashMap<u64, u64>,
+}
+
+#[cfg(test)]
+fn books(verifier: &Verifier) -> Books {
+    let ledger = verifier.ledger.lock().expect("ledger lock");
+    Books {
+        held: ledger.held,
+        charged: ledger.charged,
+        open: ledger.open.clone(),
+    }
+}
+
 #[test]
 fn model_reserve_at_the_ceiling_is_allowed() {
     let mut verifier = Verifier::new();
@@ -215,7 +237,7 @@ fn model_reserve_at_the_ceiling_is_allowed() {
         ..guest(handle)
     };
     verifier.reserve(&call, &request, 5).expect("reserve");
-    assert_eq!(verifier.ledger.held, 5);
+    assert_eq!(books(&verifier).held, 5);
 }
 
 #[test]
@@ -236,7 +258,7 @@ fn model_reserve_over_the_ceiling_is_refused() {
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(books(&verifier).held, 0);
 }
 
 #[test]
@@ -248,7 +270,7 @@ fn model_reserve_past_the_u64_total_is_refused() {
     verifier
         .reserve(&call, &guest(handle), u64::MAX)
         .expect("at the ceiling");
-    assert_eq!(verifier.ledger.held, u64::MAX);
+    assert_eq!(books(&verifier).held, u64::MAX);
     let refusal = verifier
         .reserve(&call, &guest(handle), 1)
         .expect_err("sum past u64::MAX");
@@ -261,12 +283,12 @@ fn model_reserve_past_the_u64_total_is_refused() {
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    assert_eq!(verifier.ledger.held, u64::MAX);
+    assert_eq!(books(&verifier).held, u64::MAX);
     let again = verifier
         .reserve(&call, &guest(handle), u64::MAX)
         .expect_err("still over the ceiling");
     assert_eq!(again.to_string(), "reservation exceeds the ceiling");
-    assert_eq!(verifier.ledger.held, u64::MAX);
+    assert_eq!(books(&verifier).held, u64::MAX);
 }
 
 #[test]
@@ -291,7 +313,7 @@ fn model_outstanding_hold_counts_toward_the_ceiling() {
             asked: 3,
         }
     );
-    assert_eq!(verifier.ledger.held, 3);
+    assert_eq!(books(&verifier).held, 3);
 }
 
 #[test]
@@ -305,7 +327,7 @@ fn model_reported_usage_does_not_lower_the_hold() {
         ..guest(handle)
     };
     verifier.reserve(&call, &request, 10).expect("reserve");
-    assert_eq!(verifier.ledger.held, 10);
+    assert_eq!(books(&verifier).held, 10);
 }
 
 #[test]
@@ -323,7 +345,7 @@ fn model_reserve_on_a_sibling_instance_is_refused() {
         .expect_err("sibling instance");
     assert_eq!(refusal, ReserveRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
-    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(books(&verifier).held, 0);
 }
 
 #[test]
@@ -339,9 +361,9 @@ fn model_settle_known_outcome_charges_the_measured_figure() {
         .settle(&call, &guest(handle), reservation, SettleOutcome::Known(10))
         .expect("settle");
     assert_eq!(charge, 10);
-    assert_eq!(verifier.ledger.charged, 10);
-    assert_eq!(verifier.ledger.held, 0);
-    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).charged, 10);
+    assert_eq!(books(&verifier).held, 0);
+    assert!(!books(&verifier).open.contains_key(&reservation.id));
 }
 
 #[test]
@@ -359,8 +381,8 @@ fn model_reported_usage_does_not_lower_the_settled_charge() {
         .settle(&call, &request, reservation, SettleOutcome::Known(10))
         .expect("settle");
     assert_eq!(charge, 10);
-    assert_eq!(verifier.ledger.charged, 10);
-    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(books(&verifier).charged, 10);
+    assert_eq!(books(&verifier).held, 0);
 }
 
 #[test]
@@ -378,15 +400,15 @@ fn model_settle_twice_is_refused() {
         .settle(&call, &request, reservation, SettleOutcome::Known(10))
         .expect("settle");
     assert_eq!(charge, 10);
-    assert_eq!(verifier.ledger.charged, 10);
-    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(books(&verifier).charged, 10);
+    assert_eq!(books(&verifier).held, 0);
     let refusal = verifier
         .settle(&call, &request, reservation, SettleOutcome::Known(10))
         .expect_err("second settle");
     assert_eq!(refusal, SettleRefuse::NotOutstanding);
     assert_eq!(refusal.to_string(), "reservation is not outstanding");
-    assert_eq!(verifier.ledger.charged, 10);
-    assert_eq!(verifier.ledger.held, 0);
+    assert_eq!(books(&verifier).charged, 10);
+    assert_eq!(books(&verifier).held, 0);
 }
 
 #[test]
@@ -402,9 +424,9 @@ fn model_unknown_outcome_keeps_the_hold() {
         .expect_err("unknown outcome");
     assert_eq!(refusal, SettleRefuse::UnknownOutcome);
     assert_eq!(refusal.to_string(), "unknown outcome keeps the hold");
-    assert_eq!(verifier.ledger.held, 10);
-    assert_eq!(verifier.ledger.charged, 0);
-    assert!(verifier.ledger.open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(books(&verifier).charged, 0);
+    assert!(books(&verifier).open.contains_key(&reservation.id));
     let charge = verifier
         .settle(&call, &request, reservation, SettleOutcome::Known(10))
         .expect("settle after unknown");
@@ -422,9 +444,9 @@ fn model_release_returns_the_unused_hold() {
         .expect("reserve");
     let released = verifier.release(&call, &guest(handle), reservation);
     assert_eq!(released, Ok(()));
-    assert_eq!(verifier.ledger.held, 0);
-    assert_eq!(verifier.ledger.charged, 0);
-    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 0);
+    assert!(!books(&verifier).open.contains_key(&reservation.id));
 }
 
 #[test]
@@ -450,8 +472,8 @@ fn model_settle_on_a_sibling_instance_is_refused() {
         .expect_err("sibling instance");
     assert_eq!(refusal, SettleRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
-    assert_eq!(verifier.ledger.held, 10);
-    assert_eq!(verifier.ledger.charged, 0);
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(books(&verifier).charged, 0);
 }
 
 #[test]
@@ -472,9 +494,9 @@ fn model_release_on_a_sibling_instance_is_refused() {
         .expect_err("sibling instance");
     assert_eq!(refusal, ReleaseRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
-    assert_eq!(verifier.ledger.held, 10);
-    assert_eq!(verifier.ledger.charged, 0);
-    assert!(verifier.ledger.open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(books(&verifier).charged, 0);
+    assert!(books(&verifier).open.contains_key(&reservation.id));
 }
 
 #[test]
@@ -488,18 +510,18 @@ fn model_settle_below_the_hold_returns_the_rest() {
         ..guest(handle)
     };
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
-    assert_eq!(verifier.ledger.held, 10);
+    assert_eq!(books(&verifier).held, 10);
     assert_eq!(
         verifier.settle(&call, &request, reservation, SettleOutcome::Known(4)),
         Ok(4)
     );
-    assert_eq!(verifier.ledger.charged, 4);
-    assert_eq!(verifier.ledger.held, 0);
-    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).charged, 4);
+    assert_eq!(books(&verifier).held, 0);
+    assert!(!books(&verifier).open.contains_key(&reservation.id));
     verifier
         .reserve(&call, &request, 10)
         .expect("reserve after settle");
-    assert_eq!(verifier.ledger.held, 10);
+    assert_eq!(books(&verifier).held, 10);
 }
 
 #[test]
@@ -513,14 +535,50 @@ fn model_release_twice_is_refused() {
         .expect("reserve");
     let released = verifier.release(&call, &guest(handle), reservation);
     assert_eq!(released, Ok(()));
-    assert_eq!(verifier.ledger.held, 0);
-    assert_eq!(verifier.ledger.charged, 0);
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 0);
     let refusal = verifier
         .release(&call, &guest(handle), reservation)
         .expect_err("second release");
     assert_eq!(refusal, ReleaseRefuse::NotOutstanding);
     assert_eq!(refusal.to_string(), "reservation is not outstanding");
-    assert_eq!(verifier.ledger.held, 0);
-    assert_eq!(verifier.ledger.charged, 0);
-    assert!(!verifier.ledger.open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 0);
+    assert!(!books(&verifier).open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_concurrent_reserves_keep_one_ceiling() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(5);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| verifier.reserve(&call, &request, 3));
+        let second = scope.spawn(|| verifier.reserve(&call, &request, 3));
+        (first.join().expect("first"), second.join().expect("second"))
+    });
+    let allowed = [first, second]
+        .iter()
+        .filter(|result| result.is_ok())
+        .count();
+    assert_eq!(allowed, 1);
+    let refusal = match (first, second) {
+        (Ok(_), Err(refusal)) | (Err(refusal), Ok(_)) => refusal,
+        _ => panic!("exactly one reserve must be allowed"),
+    };
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 5,
+            held: 3,
+            asked: 3,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let books = books(&verifier);
+    assert_eq!(books.held, 3);
+    assert_eq!(books.charged, 0);
+    assert_eq!(books.open.len(), 1);
 }
