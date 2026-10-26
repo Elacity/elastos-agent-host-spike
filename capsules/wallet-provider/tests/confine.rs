@@ -6055,7 +6055,9 @@ fn profile_holds_scheme_comment(profile: &str) -> bool {
 /// A number token is digits. Every `#` reader form is refused, including
 /// `#\`, `#;`, `#|`, `#!`, `#+`, `#-`, and `#"`. The grammar names only
 /// `#t`, `#f`, and `#include` as hash tokens, because `(if #t …)` fixtures
-/// and a bare `#include` atom use them. A non-ASCII or zero-width character
+/// and a bare `#include` atom use them. `#\;` is the semicolon character:
+/// one following datum on that line is dropped (both readers hide it);
+/// two or more following datums are refused. A non-ASCII or zero-width character
 /// anywhere is refused. An unknown escape is refused. An unclosed string is
 /// a refusal with its own reason.
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
@@ -6119,6 +6121,66 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                 panic!(
                     "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
                 );
+            }
+            if chars.peek() == Some(&'\\') {
+                chars.next();
+                let Some(value) = chars.next() else {
+                    panic!(
+                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                    );
+                };
+                if value != ';' {
+                    panic!(
+                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                    );
+                }
+                let mut rest = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next == '\n' {
+                        break;
+                    }
+                    let next_ok = next == '\t' || (next >= ' ' && next <= '~');
+                    assert!(
+                        next_ok,
+                        "the profile must refuse a non-ASCII or format character: {profile}"
+                    );
+                    rest.push(chars.next().expect("peeked #\\; tail"));
+                }
+                let mut datums = 0usize;
+                let mut depth = 0usize;
+                let mut in_tail_string = false;
+                let mut tail = rest.chars().peekable();
+                while let Some(part) = tail.next() {
+                    if in_tail_string {
+                        if part == '\\' {
+                            let _ = tail.next();
+                            continue;
+                        }
+                        if part == '"' {
+                            in_tail_string = false;
+                        }
+                        continue;
+                    }
+                    if part == '"' {
+                        in_tail_string = true;
+                        continue;
+                    }
+                    if part == '(' {
+                        if depth == 0 {
+                            datums += 1;
+                        }
+                        depth += 1;
+                    } else if part == ')' {
+                        depth = depth.saturating_sub(1);
+                    }
+                }
+                if datums >= 2 {
+                    panic!(
+                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                    );
+                }
+                at_token_boundary = true;
+                continue;
             }
             let mut token = String::from("#");
             while let Some(&next) = chars.peek() {
