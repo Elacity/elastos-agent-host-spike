@@ -712,10 +712,10 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 /// provider reports it and stays in service.
 ///
 /// The last case is the write beneath `STORAGE_PARENT`: `Init` for
-/// `<STORAGE_PARENT>/Fresh` with no precreated parent walks up to the granted
-/// parent, so its first ungranted step is the `mkdir` of `Fresh`. A write
-/// grant on the parent (WP65) creates it, so this test fails on the absence
-/// check.
+/// `<STORAGE_PARENT>/Fresh`, where nothing is precreated at `Fresh` or beneath
+/// it, walks up to the granted parent, so its first ungranted step is the
+/// `mkdir` of `Fresh`. A write grant on the parent (WP65) creates it, so this
+/// test fails on the absence check.
 ///
 /// Falsifier: replace `(deny default)` with `(allow default)`; the outside
 /// `Init` then succeeds and this test fails.
@@ -757,8 +757,9 @@ fn confined_outside_write_is_denied() {
         );
     }
 
-    // `<STORAGE_PARENT>/Fresh` has no precreated parent, so the walk reaches
-    // the granted parent and the first ungranted step is the `mkdir`.
+    // Nothing is precreated at `<STORAGE_PARENT>/Fresh` or beneath it, so the
+    // walk reaches the granted parent and the first ungranted step is the
+    // `mkdir`.
     let fresh_base = wallet_dir(&root)
         .parent()
         .expect("wallet parent")
@@ -1546,10 +1547,11 @@ struct FalsifierList {
 /// Reads every `capsules/<name>/falsifiers.json` list selected by
 /// `allow_rule_profiles` and returns each list's entries and ids.
 ///
-/// A missing or unreadable list, a list that is not JSON and a document
-/// without a `falsifiers` list are refusals with distinct reasons that name
-/// the path. There is no skip path. Both checks read the lists through this
-/// one function (P10).
+/// A missing or unreadable list, a list that is not JSON, a document
+/// without a `falsifiers` list and an entry whose `id` is missing or is not a
+/// JSON string are refusals with distinct reasons that name the path; the
+/// entry refusal also names the entry's position in the list. There is no
+/// skip path. Both checks read the lists through this one function (P10).
 fn read_falsifier_lists(capsules: &Path) -> Result<Vec<FalsifierList>, String> {
     let mut lists = Vec::new();
     for name in allow_rule_profiles() {
@@ -1579,10 +1581,16 @@ fn read_falsifier_lists(capsules: &Path) -> Result<Vec<FalsifierList>, String> {
             ));
         };
         let entries: Vec<Value> = list.iter().cloned().collect();
-        let ids = entries
-            .iter()
-            .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
-            .collect();
+        let mut ids = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            let Some(id) = entry["id"].as_str() else {
+                return Err(format!(
+                    "{name} falsifier list {} must give entry {index} a string id",
+                    path.display()
+                ));
+            };
+            ids.push(id.to_owned());
+        }
         lists.push(FalsifierList { name, ids, entries });
     }
     Ok(lists)
@@ -1592,9 +1600,9 @@ fn read_falsifier_lists(capsules: &Path) -> Result<Vec<FalsifierList>, String> {
 /// for the profiles selected by `allow_rule_profiles`.
 ///
 /// A missing or unreadable profile, a profile that does not parse, a missing
-/// or unreadable list, a list that is not JSON and a document without a
-/// `falsifiers` list are refusals with distinct reasons that name the path.
-/// There is no skip path.
+/// or unreadable list, a list that is not JSON, a document without a
+/// `falsifiers` list and an entry without a string id are refusals with
+/// distinct reasons that name the path. There is no skip path.
 fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
     let mut profiles = Vec::new();
     for name in allow_rule_profiles() {
@@ -2164,15 +2172,16 @@ fn allow_rule_removal_check_reports_an_unremoved_rule() {
 /// A temporary `capsules/` directory holds one fixture profile and one fixture
 /// list per required provider: the valid pair returns both profiles and the
 /// combined entries. A missing profile, a profile that does not parse, a
-/// missing list, a list that is not JSON and a document without a `falsifiers`
-/// list are each a refusal with a distinct reason that names the offending
-/// path; there is no skip path. The fixtures are built in the test and no
-/// process starts.
+/// missing list, a list that is not JSON, a document without a `falsifiers`
+/// list, an entry without an `id` and an entry whose `id` is a number are each
+/// a refusal with a distinct reason that names the offending path; an entry
+/// refusal also holds the words `string id`. There is no skip path. The
+/// fixtures are built in the test and no process starts.
 ///
 /// Falsifier: WP49 turns the unreadable-profile refusal into a skip, WP53 the
-/// parse refusal, WP50 the unreadable-list one, WP51 the not-JSON one and
-/// WP52 the missing-list one; this test fails on each because the refusal does
-/// not come.
+/// parse refusal, WP50 the unreadable-list one, WP51 the not-JSON one, WP52
+/// the missing-list one and WP66 the string-id refusal; this test fails on
+/// each because the refusal does not come.
 #[test]
 fn allow_rule_removal_check_rejects_bad_inputs() {
     let capsules = tempfile::tempdir().expect("temporary capsules directory");
@@ -2264,6 +2273,25 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
             && refusal.contains("must hold a falsifiers list"),
         "the refusal must name the list path: {refusal}"
     );
+
+    let missing_id = json!({"about": "fixture", "falsifiers": [{"title": "no id"}]});
+    fs::write(&did_list, missing_id.to_string()).expect("write an entry without an id");
+    let refusal = read_allow_rule_sources(capsules.path())
+        .expect_err("an entry without an id must be refused");
+    assert!(
+        refusal.contains(&did_list.display().to_string())
+            && refusal.contains("must give entry 0 a string id"),
+        "the refusal must name the list path and the missing string id: {refusal}"
+    );
+    let numeric_id = json!({"about": "fixture", "falsifiers": [{"id": 7}]});
+    fs::write(&did_list, numeric_id.to_string()).expect("write an entry with a number id");
+    let refusal = read_allow_rule_sources(capsules.path())
+        .expect_err("an entry with a number id must be refused");
+    assert!(
+        refusal.contains(&did_list.display().to_string())
+            && refusal.contains("must give entry 0 a string id"),
+        "the refusal must name the list path and the non-string id: {refusal}"
+    );
 }
 
 /// The section check reports an own id that the section does not name and an
@@ -2273,12 +2301,19 @@ fn allow_rule_removal_check_rejects_bad_inputs() {
 /// The list holds `DID1`, `DID2` and `DID10`, and the section names `DID2`,
 /// `DID10` and the unregistered `WP9`. `DID1` is missing even though `DID10`
 /// appears, because an id counts only as a whole token. The check returns
-/// exactly those two problems. The fixtures are built in memory; no file is
-/// read and no process starts.
+/// exactly those two problems. A later case has a letter directly before the
+/// token, `XDID1`, and another has a letter or `_` directly after its digits,
+/// `DID1a` and `DID1_x`; each section names only `DID2`, so each returns
+/// exactly the one problem that own id `DID1` is not named, and neither
+/// reports its own token as unregistered. The fixtures are built in memory;
+/// no file is read and no process starts.
 ///
 /// Falsifier: WP58 drops the own-id rule, WP59 the unregistered-id rule and
 /// WP60 matches an id as a substring; this test fails on each because the
-/// corresponding problem does not come.
+/// corresponding problem does not come. WP67 drops the character-before check,
+/// so `XDID1` then names `DID1`, and WP68 drops the character-after check, so
+/// `DID1a` then names `DID1`; the test fails on the matching case because the
+/// missing-id problem does not come.
 #[test]
 fn falsifier_section_check_reports_missing_and_stale_ids() {
     let own = vec!["DID1".to_string(), "DID2".to_string()];
@@ -2293,6 +2328,26 @@ fn falsifier_section_check_reports_missing_and_stale_ids() {
                 .to_string(),
         ],
         "the check must report the missing own id and the unregistered id"
+    );
+
+    let prefixed = "## Falsifiers\n\n- DID2 is named\n- XDID1 is named\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", prefixed, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID1 is not named in ## Falsifiers"
+                .to_string(),
+        ],
+        "a token with a letter directly before it must not name its own id"
+    );
+
+    let suffixed = "## Falsifiers\n\n- DID2 is named\n- DID1a is named\n- DID1_x is named\n";
+    assert_eq!(
+        falsifier_section_problems("fixture-provider", suffixed, &own, &registered),
+        vec![
+            "fixture-provider CONFINEMENT.md: own falsifier id DID1 is not named in ## Falsifiers"
+                .to_string(),
+        ],
+        "a token with a letter or _ directly after its digits must not name its own id"
     );
 
     let complete = "## Tests\n\n- DID2 is named\n\n## Falsifiers\n\n- DID1\n- DID2\n- DID10\n";

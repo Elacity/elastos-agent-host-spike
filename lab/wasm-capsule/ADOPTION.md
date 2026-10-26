@@ -45,19 +45,24 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   `CapsuleManifest`), and runs `wasm_capsule_audit::audit` on those checked
   bytes with the granted imports, unchanged. `verify_bundle(bundle, ...)` is
   `checked_bundle` and then `verify_checked`. It returns a sealed
-  `VerifiedBundle` (`cid()`, `entries()`, `imports()`) for wc-005 to stage.
-  It is a lab check of name, signer and imports; it is no admission or launch
-  decision (README.md, "Verify (wc-004)").
+  `VerifiedBundle` (`cid()`, `entries()`, `imports()`, `unused_grants()`) for
+  wc-005 to stage. It is a lab check of name, signer and imports; it is no
+  admission or launch decision (README.md, "Verify (wc-004)").
+  wc-009a (task 020): `read_grants(path)` is the one reader of the lab grants
+  file (`wc-009.lab-grants/v1`, labelled "lab stand-in, not admission"), and its
+  list is the `granted` input (README.md, "Granted imports only (wc-009a)").
 - `wasm_capsule_tools::run` — the lab's engine runner, as library calls.
   `run_engine` (wc-005a, task 014) runs one test-only host engine on
   `entrypoint()`'s verified bytes, written from memory into a new `0o700`
   folder, with a fixed argv, stdin null and an empty environment. `run`
   (wc-005b, task 015) takes a `RunInput` (bundle path, in-memory signature,
-  accepted signer DIDs, both engine program paths, work root), calls
-  `verify_bundle` once with no grants, then `run_engine` for `wasmtime` and
+  accepted signer DIDs, the granted imports from the lab grants file (task
+  020), both engine program paths, work root), calls `verify_bundle` once with
+  those grants unchanged, then `run_engine` for `wasmtime` and
   then for `wasmer`, one after the other, and requires both to succeed with
-  byte-identical stdout. It returns the verified `cid()` and both outputs
-  (README.md, "Same output on two engines (wc-005b)").
+  byte-identical stdout. It returns the verified `cid()`, both outputs, and
+  (task 020) `linked()` and `unused_grants()` (README.md, "Same output on two
+  engines (wc-005b)").
   `wasm_capsule_tools::receipt` (wc-005c, task 016) renders that run as
   `schema: wc-005.run-receipt/v1` lines (the lab CID, `digest`, `1592590337`,
   each engine's version, exit status and stdout), and writes it only with
@@ -112,9 +117,11 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
 - The capsule is a **core** module, not a Component. It declares no
   `elastos:bus` world and uses no `wit-bindgen`.
 - The lab does not reproduce the Runtime's content-identity rule (the
-  discovery below), so a bundle's name is a **lab CID**,
-  `lab-cid:sha256:<hex>`, cc-capsule-identity's rule. It is a lab CID, not a
-  CID: never call it the Runtime's CID, and never use it as a package identity.
+  discovery below), so a bundle's name is a **lab CID**, cc-capsule-identity's
+  rule: the 59-character CIDv1 SHA-256 UnixFS directory root of the bundle,
+  printed `bafybei...` (`lab/capsule-identity/README.md`, "The encoding"). It
+  is a lab value, not the Runtime's CID: never call it the Runtime's CID, and
+  never use it as a package identity or an admission.
   wc-004 checks a test-key signature over it (below).
 - What the walk covers, and what it does not, is cc-capsule-identity's claim
   (`lab/capsule-identity/README.md`); this lane claims only that it names
@@ -166,10 +173,19 @@ daemon and its repository into the lane. And the lab closure has no
 `_elastos_object.json`, so it is not a Runtime closure anyway.
 
 **Decision.** One lab rule: the lab names a bundle by cc-capsule-identity's
-**lab CID**, `lab-cid:sha256:<hex>` over the whole `elastos.capsule/v1`
-bundle, through `wasm_capsule_tools::bundle_identity` (README.md, "The lab
-name"). 007's lane-own name rule (PR #105) was retired by task 010 on Rong's
-one-rule note. The discovery's facts above still hold. This is a proposal to
+**lab CID**, the 59-character CIDv1 SHA-256 UnixFS directory root
+(`bafybei...`) of the whole `elastos.capsule/v1` bundle, through
+`wasm_capsule_tools::bundle_identity` (README.md, "The lab name";
+`lab/capsule-identity/README.md` has the rules). 007's lane-own name rule
+(PR #105) was retired by task 010 on Rong's one-rule note. This lane keeps one
+identity path and no UnixFS code of its own. Its two pins (README.md, "The lab
+name" and "tools/bundle") were recomputed by task 024 outside the lab code,
+with a `python3 -I` script written from that README's rules (quoted in LOG),
+and pinned only where they equal `bundle_identity`'s output:
+`bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy` (the manifest
+beside the 8-byte empty module) and
+`bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse` (the manifest
+beside `tools/bundle`'s `capsule.wasm` on this Mac). The discovery's facts above still hold. This is a proposal to
 Anders, not a contract. The value is labelled a lab CID in code and docs, never
 the Runtime's CID, and it is never a package identity.
 
@@ -197,11 +213,17 @@ None is an admission or launch path.
 1. The identity direction is cc-capsule-identity's: Anders's proposed CIDv1
    SHA-256 UnixFS directory root, frozen only after that lane's
    reproducibility tests, with the separate signed record kept outside the
-   package. When it lands, this lane changes its one export,
-   `bundle_identity`, to that function, so there is still one package identity
-   (P10, P13). wc-004's signature would then cover that name.
-2. Until then, keep the `lab-cid:sha256:` label, so a lab CID can never pass as
-   the Runtime's CID.
+   package. That lane's task 018 made its one `lab_cid` print that root, and
+   this lane's one export, `bundle_identity`, needed no change, so there is
+   still one package identity (P10, P13). wc-004's signature covers that name.
+2. A lab CID still never passes as the Runtime's CID, now by what it covers
+   rather than by a label (`lab/capsule-identity/README.md`, "Why a lab CID
+   and not the Runtime's CID"). The Runtime's CID is what its IPFS provider
+   returns for the capsule's archive, a gzip PAX tar that also holds the
+   folder's name, folder entries, modes and links. The lab CID is the UnixFS
+   root over the bundle's regular files alone, so it never equals the
+   archive's CID. It is called "lab CID" in code, output and docs, and no
+   Runtime code reads it.
 3. For a verifier to recompute the Runtime's CID without Kubo, the import
    profile above (and the required files) would need a byte-level spec in
    `docs/`. Today it lives only in code.
@@ -248,7 +270,12 @@ kept outside the package.
 check, on this one Mac with test keys only, that the bytes match a signed lab
 CID, that an accepted test key signed it, and that every import is granted. It
 makes no admission, launch or publisher-trust decision, and the granted list
-(empty for ordinary callers until wc-009) is a lab stand-in, not admission.
+(from the lab grants file since wc-009a, task 020) is a lab stand-in, not
+admission.
+
+**The grants file (wc-009a, task 020).** The lab grants file is a lab stand-in
+for the Runtime's grant decision
+(https://github.com/Elacity/elastos-runtime/issues/464), not admission.
 
 ## Runtime ABI for a bare capsule (wc-008)
 
