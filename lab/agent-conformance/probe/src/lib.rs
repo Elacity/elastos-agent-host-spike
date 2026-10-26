@@ -12,6 +12,7 @@ const _: () = assert!(
         + cfg!(feature = "granted-read") as u8
         + cfg!(feature = "sibling-read") as u8
         + cfg!(feature = "memory-write") as u8
+        + cfg!(feature = "host-key-read") as u8
         <= 1,
     "select exactly one probe effect"
 );
@@ -49,7 +50,11 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
         {
             write_memory()
         }
-        #[cfg(any(feature = "granted-read", feature = "sibling-read"))]
+        #[cfg(any(
+            feature = "granted-read",
+            feature = "sibling-read",
+            feature = "host-key-read"
+        ))]
         {
             read_granted_file()
         }
@@ -60,7 +65,8 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
             feature = "runaway",
             feature = "granted-read",
             feature = "sibling-read",
-            feature = "memory-write"
+            feature = "memory-write",
+            feature = "host-key-read"
         )))]
         {
             run_probe().map_err(|reason| elastos::bus::types::BusError::Unavailable(reason.into()))
@@ -70,7 +76,11 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
 
 #[cfg(all(
     target_arch = "wasm32",
-    any(feature = "granted-read", feature = "sibling-read")
+    any(
+        feature = "granted-read",
+        feature = "sibling-read",
+        feature = "host-key-read"
+    )
 ))]
 fn read_granted_file() -> Result<(), elastos::bus::types::BusError> {
     use elastos::bus::{capabilities, providers, types::*};
@@ -78,6 +88,8 @@ fn read_granted_file() -> Result<(), elastos::bus::types::BusError> {
     let resource = "localhost://Public/agent-conformance-grants/granted.txt";
     #[cfg(feature = "sibling-read")]
     let resource = "localhost://Public/agent-conformance-grants/sibling.txt";
+    #[cfg(feature = "host-key-read")]
+    let resource = include_str!("../../fixtures/host-key-read.txt").trim();
     let grant = capabilities::request(&CapabilityRequest {
         resource: resource.into(),
         actions: vec!["read".into()],
@@ -92,33 +104,47 @@ fn read_granted_file() -> Result<(), elastos::bus::types::BusError> {
         body: br#"{"encoding":"utf8"}"#.to_vec(),
         grant: Some(grant.id),
     })?;
-    // Compare the complete serialized provider result, including all file bytes
-    // and their length. The fixed ASCII fixture needs no guest JSON dependency.
-    // Expected bytes stay independent of the host's mutable seed fixture.
-    if response.status != "ok" {
-        let reason = if response
-            .body
-            .windows(br#""code":"parse_error""#.len())
-            .any(|part| part == br#""code":"parse_error""#)
-        {
-            "fixture provider parse error"
-        } else if response
-            .body
-            .windows(br#""code":"read_failed""#.len())
-            .any(|part| part == br#""code":"read_failed""#)
-        {
-            "fixture provider file read error"
-        } else {
-            "fixture provider read failed"
-        };
-        return Err(BusError::Unavailable(reason.into()));
-    }
-    if !fixture_bytes_match(&response.body) {
-        return Err(BusError::Invalid(
-            "granted file bytes differ from guest expectation".into(),
+    #[cfg(feature = "host-key-read")]
+    {
+        // The Bus owns refusal details. Keep successful bytes inside the guest.
+        if response.status == "ok" {
+            return Ok(());
+        }
+        return Err(BusError::Unavailable(
+            String::from_utf8(response.body)
+                .unwrap_or_else(|_| "host key read returned a non-UTF-8 refusal".into()),
         ));
     }
-    Ok(())
+    #[cfg(not(feature = "host-key-read"))]
+    {
+        // Compare the complete serialized provider result, including all file bytes
+        // and their length. The fixed ASCII fixture needs no guest JSON dependency.
+        // Expected bytes stay independent of the host's mutable seed fixture.
+        if response.status != "ok" {
+            let reason = if response
+                .body
+                .windows(br#""code":"parse_error""#.len())
+                .any(|part| part == br#""code":"parse_error""#)
+            {
+                "fixture provider parse error"
+            } else if response
+                .body
+                .windows(br#""code":"read_failed""#.len())
+                .any(|part| part == br#""code":"read_failed""#)
+            {
+                "fixture provider file read error"
+            } else {
+                "fixture provider read failed"
+            };
+            return Err(BusError::Unavailable(reason.into()));
+        }
+        if !fixture_bytes_match(&response.body) {
+            return Err(BusError::Invalid(
+                "granted file bytes differ from guest expectation".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub fn fixture_bytes_match(body: &[u8]) -> bool {

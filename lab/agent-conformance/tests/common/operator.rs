@@ -68,15 +68,14 @@ impl<'a> Operator<'a> {
     }
 
     /// All effect journeys share the same two samples and group-drain stop.
-    pub fn finish_check(mut self, (first, sampled): (usize, Instant)) -> Result<(), String> {
+    pub fn finish_check(mut self, (first, sampled): (usize, Instant)) -> Result<String, String> {
         while sampled.elapsed() < Duration::from_secs(3) {
             self.require_alive()?;
             std::thread::sleep(Duration::from_millis(50));
         }
         let second = self.census()?;
         self.child.stop()?;
-        println!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped");
-        Ok(())
+        Ok(format!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped"))
     }
 
     pub fn require_alive(&mut self) -> Result<(), &'static str> {

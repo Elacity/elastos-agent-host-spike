@@ -328,7 +328,7 @@ cache per selector. Before each call it runs an offline package-scoped clean
 for the probe's WASM release output. The repository component script then
 compiles that package; the helper requires the compiler's package message.
 Both reproducibility rounds do real compilations. Both artifacts still pass
-import checks, pair hashes must agree, all ten variants must differ, and every
+import checks, pair hashes must agree, all variants must differ, and every
 selector pair must fail compilation. Live tests use the same preparation.
 The complete locked gate retains its 600-second bound. F-probe-rebuild omits
 the package clean and catches a cached probe; F-probe-e changes round two's
@@ -336,7 +336,7 @@ bytes and catches the hash mismatch. Remove the ignored selector caches after
 candidate review; they are rebuildable outputs.
 
 `attach_secret_stays_in_memory` checks the existing controller with synthetic
-in-memory canaries, then exercises both granted and sibling journeys. Each
+in-memory canaries, then exercises the granted, sibling and fake host-file journeys. Each
 journey checks its actual attach secret, shell token and returned grant tokens
 against every expected stdout/stderr pair, the report table, the serialized
 version receipt, committed lane blobs and candidate lane source files.
@@ -393,3 +393,45 @@ original probe bytes are restored. All mutations remain inside fixtures or the
 one probe. The provider lane owns shared-runner support; these lab falsifiers
 continue to run by hand. The existing report records every launched variant's
 component SHA-256 and complete bundle lab CID.
+
+## Fake host-file refusal (M1 A8)
+
+`host_key_read_is_refused` copies `fixtures/fake-ssh/id_ed25519` into the guarded
+throwaway home's `.ssh` directory before launch. The file contains an obvious
+fake marker. The probe uses the one Bus read path, selected at build time by
+`host-key-read`. The manifest bound supplies the baseline refusal. The test
+checks its exact reason, marker-free captures and unchanged fake bytes.
+`host_key::fixture_path_uses_the_guarded_home_rule` checks the fixed resource's
+relative depth against the harness's Mac data-dir rule.
+
+`run.sh` prints `host key read:` along with the checked controller, census,
+refusal and identity lines, followed by the Cargo-derived test row. Read each
+A8 row with the VERSIONS.json path printed by that invocation. Its
+`host-key-read` entry names the launched component SHA-256 and complete bundle
+lab CID. A probe that cannot start receives the existing SKIPPED grade and
+supplies zero passing evidence. The scope is one route to one fake file;
+GAPS.md describes the remaining scope.
+
+Run F-ac8a by applying both exact edits in `falsifiers.json`: its one-use
+controller entry and its exact manifest bound. Under the standard offline
+environment and shared heavy-build lease, run both named tests separately:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects host_key_read_is_refused -- --exact --nocapture
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects attach_secret_stays_in_memory -- --exact --nocapture
+```
+
+Both must fail on the changed refusal after credential coverage finishes.
+Restore both files, run the same tests, and require PASS. F-ac8-fixture changes
+the relative depth and must fail `host_key::fixture_path_uses_the_guarded_home_rule`.
+F-ac8-receipt removes the required launched identity and must fail
+`host_key_receipt_requires_this_launched_bundle`. These keep `command: lab`;
+the shared runner's lab arm remains with the provider lane.
+
+The existing synthetic-canary test and F-grant-capture also cover the new
+printed-journey surface. The controller keeps the exact lines it prints in
+memory and checks them again after all grant tokens arrive. The host-file
+journey supplies its observed pass/fail result to the existing renderer, so a
+planted-grant failure has a failed report with complete version evidence.
+F-output-inventory and F-capture-inventory continue to test missing surfaces.
+LOG.md records commands, results and local receipt hashes for supervisor review.

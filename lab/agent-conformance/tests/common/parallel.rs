@@ -81,9 +81,12 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         .emit();
     }
     let collected = running.collect(BOUND);
-    operator
-        .finish_check(sampled)
-        .expect("final census and operator group stop");
+    println!(
+        "{}",
+        operator
+            .finish_check(sampled)
+            .expect("final census and operator group stop")
+    );
     let completions =
         collected.expect("natural client exits within shared bound; harness kills cannot pass");
     assert_results(&completions, runaway, require_reason);

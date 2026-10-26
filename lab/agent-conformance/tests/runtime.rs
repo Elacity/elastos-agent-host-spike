@@ -189,9 +189,12 @@ fn fixture_operator_sockets_are_loopback_only() {
     let sampled = operator
         .begin_check()
         .expect("operator ready and first census");
-    operator
-        .finish_check(sampled)
-        .expect("final census and operator group stop");
+    println!(
+        "{}",
+        operator
+            .finish_check(sampled)
+            .expect("final census and operator group stop")
+    );
     home.finish().unwrap();
 }
 

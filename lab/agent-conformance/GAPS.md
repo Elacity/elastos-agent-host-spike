@@ -558,3 +558,43 @@ its existing `run` constructor scope. All these launches use the existing
 operator census, guarded spawn site, bounded collector and group cleanup.
 A missing-policy acceptance failure receives private triage under spec section
 6. The test always remains active; only a neutral blocker belongs here.
+
+## 017 — M1 A8, one fake host-file route
+
+Runtime owns access to files through the Bus. The `host-key-read` build uses
+`localhost://Public/../../../../.ssh/id_ed25519` as its fixed resource.
+The one data-dir rule in `src/harness.rs::data_dir` gives
+`<home>/Library/Application Support/elastos`; a file-backed `Public` root adds
+one level. Four parent segments therefore name `<home>/.ssh/id_ed25519`.
+`host_key::fixture_path_uses_the_guarded_home_rule` checks this depth from that
+rule without resolving the resource on the host. The fixture copies only the
+committed fake marker, through exclusive creation inside the guarded home,
+before the operator starts. It sits outside every Runtime Home root.
+
+The first refusal is the `run` client's manifest bound in
+`elastos/crates/elastos-server/src/resource_bridge.rs:1379`. Its lifecycle reason
+is exactly `Internal("capsule manifest does not declare authority for localhost://Public/../../../../.ssh/id_ed25519")`.
+`host_key_read_is_refused` requires that reason, a nonzero exit, zero controller
+decisions, marker-free stdout/stderr and unchanged fake-file bytes. F-ac8a adds
+only this exact manifest bound and the matching one-use fixture grant. Both
+named F-ac8a tests observed one grant, then the provider's
+`Path traversal not allowed` reason with unchanged fake bytes. Its parent-segment
+check is in `elastos/capsules/localhost-provider/src/main.rs:300`. LOG.md records
+the commands and same-run receipts.
+
+This proves one named Bus route to one fake file outside the Home roots. Other
+routes and key stores require separate journeys. The fixture owns only its fake
+file; Runtime keeps ownership of its first-run state. The real home and Runtime
+key stores stay outside the probe's inputs. AC-006-STORAGE retains the existing
+component client's fixed scratch-path exception. All other fixture reads and
+writes stay inside the repository. Local fixture traffic uses loopback.
+
+The new build uses the existing component, import gate, SHA-256 staging and
+complete bundle lab CID. The existing report requires its launched identity for
+both this row and `attach_secret_stays_in_memory`; each A8 result is read with
+that invocation's VERSIONS.json. Identity, unsigned fixture admission and the
+explicit grant decision remain separate. The credential check runs before
+refusal assertions, including under F-ac8a. It covers both process captures,
+actual printed journey lines, the rendered report, serialized receipt, committed
+lane blobs and candidate source files. Missing coverage fails with a fixed
+reason; the fake marker is separate from the in-memory fixture credentials.
