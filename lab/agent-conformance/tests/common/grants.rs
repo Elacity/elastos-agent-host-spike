@@ -922,7 +922,7 @@ impl Controller {
             }),
         )?;
         require_success(&granted)?;
-        field(&granted, "token")?;
+        self.remember(field(&granted, "token")?)?;
         let status = self.exchange(
             session.bearer_index,
             "GET",
@@ -2448,6 +2448,89 @@ mod tests {
         assert!(controller
             .print_checked("ordinary session grant line")
             .is_ok());
+
+        for (status, expected) in [
+            (
+                framed("403 Forbidden", "request refused"),
+                Err("fixture HTTP request was refused"),
+            ),
+            (
+                framed("200 OK", "invalid JSON"),
+                Err("invalid fixture response JSON"),
+            ),
+            (
+                framed("200 OK", r#"{"status":"pending"}"#),
+                Err("fixture client grant is not granted"),
+            ),
+            (
+                framed("200 OK", r#"{"status":"granted"}"#),
+                Err("grant protocol requires a nonempty string field"),
+            ),
+            (
+                framed("200 OK", r#"{"status":"granted","token":"invalid token"}"#),
+                Err("invalid fixture authorization header"),
+            ),
+            (
+                framed(
+                    "200 OK",
+                    r#"{"status":"granted","token":"capability-token-canary"}"#,
+                ),
+                Ok("capability-token-canary"),
+            ),
+        ] {
+            with_frames(
+                vec![
+                    framed("200 OK", r#"{"status":"pending","request_id":"req-1"}"#),
+                    framed(
+                        "200 OK",
+                        r#"{"requests":[{"request_id":"req-1","session_id":"client-session"}]}"#,
+                    ),
+                    framed("200 OK", r#"{"success":true,"token":"grant-token-canary"}"#),
+                    status,
+                ],
+                |port| {
+                    let mut controller = idle_controller(port);
+                    let session = ClientSession {
+                        bearer_index: controller
+                            .remember_client_bearer(&json!({
+                                "token": "client-bearer-canary", "session_type": "capsule"
+                            }))
+                            .unwrap(),
+                        session_id: "client-session".into(),
+                    };
+                    let grant = controller.open_session_read(
+                        &session,
+                        "localhost://Public/test/one",
+                        "test read",
+                    );
+                    assert_eq!(
+                        grant.map(|grant| controller.credentials[grant.capability].as_str()),
+                        expected,
+                        "the client uses the token from its status route"
+                    );
+                    assert_eq!(
+                        controller.print_checked("grant-token-canary"),
+                        Err("fixture credential detected: printed journey"),
+                        "the issued shell token stays guarded after every status response"
+                    );
+                    assert_eq!(
+                        controller.check_bytes(b"grant-token-canary", Surface::Stdout),
+                        Err("fixture credential detected: child stdout")
+                    );
+                    assert_eq!(
+                        controller.check_bytes(b"grant-token-canary", Surface::Stderr),
+                        Err("fixture credential detected: child stderr")
+                    );
+                    if let Ok(token) = expected {
+                        assert_eq!(
+                            controller.print_checked(token),
+                            Err("fixture credential detected: printed journey"),
+                            "the status route token stays guarded"
+                        );
+                    }
+                },
+            );
+        }
     }
 
     #[test]
