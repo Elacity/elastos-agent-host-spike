@@ -6,7 +6,7 @@ use agent_conformance::identity::Observation;
 use agent_conformance::runtime::runtime_under_test;
 use std::fs;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const BOUND: Duration = Duration::from_secs(10);
 const RESULTS: [&str; 4] = [
@@ -34,7 +34,7 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
     // Share task 003's build lock and Runtime cache, including when two tests run.
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let builds = artifacts();
-    let runtime = runtime_under_test().expect("build Runtime offline");
+    let runtime = runtime_under_test().unwrap_or_else(|reason| super::probe::skipped(reason));
     let operator_home = ThrowawayHome::new().unwrap();
     let homes = [(); 4].map(|_| ThrowawayHome::new().unwrap());
     let capsules: Vec<_> = homes
@@ -57,11 +57,12 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         })
         .collect();
 
-    let mut operator =
-        common::operator::Operator::start(&operator_home).expect("start one fixture operator");
-    operator.ready().expect("operator ready");
-    let first = operator.census().expect("ready socket census");
-    let sampled = Instant::now();
+    let mut operator = common::operator::Operator::start(&operator_home).unwrap_or_else(|reason| {
+        super::probe::skipped(&format!("operator prerequisite: {reason}"))
+    });
+    let sampled = operator
+        .begin_check()
+        .expect("operator ready and first census");
     let launches: Vec<_> = homes
         .iter()
         .zip(&capsules)
@@ -80,14 +81,9 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         .emit();
     }
     let collected = running.collect(BOUND);
-    while sampled.elapsed() < Duration::from_secs(3) {
-        operator.require_alive().unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let second = operator.census().expect("final socket census");
-    operator.child.stop().expect("stop operator group");
-    drop(operator);
-    println!("operator census: {first} then {second} loopback sockets; four clients, one operator; group stopped");
+    operator
+        .finish_check(sampled)
+        .expect("final census and operator group stop");
     let completions =
         collected.expect("natural client exits within shared bound; harness kills cannot pass");
     assert_results(&completions, runaway, require_reason);

@@ -9,6 +9,8 @@ const _: () = assert!(
         + cfg!(feature = "network") as u8
         + cfg!(feature = "task") as u8
         + cfg!(feature = "runaway") as u8
+        + cfg!(feature = "granted-read") as u8
+        + cfg!(feature = "sibling-read") as u8
         <= 1,
     "select exactly one probe effect"
 );
@@ -42,16 +44,79 @@ impl exports::elastos::bus::lifecycle::Guest for Probe {
         {
             run_runaway()
         }
+        #[cfg(any(feature = "granted-read", feature = "sibling-read"))]
+        {
+            read_granted_file()
+        }
         #[cfg(not(any(
             feature = "read",
             feature = "network",
             feature = "task",
-            feature = "runaway"
+            feature = "runaway",
+            feature = "granted-read",
+            feature = "sibling-read"
         )))]
         {
             run_probe().map_err(|reason| elastos::bus::types::BusError::Unavailable(reason.into()))
         }
     }
+}
+
+#[cfg(all(
+    target_arch = "wasm32",
+    any(feature = "granted-read", feature = "sibling-read")
+))]
+fn read_granted_file() -> Result<(), elastos::bus::types::BusError> {
+    use elastos::bus::{capabilities, providers, types::*};
+    #[cfg(feature = "granted-read")]
+    let resource = "localhost://Public/agent-conformance-grants/granted.txt";
+    #[cfg(feature = "sibling-read")]
+    let resource = "localhost://Public/agent-conformance-grants/sibling.txt";
+    let grant = capabilities::request(&CapabilityRequest {
+        resource: resource.into(),
+        actions: vec!["read".into()],
+        reason: "agent conformance: fixture read".into(),
+    })?;
+    if grant.resource != resource || grant.actions != ["read"] {
+        return Err(BusError::Denied("fixture grant scope differs".into()));
+    }
+    let response = providers::invoke(&InvokeRequest {
+        resource: resource.into(),
+        operation: "read".into(),
+        body: br#"{"encoding":"utf8"}"#.to_vec(),
+        grant: Some(grant.id),
+    })?;
+    // Compare the complete serialized provider result, including all file bytes
+    // and their length. The fixed ASCII fixture needs no guest JSON dependency.
+    // Expected bytes stay independent of the host's mutable seed fixture.
+    if response.status != "ok" {
+        let reason = if response
+            .body
+            .windows(br#""code":"parse_error""#.len())
+            .any(|part| part == br#""code":"parse_error""#)
+        {
+            "fixture provider parse error"
+        } else if response
+            .body
+            .windows(br#""code":"read_failed""#.len())
+            .any(|part| part == br#""code":"read_failed""#)
+        {
+            "fixture provider file read error"
+        } else {
+            "fixture provider read failed"
+        };
+        return Err(BusError::Unavailable(reason.into()));
+    }
+    if !fixture_bytes_match(&response.body) {
+        return Err(BusError::Invalid(
+            "granted file bytes differ from guest expectation".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn fixture_bytes_match(body: &[u8]) -> bool {
+    body == br#"{"data":{"content":"grant-fixture-bytes","encoding":"utf8","size":19},"status":"ok"}"#
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "task"))]
@@ -111,6 +176,17 @@ export!(Probe);
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guest_checks_all_granted_file_bytes() {
+        let expected = br#"{"data":{"content":"grant-fixture-bytes","encoding":"utf8","size":19},"status":"ok"}"#;
+        assert!(super::fixture_bytes_match(expected));
+        for index in 0..expected.len() {
+            let mut different = expected.to_vec();
+            different[index] ^= 1;
+            assert!(!super::fixture_bytes_match(&different));
+        }
+        assert!(!super::fixture_bytes_match(&expected[..expected.len() - 1]));
+    }
     #[test]
     fn probe_refuses_without_a_launch_argument_channel() {
         assert_eq!(

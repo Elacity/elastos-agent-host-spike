@@ -1,0 +1,11 @@
+{
+  "deny_reason": "fixture denies unlisted read",
+  "grants": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/granted.txt",
+      "action": "read",
+      "reason": "agent conformance: fixture read",
+      "duration": "once"
+    }
+  ]
+}
