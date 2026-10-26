@@ -36,6 +36,7 @@ tools/Cargo.toml      the `wasm-capsule-tools` crate: the lab's host-side librar
 tools/src/lib.rs      `bundle_identity` (the shared lab CID, one re-export) + the manifest bytes
 tools/src/bundle.rs   `tools/bundle`'s rules: `parse_args` and `run`
 tools/src/verify.rs   wc-004's one verify path: `verify_checked` and `verify_bundle`
+tools/src/run.rs      wc-005a's runner: `run_engine`, one host engine on the verified entrypoint
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
@@ -52,7 +53,7 @@ the one import-audit path (P10), which wc-004's verifier calls through a path
 dependency. The cx-wasm-audit lane owns it; this lane does not edit it. Test it
 from this directory with `cargo test -p wasm-capsule-audit --locked`. `tools/`
 is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name
-and the verifier, below).
+the verifier and the runner, below).
 
 `capsule` itself has **no dependencies**: it has no `[dependencies]` (P18). Its
 tests' dev-dependencies are built only for tests: `wasm-capsule-tools`, the
@@ -357,11 +358,14 @@ capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
 walk runs the same parse and refuses first. It is kept so the verifier fails
 closed with a reason rather than a panic, and no test can reach it.
 
-**The value.** `VerifiedBundle` holds the checked bundle and the audit's own
-import list, read through `cid()`, `entries()` and `imports()`. Its fields are
-private, and it has no public constructor, no `&mut` access and no
-`Deserialize`, so a value exists only as `verify_checked` made it. wc-005
-(task 006) stages its `entries()`.
+**The value.** `VerifiedBundle` holds the checked bundle, which of its
+entries is the entrypoint (found by step 3, the one manifest read) and the
+audit's own import list, read through `cid()`, `entries()`, `entrypoint()` and
+`imports()`. `entrypoint()` returns the checked entry the manifest's
+`entrypoint` names, the module the audit read, so no caller reads the manifest
+again. Its fields are private, and it has no public constructor, no `&mut`
+access and no `Deserialize`, so a value exists only as `verify_checked` made
+it. wc-005a's runner (task 014) writes `entrypoint()`'s bytes.
 
 **The checked bytes, never the folder again.** The audit reads the module
 bytes the signed name covers, from the checked value. The verifier reads no
@@ -389,6 +393,79 @@ it, and that every import of its entrypoint module is granted. It answers
 nothing about "may this run": it makes no admission, launch or
 publisher-trust decision and sits in no admission or launch path. The signed
 name is a lab CID, not the Runtime's CID.
+
+## Run one engine (wc-005a)
+
+```rust
+wasm_capsule_tools::run::run_engine(bundle: &VerifiedBundle, engine: Engine, program: &Path,
+    work_root: &Path) -> Result<Vec<u8>, Refusal>
+```
+
+A library function; there is no command and no binary. It runs one host
+engine (`Engine::Wasmtime` or `Engine::Wasmer`) once on the verified
+entrypoint and returns its stdout. In order, the first refusal is the answer:
+
+1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
+   so it is never looked up on PATH; the same path is the one started;
+2. `work_root` must be absolute, resolve, be byte for byte its own
+   `std::fs::canonicalize` result, so no link is anywhere in it (an
+   option-like `--env=X` is relative, so it is refused), and be a folder by
+   its own `fs::metadata` (`work_root_folder`; a failed metadata read keeps
+   its OS cause, never reported as "not a folder");
+3. one new folder, `<work_root>/<engine name>`, is made with `create_dir`
+   and mode `0o700`; a name already there is refused, never reused;
+4. `entrypoint()`'s checked bytes are written from memory as
+   `<run folder>/module.wasm` with the shared `bundle::write_new_file`
+   (`create_new`, never through a link);
+5. the engine starts as one process:
+   `<program> run --invoke digest <absolute module path> 1592590337`
+   (`1592590337` is `FIXED_INPUT`, `0x5EED_0001`), with stdin null and an
+   empty environment. The module argument is absolute, so it is never read as
+   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag.
+
+That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
+`wasmer` 7.5.0 (task 006's LOG); both engines take it unchanged.
+
+**The reasons.** Each has its own exact text, after `<path>: `:
+
+- `the engine program path is not absolute: an engine is started only by an absolute path`;
+- `the work root is not an absolute path`;
+- `the work root cannot be resolved: <OS error>`;
+- `the work root is not canonical: it resolves to <canonical path>`;
+- `the work root's metadata cannot be read: <OS error>`;
+- `the work root is not a folder`;
+- `the run folder already exists: the runner makes a new one and never reuses it`;
+- `the run folder cannot be created: <OS error>`;
+- `the verified entrypoint cannot be created: <OS error>` and
+  `the verified entrypoint cannot be written: <OS error>` (the shared writer's
+  two refusals, with their path and cause kept; any other writer reason is
+  carried unchanged as `the shared writer refused: <reason>`);
+- `<engine> did not start: <OS error>` (for example a missing program);
+- `<engine> failed (exit status: <n>): <its stderr>`.
+
+**The claim.** The bytes the engine is given come from the verified value,
+`entrypoint()`, never from a second read of the bundle on disk: the verified
+`cid()` is the name, and the bytes written are exactly the bytes that name
+covers. The runner reads no environment variable and no file, parses no
+manifest or module, and writes nothing outside the new folder. The engine gets
+no folder, env or network flag, and an empty environment. This is a behaviour
+proof on one core module, not the Component ABI. `wasmtime` and `wasmer` are
+test-only host engines; neither is endorsed.
+
+**Scope of the isolation claim.** It covers the argv, the empty environment
+and what the guest is given: with no folder, env or network flag, the guest
+gets no host resource. The engine itself is a native process with the user's
+own authority, and this runner does not confine it.
+
+**Known limit, not claimed.** A host engine CLI opens the module by its path.
+A concurrent process running as the same user could replace the file, or swap
+the run folder or the work root, between the runner's write and the engine's
+open; the folder and file writes are path-based too. This runner does not
+defend against that. Binding launch to verified bytes is the Runtime's launch
+path, not lab tooling. The runner makes no admission or launch decision.
+
+Out of this task: the two-engine comparison with `verify_bundle` (task 015)
+and the receipt with engine versions (task 016).
 
 ## Runtime ABI for a bare capsule (wc-008)
 
@@ -508,6 +585,9 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 - `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
   importing module) beside the 8-byte `capsule.wasm`, the audit reads
   `main.wasm`.
+- `verified_entrypoint_is_the_audited_module` — in that same layout,
+  `entrypoint()` is the checked `main.wasm` entry itself (its path, its bytes,
+  and the audit of it gives `imports()`), not `capsule.wasm`.
 - `verifier_preserves_upstream_refusals` — the walk's (no manifest, a link),
   the signature check's (a malformed DID, a name that is not a lab CID, a
   signature that does not verify) and the audit's (a malformed module, code in
@@ -517,13 +597,14 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   before unsigned, unsigned before the audit, the signature before the
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
-  field, exactly five public functions (`verify_checked`, `verify_bundle` and
-  the three accessors), no `&mut self`, no `Deserialize`, `Default` or trait
+  field, exactly six public functions (`verify_checked`, `verify_bundle` and
+  the four accessors), no `&mut self`, no `Deserialize`, `Default` or trait
   impl for the value, and one literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
-  `verify_checked_signature` once and `audit` once, uses neither
-  `verify_name_signature` nor `audit_component`, and `verify_bundle` only walks
-  and delegates.
+  `verify_checked_signature` once and `audit` once, parses a manifest once
+  (one `from_slice`, one call of `manifest_entrypoint`), uses neither
+  `verify_name_signature` nor `audit_component`, `verify_bundle` only walks
+  and delegates, and `entrypoint()` reads no manifest.
 - `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
 - `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
   `tools/src`, comments stripped, name no `wasmparser`.
@@ -543,10 +624,53 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   `.gitignore`'s rule; `*.seed` is this lane's (`.gitignore`). If git cannot
   run, it fails.
 
+The runner, in `tests/run.rs`. Stand-in engines are shell scripts written into
+each test's own temp dir; work roots are the temp dir's canonical path (macOS
+puts it under the `/var` link):
+
+- `run_writes_only_the_verified_entrypoint_bytes` — the bundle's
+  `capsule.wasm` is changed on disk after verification; a stand-in that prints
+  the file it was given prints the verified bytes, the run folder holds exactly
+  `module.wasm`, and the work root holds only the bundle and the run folder.
+- `engine_path_must_be_absolute` — `./wasmtime`, `wasmtime` and
+  `engines/wasmtime` are refused with their own reason; nothing is written.
+- `work_root_must_be_absolute_and_canonical` — `work`, `--env=X` and `./work`
+  (relative), and a root through a folder link, a link plus `.`, a `..` and a
+  trailing `/` (not canonical) are each refused with their own reason; nothing
+  is written and no engine starts.
+- `run_directory_is_private_and_new` — the run folder's mode is `0o700`; a
+  second run in the same root and a planted folder at a run folder's name are
+  each refused, the folder is unchanged, and no engine starts.
+- `runner_io_refusals_keep_path_and_cause` — a missing root (`NotFound`), a
+  root that is a file, and a root the user may not write (`PermissionDenied`
+  on the run folder) each keep their path and cause; the shared writer's
+  create and write refusals become the runner's own two reasons with path and
+  cause kept, and another writer reason is carried unchanged.
+- `runner_passes_no_directory_env_or_network_flags` — an **argv proof**, not
+  behaviour: for each engine, a stand-in prints its argv, which is exactly
+  `run`, `--invoke`, `digest`, the absolute module path and `1592590337`
+  (`FIXED_INPUT`), with no `--dir`, `--mapdir`, `--env` or `--net`.
+- `engine_starts_with_an_empty_environment` — a stand-in sees no `HOME`,
+  which the test process has.
+- `engine_failures_keep_their_cause` — a stand-in that exits 3 with a stderr
+  line gives the engine, the status and that line; a missing program gives the
+  OS error. Two different reasons, for each engine.
+- `each_engine_prints_the_fixed_output` — the capsule `tools/build` makes,
+  bundled, signed and verified, run on the real `wasmtime` and `wasmer` found
+  on PATH: each prints `230101071268130872` (`FIXED_OUTPUT`) for `1592590337`.
+  An engine not found prints `SKIPPED` and gives no result, never a PASS.
+- `runner_uses_only_explicit_inputs` — the runner's source, comments
+  stripped: no environment read, no file read, no manifest or module parse, no
+  second verify, and `entrypoint()` is its one source of module bytes.
+- `runner_reuses_shared_writer` — the runner writes through
+  `bundle::write_new_file` once and has no writer of its own (`OpenOptions`,
+  `fs::write`, `create_new` and the like).
+
 ## Falsifiers
 
 `falsifiers.json` holds nine wc-001, seven task-010, 23 task-009, one task-012,
-21 wc-004 and four wc-008 planted bugs in the provider format (`command: "lab"`). Each requires
+one task-017, 21 wc-004, four wc-008 and 20 wc-005a (task 014) planted bugs in
+the provider format (`command: "lab"`). Each requires
 all its named tests to fail at an assertion. The canonical runner
 `examples/agent-host/falsify.py` now has a `lab` command (`cargo test
 --workspace` on this workspace), but its recovery targets (`PROVIDER_TARGETS`)
@@ -678,3 +802,52 @@ name neither `capsule/capsule.json` nor `tools/src/lib.rs`), not a PASS.
   one `description` byte changes, and
   `this_capsule_bundle_has_the_pinned_lab_cid` fails. wc-008 adds no second
   entry for it (F-WC8-ONE-BYTE).
+
+wc-005a's 23 (task 014), runner-caught. The canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`
+reported `summary: 44 CAUGHT of 44` (these 23 and wc-004's 21, re-run because
+`tools/src/verify.rs` changed), exit 0, and restored every file. Each named test
+passed unmutated first. `tools/src/run.rs` is not in the runner's recovery
+targets (`PROVIDER_TARGETS`, the provider lane's), so a killed run cannot
+restore it for the F-WC5 entries (ask R2):
+
+- F-WC5c — the runner adds `--dir .` to the argv
+  (`runner_passes_no_directory_env_or_network_flags`).
+- F-WC5d — the runner passes `--env WC5=1 --dir .` to `wasmer` only (the same
+  test, on its `wasmer` run).
+- F-WC5-DISK-REREAD — the runner writes the bundle's module read again from
+  disk, not `entrypoint()`'s bytes (`run_writes_only_the_verified_entrypoint_bytes`
+  sees the changed bytes; `runner_uses_only_explicit_inputs` sees the read).
+- F-WC5-RELATIVE-ENGINE — the absolute-path check is removed
+  (`engine_path_must_be_absolute`).
+- F-WC5-WORK-ROOT-LINK — the canonical check is removed
+  (`work_root_must_be_absolute_and_canonical`).
+- F-WC5-RUN-DIR-MODE and F-WC5-RUN-DIR-REUSE — the run folder is made `0o755`,
+  or an existing one is reused by a recursive create
+  (`run_directory_is_private_and_new`).
+- F-WC5-IO-ROOT-CAUSE, -IO-RUN-DIR-CAUSE, -IO-MODULE-CREATE, -IO-MODULE-WRITE
+  and -IO-MODULE-PATH — the work root's, the run folder's, or the module file's
+  refusal loses its cause or path (`runner_io_refusals_keep_path_and_cause`).
+- F-WC5-IO-ROOT-METADATA and -IO-ROOT-IS-DIR — a failed metadata read of the
+  work root is reported as "not a folder", in `work_root_folder` or by a
+  `Path::is_dir` check in its place (`runner_io_refusals_keep_path_and_cause`).
+- F-WC5-STDIN-PIPED — the engine's stdin is a pipe, not `/dev/null`
+  (`engine_stdin_is_null`).
+- F-WC5-ENV-READ — the engine program comes from an environment variable when
+  set (`runner_uses_only_explicit_inputs`).
+- F-WC5-LOCAL-WRITER — the module is written with `fs::write`, not the shared
+  writer (`runner_reuses_shared_writer`).
+- F-WC5-ENGINE-ENV — the engine inherits the test process's environment
+  (`engine_starts_with_an_empty_environment`).
+- F-WC5-FAIL-STDERR, -START-CAUSE and -EXIT-IGNORED — a failed engine's
+  stderr is dropped, a start failure loses its OS error, or a nonzero exit is
+  accepted (`engine_failures_keep_their_cause`).
+- F-WC4-ENTRYPOINT-ACCESSOR — `entrypoint()` returns `capsule.wasm`, not the
+  manifest's entrypoint (`verified_entrypoint_is_the_audited_module`).
+- F-WC4-ENTRYPOINT-REPARSE — `entrypoint()` reads the manifest again
+  (`verifier_has_one_check_path`).
+
+Task 014 also re-anchored six wc-004 entries to the moved verifier code, each
+the same bug as before: F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
+-ORDER-AUDIT-FIRST, -SEALED-FIELD, -SEALED-NEW (now with the `entrypoint`
+field) and -SECOND-AUDIT. All six are in the 44 above.

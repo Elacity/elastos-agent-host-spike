@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012 and 015). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015 and 016). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -89,8 +89,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n",
-          "new": "    if let Some(manifest) = entries.iter().find(|entry| entry.path == MANIFEST_FILE) {\n        check_manifest(&manifest.content)?;\n    }\n"
+          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    let wasm = check_manifest(&manifest.content)?;\n",
+          "new": "    let mut wasm = false;\n    if let Some(manifest) = entries.iter().find(|entry| entry.path == MANIFEST_FILE) {\n        wasm = check_manifest(&manifest.content)?;\n    }\n"
         }
       ],
       "tests": [
@@ -106,7 +106,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    let manifest: CapsuleManifest = serde_json::from_slice(bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n",
-          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok(());\n    };\n"
+          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok(false);\n    };\n"
         }
       ],
       "tests": [
@@ -121,8 +121,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    manifest.validate().map_err(Refusal::ManifestInvalid)\n",
-          "new": "    let _ = manifest;\n    Ok(())\n"
+          "old": "    manifest.validate().map_err(Refusal::ManifestInvalid)?;\n",
+          "new": ""
         }
       ],
       "tests": [
@@ -174,8 +174,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != MANIFEST_FILE)\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != MANIFEST_FILE)\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -191,8 +191,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -540,8 +540,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    check_manifest(&manifest.content)?;\n    let folder = bundle.file_name().unwrap_or_default().to_string_lossy();\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: format!(\"{folder}/{}\", entry.path),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let folder = bundle.file_name().unwrap_or_default().to_string_lossy();\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: format!(\"{folder}/{}\", entry.path),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -556,8 +556,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle.join(&entry.path).to_string_lossy().into_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle.join(&entry.path).to_string_lossy().into_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -642,8 +642,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -772,8 +772,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .map(|cid| CheckedBundle { cid, entries })\n",
-          "new": "        .and_then(|cid| {\n            let entries = entries\n                .into_iter()\n                .map(|entry| {\n                    let content = std::fs::read(bundle.join(&entry.path))\n                        .map_err(|error| unreadable(&entry.path, error))?;\n                    Ok(BundleEntry {\n                        path: entry.path,\n                        content,\n                    })\n                })\n                .collect::<Result<Vec<_>, Refusal>>()?;\n            Ok(CheckedBundle { cid, entries })\n        })\n"
+          "old": "        .map(|cid| CheckedBundle { cid, entries, wasm })\n",
+          "new": "        .and_then(|cid| {\n            let entries = entries\n                .into_iter()\n                .map(|entry| {\n                    let content = std::fs::read(bundle.join(&entry.path))\n                        .map_err(|error| unreadable(&entry.path, error))?;\n                    Ok(BundleEntry {\n                        path: entry.path,\n                        content,\n                    })\n                })\n                .collect::<Result<Vec<_>, Refusal>>()?;\n            Ok(CheckedBundle { cid, entries, wasm })\n        })\n"
         }
       ],
       "tests": [
@@ -789,8 +789,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .map(|cid| CheckedBundle { cid, entries })\n",
-          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries: entries\n                .into_iter()\n                .filter(|entry| entry.path != MANIFEST_FILE)\n                .collect(),\n        })\n"
+          "old": "        .map(|cid| CheckedBundle { cid, entries, wasm })\n",
+          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries: entries\n                .into_iter()\n                .filter(|entry| entry.path != MANIFEST_FILE)\n                .collect(),\n            wasm,\n        })\n"
         }
       ],
       "tests": [
@@ -805,8 +805,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    encode_entries(&entries)\n"
+          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = false;\n    encode_entries(&entries)\n"
         },
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
@@ -827,8 +827,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n}\n",
-          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    pub entries: Vec<BundleEntry>,\n}\n"
+          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n}\n",
+          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    pub entries: Vec<BundleEntry>,\n    wasm: bool,\n}\n"
         }
       ],
       "tests": [
@@ -844,7 +844,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "impl CheckedBundle {\n",
-          "new": "impl CheckedBundle {\n    pub fn new(cid: LabCid, entries: Vec<BundleEntry>) -> Self {\n        Self { cid, entries }\n    }\n\n"
+          "new": "impl CheckedBundle {\n    pub fn new(cid: LabCid, entries: Vec<BundleEntry>) -> Self {\n        Self { cid, entries, wasm: false }\n    }\n\n"
         }
       ],
       "tests": [
@@ -926,13 +926,13 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n}\n",
-          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    bundle: std::path::PathBuf,\n}\n"
+          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n}\n",
+          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n    bundle: std::path::PathBuf,\n}\n"
         },
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .map(|cid| CheckedBundle { cid, entries })\n",
-          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            bundle: bundle.to_path_buf(),\n        })\n"
+          "old": "        .map(|cid| CheckedBundle { cid, entries, wasm })\n",
+          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            bundle: bundle.to_path_buf(),\n        })\n"
         },
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
@@ -1995,8 +1995,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"weights.gguf\")\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"weights.gguf\")\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -2334,8 +2334,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    require_variant_cids(binding, variants)?;\n    require_recipe_cid(binding, recipe)?;\n",
-          "new": "    require_recipe_cid(binding, recipe)?;\n    require_variant_cids(binding, variants)?;\n"
+          "old": "    require_variant_cids(binding, variants)?;\n    require_portable_wasm(variants.iter().copied())?;\n    require_recipe_cid(binding, recipe)?;\n",
+          "new": "    require_recipe_cid(binding, recipe)?;\n    require_variant_cids(binding, variants)?;\n    require_portable_wasm(variants.iter().copied())?;\n"
         }
       ],
       "tests": [
@@ -2392,14 +2392,14 @@
     },
     {
       "id": "F-CI15x",
-      "title": "sign_variant_binding replaces lab_cid's refusal with NoManifest",
+      "title": "sign_variant_binding replaces the walk's refusal with NoManifest",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            .map(|(platform, bundle)| Ok(((*platform).to_owned(), lab_cid(bundle)?.to_string())))\n",
-          "new": "            .map(|(platform, bundle)| Ok(((*platform).to_owned(), lab_cid(bundle).map_err(|_| Refusal::NoManifest)?.to_string())))\n"
+          "old": "        walked.push((*platform, checked_bundle(bundle)?));\n",
+          "new": "        walked.push((*platform, checked_bundle(bundle).map_err(|_| Refusal::NoManifest)?));\n"
         }
       ],
       "tests": [
@@ -2537,6 +2537,152 @@
       "tests": [
         "variant_binding_paths_share_one_implementation",
         "signature_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI16a",
+      "title": "variant binding verification skips check (e2), so a WASM app verifies under a platform label",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_portable_wasm(variants.iter().copied())?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a_wasm_app_under_a_platform_label_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI16b",
+      "title": "check (c) allows the portable label * with other labels",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if seen.len() > 1 && seen.contains(&PORTABLE_PLATFORM) {\n",
+          "new": "    if false && seen.len() > 1 && seen.contains(&PORTABLE_PLATFORM) {\n"
+        }
+      ],
+      "tests": [
+        "the_portable_label_stands_alone"
+      ]
+    },
+    {
+      "id": "F-CI16c",
+      "title": "the manifest check sets the WASM flag for every bundle",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let wasm = manifest.capsule_type == CapsuleType::Wasm;\n",
+          "new": "    let wasm = manifest.capsule_type == CapsuleType::Wasm || true;\n"
+        }
+      ],
+      "tests": [
+        "a_portable_data_capsule_binds_under_the_portable_label",
+        "variant_binding_binds_each_variant_cid_and_verifies"
+      ]
+    },
+    {
+      "id": "F-CI16d",
+      "title": "check (e2) reads the WASM type with a second CapsuleManifest parse of the checked capsule.json (same answers)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .filter(|(platform, checked)| checked.wasm && *platform != PORTABLE_PLATFORM)\n",
+          "new": "        .filter(|(platform, checked)| {\n            let manifest = checked\n                .entries\n                .iter()\n                .find(|entry| entry.path == MANIFEST_FILE)\n                .expect(\"the walk read capsule.json\");\n            let manifest: CapsuleManifest = serde_json::from_slice(&manifest.content)\n                .expect(\"the walk parsed capsule.json\");\n            manifest.capsule_type == CapsuleType::Wasm && *platform != PORTABLE_PLATFORM\n        })\n"
+        }
+      ],
+      "tests": [
+        "wasm_type_comes_from_the_one_manifest_check"
+      ]
+    },
+    {
+      "id": "F-CI16e",
+      "title": "sign_variant_binding checks (e2) with its own copy of the rule instead of the shared function (same refusals)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_portable_wasm(\n        walked\n            .iter()\n            .map(|(platform, checked)| (*platform, checked)),\n    )?;\n",
+          "new": "    let mut own: Vec<&(&str, CheckedBundle)> = walked.iter().collect();\n    own.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));\n    for (platform, checked) in own {\n        if checked.wasm && *platform != PORTABLE_PLATFORM {\n            return Err(Refusal::WasmNotPortable {\n                platform: (*platform).to_owned(),\n                bundle: checked.cid(),\n            });\n        }\n    }\n"
+        }
+      ],
+      "tests": [
+        "variant_binding_paths_share_one_implementation"
+      ]
+    },
+    {
+      "id": "F-CI16f",
+      "title": "variant binding verification runs check (e2) before check (e)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_variant_cids(binding, variants)?;\n    require_portable_wasm(variants.iter().copied())?;\n",
+          "new": "    require_portable_wasm(variants.iter().copied())?;\n    require_variant_cids(binding, variants)?;\n"
+        }
+      ],
+      "tests": [
+        "wasm_variant_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI16g",
+      "title": "variant binding verification runs check (e2) after check (f)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_portable_wasm(variants.iter().copied())?;\n    require_recipe_cid(binding, recipe)?;\n",
+          "new": "    require_recipe_cid(binding, recipe)?;\n    require_portable_wasm(variants.iter().copied())?;\n"
+        }
+      ],
+      "tests": [
+        "wasm_variant_refusal_order_is_stable"
+      ]
+    },
+    {
+      "id": "F-CI16h",
+      "title": "sign_variant_binding skips check (e2), so it signs a WASM app under a platform label",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    require_portable_wasm(\n        walked\n            .iter()\n            .map(|(platform, checked)| (*platform, checked)),\n    )?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a_wasm_app_under_a_platform_label_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI16i",
+      "title": "check (c) refuses the portable label * as unknown",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        if !VARIANT_PLATFORMS.contains(&label) {\n",
+          "new": "        if !VARIANT_PLATFORMS.contains(&label) || label == PORTABLE_PLATFORM {\n"
+        }
+      ],
+      "tests": [
+        "a_wasm_app_binds_one_portable_variant",
+        "the_portable_label_stands_alone"
       ]
     }
   ]
