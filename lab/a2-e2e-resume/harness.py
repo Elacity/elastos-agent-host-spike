@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -15,7 +16,11 @@ LANE = Path(__file__).resolve().parent
 REPO = LANE.parent.parent
 EVIDENCE = LANE / "evidence.txt"
 DRIVER_BIN = LANE / "target/debug/a2-resume-driver"
+GUEST_PIN = LANE / "guest.sha256"
 JOURNEY = ("WRITE", "STALE", "STOP", "START", "RESUME", "WRITE2")
+EXPECTED_STOP_EXIT = 0
+EXPECTED_SECOND_EXIT = 0
+STATE_FILE = "a2-resume-state.json"
 
 
 class Proof:
@@ -31,13 +36,24 @@ class Proof:
     def row(self, name: str, result: str, detail: str) -> None:
         if name not in JOURNEY:
             raise SystemExit(f"unknown row {name}")
-        if result not in {"PASS", "FAIL", "NOT RUN"}:
+        if result == "PASS":
+            raise SystemExit(f"{name} PASS must be computed from evidence, not assigned")
+        if result not in {"FAIL", "NOT RUN"}:
             raise SystemExit(f"bad result {result} for {name}")
         if result == "PASS" and name in self.steps and self.steps[name] == "NOT RUN":
             raise SystemExit(f"{name} was NOT RUN; it cannot become PASS")
         self.steps[name] = result
         self.details[name] = detail
         self.log(f"STEP {name}: {result} — {detail}")
+
+    def accept(self, name: str, detail: str) -> None:
+        if name not in JOURNEY:
+            raise SystemExit(f"unknown row {name}")
+        if name in self.steps and self.steps[name] == "NOT RUN":
+            raise SystemExit(f"{name} was NOT RUN; it cannot become PASS")
+        self.steps[name] = "PASS"
+        self.details[name] = detail
+        self.log(f"STEP {name}: PASS — {detail}")
 
 
 def run(
@@ -68,6 +84,25 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def pinned_guest_sha256() -> str:
+    text = GUEST_PIN.read_text(encoding="utf-8").strip()
+    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+        raise SystemExit(f"{GUEST_PIN.name} is not a 64-char hex sha256")
+    return text
+
+
+def parse_evidence(output: str) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for line in output.splitlines():
+        if not line.startswith("EVIDENCE "):
+            continue
+        for part in line[len("EVIDENCE ") :].split():
+            if "=" in part:
+                key, value = part.split("=", 1)
+                found[key] = value
+    return found
+
+
 def parse_driver_rows(output: str) -> dict[str, tuple[str, str]]:
     found: dict[str, tuple[str, str]] = {}
     for line in output.splitlines():
@@ -82,6 +117,32 @@ def parse_driver_rows(output: str) -> dict[str, tuple[str, str]]:
             continue
         found[name] = (result, detail)
     return found
+
+
+def parse_pid(output: str, phase: str) -> str | None:
+    marker = f"PROCESS {phase} pid="
+    for line in output.splitlines():
+        if line.startswith(marker):
+            return line[len(marker) :].strip()
+    return None
+
+
+def journal_files(store: Path) -> list[Path]:
+    runtime = store / "runtime-data"
+    if not runtime.is_dir():
+        return []
+    found: list[Path] = []
+    for path in runtime.rglob("*"):
+        if path.is_file() and path.name == "journal":
+            found.append(path)
+    return found
+
+
+def read_state(store: Path) -> dict:
+    path = store / STATE_FILE
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def record_versions(proof: Proof) -> dict[str, str]:
@@ -122,7 +183,8 @@ def build_guest(proof: Proof) -> Path:
     wasm = REPO / "examples/agent-host/agent-host.component.wasm"
     if not wasm.is_file():
         raise SystemExit("guest wasm missing after build")
-    proof.log(f"GUEST_WASM sha256:{sha256_file(wasm)} bytes:{wasm.stat().st_size}")
+    digest = sha256_file(wasm)
+    proof.log(f"GUEST_WASM sha256:{digest} bytes:{wasm.stat().st_size}")
     return wasm
 
 
@@ -155,24 +217,181 @@ def mark_not_run(proof: Proof, names: tuple[str, ...], reason: str) -> None:
             proof.row(name, "NOT RUN", reason)
 
 
-def apply_driver_rows(proof: Proof, output: str, expected: tuple[str, ...]) -> None:
-    found = parse_driver_rows(output)
-    for name in expected:
-        if name in found:
-            result, detail = found[name]
-            proof.row(name, result, detail)
-        else:
-            proof.row(name, "NOT RUN", "driver did not print this row")
-
-
 def run_phase(proof: Proof, phase: str, store: Path) -> subprocess.CompletedProcess[str]:
     result = run([str(DRIVER_BIN), phase, str(store)], cwd=REPO, timeout=180)
     output = result.stdout + result.stderr
     proof.log(f"CMD a2-resume-driver {phase} -> {result.returncode}")
     for line in output.splitlines():
-        if line.startswith("ROW ") or line.startswith("PROCESS ") or line.startswith("DRIVER_ERROR"):
+        if (
+            line.startswith("ROW ")
+            or line.startswith("PROCESS ")
+            or line.startswith("EVIDENCE ")
+            or line.startswith("DRIVER_ERROR")
+        ):
             proof.log(line)
     return result
+
+
+def compute_write(
+    proof: Proof,
+    first: subprocess.CompletedProcess[str],
+    store: Path,
+    wasm: Path,
+    expected_guest: str,
+) -> None:
+    output = first.stdout + first.stderr
+    evidence = parse_evidence(output)
+    journals = journal_files(store)
+    state = read_state(store)
+    live_guest = sha256_file(wasm) if wasm.is_file() else ""
+    guest_ok = (
+        live_guest == expected_guest
+        and evidence.get("guest_sha256") == expected_guest
+        and evidence.get("pinned") == expected_guest
+    )
+    format2 = evidence.get("format2") == "true"
+    wrote = "write:ok" in evidence.get("invokes", "").split(",")
+    has_journal = bool(journals) and all(path.stat().st_size > 0 for path in journals)
+    has_state = bool(state.get("sha256")) and state.get("sha256") == evidence.get("journal_sha256")
+    if guest_ok and format2 and wrote and has_journal and has_state:
+        proof.accept(
+            "WRITE",
+            (
+                f"journal on disk; format2; write:ok; sha256={state['sha256']} "
+                f"guest={live_guest}"
+            ),
+        )
+        return
+    proof.row(
+        "WRITE",
+        "FAIL",
+        (
+            f"guest_ok={guest_ok} format2={format2} write:ok={wrote} "
+            f"journal={has_journal} state={has_state} live_guest={live_guest}"
+        ),
+    )
+
+
+def compute_stale(
+    proof: Proof,
+    first: subprocess.CompletedProcess[str],
+    store: Path,
+) -> None:
+    output = first.stdout + first.stderr
+    evidence = parse_evidence(output)
+    state = read_state(store)
+    conflict = "write:conflict" in evidence.get("invokes", "").split(",")
+    same = state.get("sha256") == evidence.get("journal_sha256") and bool(state.get("sha256"))
+    if proof.steps.get("WRITE") != "PASS":
+        if "STALE" not in proof.steps:
+            proof.row("STALE", "NOT RUN", "WRITE did not pass; stale was not counted")
+        return
+    if conflict and same:
+        proof.accept(
+            "STALE",
+            f"guest write/conflict audited; stored sha256={state['sha256']}",
+        )
+        return
+    rows = parse_driver_rows(output)
+    if "STALE" in rows and rows["STALE"][0] == "FAIL":
+        proof.row("STALE", "FAIL", rows["STALE"][1])
+        return
+    proof.row("STALE", "NOT RUN", "first process printed no STALE row")
+
+
+def compute_stop(proof: Proof, first: subprocess.CompletedProcess[str], store: Path) -> None:
+    if proof.steps.get("WRITE") != "PASS":
+        mark_not_run(proof, ("STOP",), "first process did not complete a write")
+        return
+    if first.returncode == EXPECTED_STOP_EXIT:
+        proof.accept(
+            "STOP",
+            f"first Runtime process exited {first.returncode}; store kept at {store.name}",
+        )
+        return
+    proof.row(
+        "STOP",
+        "FAIL",
+        f"first process exited {first.returncode}; expected {EXPECTED_STOP_EXIT}",
+    )
+
+
+def compute_start(
+    proof: Proof,
+    first: subprocess.CompletedProcess[str],
+    second: subprocess.CompletedProcess[str],
+    store: Path,
+) -> None:
+    output = second.stdout + second.stderr
+    first_pid = parse_pid(first.stdout + first.stderr, "first")
+    second_pid = parse_pid(output, "second")
+    journals = journal_files(store)
+    opened_store = bool(journals) and (store / STATE_FILE).is_file()
+    if (
+        second_pid
+        and first_pid
+        and second_pid != first_pid
+        and opened_store
+        and "DRIVER_ERROR" not in output.splitlines()[0:1]
+        and "PROCESS second" in output
+    ):
+        proof.accept(
+            "START",
+            (
+                f"fresh Runtime process pid={second_pid} opened store {store.name}; "
+                f"first_pid={first_pid}"
+            ),
+        )
+        return
+    proof.row(
+        "START",
+        "FAIL",
+        (
+            f"second_pid={second_pid} first_pid={first_pid} "
+            f"store_open={opened_store} exit={second.returncode}"
+        ),
+    )
+
+
+def compute_resume(proof: Proof, second: subprocess.CompletedProcess[str], store: Path) -> None:
+    output = second.stdout + second.stderr
+    evidence = parse_evidence(output)
+    state = read_state(store)
+    rows = parse_driver_rows(output)
+    loaded = "read:ok" in evidence.get("invokes", "").split(",")
+    if proof.steps.get("START") != "PASS":
+        if "RESUME" not in proof.steps:
+            proof.row("RESUME", "NOT RUN", "START did not pass; resume was not counted")
+        return
+    if loaded and "RESUME" in rows and rows["RESUME"][0] == "PASS" and state.get("sha256"):
+        proof.accept(
+            "RESUME",
+            f"guest read:ok on the stored journal; first sha256={state['sha256']}",
+        )
+        return
+    if "RESUME" not in rows:
+        proof.row("RESUME", "NOT RUN", "second process printed no RESUME row")
+        return
+    proof.row("RESUME", "FAIL", rows["RESUME"][1] or "resume evidence was missing")
+
+
+def compute_write2(proof: Proof, second: subprocess.CompletedProcess[str]) -> None:
+    output = second.stdout + second.stderr
+    evidence = parse_evidence(output)
+    rows = parse_driver_rows(output)
+    wrote = "write:ok" in evidence.get("invokes", "").split(",")
+    format2 = evidence.get("format2") == "true"
+    if proof.steps.get("RESUME") != "PASS":
+        if "WRITE2" not in proof.steps:
+            proof.row("WRITE2", "NOT RUN", "resume did not pass; write-again was not started")
+        return
+    if wrote and format2 and "WRITE2" in rows and rows["WRITE2"][0] == "PASS":
+        proof.accept("WRITE2", rows["WRITE2"][1] or "guest wrote a new format-2 revision")
+        return
+    if "WRITE2" not in rows:
+        proof.row("WRITE2", "NOT RUN", "second process printed no WRITE2 row")
+        return
+    proof.row("WRITE2", "FAIL", rows["WRITE2"][1] or f"write:ok={wrote} format2={format2}")
 
 
 def write_evidence(proof: Proof, versions: dict[str, str]) -> None:
@@ -187,7 +406,8 @@ def write_evidence(proof: Proof, versions: dict[str, str]) -> None:
         f"rustc: {versions['rustc']}",
         f"python: {versions['python']}",
         "",
-        "Every row is derived from driver or process output. A skip is NOT RUN.",
+        "Every row is computed from journal files, guest hash, audit invokes, and exit codes.",
+        "Proof.row never accepts PASS. A skip is NOT RUN.",
         "",
         *[f"{name}: {proof.steps.get(name, 'NOT RUN')} — {proof.details.get(name, '')}" for name in JOURNEY],
         f"A2_counted: {'yes' if counted else 'no'}",
@@ -205,7 +425,18 @@ def main() -> int:
     proof = Proof()
     versions = record_versions(proof)
     ensure_wasm_target(proof)
-    build_guest(proof)
+    wasm = build_guest(proof)
+    expected_guest = pinned_guest_sha256()
+    live_guest = sha256_file(wasm)
+    if live_guest != expected_guest:
+        proof.row(
+            "WRITE",
+            "FAIL",
+            f"built guest {live_guest} does not match {GUEST_PIN.name} {expected_guest}",
+        )
+        mark_not_run(proof, JOURNEY[1:], "guest hash mismatch; later rows were not started")
+        write_evidence(proof, versions)
+        return 1
     build_driver(proof)
     store = LANE / "homes" / f"store-{os.getpid()}"
     if store.exists():
@@ -214,52 +445,34 @@ def main() -> int:
     proof.log(f"STORE {store.relative_to(REPO)}")
 
     first = run_phase(proof, "first", store)
-    apply_driver_rows(proof, first.stdout + first.stderr, ("WRITE", "STALE"))
-    if "WRITE" not in proof.steps:
-        proof.row(
-            "WRITE",
-            "FAIL" if first.returncode != 0 else "NOT RUN",
-            f"first process exited {first.returncode} with no WRITE row",
-        )
-    if "STALE" not in proof.steps:
-        proof.row("STALE", "NOT RUN", "first process printed no STALE row")
+    compute_write(proof, first, store, wasm, expected_guest)
+    compute_stale(proof, first, store)
+    compute_stop(proof, first, store)
 
-    if proof.steps.get("WRITE") == "PASS":
-        proof.row(
-            "STOP",
-            "PASS" if first.returncode is not None else "FAIL",
-            f"first Runtime process exited {first.returncode}; store kept at {store.name}",
-        )
-    else:
-        mark_not_run(proof, ("STOP",), "first process did not complete a write")
-
-    can_resume = proof.steps.get("WRITE") == "PASS" and proof.steps.get("STALE") == "PASS"
+    can_resume = (
+        proof.steps.get("WRITE") == "PASS"
+        and proof.steps.get("STALE") == "PASS"
+        and proof.steps.get("STOP") == "PASS"
+    )
     if not can_resume:
         mark_not_run(
             proof,
             ("START", "RESUME", "WRITE2"),
-            "write or stale did not pass; later rows were not started",
+            "write, stale, or stop did not pass; later rows were not started",
         )
         write_evidence(proof, versions)
         return 1
 
     second = run_phase(proof, "second", store)
-    if "PROCESS second" in (second.stdout + second.stderr):
+    compute_start(proof, first, second, store)
+    compute_resume(proof, second, store)
+    compute_write2(proof, second)
+    if second.returncode != EXPECTED_SECOND_EXIT and proof.steps.get("WRITE2") == "PASS":
         proof.row(
-            "START",
-            "PASS",
-            f"fresh Runtime process started on the same store; exit={second.returncode}",
+            "WRITE2",
+            "FAIL",
+            f"second process exited {second.returncode}; expected {EXPECTED_SECOND_EXIT}",
         )
-    else:
-        proof.row("START", "FAIL", "second process printed no PROCESS second line")
-    apply_driver_rows(proof, second.stdout + second.stderr, ("RESUME", "WRITE2"))
-    if "RESUME" not in proof.steps:
-        proof.row("RESUME", "NOT RUN", "second process printed no RESUME row")
-    if proof.steps.get("RESUME") != "PASS":
-        if "WRITE2" not in proof.steps:
-            proof.row("WRITE2", "NOT RUN", "resume did not pass; write-again was not started")
-    elif "WRITE2" not in proof.steps:
-        proof.row("WRITE2", "NOT RUN", "second process printed no WRITE2 row")
 
     write_evidence(proof, versions)
     if all(proof.steps.get(name) == "PASS" for name in JOURNEY):

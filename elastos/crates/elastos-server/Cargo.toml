@@ -133,3 +133,7 @@ gossip-rand = { package = "rand", version = "0.10", default-features = false, fe
 
 [features]
 default = []
+# Off by default. The product binary never enables this. It only lets the
+# A2 lab crate create disposable principal-root protection for an isolated
+# store. `cargo build -p elastos-server --release` does not compile it.
+lab-protection = []

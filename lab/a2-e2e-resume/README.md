@@ -1,22 +1,25 @@
 # A2 e2e resume
 
-M1 check A2: session journal written through the real Runtime bridge,
+M1 check A2: session journal written through the real Runtime hostcall,
 revision-checked, resumable after a process restart.
 
-This folder is a new lab. It copies the #331 `lab/a2-e2e-proof` idea and
-replaces the hardcoded resume FAIL. Every journey row is derived from
-driver or process output. A skip is `NOT RUN`, never `PASS`.
+WRITE, STALE, RESUME, and WRITE2 all go through the guest's
+`providers.invoke` hostcall. The driver does not call
+`handle_component_resource_request` and does not mint a write token.
+Every journey row is computed from journal files, the pinned guest hash,
+audit invokes, and exit codes. `Proof.row` refuses PASS. A skip is
+`NOT RUN`.
 
 ## Journey
 
 | Step | What must be true | How this runner checks it |
 | --- | --- | --- |
-| WRITE | Guest writes a format-2 journal through the real bridge | First `a2-resume-driver` process; `ROW WRITE` from stored bytes |
-| STALE | A write with a stale `if_revision` is `revision_conflict` | Same process, same store; stored bytes stay |
-| STOP | That Runtime process has exited | First process return code |
-| START | A fresh process opens the same store | Second process prints `PROCESS second` |
-| RESUME | The new launch loads the latest revision and does not overwrite | Guest launch on the fresh process; sha256 and revision match |
-| WRITE2 | A write that names that revision is stored | Bridge write with the loaded `if_revision` |
+| WRITE | Guest writes a format-2 journal through the real hostcall | First process; journal on disk; `write:ok`; guest sha256 matches `guest.sha256` |
+| STALE | Guest write with a stale `if_revision` is `revision_conflict` | Same process; audited `write:conflict`; stored sha256 stays |
+| STOP | That Runtime process exited 0 | First process return code is exactly 0 |
+| START | A fresh process opened the same store | `PROCESS second` after setup; different pid; journal still on disk |
+| RESUME | The new launch loads the latest revision | Pre-launch store matches; audited `read:ok` |
+| WRITE2 | Guest writes again with that loaded revision | Audited `write:ok`; new format-2 revision on disk |
 
 ## Run
 
@@ -37,8 +40,15 @@ affected phases, and restores the file.
 | F-A2-CREATE-ONLY | `run()` writes with `create_only` on a new launch | RESUME FAIL |
 | F-A2-SKIP-LOAD | `load_latest_journal` always returns no journal | RESUME FAIL |
 | F-A2-REVISION | A stale `if_revision` write returns ok | STALE FAIL |
+| F-REV-SECOND-STALE-WRITE | Second process writes with a stale `if_revision` | WRITE2 FAIL |
+| F-REV-OLDER-JOURNAL | State names a different journal than the store | RESUME FAIL |
+| F-REV-STORE-WIPE | Store removed between processes | RESUME not PASS |
+| F-REV-GUEST-HASH | Last guest wasm byte flipped | WRITE FAIL |
+| F-REV-HARDCODED-HARNESS-PASS | Six hardcoded `Proof.row(..., "PASS")` | refused |
+| F-REV-SKIPPED-STALE | Guest never sends the stale write | STALE NOT RUN |
+| F-REV-STOP-NONZERO | First process exits 1 after WRITE+STALE | STOP FAIL |
 
 ## A2 count
 
 A2 stays counted only when WRITE, STALE, STOP, START, RESUME, WRITE2
-are PASS and every falsifier is CAUGHT.
+are computed PASS and every falsifier is CAUGHT.

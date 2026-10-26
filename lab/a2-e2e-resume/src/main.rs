@@ -1,6 +1,7 @@
 //! Two-process A2 journal driver. Each invocation is one Runtime process
-//! on a shared store. The guest writes and resumes through the real
-//! component bridge. Stale and follow-up writes use that same bridge.
+//! on a shared store. WRITE, STALE, RESUME, and WRITE2 all go through the
+//! guest's real `providers.invoke` hostcall. The driver does not mint a
+//! token and does not call `handle_component_resource_request`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,33 +10,30 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use elastos_common::localhost::rooted_localhost_fs_path;
 use elastos_compute::providers::ComponentProvider;
-use elastos_runtime::capability::{
-    Action, CapabilityManager, GrantDuration, ResourceId, TokenConstraints,
-};
-use elastos_runtime::primitives::audit::AuditLog;
+use elastos_runtime::capability::{CapabilityManager, GrantDuration, TokenConstraints};
+use elastos_runtime::primitives::audit::{AuditEvent, AuditLog};
 use elastos_runtime::primitives::metrics::MetricsManager;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_server::auth::{
     load_principal_root_protection, principal_localhost_root, read_principal_root_object,
     store_test_principal_root_protection,
 };
-use elastos_server::resource_bridge::{handle_component_resource_request, BridgeContext};
 use elastos_server::runtime::Runtime;
 use elastos_storage::providers::LocalFSProvider;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 
 const PERSON: &str = "person:local:agent-host-e2e";
-const SELF_URI: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
 const STATE_FILE: &str = "a2-resume-state.json";
+const GUEST_PIN: &str = "guest.sha256";
 
 #[derive(Clone)]
 struct Host {
     runtime: Arc<Runtime>,
     capability_manager: Arc<CapabilityManager>,
     pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    audit_log: Arc<AuditLog>,
     data_dir: PathBuf,
-    ctx: BridgeContext,
     object_uri: String,
 }
 
@@ -62,12 +60,31 @@ async fn run() -> Result<()> {
 }
 
 async fn first(store: &Path) -> Result<()> {
-    println!("PROCESS first pid={}", std::process::id());
     let host = setup(store, true).await?;
+    println!("PROCESS first pid={}", std::process::id());
+    let guest_sha = guest_sha256()?;
+    let pinned = pinned_guest_sha256()?;
+    println!("EVIDENCE guest_sha256={guest_sha} pinned={pinned}");
+    if guest_sha != pinned {
+        row(
+            "WRITE",
+            "FAIL",
+            &format!("guest bytes do not match {GUEST_PIN}; got {guest_sha}"),
+        );
+        return Ok(());
+    }
     let before_exists = journal_path(&host).exists();
     match launch_guest(&host).await {
         Ok(()) => {
-            let (plain, revision) = read_journal(&host).await?;
+            let (plain, revision) = read_journal(&host)?;
+            let sha = sha256_hex(&plain);
+            let invokes = invoke_outcomes(&host.audit_log);
+            println!(
+                "EVIDENCE journal_sha256={sha} revision={revision} bytes={} format2={} invokes={}",
+                plain.len(),
+                is_format2(&plain),
+                format_invokes(&invokes)
+            );
             if before_exists {
                 row(
                     "WRITE",
@@ -76,44 +93,88 @@ async fn first(store: &Path) -> Result<()> {
                 );
                 return Ok(());
             }
-            if plain.len() < 6 || &plain[..4] != b"EAHJ" || plain[4..6] != 2u16.to_le_bytes() {
+            let wrote =
+                is_format2(&plain) && invokes.iter().any(|(op, out)| op == "write" && out == "ok");
+            if wrote {
+                row(
+                    "WRITE",
+                    "PASS",
+                    &format!(
+                        "guest wrote format-2 journal through the real hostcall; revision={revision} sha256={sha} bytes={}",
+                        plain.len()
+                    ),
+                );
+                write_state(
+                    store,
+                    &serde_json::json!({
+                        "revision": revision,
+                        "sha256": sha,
+                        "bytes": plain.len(),
+                        "first_pid": std::process::id(),
+                        "guest_sha256": guest_sha,
+                    }),
+                )?;
+            } else {
                 row(
                     "WRITE",
                     "FAIL",
-                    &format!("stored bytes are not format 2 (len={})", plain.len()),
+                    &format!(
+                        "stored bytes are not a guest hostcall write (format2={} invokes={})",
+                        is_format2(&plain),
+                        format_invokes(&invokes)
+                    ),
                 );
                 return Ok(());
             }
-            row(
-                "WRITE",
-                "PASS",
-                &format!(
-                    "guest wrote format-2 journal through the real bridge; revision={} sha256={} bytes={}",
-                    revision,
-                    sha256_hex(&plain),
-                    plain.len()
-                ),
-            );
-            write_state(
-                store,
-                &serde_json::json!({
-                    "revision": revision,
-                    "sha256": sha256_hex(&plain),
-                    "bytes": plain.len(),
-                    "first_pid": std::process::id(),
-                }),
-            )?;
-            stale_write(&host, &plain, &revision).await?;
+            let stale = invokes
+                .iter()
+                .any(|(op, out)| op == "write" && out == "conflict")
+                && read_journal(&host)?.0 == plain;
+            if stale {
+                row(
+                    "STALE",
+                    "PASS",
+                    &format!(
+                        "guest stale if_revision refused with revision_conflict; stored sha256={sha}"
+                    ),
+                );
+            }
+            // No STALE row when the guest never sent the stale write.
+            // The harness marks that as NOT RUN.
         }
         Err(error) => {
+            let invokes = invoke_outcomes(&host.audit_log);
+            println!("EVIDENCE invokes={}", format_invokes(&invokes));
+            if journal_path(&host).exists() {
+                if let Ok((plain, revision)) = read_journal(&host) {
+                    println!(
+                        "EVIDENCE journal_sha256={} revision={revision} bytes={} format2={}",
+                        sha256_hex(&plain),
+                        plain.len(),
+                        is_format2(&plain)
+                    );
+                }
+            }
             row("WRITE", "FAIL", &format!("guest launch: {error:#}"));
+            let unchanged_conflict = invokes
+                .iter()
+                .any(|(op, out)| op == "write" && out == "conflict");
+            if !unchanged_conflict {
+                row(
+                    "STALE",
+                    "FAIL",
+                    &format!(
+                        "guest launch failed and no write/conflict was audited; invokes={}",
+                        format_invokes(&invokes)
+                    ),
+                );
+            }
         }
     }
     Ok(())
 }
 
 async fn second(store: &Path) -> Result<()> {
-    println!("PROCESS second pid={}", std::process::id());
     let state = read_state(store)?;
     let expected_rev = state["revision"]
         .as_str()
@@ -124,7 +185,19 @@ async fn second(store: &Path) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("state missing sha256"))?
         .to_string();
     let host = setup(store, false).await?;
-    let (before, before_rev) = read_journal(&host).await?;
+    println!("PROCESS second pid={}", std::process::id());
+    let guest_sha = guest_sha256()?;
+    let pinned = pinned_guest_sha256()?;
+    println!("EVIDENCE guest_sha256={guest_sha} pinned={pinned}");
+    if guest_sha != pinned {
+        row(
+            "RESUME",
+            "FAIL",
+            &format!("guest bytes do not match {GUEST_PIN}; got {guest_sha}"),
+        );
+        return Ok(());
+    }
+    let (before, before_rev) = read_journal(&host)?;
     if sha256_hex(&before) != expected_sha || before_rev != expected_rev {
         row(
             "RESUME",
@@ -135,34 +208,67 @@ async fn second(store: &Path) -> Result<()> {
     }
     match launch_guest(&host).await {
         Ok(()) => {
-            let (after, after_rev) = read_journal(&host).await?;
-            if sha256_hex(&after) != expected_sha || after_rev != expected_rev {
+            let (after, after_rev) = read_journal(&host)?;
+            let invokes = invoke_outcomes(&host.audit_log);
+            println!(
+                "EVIDENCE journal_sha256={} revision={after_rev} bytes={} format2={} invokes={}",
+                sha256_hex(&after),
+                after.len(),
+                is_format2(&after),
+                format_invokes(&invokes)
+            );
+            let loaded =
+                invokes.iter().any(|(op, out)| op == "read" && out == "ok") && is_format2(&after);
+            if loaded {
                 row(
                     "RESUME",
-                    "FAIL",
+                    "PASS",
                     &format!(
-                        "new launch overwrote the stored journal; before={} after={}",
+                        "fresh process loaded the latest revision; before={} after={}",
                         expected_sha,
                         sha256_hex(&after)
                     ),
                 );
+            } else {
+                row(
+                    "RESUME",
+                    "FAIL",
+                    &format!(
+                        "fresh process did not audit a guest read of the stored journal; invokes={}",
+                        format_invokes(&invokes)
+                    ),
+                );
                 return Ok(());
             }
-            row(
-                "RESUME",
-                "PASS",
-                &format!(
-                    "fresh process loaded the latest revision without writing; revision={} sha256={}",
-                    after_rev,
-                    sha256_hex(&after)
-                ),
-            );
-            write_again(&host, &after, &after_rev).await?;
+            let wrote = invokes.iter().any(|(op, out)| op == "write" && out == "ok")
+                && sha256_hex(&after) != expected_sha
+                && after_rev != expected_rev
+                && is_format2(&after);
+            if wrote {
+                row(
+                    "WRITE2",
+                    "PASS",
+                    &format!(
+                        "guest wrote with the loaded revision; old={expected_rev} new={after_rev}"
+                    ),
+                );
+            } else {
+                row(
+                    "WRITE2",
+                    "FAIL",
+                    &format!(
+                        "guest did not store a new format-2 revision after load; after={} invokes={}",
+                        sha256_hex(&after),
+                        format_invokes(&invokes)
+                    ),
+                );
+            }
         }
         Err(error) => {
-            let (after, after_rev) = read_journal(&host)
-                .await
-                .unwrap_or((before.clone(), expected_rev.clone()));
+            let (after, after_rev) =
+                read_journal(&host).unwrap_or((before.clone(), expected_rev.clone()));
+            let invokes = invoke_outcomes(&host.audit_log);
+            println!("EVIDENCE invokes={}", format_invokes(&invokes));
             let kept = sha256_hex(&after) == expected_sha && after_rev == expected_rev;
             row(
                 "RESUME",
@@ -170,74 +276,6 @@ async fn second(store: &Path) -> Result<()> {
                 &format!("guest launch on the fresh process: {error:#}; stored kept={kept}"),
             );
         }
-    }
-    Ok(())
-}
-
-async fn stale_write(host: &Host, latest: &[u8], revision: &str) -> Result<()> {
-    let forged = b"stale if_revision replay";
-    let reply = bridge_write(
-        host,
-        forged,
-        serde_json::json!({ "if_revision": "stale-not-current" }),
-    )
-    .await?;
-    let code = reply
-        .pointer("/response/result/code")
-        .or_else(|| reply.pointer("/response/code"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
-    let (kept, kept_rev) = read_journal(host).await?;
-    let unchanged = kept == latest && kept_rev == revision;
-    if code == "revision_conflict" && unchanged {
-        row(
-            "STALE",
-            "PASS",
-            &format!(
-                "stale if_revision refused with revision_conflict; stored sha256={}",
-                sha256_hex(&kept)
-            ),
-        );
-    } else {
-        row(
-            "STALE",
-            "FAIL",
-            &format!("code={code:?} unchanged={unchanged} reply={reply}"),
-        );
-    }
-    Ok(())
-}
-
-async fn write_again(host: &Host, latest: &[u8], revision: &str) -> Result<()> {
-    let mut next = latest.to_vec();
-    next.extend_from_slice(b"\n#a2-resume-write");
-    let reply = bridge_write(host, &next, serde_json::json!({ "if_revision": revision })).await?;
-    let status = reply
-        .pointer("/response/result/status")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let new_rev = reply
-        .pointer("/response/result/data/revision")
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
-    let (stored, stored_rev) = read_journal(host).await?;
-    if status == "ok" && new_rev != revision && stored == next && stored_rev == new_rev {
-        row(
-            "WRITE2",
-            "PASS",
-            &format!(
-                "write with the loaded revision stored a new revision; old={} new={}",
-                revision, new_rev
-            ),
-        );
-    } else {
-        row(
-            "WRITE2",
-            "FAIL",
-            &format!("status={status:?} new_rev={new_rev:?} reply={reply}"),
-        );
     }
     Ok(())
 }
@@ -284,7 +322,7 @@ async fn setup(store: &Path, create_protection: bool) -> Result<Host> {
         Arc::new(MetricsManager::new()),
     ));
     let pending_store =
-        Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()));
     runtime
         .set_provider_registry(
             Arc::new(ProviderRegistry::new()),
@@ -294,21 +332,12 @@ async fn setup(store: &Path, create_protection: bool) -> Result<Host> {
         )
         .await;
     let object_uri = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
-    let ctx = BridgeContext {
-        provider_registry: Arc::new(ProviderRegistry::new()),
-        capability_manager: capability_manager.clone(),
-        pending_store: pending_store.clone(),
-        capsule_id: "agent-host".to_string(),
-        principal_id: Some(PERSON.to_string()),
-        manifest_capabilities: vec![format!("{root}/.AppData/Agents/agent-host/*")],
-        data_dir: Some(data_dir.clone()),
-    };
     Ok(Host {
         runtime,
         capability_manager,
         pending_store,
+        audit_log,
         data_dir,
-        ctx,
         object_uri,
     })
 }
@@ -361,46 +390,9 @@ async fn next_pending(
     .context("the guest did not ask for a journal grant")
 }
 
-async fn read_journal(host: &Host) -> Result<(Vec<u8>, String)> {
-    let token = bridge_token(host, Action::Read)?;
-    let line = serde_json::json!({
-        "id": 1,
-        "request": {
-            "type": "resource_invoke",
-            "uri": SELF_URI,
-            "operation": "read",
-            "token": token,
-            "body": {},
-        }
-    })
-    .to_string();
-    let reply = handle_component_resource_request(&line, host.ctx.clone())
-        .await
-        .context("bridge read")?;
-    let status = reply
-        .pointer("/response/result/status")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    if status != "ok" {
-        bail!("bridge read failed: {reply}");
-    }
-    let content: Vec<u8> = serde_json::from_value(
-        reply
-            .pointer("/response/result/data/content")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    )
-    .context("read content")?;
-    let revision = reply
-        .pointer("/response/result/data/revision")
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
-    if revision.is_empty() {
-        bail!("bridge read returned no revision");
-    }
+fn read_journal(host: &Host) -> Result<(Vec<u8>, String)> {
     let path = journal_path(host);
-    let disk = read_principal_root_object(
+    let content = read_principal_root_object(
         &host.data_dir,
         PERSON,
         &principal_localhost_root(PERSON),
@@ -408,51 +400,56 @@ async fn read_journal(host: &Host) -> Result<(Vec<u8>, String)> {
         &path,
     )
     .context("disk read")?;
-    if disk != content {
-        bail!("bridge read and disk bytes differ");
+    if content.is_empty() {
+        bail!("disk journal is empty");
     }
+    let revision = journal_revision(&host.object_uri, &content);
     Ok((content, revision))
 }
 
-async fn bridge_write(
-    host: &Host,
-    content: &[u8],
-    precondition: serde_json::Value,
-) -> Result<serde_json::Value> {
-    let token = bridge_token(host, Action::Write)?;
-    let mut body = serde_json::json!({ "content": content, "append": false });
-    if let Some(extra) = precondition.as_object() {
-        for (key, value) in extra {
-            body[key] = value.clone();
-        }
-    }
-    let line = serde_json::json!({
-        "id": 2,
-        "request": {
-            "type": "resource_invoke",
-            "uri": SELF_URI,
-            "operation": "write",
-            "token": token,
-            "body": body,
-        }
-    })
-    .to_string();
-    handle_component_resource_request(&line, host.ctx.clone())
-        .await
-        .context("bridge write")
+fn journal_revision(object_uri: &str, plaintext: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(PERSON.as_bytes());
+    digest.update([0]);
+    digest.update(object_uri.as_bytes());
+    digest.update([0]);
+    digest.update(plaintext);
+    format!("\"{}\"", hex::encode(digest.finalize()))
 }
 
-fn bridge_token(host: &Host, action: Action) -> Result<String> {
-    let token = host.capability_manager.grant(
-        &host.ctx.capsule_id,
-        ResourceId::new(&host.object_uri),
-        action,
-        TokenConstraints::default(),
-        None,
-    );
-    token
-        .to_base64()
-        .map_err(|error| anyhow::anyhow!("token: {error}"))
+fn invoke_outcomes(audit: &AuditLog) -> Vec<(String, String)> {
+    audit
+        .recent_events(100)
+        .iter()
+        .filter_map(|event| match event {
+            AuditEvent::Custom {
+                event_type,
+                details,
+            } if event_type == "component.invoke.completed" => Some((
+                details["operation"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                details["outcome"].as_str().unwrap_or_default().to_string(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn format_invokes(invokes: &[(String, String)]) -> String {
+    if invokes.is_empty() {
+        return "none".to_string();
+    }
+    invokes
+        .iter()
+        .map(|(op, out)| format!("{op}:{out}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn is_format2(plain: &[u8]) -> bool {
+    plain.len() >= 6 && &plain[..4] == b"EAHJ" && plain[4..6] == 2u16.to_le_bytes()
 }
 
 fn journal_path(host: &Host) -> PathBuf {
@@ -462,6 +459,22 @@ fn journal_path(host: &Host) -> PathBuf {
 fn agent_host_dir() -> Result<PathBuf> {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     Ok(here.join("../../examples/agent-host").canonicalize()?)
+}
+
+fn pinned_guest_sha256() -> Result<String> {
+    let pin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(GUEST_PIN);
+    let text = std::fs::read_to_string(&pin).with_context(|| format!("read {}", pin.display()))?;
+    let hash = text.trim().to_string();
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{GUEST_PIN} is not a 64-char hex sha256");
+    }
+    Ok(hash)
+}
+
+fn guest_sha256() -> Result<String> {
+    let wasm = agent_host_dir()?.join("agent-host.component.wasm");
+    let bytes = std::fs::read(&wasm).with_context(|| format!("read {}", wasm.display()))?;
+    Ok(sha256_hex(&bytes))
 }
 
 fn write_state(store: &Path, value: &serde_json::Value) -> Result<()> {

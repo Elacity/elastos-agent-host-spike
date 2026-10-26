@@ -867,11 +867,7 @@ fn provider_scheme_for_resource_uri(uri: &str) -> Result<String, String> {
 }
 
 /// Handle a single request from a component capsule host call.
-///
-/// Lab drivers (A2 resume) call this so a write or read goes through the
-/// same bridge the guest uses. Product launch still goes through
-/// `Runtime::set_provider_registry`.
-pub async fn handle_component_resource_request(
+pub(crate) async fn handle_component_resource_request(
     line: &str,
     ctx: BridgeContext,
 ) -> Result<serde_json::Value> {

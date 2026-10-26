@@ -13,7 +13,7 @@ anyhow = "1"
 elastos-common = { path = "../../elastos/crates/elastos-common" }
 elastos-compute = { path = "../../elastos/crates/elastos-compute" }
 elastos-runtime = { path = "../../elastos/crates/elastos-runtime" }
-elastos-server = { path = "../../elastos/crates/elastos-server" }
+elastos-server = { path = "../../elastos/crates/elastos-server", features = ["lab-protection"] }
 elastos-storage = { path = "../../elastos/crates/elastos-storage" }
 hex = "0.4"
 serde_json = "1"
