@@ -4,8 +4,9 @@
 # host-side build and verification tooling lives in tests/ (never compiled into
 # the capsule). `audit/`: the cx-wasm-audit lane's `wasm-capsule-audit` crate,
 # the one import-audit path (PRINCIPLES P10) for wc-004's verifier. And
-# `tools/`: `wasm-capsule-tools`, the lab's host-side library, which holds the
-# one rule that names a lab bundle (wc-003a).
+# `tools/`: `wasm-capsule-tools`, the lab's host-side library, which names a
+# lab bundle only through cc-capsule-identity's lab CID (`bundle_identity`, one
+# re-export) and holds this capsule's manifest bytes.
 #
 # `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
 # act on the root package `capsule` only (there is no `default-members`), so
@@ -25,10 +26,15 @@ path = "capsule/src/lib.rs"
 # minimal surface (Rong's DigitCapsule; PRINCIPLES P18).
 crate-type = ["cdylib", "rlib"]
 
-# The named tests in tests/ call the lab-name rule in the tools crate. Cargo
-# builds a dev-dependency only for tests, never for the capsule, and `capsule`
-# keeps no `[dependencies]` (P18).
+# The named tests in tests/ name bundles through the tools crate's
+# `bundle_identity`, and read this capsule's manifest with the Runtime's own
+# `CapsuleManifest` (a read-only path dependency on `elastos-common`, parsed
+# with `serde_json`, the crate that type is read with). Cargo builds a
+# dev-dependency only for tests, never for the capsule, and `capsule` keeps no
+# `[dependencies]` (P18).
 [dev-dependencies]
+elastos-common = { path = "../../elastos/crates/elastos-common" }
+serde_json = "1.0"
 wasm-capsule-tools = { path = "tools" }
 
 # The reproducible-build knobs the capsule is compiled with (Cargo honours
@@ -44,6 +50,8 @@ strip = true
 
 # Stay out of the root ElastOS workspace. The root package `capsule` is always
 # a member; `audit` and `tools` declare no `[workspace]` of their own and share
-# Cargo.lock.
+# Cargo.lock. The path dependencies outside this folder (`../capsule-identity`
+# and, through it and the dev-dependency above, `elastos/`) are not members,
+# but Cargo loads their manifests to resolve this one lockfile.
 [workspace]
 members = ["audit", "tools"]
