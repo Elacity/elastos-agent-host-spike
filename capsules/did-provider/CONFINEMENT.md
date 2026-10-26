@@ -96,7 +96,10 @@ Genuine-proof correctness is covered by the in-process unit tests in
 
 Two symlink cases check the boundary. `outside_write_denied` points the granted
 nickname file at an unrelated directory and expects `storage_error`, no file
-outside the root, and a later write under the root to succeed.
+outside the root, and a later write under the root to succeed. It repeats that
+link case for `nickname.enc` in a sibling directory under the same base, beside
+`did/`, and gets the same refusal, so the write grant stops at
+`Init.base_path/did`.
 `outside_read_denied` points the same path at real encrypted nickname state
 outside the root and expects `Init` to refuse with the nickname-read reason,
 the outside file to stay unchanged, the provider to report no nickname for its
@@ -200,6 +203,9 @@ the test.
 - Return a fixed message from the response-stream branch instead of the shared
   diagnostic (DID17): `startup_denial_reports_its_reason` fails because the
   response-stream failure names no request, exit status or standard error.
+- Widen the write grant from `STORAGE_ROOT` to `STORAGE_PARENT` (DID18):
+  `outside_write_denied` fails on its sibling target because that write
+  succeeds.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
