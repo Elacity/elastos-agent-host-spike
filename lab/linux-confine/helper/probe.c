@@ -24,8 +24,10 @@
 #define S_IFSOCK 0140000
 #define S_IRUSR 0400
 #define S_IWUSR 0200
-/* TIOCGPTN on /dev/ptmx. ioctl(0) on /dev/null is ENOTTY unconfined. */
-#define TIOCGPTN 0x80045430
+/* RNDGETENTCNT on /dev/urandom. ioctl(0) on /dev/null is ENOTTY
+ * unconfined. Opening a bind-mounted /dev/ptmx allocates a pty and the
+ * confined open is EACCES, so that is not the control. */
+#define RNDGETENTCNT 0x80045200
 
 static long sc(long n, long a, long b, long c, long d, long e, long f) {
 #if defined(__x86_64__)
@@ -319,17 +321,28 @@ int main(int argc, char **argv) {
     call_result("refer", sc(SYS_linkat, AT_FDCWD, (long)storage, AT_FDCWD, (long)refer_dest, 0, 0),
                 "landlock refused REFER", "linkat across directories succeeded");
     {
-        unsigned int ptn = 0;
-        long fd = sc(SYS_openat, AT_FDCWD, (long)ioctl_dev, O_RDWR, 0, 0, 0);
-        if (fd < 0) {
-            fd = sc(SYS_openat, AT_FDCWD, (long)"/dev/ptmx", O_RDWR, 0, 0, 0);
-        }
-        if (fd < 0) {
-            line("ioctl-dev", "refused", fd, "open of planted device failed");
-        } else {
-            long r = sc(SYS_ioctl, fd, TIOCGPTN, (long)&ptn, 0, 0, 0);
+        int ent = 0;
+        long fd = sc(SYS_openat, AT_FDCWD, (long)ioctl_dev, O_RDONLY, 0, 0, 0);
+        long r = fd < 0 ? fd : sc(SYS_ioctl, fd, RNDGETENTCNT, (long)&ent, 0, 0, 0);
+        if (fd >= 0) {
             sc(SYS_close, fd, 0, 0, 0, 0, 0);
-            call_result("ioctl-dev", r, "landlock refused IOCTL_DEV", "ioctl TIOCGPTN succeeded");
+        }
+        /* A leftover regular .lc-char (the host side of the bind-mount)
+         * returns ENOTTY. Fall back to /dev/urandom so the unconfined
+         * control is a real device ioctl. Landlock EACCES stays. */
+        if (fd < 0 || r == -25) {
+            fd = sc(SYS_openat, AT_FDCWD, (long)"/dev/urandom", O_RDONLY, 0, 0, 0);
+            if (fd < 0) {
+                line("ioctl-dev", "refused", fd, "open of planted device failed");
+            } else {
+                r = sc(SYS_ioctl, fd, RNDGETENTCNT, (long)&ent, 0, 0, 0);
+                sc(SYS_close, fd, 0, 0, 0, 0, 0);
+                call_result("ioctl-dev", r, "landlock refused IOCTL_DEV",
+                            "ioctl RNDGETENTCNT succeeded");
+            }
+        } else {
+            call_result("ioctl-dev", r, "landlock refused IOCTL_DEV",
+                        "ioctl RNDGETENTCNT succeeded");
         }
     }
 

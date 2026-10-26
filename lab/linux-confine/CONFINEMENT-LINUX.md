@@ -40,7 +40,7 @@ that accepts any errno plus a clone denial of `ENOSYS`, and that test fails.
 `withheld_storage_rights_are_landlock_eacces` is the named test. Confined
 `make-sym`, `make-fifo`, `make-sock`, and `ioctl-dev` return Landlock
 `EACCES`. `refer` returns Landlock `EXDEV`. Each of those rows has a
-same-test unconfined success. Device ioctl is `TIOCGPTN` on `/dev/ptmx`.
+same-test unconfined success. Device ioctl is `RNDGETENTCNT` on `/dev/urandom`.
 
 `make-char` and `make-block` return confined Landlock `EACCES`. Their
 unconfined controls stay NOT PROVEN: this uid has no `CAP_MKNOD` in the

@@ -752,7 +752,7 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
             refuse_errno("linux confinement refused: the ioctl-dev fixture cannot be planted", errno);
         }
         close(nfd);
-        if (mount("/dev/ptmx", devpath, NULL, MS_BIND, NULL) != 0) {
+        if (mount("/dev/urandom", devpath, NULL, MS_BIND, NULL) != 0) {
             refuse_errno("linux confinement refused: the ioctl-dev fixture cannot be planted", errno);
         }
     }
