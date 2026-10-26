@@ -62,5 +62,29 @@
     "new": "expect errno 0",
     "test": "aarch64_qemu_user_host_kernel --ignored",
     "caught": "ENOSYS"
+  },
+  {
+    "id": "F-LC-SKIP-NETNS",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "unshare(CLONE_NEWNET)",
+    "new": "if (0 && unshare(CLONE_NEWNET))",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "netns=host"
+  },
+  {
+    "id": "F-LC-DROP-SECCOMP",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "install_provider_filter / install_allow_list",
+    "new": "if (0) skip both seccomp installs",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "op=socket result=ok"
+  },
+  {
+    "id": "F-LC-WIDE-ROOT",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "add_rule(storage_root, LC_STORAGE_RIGHTS)",
+    "new": "add_rule(\"/\", handled_fs()) before STORAGE_ROOT",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "op=outside-read result=ok"
   }
 ]

@@ -15,12 +15,23 @@ export TMPDIR=/tmp
 export HOME=/tmp
 export RUST_BACKTRACE=1
 
-DEPS=/workspace/target-build/aarch64-unknown-linux-gnu/debug/deps
-BINS=/workspace/lab/linux-confine/guest-bins
-OUT=/workspace/target-build/aarch64-unknown-linux-gnu/debug/build
-HELPER_DIR=$(ls -d "$OUT"/linux-confine-*/out 2>/dev/null | head -1)
-PLANTS=/workspace/lab/linux-confine/guest-plants
+# Host writes the worktree path and nonce. Fall back to /workspace.
+if [ -f /etc/lc-guest.env ]; then
+    # shellcheck disable=SC1091
+    . /etc/lc-guest.env
+fi
+REPO="${LC_GUEST_REPO:-/workspace}"
+NONCE="${LC_GUEST_NONCE:-missing-nonce}"
+DEPS="$REPO/target-build/aarch64-unknown-linux-gnu/debug/deps"
+BINS="$REPO/lab/linux-confine/guest-bins"
+OUT="$REPO/target-build/aarch64-unknown-linux-gnu/debug/build"
+HELPER_DIR="${LC_GUEST_HELPER_DIR:-}"
+if [ -z "$HELPER_DIR" ]; then
+    HELPER_DIR=$(ls -d "$OUT"/linux-confine-*/out 2>/dev/null | head -1)
+fi
+PLANTS="$REPO/lab/linux-confine/guest-plants"
 SUMMARY="$EVIDENCE/summary.txt"
+RESULTS="$EVIDENCE/guest-results.txt"
 
 pick_bin() {
     name=$1
@@ -36,9 +47,12 @@ providers_bin=$(pick_bin providers)
 elf_bin=$(pick_bin elf)
 aarch64_bin=$(pick_bin aarch64)
 
+: > "$RESULTS"
 echo "LABEL=$LABEL" | tee "$SUMMARY"
 echo "native=0" | tee -a "$SUMMARY"
 echo "jetson=0" | tee -a "$SUMMARY"
+echo "nonce=$NONCE" | tee -a "$SUMMARY" | tee -a "$RESULTS"
+echo "repo=$REPO" | tee -a "$SUMMARY"
 echo "uid=$(id -u) gid=$(id -g)" | tee -a "$SUMMARY"
 echo "confine_bin=$confine_bin" | tee -a "$SUMMARY"
 echo "providers_bin=$providers_bin" | tee -a "$SUMMARY"
@@ -46,15 +60,66 @@ echo "elf_bin=$elf_bin" | tee -a "$SUMMARY"
 echo "aarch64_bin=$aarch64_bin" | tee -a "$SUMMARY"
 echo "helper_dir=$HELPER_DIR" | tee -a "$SUMMARY"
 
+if [ ! -x "$HELPER_DIR/lc-setup" ]; then
+    echo "HELPERS MISSING path=$HELPER_DIR (baked host path hidden?)" | tee -a "$SUMMARY" | tee -a "$RESULTS"
+    echo "LC_MARK nonce=$NONCE suite=helpers exit=1 passed=0 failed=1 ignored=0 status=MISSING"
+    echo "FAIL" > "$EVIDENCE/helpers.status"
+    echo "1" > "$EVIDENCE/helpers.exit"
+    echo "guest_exit=1" >> "$EVIDENCE/guest-exit.txt"
+    exit 1
+fi
+for name in did-provider wallet-provider model-provider; do
+    if [ ! -x "$REPO/capsules/$name/target/debug/$name" ]; then
+        echo "PROVIDER MISSING $REPO/capsules/$name/target/debug/$name" | tee -a "$SUMMARY"
+        echo "LC_MARK nonce=$NONCE suite=providers exit=1 passed=0 failed=1 ignored=0 status=MISSING"
+        exit 1
+    fi
+done
+
+counts_from_log() {
+    log=$1
+    # Last rust harness summary in this log.
+    line=$(grep -E '^test result:' "$log" | tail -1 || true)
+    if [ -z "$line" ]; then
+        echo "0 0 0"
+        return
+    fi
+    echo "$line" | awk '{
+        p=0; f=0; i=0;
+        for (n=1; n<=NF; n++) {
+            if ($n=="passed;") p=$(n-1);
+            if ($n=="failed;") f=$(n-1);
+            if ($n=="ignored;") i=$(n-1);
+        }
+        print p, f, i
+    }'
+}
+
+mark() {
+    suite=$1
+    rc=$2
+    passed=$3
+    failed=$4
+    ignored=$5
+    status=$6
+    echo "LC_MARK nonce=$NONCE suite=$suite exit=$rc passed=$passed failed=$failed ignored=$ignored status=$status"
+    echo "suite=$suite exit=$rc passed=$passed failed=$failed ignored=$ignored status=$status" >> "$RESULTS"
+}
+
 run_suite() {
     name=$1
     bin=$2
-    extra=${3:-}
+    want_passed=$3
+    want_failed=$4
+    want_ignored=$5
+    extra=${6:-}
     log="$EVIDENCE/${name}.txt"
     echo "======== suite $name ========" | tee -a "$SUMMARY"
     if [ ! -x "$bin" ]; then
         echo "$name MISSING $bin" | tee -a "$SUMMARY"
         echo "MISSING" > "$EVIDENCE/${name}.status"
+        echo "1" > "$EVIDENCE/${name}.exit"
+        mark "$name" 1 0 0 0 MISSING
         return 1
     fi
     set +e
@@ -63,24 +128,43 @@ run_suite() {
     rc=$?
     set -e
     echo "$rc" > "$EVIDENCE/${name}.exit"
-    # Rust harness summary lines.
+    set -- $(counts_from_log "$log")
+    passed=$1
+    failed=$2
+    ignored=$3
     grep -E '^test |^test result:' "$log" | tee -a "$SUMMARY" || true
-    if [ "$rc" -eq 0 ]; then
+    status=PASS
+    if [ "$rc" -ne 0 ]; then
+        status=FAIL
+    fi
+    if [ "$passed" -lt "$want_passed" ] || [ "$failed" -ne "$want_failed" ] || [ "$ignored" -lt "$want_ignored" ]; then
+        echo "$name SHORT counts passed=$passed failed=$failed ignored=$ignored want $want_passed/$want_failed/$want_ignored" | tee -a "$SUMMARY"
+        status=SHORT
+        if [ "$rc" -eq 0 ]; then
+            rc=1
+        fi
+    fi
+    if [ "$status" = "PASS" ]; then
         echo "$name PASS" | tee -a "$SUMMARY"
         echo "PASS" > "$EVIDENCE/${name}.status"
     else
-        echo "$name FAIL exit=$rc" | tee -a "$SUMMARY"
-        echo "FAIL" > "$EVIDENCE/${name}.status"
+        echo "$name $status exit=$rc" | tee -a "$SUMMARY"
+        echo "$status" > "$EVIDENCE/${name}.status"
         tail -80 "$log" | tee -a "$SUMMARY"
+    fi
+    mark "$name" "$rc" "$passed" "$failed" "$ignored" "$status"
+    if [ "$status" != "PASS" ]; then
+        return 1
     fi
     return 0
 }
 
-run_suite elf "$elf_bin"
-run_suite aarch64 "$aarch64_bin"
+fail=0
+run_suite elf "$elf_bin" 6 0 0 || fail=1
+run_suite aarch64 "$aarch64_bin" 2 0 1 || fail=1
 # Do not pass --ignored: qemu-user Landlock ENOSYS is a host-kernel row.
-run_suite confine "$confine_bin"
-run_suite providers "$providers_bin"
+run_suite confine "$confine_bin" 25 0 0 || fail=1
+run_suite providers "$providers_bin" 4 0 0 || fail=1
 
 echo "======== falsify.py-equivalent plants ========" | tee -a "$SUMMARY"
 swap_helper() {
@@ -117,12 +201,14 @@ run_plant() {
     if [ ! -x "$bin" ]; then
         echo "$id NOT RUN: missing $bin" | tee -a "$SUMMARY"
         echo "NOT_RUN" > "$EVIDENCE/${id}.status"
+        echo "plant=$id status=NOT_RUN" >> "$RESULTS"
         return 0
     fi
     if [ -n "$helper_plant" ]; then
         if ! swap_helper "$helper_plant"; then
             echo "$id NOT RUN: helper swap failed" | tee -a "$SUMMARY"
             echo "NOT_RUN" > "$EVIDENCE/${id}.status"
+            echo "plant=$id status=NOT_RUN" >> "$RESULTS"
             return 0
         fi
     fi
@@ -136,14 +222,22 @@ run_plant() {
     if [ "$rc" -ne 0 ] && grep -q "$caught" "$log"; then
         echo "$id CAUGHT" | tee -a "$SUMMARY"
         echo "CAUGHT" > "$EVIDENCE/${id}.status"
+        echo "LC_MARK nonce=$NONCE suite=$id exit=$rc passed=0 failed=1 ignored=0 status=CAUGHT"
+        echo "plant=$id status=CAUGHT" >> "$RESULTS"
     elif [ "$rc" -eq 0 ]; then
         echo "$id SURVIVED (test passed under the plant)" | tee -a "$SUMMARY"
         echo "SURVIVED" > "$EVIDENCE/${id}.status"
+        echo "LC_MARK nonce=$NONCE suite=$id exit=$rc passed=1 failed=0 ignored=0 status=SURVIVED"
+        echo "plant=$id status=SURVIVED" >> "$RESULTS"
         tail -40 "$log" | tee -a "$SUMMARY"
+        fail=1
     else
         echo "$id NOT RUN or unexpected fail (no '$caught')" | tee -a "$SUMMARY"
         echo "UNEXPECTED" > "$EVIDENCE/${id}.status"
+        echo "LC_MARK nonce=$NONCE suite=$id exit=$rc passed=0 failed=1 ignored=0 status=UNEXPECTED"
+        echo "plant=$id status=UNEXPECTED" >> "$RESULTS"
         tail -40 "$log" | tee -a "$SUMMARY"
+        fail=1
     fi
 }
 
@@ -171,14 +265,27 @@ run_plant F-LC-ANY-ERRNO provider_filter_refuses_clone_process \
     "not any failure" \
     "$any_bin" "$PLANTS/F-LC-ANY-ERRNO/lc-setup"
 
+# Official review plants. Skip-netns needs a guest NIC besides lo.
+run_plant F-LC-SKIP-NETNS did_profile_permits_its_operations_and_refuses_the_rest \
+    "netns=host" \
+    "$confine_bin" "$PLANTS/F-LC-SKIP-NETNS/lc-setup"
+run_plant F-LC-DROP-SECCOMP did_profile_permits_its_operations_and_refuses_the_rest \
+    "op=socket result=ok" \
+    "$confine_bin" "$PLANTS/F-LC-DROP-SECCOMP/lc-setup"
+run_plant F-LC-WIDE-ROOT did_profile_permits_its_operations_and_refuses_the_rest \
+    "op=outside-read result=ok" \
+    "$confine_bin" "$PLANTS/F-LC-WIDE-ROOT/lc-setup"
+
 echo "F-LC-WRONG-ARCH-CC NOT RUN in guest (host cargo check / TARGET_CC=cc)" | tee -a "$SUMMARY"
 echo "F-LC-QEMU-USER-LANDLOCK NOT RUN in guest (qemu-user host-kernel row)" | tee -a "$SUMMARY"
 echo "NOT_RUN" > "$EVIDENCE/F-LC-WRONG-ARCH-CC.status"
 echo "NOT_RUN" > "$EVIDENCE/F-LC-QEMU-USER-LANDLOCK.status"
+echo "plant=F-LC-WRONG-ARCH-CC status=NOT_RUN" >> "$RESULTS"
+echo "plant=F-LC-QEMU-USER-LANDLOCK status=NOT_RUN" >> "$RESULTS"
 
 echo "======== end $LABEL ========" | tee -a "$SUMMARY"
-# Non-zero only if a standing suite failed.
-fail=0
+echo "guest_fail=$fail" >> "$RESULTS"
+# Non-zero if a standing suite failed, was missing, or was short, or a plant survived.
 for s in elf aarch64 confine providers; do
     st=$(cat "$EVIDENCE/${s}.status" 2>/dev/null || echo FAIL)
     if [ "$st" != "PASS" ]; then

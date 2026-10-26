@@ -8,13 +8,18 @@
 # Usage:
 #   lab/linux-confine/run-aarch64-guest.sh           # full C9 + plants
 #   lab/linux-confine/run-aarch64-guest.sh smoke     # ABI probe only
+#   lab/linux-confine/run-aarch64-guest.sh fail-closed  # deliberate short suite
 set -euo pipefail
 
 MODE="${1:-full}"
 LABEL='aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)'
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 LAB="$REPO/lab/linux-confine"
-EVIDENCE="$LAB/evidence/aarch64-qemu-system-6.18"
+if [ "$MODE" = "fail-closed" ]; then
+    EVIDENCE="$LAB/evidence/aarch64-qemu-system-6.18-fail-closed"
+else
+    EVIDENCE="$LAB/evidence/aarch64-qemu-system-6.18"
+fi
 WORK="${LC_GUEST_WORK:-/tmp/linux-confine-aarch64}"
 CC=aarch64-linux-gnu-gcc
 TARGET=aarch64-unknown-linux-gnu
@@ -22,6 +27,8 @@ ALPINE_VER=3.23.5
 KERNEL_APK_VER=6.18.58-r0
 KERNEL_REL=6.18.58-0-virt
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.23}"
+EXPECTED="$LAB/guest/expected.json"
+NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$CC"
 export CC_aarch64_unknown_linux_gnu="$CC"
@@ -50,7 +57,12 @@ need gzip
 need python3
 
 mkdir -p "$WORK/dl" "$EVIDENCE"
+# Stale PASS files from an earlier boot must not look like this run.
+find "$EVIDENCE" -maxdepth 1 -type f \
+    \( -name '*.status' -o -name '*.exit' -o -name '*.txt' -o -name 'LABEL.txt' \) \
+    -delete
 echo "$LABEL" > "$EVIDENCE/LABEL.txt"
+echo "$NONCE" > "$EVIDENCE/nonce.txt"
 {
     echo "label=$LABEL"
     echo "native=0"
@@ -64,6 +76,7 @@ echo "$LABEL" > "$EVIDENCE/LABEL.txt"
     echo "mode=$MODE"
     echo "repo=$REPO"
     echo "head=$(git -C "$REPO" rev-parse HEAD)"
+    echo "nonce=$NONCE"
 } | tee "$EVIDENCE/host-context.txt"
 
 echo "=== rust targets ==="
@@ -148,6 +161,10 @@ print(p, "EM_AARCH64=183")
 PY
 done
 echo "helper_dir=$HELPER_DIR" | tee -a "$EVIDENCE/host-context.txt"
+if [[ "$HELPER_DIR" == /tmp/* ]] || [[ "$REPO" == /tmp/* ]]; then
+    echo "worktree_under_tmp=1 baked helpers must stay visible after guest /tmp tmpfs" \
+        | tee -a "$EVIDENCE/host-context.txt"
+fi
 
 if [ "$MODE" = "full" ]; then
     echo "=== build falsify.py-equivalent plants ==="
@@ -175,7 +192,24 @@ done
 
 # 9p modules so the guest can write evidence without a second disk.
 MODDST="$ROOT/lib/modules/$KERNEL_REL"
-mkdir -p "$MODDST/kernel/fs/netfs" "$MODDST/kernel/net/9p" "$MODDST/kernel/fs/9p"
+mkdir -p "$MODDST"
+copy_kernel_mod() {
+    name=$1
+    found=$(find "$WORK/kernel/lib/modules/$KERNEL_REL" -name "$name.ko.gz" -o -name "$name.ko" 2>/dev/null | head -1 || true)
+    if [ -z "$found" ]; then
+        echo "kernel module $name not in apk (optional)"
+        return 0
+    fi
+    rel=${found#"$WORK/kernel/lib/modules/$KERNEL_REL/"}
+    dest="$MODDST/${rel%.gz}"
+    mkdir -p "$(dirname "$dest")"
+    if [ "${found%.gz}" != "$found" ]; then
+        gzip -dc "$found" > "$dest"
+    else
+        cp -a "$found" "$dest"
+    fi
+    echo "packed_mod=$rel"
+}
 for rel in \
     kernel/fs/netfs/netfs.ko.gz \
     kernel/net/9p/9pnet.ko.gz \
@@ -188,8 +222,11 @@ for rel in \
         gzip -dc "$src" > "$dest"
     fi
 done
+copy_kernel_mod dummy
+copy_kernel_mod virtio_net
 
-# Recreate the baked host paths inside the guest tmpfs.
+# Recreate the baked host paths inside the guest. Suites read
+# CARGO_MANIFEST_DIR and LC_* which are this worktree, including /tmp.
 install_tree() {
     src=$1
     dest=$2
@@ -202,35 +239,46 @@ install_tree() {
     fi
 }
 
-# Profiles the suites read via CARGO_MANIFEST_DIR/../..
 for name in did-provider wallet-provider model-provider; do
     install_tree "$REPO/capsules/$name/confine.sb" \
-        "$ROOT/workspace/capsules/$name/confine.sb"
+        "$ROOT$REPO/capsules/$name/confine.sb"
     install_tree "$REPO/capsules/$name/tests/fixtures/confine/declared-rights.json" \
-        "$ROOT/workspace/capsules/$name/tests/fixtures/confine/declared-rights.json"
-    # providers.rs looks at capsules/<name>/target/debug/<name>
+        "$ROOT$REPO/capsules/$name/tests/fixtures/confine/declared-rights.json"
     src="$REPO/capsules/$name/target/aarch64-unknown-linux-gnu/debug/$name"
-    install_tree "$src" "$ROOT/workspace/capsules/$name/target/debug/$name"
-    chmod 755 "$ROOT/workspace/capsules/$name/target/debug/$name"
+    install_tree "$src" "$ROOT$REPO/capsules/$name/target/debug/$name"
+    chmod 755 "$ROOT$REPO/capsules/$name/target/debug/$name"
 done
 
 # Standing test binaries live at a stable path. Do not glob deps/ after
 # the plant rebuilds — those hashes may be planted copies.
-mkdir -p "$ROOT/workspace/lab/linux-confine/guest-bins"
-cp -a "$BINS/." "$ROOT/workspace/lab/linux-confine/guest-bins/"
+mkdir -p "$ROOT$REPO/lab/linux-confine/guest-bins"
+cp -a "$BINS/." "$ROOT$REPO/lab/linux-confine/guest-bins/"
 
 # Baked helper paths from env!("LC_*").
 guest_helper="$ROOT${HELPER_DIR}"
 mkdir -p "$guest_helper"
 cp -a "$WORK/standing-helpers/." "$guest_helper/"
+if [ ! -x "$guest_helper/lc-setup" ]; then
+    echo "baked lc-setup missing at guest path $HELPER_DIR" >&2
+    exit 1
+fi
 
-# Lab sources needed for plants listing / docs inside the guest tree.
-mkdir -p "$ROOT/workspace/lab/linux-confine"
+mkdir -p "$ROOT$REPO/lab/linux-confine/guest"
+cp -a "$LAB/guest/expected.json" "$ROOT$REPO/lab/linux-confine/guest/expected.json"
 cp -a "$LAB/guest/run-c9.sh" "$ROOT/usr/local/bin/run-c9.sh"
 chmod 755 "$ROOT/usr/local/bin/run-c9.sh"
 if [ -d "$LAB/guest-plants" ]; then
-    cp -a "$LAB/guest-plants" "$ROOT/workspace/lab/linux-confine/guest-plants"
+    cp -a "$LAB/guest-plants" "$ROOT$REPO/lab/linux-confine/guest-plants"
 fi
+
+cat > "$ROOT/etc/lc-guest.env" <<ENV
+LC_GUEST_REPO=$REPO
+LC_GUEST_HELPER_DIR=$HELPER_DIR
+LC_GUEST_NONCE=$NONCE
+LC_GUEST_LABEL=$LABEL
+ENV
+echo "$NONCE" > "$ROOT/etc/lc-nonce"
+chmod 644 "$ROOT/etc/lc-guest.env" "$ROOT/etc/lc-nonce"
 
 cp -a "$WORK/guest-landlock-probe" "$ROOT/usr/local/bin/guest-landlock-probe"
 cp -a "$WORK/run-as-tester" "$ROOT/usr/local/bin/run-as-tester"
@@ -240,12 +288,41 @@ chmod 755 "$ROOT/init"
 
 # Smoke mode: replace run-c9.sh with a no-op so we only prove the kernel.
 if [ "$MODE" = "smoke" ]; then
-    cat > "$ROOT/usr/local/bin/run-c9.sh" <<'SMOKE'
+    cat > "$ROOT/usr/local/bin/run-c9.sh" <<SMOKE
 #!/bin/sh
+. /etc/lc-guest.env
 echo "SMOKE: skipped C9 suites"
+echo "LC_MARK nonce=\$LC_GUEST_NONCE suite=smoke exit=0 passed=0 failed=0 ignored=0 status=PASS"
 echo "PASS" > /evidence/smoke.status 2>/dev/null || true
 exit 0
 SMOKE
+    chmod 755 "$ROOT/usr/local/bin/run-c9.sh"
+fi
+
+# Fail-closed probe: a real rust suite that reports 0 tests. Host must exit 1.
+if [ "$MODE" = "fail-closed" ]; then
+    cat > "$ROOT/usr/local/bin/run-c9.sh" <<'FAIL'
+#!/bin/sh
+set -eu
+. /etc/lc-guest.env
+EVIDENCE=/evidence
+BINS="$LC_GUEST_REPO/lab/linux-confine/guest-bins"
+echo "LABEL=$LC_GUEST_LABEL" | tee "$EVIDENCE/summary.txt"
+echo "nonce=$LC_GUEST_NONCE" | tee -a "$EVIDENCE/summary.txt"
+echo "FAIL-CLOSED: run elf with a name that matches nothing" | tee -a "$EVIDENCE/summary.txt"
+log="$EVIDENCE/elf.txt"
+set +e
+"$BINS/elf" --test-threads=1 --nocapture --exact no_such_deliberate_fail > "$log" 2>&1
+rc=$?
+set -e
+echo "$rc" > "$EVIDENCE/elf.exit"
+grep -E '^test |^test result:' "$log" | tee -a "$EVIDENCE/summary.txt" || true
+echo "SHORT" > "$EVIDENCE/elf.status"
+echo "LC_MARK nonce=$LC_GUEST_NONCE suite=elf exit=$rc passed=0 failed=0 ignored=0 status=SHORT"
+echo "suite=elf exit=$rc passed=0 failed=0 ignored=0 status=SHORT" > "$EVIDENCE/guest-results.txt"
+echo "nonce=$LC_GUEST_NONCE" >> "$EVIDENCE/guest-results.txt"
+exit 1
+FAIL
     chmod 755 "$ROOT/usr/local/bin/run-c9.sh"
 fi
 
@@ -255,6 +332,7 @@ ls -lh "$WORK/guest.cpio.gz" | tee -a "$EVIDENCE/host-context.txt"
 
 echo "=== boot qemu-system-aarch64 TCG ==="
 # -accel tcg: emulated CPU. Do not use kvm. This is not Jetson.
+# virtio-net (user, restricted) plus guest dummy0 so skip-netns is visible.
 QEMU_LOG="$EVIDENCE/qemu-console.txt"
 set +e
 qemu-system-aarch64 \
@@ -269,6 +347,8 @@ qemu-system-aarch64 \
     -kernel "$WORK/kernel/boot/vmlinuz-virt" \
     -initrd "$WORK/guest.cpio.gz" \
     -append "console=ttyAMA0 earlycon=pl011,0x09000000 panic=1" \
+    -netdev user,id=n0,restrict=on \
+    -device virtio-net-pci,netdev=n0 \
     -fsdev local,id=ev,path="$EVIDENCE",security_model=mapped-xattr \
     -device virtio-9p-pci,fsdev=ev,mount_tag=evidence \
     > "$QEMU_LOG" 2>&1
@@ -286,6 +366,39 @@ if ! grep -q "LABEL=$LABEL" "$QEMU_LOG" && ! grep -q "LABEL=$LABEL" "$EVIDENCE/s
 fi
 if grep -qi 'jetson' "$QEMU_LOG" && grep -qi 'jetson=1' "$QEMU_LOG"; then
     echo "guest claimed Jetson" >&2
+    exit 1
+fi
+
+echo "=== host check of guest results ==="
+set +e
+if [ "$MODE" = "smoke" ]; then
+    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" smoke
+    check_rc=$?
+    # Smoke does not run the suites; only the label and nonce matter.
+    if grep -q "LABEL=$LABEL" "$QEMU_LOG"; then
+        echo "SMOKE ok" | tee -a "$EVIDENCE/host-context.txt"
+        check_rc=0
+    fi
+elif [ "$MODE" = "fail-closed" ]; then
+    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" fail-closed
+    check_rc=$?
+    if [ "$check_rc" -eq 0 ]; then
+        echo "fail-closed probe unexpectedly passed the host check" >&2
+        exit 1
+    fi
+    echo "fail-closed: host exited non-zero as required (check_rc=$check_rc)" \
+        | tee -a "$EVIDENCE/host-context.txt"
+    echo "wrote $EVIDENCE"
+    exit 1
+else
+    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" full
+    check_rc=$?
+fi
+set -e
+
+if [ "$check_rc" -ne 0 ]; then
+    echo "host check failed; guest suites missing, short, or not PASS" >&2
+    echo "wrote $EVIDENCE"
     exit 1
 fi
 

@@ -10,8 +10,10 @@ for `landlock_*`. `lab/linux-confine/run-aarch64-guest.sh` boots
 and runs the C9 suites inside that guest. Label:
 `aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)`.
 Guest result: confine 25/25, providers 4/4, Landlock ABI 7, IOCTL_DEV
-EACCES, six in-guest plants CAUGHT. That guest is still not Jetson and
-not native aarch64.
+EACCES, nine in-guest plants CAUGHT (including skip-netns, drop-seccomp,
+and widen-Landlock). The guest has a NIC besides `lo`. The host exits
+non-zero if a suite fails, is missing, or is short. That guest is still
+not Jetson and not native aarch64.
 
 C9 asks for namespaces, capabilities, seccomp and Landlock, with permitted and
 denied rows. The Linux map also says the filter refuses a new process and every

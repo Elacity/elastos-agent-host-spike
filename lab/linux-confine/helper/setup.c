@@ -819,10 +819,12 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
         emit_fd(2, enforced);
         syscall(SYS_execve, pol->helper, av, envp);
         {
-            char buf[200];
+            char buf[4600];
             int err = errno;
+            /* Path + op: this spawn's execve of helper, not any errno=13. */
             snprintf(buf, sizeof buf,
-                     "linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=%d\n", err);
+                     "linux confinement refused: exec of PROVIDER_EXECUTABLE (%s) failed errno=%d\n",
+                     pol->helper, err);
             emit_fd(2, buf);
         }
         syscall(SYS_exit_group, 2);
@@ -847,9 +849,11 @@ static void confine_and_exec(struct policy *pol, long host_pid) {
         syscall(SYS_execve, pol->helper, av, empty_env);
     }
     {
-        char buf[160];
+        char buf[4600];
         int err = errno;
-        snprintf(buf, sizeof buf, "linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=%d\n", err);
+        snprintf(buf, sizeof buf,
+                 "linux confinement refused: exec of PROVIDER_EXECUTABLE (%s) failed errno=%d\n",
+                 pol->helper, err);
         emit(buf);
     }
     syscall(SYS_exit_group, 2);

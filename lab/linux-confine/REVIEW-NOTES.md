@@ -85,7 +85,7 @@ The permitted rows are the provider's own stdin/stdout protocol, with no witness
 - `kill` of the host supervisor pid returns errno 3. Reason: `the pid namespace has no such host process`.
 - `execve` of the copy returns errno 13. Reason: `landlock refused exec of a file other than PROVIDER_EXECUTABLE`.
 
-A second start asks `execve` to run that copy as the program and grants execute only on the original file. The launcher reports `linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=13` and the provider does not answer.
+A second start asks `execve` to run that copy as the program and grants execute only on the original file. The launcher reports `linux confinement refused: exec of PROVIDER_EXECUTABLE (<copy path>) failed errno=13` and the provider does not answer. The providers suite waits for that exact line, not any `errno=13`.
 
 Outside read and write are the provider's own errors:
 
@@ -103,6 +103,6 @@ Native aarch64 and Jetson execution are NOT RUN. `build.rs` honours `CC_aarch64_
 
 With the real `aarch64-linux-gnu-gcc`, `cargo check --target aarch64-unknown-linux-gnu` exits 0 and the helpers are `EM_AARCH64=183`. That is an aarch64 build, not native execution. `tests/aarch64.rs` `aarch64_qemu_user_host_kernel` is labelled `aarch64 build + qemu-user (host kernel)`. It also compiles `helper/landlock-probe.c`. qemu-user 8.2.2 does not implement `landlock_create_ruleset` / `landlock_add_rule` / `landlock_restrict_self` (guest `ENOSYS`). The launcher then fail-closes. `--explain-abi` does not call those syscalls. qemu-user forwards implemented syscalls to the **x86_64 host kernel**, so even a future qemu that implemented Landlock would still be host-kernel Landlock, not an ARM kernel.
 
-`qemu-system-aarch64` TCG + Alpine virt `6.18.58-0-virt` is a real aarch64 guest kernel (Landlock ABI 7). `run-aarch64-guest.sh` cross-builds the lab binaries and runs the C9 suites inside that guest. Label: `aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)`. Guest result: confine 25/25, providers 4/4, IOCTL_DEV EACCES, six in-guest plants CAUGHT. That is still not Jetson and not native aarch64. C9 rows on real ARM hardware still need a Jetson (or other aarch64 board) on kernel >= 6.7.
+`qemu-system-aarch64` TCG + Alpine virt `6.18.58-0-virt` is a real aarch64 guest kernel (Landlock ABI 7). `run-aarch64-guest.sh` cross-builds the lab binaries and runs the C9 suites inside that guest. Label: `aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)`. Guest result: confine 25/25, providers 4/4, IOCTL_DEV EACCES, nine in-guest plants CAUGHT. The guest has a NIC besides `lo` so skip-netns is visible. The host fails closed on a short or missing suite. That is still not Jetson and not native aarch64. C9 rows on real ARM hardware still need a Jetson (or other aarch64 board) on kernel >= 6.7.
 
 This lab is not the Runtime's provider bridge. A production launcher still has to own the library list, the wallet parent mount, and the Tokio socket-pair exception, and a reviewer should treat each of those as its own decision.

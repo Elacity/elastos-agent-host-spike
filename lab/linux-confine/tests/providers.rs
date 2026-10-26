@@ -514,13 +514,21 @@ fn unbound_exec_reason(launch: &mut ProviderLaunch) -> String {
     launch.binary = launch.copy.clone();
     launch.execute = real;
     launch.preload = false;
+    // Exact line for this spawn: exec of this copy, errno=13. A stray
+    // pre-exec refuse_errno(..., 13) must not satisfy the wait.
+    let expected = format!(
+        "linux confinement refused: exec of PROVIDER_EXECUTABLE ({}) failed errno=13",
+        launch.binary.display()
+    );
     let err = match spawn_provider(launch) {
         Ok(running) => {
             // The launcher prints `enforced` before execve. On a slow
             // emulated CPU the EACCES line can land a moment later.
             let started = Instant::now();
             let mut text = running.stderr();
-            while !text.contains("errno=13") && started.elapsed() < Duration::from_secs(5) {
+            while !text.lines().any(|line| line == expected)
+                && started.elapsed() < Duration::from_secs(5)
+            {
                 thread::sleep(Duration::from_millis(20));
                 text = running.stderr();
             }
@@ -528,11 +536,15 @@ fn unbound_exec_reason(launch: &mut ProviderLaunch) -> String {
         }
         Err(err) => err,
     };
-    assert!(
-        err.contains("errno=13"),
-        "unbound exec of the real binary was not refused: {err}"
-    );
-    "linux confinement refused: exec of PROVIDER_EXECUTABLE failed errno=13".to_string()
+    err.lines()
+        .find(|line| *line == expected)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            panic!(
+                "unbound exec of {} was not refused with the exec errno line: {err}",
+                launch.binary.display()
+            )
+        })
 }
 
 #[test]

@@ -141,6 +141,57 @@ def main():
 
     tmp.write_text(text.replace(CLONE_ERRNO_OLD, CLONE_ERRNO_NEW, 1))
     compile_setup(plants / "F-LC-ANY-ERRNO" / "lc-setup", tmp)
+
+    # Review plants that the standard guest run must catch.
+    skip_net = (
+        "    if (unshare(CLONE_NEWNET) != 0) {\n"
+        "        refuse_errno(\"linux confinement refused: the network namespace cannot be created\", errno);\n"
+        "    }"
+    )
+    tmp.write_text(
+        text.replace(
+            skip_net,
+            "    if (0 && unshare(CLONE_NEWNET) != 0) {\n"
+            "        refuse_errno(\"linux confinement refused: the network namespace cannot be created\", errno);\n"
+            "    }",
+            1,
+        )
+    )
+    compile_setup(plants / "F-LC-SKIP-NETNS" / "lc-setup", tmp)
+
+    drop = text
+    drop = drop.replace(
+        "        install_provider_filter(pol->deny_network);\n        emit_fd(2, enforced);",
+        "        if (0) install_provider_filter(pol->deny_network);\n        emit_fd(2, enforced);",
+        1,
+    )
+    drop = drop.replace(
+        "    if (pol->provider_filter) {\n        install_provider_filter(pol->deny_network);\n    } else {\n        install_allow_list(pol->deny_network);\n    }",
+        "    if (0) {\n    if (pol->provider_filter) {\n        install_provider_filter(pol->deny_network);\n    } else {\n        install_allow_list(pol->deny_network);\n    }\n    }",
+        1,
+    )
+    if drop.count("if (0) install_provider_filter") != 1 or drop.count("if (0) {") < 1:
+        raise SystemExit("drop-seccomp plant did not apply uniquely")
+    tmp.write_text(drop)
+    compile_setup(plants / "F-LC-DROP-SECCOMP" / "lc-setup", tmp)
+
+    wide = (
+        "    storage_rights = LC_STORAGE_RIGHTS;\n"
+        "    add_rule(ruleset, pol->storage_root, storage_rights,\n"
+        "             \"linux confinement refused: the launch cannot open the storage root\");"
+    )
+    tmp.write_text(
+        text.replace(
+            wide,
+            "    storage_rights = LC_STORAGE_RIGHTS;\n"
+            "    add_rule(ruleset, \"/\", handled_fs(),\n"
+            "             \"linux confinement refused: the launch cannot open the storage root\");\n"
+            "    add_rule(ruleset, pol->storage_root, storage_rights,\n"
+            "             \"linux confinement refused: the launch cannot open the storage root\");",
+            1,
+        )
+    )
+    compile_setup(plants / "F-LC-WIDE-ROOT" / "lc-setup", tmp)
     tmp.unlink()
 
     rust_plant(
