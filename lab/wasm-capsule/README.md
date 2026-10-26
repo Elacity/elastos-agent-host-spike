@@ -246,8 +246,8 @@ Task 017: the retired name label is checked in every git-listed lane file,
 docs, `falsifiers.json` and `audit/` included (falsifier
 F-WC3-RETIRED-LABEL-DOC); the code names keep the docs exemption.
 Task 018: `lane_files_reads_names_git_would_quote` lists a temp git repo
-holding `review"note.md`; dropping `-z` fails it (hand-proven, pending R2; not
-in runner-caught totals).
+holding `review"note.md`; dropping `-z` fails it (runner-caught as
+F-WC3-LANE-FILES-QUOTED, task 029; counted in "## Falsifiers").
 
 ### Why the tests live in the root package
 
@@ -1447,21 +1447,21 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 
 ## Falsifiers
 
-`falsifiers.json` holds 155 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 157 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
-seven wc-010b (task 027) and two wc-010c (task 028).
+seven wc-010b (task 027), two wc-010c (task 028) and two task 029.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 91, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027 and
-028: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2), each run by the canonical
-runner with its summary line quoted.
+Two kinds of evidence, kept apart. Runner-caught: 93, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028
+and 029: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2), each run by the
+canonical runner with its summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1471,10 +1471,9 @@ quoted.
 R1 is done: the canonical runner `examples/agent-host/falsify.py` has a `lab`
 command (`cargo test --workspace` on this workspace). Its recovery targets
 (`PROVIDER_TARGETS`, the provider lane's) name every lane file a falsifier
-edits except `tools/src/run.rs` and `tools/src/receipt.rs`, so a killed run
-cannot restore those two (ask **R2**, open). (26 Oct, task 027: R2 is done on
-this base; provider 026 added `tools/src/run.rs`, `tools/src/receipt.rs` and
-`tests/lab_cid.rs` to `PROVIDER_TARGETS`.)
+edits, so a killed run can restore each one. Ask **R2** is done: provider 026
+(PR #242) added `tools/src/run.rs`, `tools/src/receipt.rs` and
+`tests/lab_cid.rs` to `PROVIDER_TARGETS`.
 
 wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
 
@@ -1781,9 +1780,9 @@ empty, so it still builds) and F-WC4-SEALED-NEW (the
 planted constructor fills the new `unused` field, so it still compiles and is
 caught by `verified_bundle_is_sealed`). That `run` forwards `input.granted` is
 held by `runner_uses_only_explicit_inputs` and `granted_import_is_linked`; its
-planted bug (`&[]` in place of `input.granted`, in `tools/src/run.rs`) has no
-`falsifiers.json` entry, because `run.rs` is not a recovery target (ask R2), and
-is hand-proven, pending R1 (LOG.md, task 020), outside every count above.
+planted bug (`&[]` in place of `input.granted`, in `tools/src/run.rs`) was
+hand-proven when task 020 ran (LOG.md, task 020), and is now runner-caught as
+F-WC9-RUN-DROPS-GRANTS (task 029, below), counted in the totals above.
 
 Task 023's eight planted bugs in the `"about"` text, each hand-proven
 (`falsifiers.json` is the canonical runner's own input and not a recovery
@@ -1899,3 +1898,21 @@ Task 028 also adds `receipt_cap_line_matches_the_argv_the_engine_got` to
 `wasmtime`'s argv the test fails at its one `-W` argument assertion) and
 re-anchors F-WC-README-COUNT to the new total, the same bug as before. Both
 keep their runner-caught label above.
+
+Task 029's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 029). Each bug was first planted by hand in an earlier task; it
+gets its entry now that its file is a recovery target (R2 done). Each named
+test fails at its assertion:
+
+- F-WC3-LANE-FILES-QUOTED — `lane_files` in `tests/lab_cid.rs` drops `-z`
+  and splits git's listing by line, so a name git quotes (`review"note.md`) is
+  read under its quoted form and skipped (task 018's bug;
+  `lane_files_reads_names_git_would_quote`, "lane_files did not list every file
+  under its real name").
+- F-WC9-RUN-DROPS-GRANTS — `run` in `tools/src/run.rs` passes `&[]` in place
+  of `input.granted` to `verify_bundle`, so a granted import is refused (task
+  020's bug; `runner_uses_only_explicit_inputs` and
+  `granted_import_is_linked`).
+
+Task 029 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before.

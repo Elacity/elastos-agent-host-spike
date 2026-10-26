@@ -1490,6 +1490,18 @@ const SHARED_RULES: [&str; 3] = [
     r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
     r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
 ];
+/// The right ids the shared contract names. A declared-rights file may claim
+/// only these.
+const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
+/// The observed startup ids the shared contract names. A declared-rights file
+/// may claim only these under `observed_startup_needs`, and Anders decides
+/// whether they become rights.
+const OBSERVED_STARTUP_NEEDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
+/// The sentence a declared-rights file gives for its own role.
+const DECLARED_RIGHTS_ROLE: &str =
+    "lab stand-in for the Runtime generator's input, not a manifest field";
+/// The sentence the observed startup needs give for their own status.
+const OBSERVED_STARTUP_STATUS: &str = "observed startup needs, not approved rights; Anders decides";
 /// The file profiles the one contract check requires. Every one of them must
 /// present the contract, in this order.
 const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
@@ -1590,6 +1602,176 @@ fn check_file_profiles(capsules: &Path) -> Result<Vec<&'static str>, String> {
         checked.push(name);
     }
     Ok(checked)
+}
+
+/// One declared entry of a declared-rights file: its id and the allow rules it
+/// claims.
+#[derive(Debug)]
+struct DeclaredClaim {
+    id: String,
+    rules: Vec<String>,
+}
+
+/// The one declared-rights check for the did and wallet profiles: every
+/// top-level allow form of `profile` traces to exactly one right the shared
+/// contract names or to one observed startup need, and every declared rule is
+/// exactly one allow form of that profile.
+///
+/// The check reads no file. It refuses, in this order: a document without the
+/// role, provider, rights and observed-startup-needs fields; an id the shared
+/// contract does not name; an entry with no rules; an allow form with no
+/// claimant or with more than one; a declared rule that is not exactly one
+/// allow form; and a shared rule claimed by the wrong id. Each refusal starts
+/// with the provider name and quotes the rule or names the id (P11).
+fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<(), String> {
+    if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
+        return Err(format!(
+            "{name} declared-rights file must give the role {DECLARED_RIGHTS_ROLE:?}"
+        ));
+    }
+    if declared["provider"].as_str() != Some(name) {
+        return Err(format!(
+            "{name} declared-rights file must name the provider {name}"
+        ));
+    }
+    let Some(rights) = declared["rights"].as_array() else {
+        return Err(format!(
+            "{name} declared-rights file must hold a rights list"
+        ));
+    };
+    let Some(startup) = declared["observed_startup_needs"].as_object() else {
+        return Err(format!(
+            "{name} declared-rights file must hold observed_startup_needs"
+        ));
+    };
+    if startup.get("status").and_then(Value::as_str) != Some(OBSERVED_STARTUP_STATUS) {
+        return Err(format!(
+            "{name} observed startup needs must give the status {OBSERVED_STARTUP_STATUS:?}"
+        ));
+    }
+    let Some(needs) = startup.get("needs").and_then(Value::as_array) else {
+        return Err(format!(
+            "{name} observed_startup_needs must hold a needs list"
+        ));
+    };
+    let rights = declared_claims(name, rights)?;
+    let needs = declared_claims(name, needs)?;
+    for claim in &rights {
+        if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
+            return Err(format!(
+                "{name} declares {}, which the shared contract does not name",
+                claim.id
+            ));
+        }
+    }
+    for claim in &needs {
+        if !OBSERVED_STARTUP_NEEDS.contains(&claim.id.as_str()) {
+            return Err(format!(
+                "{name} declares {}, which the shared contract does not name",
+                claim.id
+            ));
+        }
+    }
+    let claims: Vec<&DeclaredClaim> = rights.iter().chain(needs.iter()).collect();
+    for claim in &claims {
+        if claim.rules.is_empty() {
+            return Err(format!("{name} declares {} with no rules", claim.id));
+        }
+    }
+    let forms = allow_forms(profile);
+    for form in &forms {
+        let claimants: Vec<&str> = claims
+            .iter()
+            .filter(|claim| claim.rules.iter().any(|rule| rule == form))
+            .map(|claim| claim.id.as_str())
+            .collect();
+        match claimants.len() {
+            0 => {
+                return Err(format!(
+                    "{name} allow rule has no declared right and no observed startup need: {form}"
+                ))
+            }
+            1 => {}
+            _ => {
+                return Err(format!(
+                    "{name} allow rule is claimed more than once: {form} ({})",
+                    claimants.join(", ")
+                ))
+            }
+        }
+    }
+    for claim in &claims {
+        for rule in &claim.rules {
+            if forms.iter().filter(|form| *form == rule).count() != 1 {
+                return Err(format!(
+                    "{name} declared rule is not an allow rule of its profile: {rule}"
+                ));
+            }
+        }
+    }
+    for (rule, expected) in [
+        (SHARED_RULES[0], "bound-executable"),
+        (SHARED_RULES[1], "storage"),
+        (SHARED_RULES[2], "storage"),
+    ] {
+        let claimant = claims
+            .iter()
+            .find(|claim| claim.rules.iter().any(|candidate| candidate == rule))
+            .map(|claim| claim.id.as_str());
+        if claimant != Some(expected) {
+            return Err(format!(
+                "{name} shared rule {rule} must be claimed by {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The declared entries of `entries`, each proven to hold a string id and a
+/// rules list of strings. A refusal names the provider and the entry or id.
+fn declared_claims(name: &str, entries: &[Value]) -> Result<Vec<DeclaredClaim>, String> {
+    let mut claims = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(id) = entry["id"].as_str() else {
+            return Err(format!(
+                "{name} declared rights and observed startup needs must give entry {index} a string id"
+            ));
+        };
+        let Some(rules) = entry["rules"].as_array() else {
+            return Err(format!("{name} declares {id} without a rules list"));
+        };
+        let mut claimed = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let Some(rule) = rule.as_str() else {
+                return Err(format!(
+                    "{name} declares {id} with a rule that is not a string"
+                ));
+            };
+            claimed.push(rule.to_owned());
+        }
+        claims.push(DeclaredClaim {
+            id: id.to_owned(),
+            rules: claimed,
+        });
+    }
+    Ok(claims)
+}
+
+/// Reads one provider's declared-rights file. A missing, unreadable or invalid
+/// file is a refusal that names the path; there is no skip path.
+fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "{name} declared-rights file {} must be readable: {err}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|err| {
+        format!(
+            "{name} declared-rights file {} must be valid JSON: {err}",
+            path.display()
+        )
+    })
 }
 
 /// Selects the removal check's profiles from the one file-profile list. The
@@ -1976,6 +2158,15 @@ fn operations_table_citation_problems(
     problems
 }
 
+/// The top-level allow forms of `profile`, in profile order. This is the one
+/// selector, used by the removal check and the declared-rights check (P10).
+fn allow_forms(profile: &str) -> Vec<String> {
+    profile_forms(profile)
+        .into_iter()
+        .filter(|form| form.starts_with("(allow "))
+        .collect()
+}
+
 /// The top-level allow forms of `profile` that no `entries` item removes.
 ///
 /// An entry removes a form only when it expects a catch and one of its edits
@@ -1987,9 +2178,8 @@ fn operations_table_citation_problems(
 /// `allow_rule_removal_check_reports_an_unremoved_rule` fails on each.
 fn unremoved_allow_forms(name: &str, profile: &str, entries: &[Value]) -> Vec<String> {
     let target = runner_edit_path(&format!("../../capsules/{name}/confine.sb"));
-    profile_forms(profile)
+    allow_forms(profile)
         .into_iter()
-        .filter(|form| form.starts_with("(allow "))
         .filter(|form| {
             !target.as_ref().is_some_and(|target| {
                 entries
@@ -2074,6 +2264,49 @@ fn contract_fixture_capsules() -> tempfile::TempDir {
     capsules
 }
 
+/// The contract fixture profile plus the two allow forms did and wallet get for
+/// startup, so the declared-rights fixture can trace all five forms.
+fn declared_rights_fixture_profile() -> String {
+    let mut profile = contract_fixture_profile(true);
+    profile.push_str("(allow file-read* (literal \"/\"))\n");
+    profile.push_str("(allow sysctl-read)\n");
+    profile
+}
+
+/// The declared-rights fixture for `provider`: the two rights and the two
+/// observed startup needs, each holding the allow forms of
+/// `declared_rights_fixture_profile`.
+fn declared_rights_fixture(provider: &str) -> Value {
+    json!({
+        "role": DECLARED_RIGHTS_ROLE,
+        "provider": provider,
+        "rights": [
+            {"id": "storage", "rules": [SHARED_RULES[1], SHARED_RULES[2]]},
+            {"id": "bound-executable", "rules": [SHARED_RULES[0]]},
+        ],
+        "observed_startup_needs": {
+            "status": OBSERVED_STARTUP_STATUS,
+            "needs": [
+                {
+                    "id": "startup-root-directory",
+                    "rules": ["(allow file-read* (literal \"/\"))"],
+                },
+                {"id": "startup-sysctl", "rules": ["(allow sysctl-read)"]},
+            ],
+        },
+    })
+}
+
+/// Writes `declared` as
+/// `capsules/<provider>/tests/fixtures/confine/declared-rights.json` under a
+/// temporary directory.
+fn write_declared_rights(capsules: &Path, provider: &str, declared: &Value) {
+    let dir = capsules.join(provider).join("tests/fixtures/confine");
+    fs::create_dir_all(&dir).expect("fixture declared-rights directory");
+    fs::write(dir.join("declared-rights.json"), declared.to_string())
+        .expect("fixture declared rights");
+}
+
 /// The did, wallet and model file profiles present one contract: the same
 /// canonical parameter tokens and the same deny-by-default head. The tests
 /// bind `STORAGE_ROOT`, `STORAGE_PARENT` and `PROVIDER_EXECUTABLE` with one
@@ -2092,6 +2325,157 @@ fn both_file_profiles_bind_one_storage_parameter_contract() {
     assert!(
         checked.starts_with(&FILE_PROFILES),
         "the required file profiles must be checked first: {checked:?}"
+    );
+}
+
+/// Every top-level allow rule of the did and wallet profiles traces to exactly
+/// one right the shared contract names, or to one observed startup need.
+///
+/// The check reads `capsules/did-provider/confine.sb`,
+/// `capsules/wallet-provider/confine.sb` and each provider's
+/// `tests/fixtures/confine/declared-rights.json`. That file is a lab stand-in
+/// for the Runtime generator's input and not a manifest field; the profile
+/// rules are evidence for Anders to review and not accepted rights. Each
+/// profile's allow forms and each declared rule meet one to one, and the
+/// shared rules keep their named rights. An unreadable profile, an unreadable
+/// or invalid declared-rights file and every refusal of the one check fail the
+/// test with the provider name and the rule or id. The model profile is not
+/// read here. The test reads files and starts no process, so it runs on every
+/// platform.
+///
+/// Falsifier: WP84 appends
+/// `(allow file-read* (literal "/private/var/cc-confine-unnamed"))` to the did
+/// profile, and WP85 appends the same rule to the wallet profile; this test
+/// fails because no declared right and no observed startup need claims that
+/// form.
+#[test]
+fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    for name in allow_rule_profiles() {
+        let profile_path = capsules.join(name).join("confine.sb");
+        let profile =
+            read_allow_rule_profile(name, &profile_path).unwrap_or_else(|err| panic!("{err}"));
+        let declared_path = capsules
+            .join(name)
+            .join("tests/fixtures/confine/declared-rights.json");
+        let declared =
+            read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
+        check_declared_rights(name, &profile, &declared).unwrap_or_else(|err| panic!("{err}"));
+    }
+}
+
+/// The declared-rights check refuses each bad input with a reason that starts
+/// with the provider name and names the rule or id.
+///
+/// A temporary `capsules/` directory holds the passing fixture for all three
+/// required file profiles and the two startup allow forms, plus a
+/// declared-rights file for each of did and wallet. The valid pair passes.
+/// Then one case for each refusal, in the check's order: a right id and a
+/// startup-need id the shared contract does not name, an entry with no rules,
+/// an allow form with no claimant and one with two claimants, a declared rule
+/// that is not an allow form, and a shared rule claimed by the wrong id. The
+/// fixtures are built in the test and no process starts.
+///
+/// Falsifier: none. The named test above carries the two profile falsifiers.
+#[test]
+fn declared_rights_trace_refuses_each_bad_input() {
+    let capsules = contract_fixture_capsules();
+    let profile = declared_rights_fixture_profile();
+    for name in allow_rule_profiles() {
+        write_fixture_profile(capsules.path(), name, &profile);
+        write_declared_rights(capsules.path(), name, &declared_rights_fixture(name));
+    }
+    let name = "did-provider";
+    let declared_path = capsules
+        .path()
+        .join(name)
+        .join("tests/fixtures/confine/declared-rights.json");
+    let read = || {
+        read_declared_rights(name, &declared_path)
+            .expect("the fixture declared-rights file must be readable JSON")
+    };
+    check_declared_rights(name, &profile, &read()).expect("the full fixture must pass");
+
+    let refuse = |declared: &Value, profile: &str| {
+        let reason = check_declared_rights(name, profile, declared)
+            .expect_err("a bad declared-rights input must be refused");
+        assert!(
+            reason.starts_with(name),
+            "the refusal must start with the provider name: {reason}"
+        );
+        reason
+    };
+
+    let mut declared = read();
+    declared["rights"]
+        .as_array_mut()
+        .expect("fixture rights")
+        .push(json!({"id": "network", "rules": [SHARED_RULES[1]]}));
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("network") && reason.contains("does not name"),
+        "an unnamed right id must be refused by name: {reason}"
+    );
+
+    let mut declared = read();
+    declared["observed_startup_needs"]["needs"]
+        .as_array_mut()
+        .expect("fixture startup needs")
+        .push(json!({"id": "startup-clock", "rules": ["(allow sysctl-read)"]}));
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("startup-clock") && reason.contains("does not name"),
+        "an unnamed startup-need id must be refused by name: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"] = json!([]);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("storage") && reason.contains("no rules"),
+        "an entry with no rules must be refused by id: {reason}"
+    );
+
+    let mut widened = profile.clone();
+    widened.push_str("(allow file-read* (literal \"/private/var/cc-confine-unnamed\"))\n");
+    let reason = refuse(&read(), &widened);
+    assert!(
+        reason.contains("(allow file-read* (literal \"/private/var/cc-confine-unnamed\"))")
+            && reason.contains("no declared right"),
+        "an unclaimed allow form must be refused with its rule: {reason}"
+    );
+
+    let mut declared = read();
+    declared["observed_startup_needs"]["needs"][1]["rules"] = json!([SHARED_RULES[1]]);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains(SHARED_RULES[1])
+            && reason.contains("storage")
+            && reason.contains("startup-sysctl")
+            && reason.contains("more than once"),
+        "a form with two claimants must name the rule and both ids: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"]
+        .as_array_mut()
+        .expect("fixture storage rules")
+        .push(json!("(allow file-read* (literal \"/etc\"))"));
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains("(allow file-read* (literal \"/etc\"))"),
+        "a rule that is not an allow form must be refused with its text: {reason}"
+    );
+
+    let mut declared = read();
+    declared["rights"][0]["rules"] = json!([SHARED_RULES[0]]);
+    declared["rights"][1]["rules"] = json!([SHARED_RULES[1], SHARED_RULES[2]]);
+    let reason = refuse(&declared, &profile);
+    assert!(
+        reason.contains(SHARED_RULES[0]) && reason.contains("bound-executable"),
+        "a shared rule claimed by the wrong id must name the rule and the id: {reason}"
     );
 }
 

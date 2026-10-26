@@ -551,3 +551,17 @@
   change to `tools/Cargo.toml`, `Cargo.toml`, `Cargo.lock`, `capsule.json`, `capsule/` or the lab CID pins.
   Gates: `cargo test --locked` (91 passed, 2 ignored, 0 failed) and both fmt checks green; retired-label greps: both
   empty, exit 1.
+- 27 Oct, task 029: runner entries for the two bugs R2 held back (provider 026, PR #242, made `tests/lab_cid.rs` and
+  `tools/src/run.rs` recovery targets). `falsifiers.json` gains F-WC3-LANE-FILES-QUOTED (task 018's bug: `lane_files`
+  drops `"-z",` and splits by `lines()`; named test `lane_files_reads_names_git_would_quote`) and
+  F-WC9-RUN-DROPS-GRANTS (task 020's bug: `run` passes `&[]` in place of `input.granted` to `verify_bundle`; named
+  tests `runner_uses_only_explicit_inputs` and `granted_import_is_linked`); F-WC-README-COUNT re-anchored to 157; one
+  `"about"` sentence for task 029. README: task 018's note and task 020's passage now say runner-caught under the new
+  ids, the totals are 157 (two task 029) and 93 runner-caught, the recovery-target sentence says R2 is done, and a
+  task 029 section lists both. No change to `tests/`, `tools/`, `capsule/`, `capsule.wasm`, `Cargo.toml` or
+  `Cargo.lock`. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC3-LANE-FILES-QUOTED F-WC9-RUN-DROPS-GRANTS F-WC-README-COUNT`: "baseline: 4
+  named tests pass without an edit, 0 do not", "summary: 3 CAUGHT of 3", exit 0 (runner-caught), no
+  `*.falsify-original` backup left. Gates: `cargo test --locked` (91 passed, 2 ignored, 0 failed) and `cargo fmt
+  --check` green. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
