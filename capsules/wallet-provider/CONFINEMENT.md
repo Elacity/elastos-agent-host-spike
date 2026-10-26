@@ -87,10 +87,13 @@ refused when the profile cannot be applied.
 `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json`. That
 file is a lab stand-in for the Runtime generator's input and not a manifest
 field. Every top-level allow rule of the wallet profile traces to exactly one
-right the shared contract names, or to one observed startup need. The profile
-rules are evidence for Anders to review and not accepted rights. The startup
-label says "observed startup needs, not approved rights; Anders decides". The
-generator stays the Runtime's.
+right the shared contract names, or to one platform-baseline rule. The profile
+rules are evidence for Anders to review and not accepted rights. Its status
+label says "Runtime platform baseline for the wallet-provider executable on
+macOS, not approved rights". The model provider's
+`capsules/model-provider/tests/fixtures/confine/declared-rights.json` uses the
+same template, and `model_declared_rights_read_on_the_did_and_wallet_template`
+reads it. The generator stays the Runtime's.
 
 ## The model provider's inline profile
 
@@ -421,10 +424,16 @@ binding is the only difference between the two runs.
 - `every_did_and_wallet_allow_rule_traces_to_one_declared_right` reads each
   provider's `tests/fixtures/confine/declared-rights.json` and requires every
   top-level allow rule of the did and wallet profiles to trace to exactly one
-  declared right or observed startup need.
+  declared right or platform-baseline rule.
   `declared_rights_trace_refuses_each_bad_input` builds the same files in a
   temporary `capsules/` directory and proves each refusal. Neither test starts
   a process.
+- `model_declared_rights_read_on_the_did_and_wallet_template` reads
+  `capsules/model-provider/confine.sb` and the model provider's
+  `tests/fixtures/confine/declared-rights.json`, then requires the one
+  declared-rights check to accept them unchanged. The model's file uses the
+  same rights and platform-baseline template as did and wallet. A missing file
+  fails with its path. The test reads files and starts no process.
 
 When a request goes unanswered, the harness failure names the request, the
 child's exit status or the deadline that ended the wait, and all the child
@@ -667,9 +676,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append `(allow file-read* (literal "/private/var/cc-confine-unnamed"))` to
   the did profile (WP84):
   `every_did_and_wallet_allow_rule_traces_to_one_declared_right` fails because
-  no declared right and no observed startup need claims that form.
+  no declared right and no platform-baseline rule claims that form.
 - Append the same rule to this profile (WP85): the same test fails because the
   wallet form likewise has no claimant.
+- Rename the one platform-baseline key the declared-rights check reads to the
+  old startup-needs key (WP86):
+  `every_did_and_wallet_allow_rule_traces_to_one_declared_right` and
+  `model_declared_rights_read_on_the_did_and_wallet_template` fail because the
+  did, wallet and model files no longer hold that key.
+- Drop the justification refusal (WP87):
+  `declared_rights_trace_refuses_each_bad_input` fails because its
+  missing-justification case finds no refusal.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
