@@ -31,7 +31,7 @@ static int streq(const char *a, const char *b) {
     return *a == *b;
 }
 
-static void finish(int code) {
+__attribute__((noreturn, noinline, used)) static void finish(int code) {
     sc(SYS_exit_group, code, 0, 0, 0, 0, 0);
     for (;;) {
     }

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from check import FILTER_SPLIT, MUST_DENY, grade, parse_ops
 
 HERE = pathlib.Path(__file__).resolve().parent

@@ -9,10 +9,10 @@ counted as pass.
 from __future__ import annotations
 
 import pathlib
-import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from check import grade
 from run import compile_probe, run_unconfined, source_skip_pass, write_cfg
 
