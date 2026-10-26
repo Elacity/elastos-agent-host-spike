@@ -16,7 +16,20 @@
 //! 5. the engine is started once, by that same path, as
 //!    `run --invoke digest <memory cap> <absolute module path> 1592590337`,
 //!    with stdin null and an empty environment. It gets no folder, env or
-//!    network flag.
+//!    network flag;
+//! 6. task 039: once the engine has exited (its outcome is read first), the
+//!    module file, if this run made it, and then the run folder are removed,
+//!    on every outcome after step 3: a module write that was refused, an
+//!    engine that did not start, failed or succeeded. The folder is removed
+//!    with `fs::remove_dir`, never `remove_dir_all`, so an entry someone else
+//!    put in it is never deleted; the folder then stays and the removal fails.
+//!
+//! Which answer wins (task 039): after a success, a failed removal refuses the
+//! run with its own reason and the path it stopped at. After a refusal, that
+//! first refusal stays the answer, and a failed removal is not reported (a
+//! known limit). A runner process that is itself killed leaves its folder (a
+//! known limit). A run folder name is still never reused while it exists; a
+//! second run in the same work root finds no folder and makes a new one.
 //!
 //! wc-010b: the memory cap comes from [`VerifiedBundle::memory_mb`], the
 //! manifest's declared `resources.memory_mb`, read by the verifier's one
@@ -46,7 +59,8 @@
 //! The runner reads no environment variable and no file, and parses no
 //! manifest or module: the verified value already holds the bytes its lab CID
 //! names, and the entrypoint the verifier's one manifest read found. Nothing
-//! is written outside the new folder.
+//! is written outside the new folder, and nothing the runner made is left in
+//! the work root after `run_engine` returns.
 //!
 //! Claim scope. The argv and the empty environment are what this runner
 //! controls. With no folder, env or network flag the guest is given no host
@@ -252,6 +266,9 @@ pub enum Reason {
         status: ExitStatus,
         stderr: String,
     },
+    /// The engine succeeded, but its module file or its run folder could not
+    /// be removed after it exited (task 039).
+    RunDirNotRemoved(io::Error),
 }
 
 impl fmt::Display for Reason {
@@ -331,6 +348,10 @@ impl fmt::Display for Reason {
                 "{engine} rejected the memory cap argument -W {argument} ({status}): {}; the module is not run without its cap",
                 stderr.trim_end()
             ),
+            Reason::RunDirNotRemoved(error) => write!(
+                f,
+                "the run folder cannot be removed after the engine exited: {error}"
+            ),
         }
     }
 }
@@ -375,8 +396,9 @@ pub struct EngineRun {
 
 /// Run `engine`, the program at the absolute path `program`, once on
 /// `bundle`'s verified entrypoint bytes, written into a new folder inside
-/// `work_root`. The steps and their order are in the module docs; the first
-/// refusal is the answer. Success returns the engine's exit status and stdout.
+/// `work_root`, which is removed again once the engine has exited. The steps
+/// and their order are in the module docs; the first refusal is the answer.
+/// Success returns the engine's exit status and stdout.
 pub fn run_engine(
     bundle: &VerifiedBundle,
     engine: Engine,
@@ -385,6 +407,15 @@ pub fn run_engine(
 ) -> Result<EngineRun, Refusal> {
     check_program(program)?;
     check_work_root(work_root)?;
+    let run_dir = make_run_dir(work_root, engine)?;
+    let outcome = write_and_start(bundle, engine, program, &run_dir);
+    finish_run(&run_dir, outcome)
+}
+
+/// Step 3: one new folder, `<work_root>/<engine name>`, with mode `0o700`. A
+/// name already there is refused, never reused; nothing is made then, so
+/// nothing is removed.
+fn make_run_dir(work_root: &Path, engine: Engine) -> Result<PathBuf, Refusal> {
     let run_dir = work_root.join(engine.name());
     DirBuilder::new()
         .mode(RUN_DIR_MODE)
@@ -393,9 +424,61 @@ pub fn run_engine(
             io::ErrorKind::AlreadyExists => Refusal::new(&run_dir, Reason::RunDirExists),
             _ => Refusal::new(&run_dir, Reason::RunDirNotCreated(error)),
         })?;
+    Ok(run_dir)
+}
+
+/// Steps 4 and 5, in the run folder step 3 made: write the verified
+/// entrypoint as its module file, then start the engine on it once. Every
+/// outcome, a refusal too, goes to [`finish_run`].
+fn write_and_start(
+    bundle: &VerifiedBundle,
+    engine: Engine,
+    program: &Path,
+    run_dir: &Path,
+) -> Result<EngineRun, Refusal> {
     let module = run_dir.join(MODULE_FILE);
     write_new_file(&module, &bundle.entrypoint().content).map_err(module_refusal)?;
     start_engine(engine, program, &module, bundle.memory_mb())
+}
+
+/// Task 039: after `outcome`, which is read only once the engine has exited
+/// (or never started), remove the run folder through [`remove_run_dir`], on
+/// every outcome. After a success, a failed removal refuses the run with its
+/// path and cause. After a refusal, that first refusal stays the answer, and a
+/// failed removal is not reported (a known limit).
+fn finish_run(run_dir: &Path, outcome: Result<EngineRun, Refusal>) -> Result<EngineRun, Refusal> {
+    let removed = remove_run_dir(run_dir, module_made(&outcome));
+    match (outcome, removed) {
+        (Ok(run), Ok(())) => Ok(run),
+        (Ok(_), Err(refusal)) => Err(refusal),
+        (Err(refusal), _) => Err(refusal),
+    }
+}
+
+/// Whether the module file was made in the run folder: always, unless the
+/// shared writer refused to create it. A creation refusal means something
+/// else may be at its path, which the runner never deletes.
+fn module_made(outcome: &Result<EngineRun, Refusal>) -> bool {
+    !matches!(
+        outcome,
+        Err(Refusal {
+            reason: Reason::ModuleNotCreated(_) | Reason::Writer(_),
+            ..
+        })
+    )
+}
+
+/// Remove the module file, if this run made it, then the run folder with
+/// `fs::remove_dir`, which removes only an empty folder: an entry someone else
+/// put there is never deleted, so the folder then stays and the removal is
+/// refused. The first removal that fails is the answer, with its path.
+fn remove_run_dir(run_dir: &Path, module_made: bool) -> Result<(), Refusal> {
+    if module_made {
+        let module = run_dir.join(MODULE_FILE);
+        fs::remove_file(&module)
+            .map_err(|error| Refusal::new(&module, Reason::RunDirNotRemoved(error)))?;
+    }
+    fs::remove_dir(run_dir).map_err(|error| Refusal::new(run_dir, Reason::RunDirNotRemoved(error)))
 }
 
 /// The memory cap, in bytes, for a declared `memory_mb`: `memory_mb ×

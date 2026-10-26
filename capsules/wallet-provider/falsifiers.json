@@ -268,6 +268,8 @@
       "tests": [
         "confined_provider_serves_wallet_operations_under_its_root",
         "account_edits_persist_under_storage_root",
+        "managed_recovery_writes_persist_under_storage_root",
+        "evm_proofs_and_link_persist_under_storage_root",
         "confined_outside_write_is_denied",
         "account_operations_beneath_storage_parent_are_refused",
         "both_file_profiles_bind_one_storage_parameter_contract"
