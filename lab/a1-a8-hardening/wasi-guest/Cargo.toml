@@ -1,0 +1,22 @@
+[package]
+name = "a1-wasi-guest"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+wasi-env = []
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "=0.57.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+# Built alone by scripts/build-component-capsule.sh, outside the lane crate.
+[workspace]
