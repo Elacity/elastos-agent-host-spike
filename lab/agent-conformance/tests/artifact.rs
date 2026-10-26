@@ -2,6 +2,8 @@
 mod probe;
 
 use agent_conformance::build::{lane, offline_build, repository};
+use agent_conformance::harness::ThrowawayHome;
+use agent_conformance::identity::{stage_probe, Observation, MANIFEST};
 use probe::{build_probe, Effect};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -140,10 +142,14 @@ fn probe_hash_is_stable() {
             hashes.insert(first_hash.clone()),
             "effects must have distinct bytes"
         );
-        println!(
-            "probe component sha256:{first_hash} effect:{}",
-            effect.name()
-        );
+        let home = ThrowawayHome::new().unwrap();
+        let staged = stage_probe(&home, first, MANIFEST, effect.name()).unwrap();
+        assert_eq!(staged.identity.component_sha256, first_hash);
+        Observation::BuildOnly {
+            probe: staged.identity,
+        }
+        .emit();
+        home.finish().unwrap();
     }
 }
 

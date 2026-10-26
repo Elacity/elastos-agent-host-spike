@@ -13,7 +13,10 @@
 //! made from the one profile source, so a `confine.sb` edit reaches it too.
 //! Its program launch binds one path as `PROVIDER_EXECUTABLE` and starts the
 //! program it names, that path or another, under `confine.sb`, so the
-//! profile's exec rule alone decides whether that program runs.
+//! profile's exec rule alone decides whether that program runs. Its idle
+//! launch starts `/bin/sleep` on the same pipes and never writes an answer,
+//! so a test can run the one receive to its timeout without the provider
+//! binary.
 //!
 //! When `/usr/bin/sandbox-exec` is absent a confined test prints why it did
 //! not run and returns; it never passes silently. The one profile-shape check
@@ -33,10 +36,12 @@ use elastos_model_contract::{
     RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA, TEXT_INPUT_V1_SCHEMA,
 };
 use serde_json::{json, Value};
+use std::any::Any;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +111,10 @@ enum Launch<'a> {
     },
     /// The same binary and pipes without the profile: a control run.
     Unconfined,
+    /// `/bin/sleep` on the same pipes. It holds them open and writes nothing,
+    /// so the one receive can run out of time. The provider binary is not
+    /// started.
+    Idle,
 }
 
 /// A test-time copy of `confine.sb` with fixture rules appended. The copy is
@@ -156,7 +165,8 @@ fn sandboxed(
     command
 }
 
-/// The real provider binary speaking its line-delimited JSON protocol.
+/// The real provider binary speaking its line-delimited JSON protocol, or the
+/// idle hold, which never writes an answer.
 struct Provider {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -184,6 +194,11 @@ impl Provider {
                 program,
             } => sandboxed(Path::new(PROFILE_PATH), storage, &[], executable, program),
             Launch::Unconfined => Command::new(&binary),
+            Launch::Idle => {
+                let mut command = Command::new("/bin/sleep");
+                command.arg("60");
+                command
+            }
         };
         let mut child = command
             .stdin(Stdio::piped())
@@ -228,10 +243,7 @@ impl Provider {
     /// closes its stdout before it answers. A process that does neither
     /// within `FIXTURE_EVENT_TIMEOUT` fails the test.
     fn answer(&mut self, request: &Value) -> Option<Value> {
-        let stdin = self.stdin.as_mut().expect("provider stdin is open");
-        // A closed pipe shows up below as an exit without an answer.
-        let _ = writeln!(stdin, "{request}").and_then(|()| stdin.flush());
-        match self.responses.recv_timeout(FIXTURE_EVENT_TIMEOUT) {
+        match self.answer_within(request, FIXTURE_EVENT_TIMEOUT) {
             Ok(response) => Some(response),
             Err(RecvTimeoutError::Disconnected) => None,
             Err(RecvTimeoutError::Timeout) => panic!(
@@ -241,6 +253,22 @@ impl Provider {
         }
     }
 
+    /// The one receive on the request path. Sends one request and waits at
+    /// most `wait` for its answer. `answer` uses it with
+    /// `FIXTURE_EVENT_TIMEOUT`. A shorter wait is the time left until a run's
+    /// deadline: `Timeout` is not an answer, and the wait loop names that
+    /// deadline.
+    fn answer_within(
+        &mut self,
+        request: &Value,
+        wait: Duration,
+    ) -> Result<Value, RecvTimeoutError> {
+        let stdin = self.stdin.as_mut().expect("provider stdin is open");
+        // A closed pipe shows up below as an exit without an answer.
+        let _ = writeln!(stdin, "{request}").and_then(|()| stdin.flush());
+        self.responses.recv_timeout(wait)
+    }
+
     /// Sends one request and returns its answer. A process that exits first
     /// fails the test with its exit status: `sandbox-exec` exits 71 when the
     /// profile refuses to execute the binary, and a startup the profile breaks
@@ -248,12 +276,16 @@ impl Provider {
     fn request(&mut self, request: &Value) -> Value {
         match self.answer(request) {
             Some(response) => response,
-            None => panic!(
-                "the provider process exited before answering {}: {}",
-                request["op"],
-                describe(self.wait())
-            ),
+            None => self.exited(request),
         }
+    }
+
+    fn exited(&mut self, request: &Value) -> ! {
+        panic!(
+            "the provider process exited before answering {}: {}",
+            request["op"],
+            describe(self.wait())
+        )
     }
 
     /// How a process ended that closed its stdout without answering: its exit
@@ -275,6 +307,23 @@ impl Provider {
     /// Sends one request that must succeed and returns its data.
     fn ok(&mut self, request: &Value) -> Value {
         let response = self.request(request);
+        self.accepted(request, response)
+    }
+
+    /// `ok` with its own wait: the data, or `None` when no answer comes within
+    /// `wait`. That answer may still arrive, so a caller that gets `None`
+    /// sends no other request. A process that exits first fails the test as
+    /// `request` does.
+    fn ok_within(&mut self, request: &Value, wait: Duration) -> Option<Value> {
+        let response = match self.answer_within(request, wait) {
+            Ok(response) => response,
+            Err(RecvTimeoutError::Timeout) => return None,
+            Err(RecvTimeoutError::Disconnected) => self.exited(request),
+        };
+        Some(self.accepted(request, response))
+    }
+
+    fn accepted(&self, request: &Value, response: Value) -> Value {
         if response["status"] != "ok" {
             let logged = response["code"]
                 .as_str()
@@ -511,18 +560,40 @@ impl HostedRun {
     /// run that does not settle within `FIXTURE_EVENT_TIMEOUT` fails the test.
     fn settle(&self, provider: &mut Provider) -> Value {
         let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        loop {
-            let run = provider.ok(&self.get);
-            if run["terminal"].is_object() {
-                return run;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the run must settle within {FIXTURE_EVENT_TIMEOUT:?}: {run}"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        self.settle_within(provider, deadline, FIXTURE_EVENT_TIMEOUT)
     }
+
+    /// `settle` with the deadline the caller names. `within` is that budget,
+    /// the one the deadline message names.
+    fn settle_within(&self, provider: &mut Provider, deadline: Instant, within: Duration) -> Value {
+        wait_for_terminal(deadline, within, |left| provider.ok_within(&self.get, left))
+    }
+}
+
+/// The one wait loop for a hosted run. Each call of `poll` gets only the time
+/// left until `deadline`. `poll` returns `None` when that time runs out with
+/// no answer. The loop checks the deadline after every reply, terminal or
+/// not, before it returns the run, so a reply read at or after the deadline
+/// fails the test. `within` is the budget the deadline was built from.
+fn wait_for_terminal(
+    deadline: Instant,
+    within: Duration,
+    mut poll: impl FnMut(Duration) -> Option<Value>,
+) -> Value {
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Some(run) = poll(left) else {
+            break;
+        };
+        assert!(
+            Instant::now() < deadline,
+            "the run must settle within {within:?}: {run}"
+        );
+        if run["terminal"].is_object() {
+            return run;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the run must settle within {within:?}: no terminal reply came before the deadline")
 }
 
 /// The confined provider serves `init`, `status` and `offers_list`, and
@@ -1398,6 +1469,96 @@ fn runtime_socket_stand_in_accepts_behind_a_silent_connection() {
             requests: vec!["POST /v1/hosted-effect HTTP/1.1".to_string()],
         },
         "the stand-in must count both connections and record the second one's request line"
+    );
+}
+
+/// The text a caught panic carries.
+fn panic_text(payload: Box<dyn Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .unwrap_or_default()
+}
+
+/// The hosted run's wait loop checks its deadline after every reply, terminal
+/// or not, and gives each poll only the time left. The test gives the loop a
+/// deadline 50 ms ahead and a poll that records the wait it was given, sleeps
+/// 100 ms and returns a terminal run. The loop fails with the deadline
+/// message, and the first poll was given no more than 50 ms. The test uses no
+/// provider and no sandbox, so it runs on every Unix host.
+///
+/// Falsifiers: F-cc16a returns a terminal reply before the deadline check, so
+/// the late run is accepted and this test fails. F-cc16b gives each poll
+/// `FIXTURE_EVENT_TIMEOUT` instead of the time left, so the first poll is
+/// given more than 50 ms and this test fails.
+#[test]
+fn hosted_run_wait_fails_a_reply_after_its_deadline() {
+    let within = Duration::from_millis(50);
+    let deadline = Instant::now() + within;
+    let late = json!({ "status": "failed", "terminal": {} });
+    let mut waits = Vec::new();
+    let settled = catch_unwind(AssertUnwindSafe(|| {
+        wait_for_terminal(deadline, within, |wait| {
+            waits.push(wait);
+            thread::sleep(Duration::from_millis(100));
+            Some(late.clone())
+        })
+    }));
+    let failure = match settled {
+        Ok(run) => panic!("the wait loop must fail a reply read after its deadline: {run}"),
+        Err(payload) => panic_text(payload),
+    };
+    assert_eq!(
+        failure,
+        format!("the run must settle within {within:?}: {late}"),
+        "a reply read after the deadline must fail with the deadline message"
+    );
+    assert!(
+        waits.first().is_some_and(|wait| *wait <= within),
+        "the first poll must be given at most {within:?}, but the polls were given {waits:?}"
+    );
+}
+
+/// Each `runs_get` of the hosted run's wait loop waits only the time left,
+/// on the one receive `answer` uses. The test runs that loop with a deadline
+/// 50 ms ahead against the idle launch, which never answers, so `runs_get`
+/// gets no answer. The loop fails with the deadline message, and the wait is
+/// at least 30 ms and less than half of `FIXTURE_EVENT_TIMEOUT`. The test
+/// does not start the provider binary and it needs no sandbox.
+///
+/// Falsifier: F-cc16c gives that receive `FIXTURE_EVENT_TIMEOUT` again instead
+/// of the wait it is given, so `runs_get` waits that long and this test fails.
+#[test]
+fn hosted_run_wait_times_out_without_a_reply() {
+    let mut idle = Provider::start(Launch::Idle);
+    let run = HostedRun::new("request:idle-wait");
+    let within = Duration::from_millis(50);
+    let started = Instant::now();
+    let settled = catch_unwind(AssertUnwindSafe(|| {
+        run.settle_within(&mut idle, Instant::now() + within, within)
+    }));
+    let took = started.elapsed();
+    let failure = match settled {
+        Ok(settled) => panic!("a run with no answer must not settle: {settled}"),
+        Err(payload) => panic_text(payload),
+    };
+    assert_eq!(
+        failure,
+        format!(
+            "the run must settle within {within:?}: no terminal reply came before the deadline"
+        ),
+        "a run with no answer before the deadline must fail with the deadline message"
+    );
+    assert!(
+        took >= Duration::from_millis(30),
+        "the runs_get must wait out the time left ({within:?}), but the wait took {took:?}"
+    );
+    assert!(
+        took < FIXTURE_EVENT_TIMEOUT / 2,
+        "the runs_get must wait only the time left ({within:?}), but the wait took {took:?}"
     );
 }
 

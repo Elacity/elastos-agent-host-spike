@@ -2,6 +2,7 @@
 
 use super::{build_probe, common, stage_probe, Effect, EFFECT_RUN};
 use agent_conformance::harness::{Completion, Launch, RunningInstances, ThrowawayHome};
+use agent_conformance::identity::Observation;
 use agent_conformance::runtime::runtime_under_test;
 use std::fs;
 use std::sync::OnceLock;
@@ -67,11 +68,17 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         .map(|(home, capsule)| Launch {
             home,
             program: &runtime.binary,
-            args: vec!["run", capsule.to_str().unwrap()],
+            args: vec!["run", capsule.path.to_str().unwrap()],
         })
         .collect();
     let running = RunningInstances::start(&launches, Some(&operator_home))
         .expect("start all four clients before collection");
+    for capsule in &capsules {
+        Observation::Launched {
+            probe: capsule.identity.clone(),
+        }
+        .emit();
+    }
     let collected = running.collect(BOUND);
     while sampled.elapsed() < Duration::from_secs(3) {
         operator.require_alive().unwrap();

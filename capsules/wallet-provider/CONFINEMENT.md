@@ -18,9 +18,10 @@ with `sandbox-exec -D`:
 the same three parameter tokens, literal startup access, one state subtree
 grant, and a real stdin/stdout process test.
 
-The bridge change creates the shared ancestors before launch, derives both
-storage parameters from the same canonical `Init.base_path`, and passes the
-original base to `Init`; the tests do the same. The provider creates the final
+The tests create the shared ancestors before launch, derive both storage
+parameters from the same canonical `Init.base_path` and pass the original base
+to `Init` (`start_with_profile`); the Runtime half of the bridge change does
+the same and is not built. The provider creates the final
 `Wallet` directory. Seatbelt grants recursive state access to that wallet
 directory alone. Literal read access to its existing parent lets the provider
 inspect and synchronize the directory while it creates Wallet. The parent
@@ -90,18 +91,25 @@ generated profile for the model provider must match it too.
 
 ## Host-OS status
 
-These profiles are enforced on macOS through `/usr/bin/sandbox-exec`. On macOS
-a confinement test that cannot run because `/usr/bin/sandbox-exec` is missing
-fails the gate; it never passes by skipping. On Linux the providers are not
-confined yet; there, and on any host OS other than macOS, the `sandbox-exec`
-integration tests print a skip reason and do not run. The rule for
-provider-status documents is that a provider is marked "confined" only for a
-host OS where a test proves its profile, so no status document records
-`did-provider` or `wallet-provider` as confined on Linux until that test
-exists (P10, P11). The status change lands when the Runtime side does.
+The confinement tests exercise these oracles on macOS through
+`/usr/bin/sandbox-exec`. On macOS a test that cannot run because that tool is
+missing fails the gate; it never passes by skipping. On any host OS other than
+macOS the `sandbox-exec` integration tests print a skip reason and do not run
+when that tool is absent. The gate test
+`sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks that rule: a
+missing tool on `macos` is an error that names the OS and the path, a missing
+one on `linux` is a skip, and a present one on `macos` runs the test.
+This contract has no Linux enforcement or tests yet. A provider-status claim
+needs host-specific test evidence and the Runtime acceptance step, so no status
+document records `did-provider` or `wallet-provider` as confined on Linux until
+that test exists (P10, P11). The status change lands when the Runtime side
+does.
 
-The Linux design for the same one contract is `CONFINEMENT-LINUX.md`: it is a
-design whose Linux tests do not exist yet, and it claims no current behaviour.
+Future Linux enforcement tests for this lab contract are designed in
+`CONFINEMENT-LINUX.md`: it is the one Linux mapping, its tests do not exist
+yet, and it claims no current behaviour. The existing source-only check
+`both_file_profiles_bind_one_storage_parameter_contract` reads the three
+oracles and supplies contract evidence, not Linux execution evidence.
 
 ## Tests
 
@@ -169,7 +177,8 @@ design whose Linux tests do not exist yet, and it claims no current behaviour.
   profile fails, naming did-provider.
 
 When a request goes unanswered, the harness failure names the request, the
-child's exit status and all the child wrote to standard error.
+child's exit status or the deadline that ended the wait, and all the child
+wrote to standard error.
 
 The tests skip with a printed reason when `/usr/bin/sandbox-exec` is absent on
 a host OS other than macOS.

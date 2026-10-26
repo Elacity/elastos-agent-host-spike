@@ -44,6 +44,9 @@ process through `tests/common/probe.rs`. Each build directory and the shared
 entrypoint are removed after the artifact bytes have been copied into memory; after an interrupted run, the next test
 recreates those directories. Host build outputs are rebuildable files under this lane. Live effect tests
 copy component bytes into a hash-named directory inside their fresh Home.
+The shared staging path names the complete manifest and payload with
+`capsule_identity::checked_bundle`. Build-only and launched identities use one
+typed observation format.
 
 The artifact hash is specific to the machine and toolchain. Cargo symbol hashes
 can differ across hosts. Publication and admission must bind the complete
@@ -63,7 +66,7 @@ lab/agent-conformance/Cargo.toml TEST_NAME -- --nocapture`. A caught mutation
 requires that named test to run and fail; a build or test-loading error does
 not count. Restore the source bytes before running the normal suite again.
 
-The [runbook](RUNBOOK.md) gives the one-command table: `lab/agent-conformance/run.sh`.
+The [runbook](RUNBOOK.md) gives the one-command table and retained `VERSIONS.json` receipt: `lab/agent-conformance/run.sh`.
 The `harness` module owns fresh Homes and the one bounded launch primitive.
 The no-operator Runtime checks require the operator-lookup refusal. The effect
 checks use the ready operator recipe and require the guest lifecycle refusal. A decoy coordinates file proves which data
