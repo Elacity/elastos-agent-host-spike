@@ -223,6 +223,10 @@ note: one bundle-identity rule for the two lab lanes. Its library, its 18 tests
 and its 24 falsifiers are deleted. cc-capsule-identity's own tests and
 falsifiers cover the walk and the encoding.
 
+Task 017: the retired name label is checked in every git-listed lane file,
+docs, `falsifiers.json` and `audit/` included (falsifier
+F-WC3-RETIRED-LABEL-DOC); the code names keep the docs exemption.
+
 ### Why the tests live in the root package
 
 The lane gate `cargo test --locked --manifest-path lab/wasm-capsule/Cargo.toml`
@@ -437,9 +441,11 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   validates, is `type` `wasm` with `entrypoint` `capsule.wasm`, and has the root
   package's `name` and `version`.
 - `this_capsule_bundle_has_the_pinned_lab_cid` — the pinned vector above.
-- `the_lane_keeps_no_bundle_name_rule_of_its_own` — the lane's own files (from
-  `git ls-files`, without `audit/`, the docs and `falsifiers.json`) hold none of
-  007's retired names, and the shared crate's naming functions (`lab_cid`,
+- `the_lane_keeps_no_bundle_name_rule_of_its_own` — no lane file listed by
+  `git ls-files` holds the retired name label; the same files without `audit/`,
+  the docs and `falsifiers.json` hold none of 007's retired code names (the
+  runner's `*.falsify-original` backups are left out), and the shared crate's
+  naming functions (`lab_cid`,
   `lab_cid_observed`, `checked_bundle_observed`, `encode_entries`) are named by
   the one export line only. wc-004's imports of the checked bundle and the name
   signature are allowed. If git cannot run, it fails.
@@ -603,6 +609,13 @@ cannot restore it:
   instead of `create_new`, so an existing file or a link at its path is written
   over or through. `bundle_io_refusals_keep_path_and_cause` fails at its
   `expect_err("an entry is there")`.
+
+Task 017's one, runner-caught (the canonical runner reported
+`summary: 3 CAUGHT of 3` for it, F-WC3-SECOND-RULE and F-WC3-SECOND-IMPORT):
+
+- F-WC3-RETIRED-LABEL-DOC — a line holding the retired name label is appended
+  to `LOG.md`. `the_lane_keeps_no_bundle_name_rule_of_its_own` fails at its
+  `found.is_empty()` assertion and names the line as `LOG.md:<line>`.
 
 wc-004's 21, each hand-proven, pending R1 (every named test failed at its
 assertion with the bug in, and passed again after the revert). Task 010's
