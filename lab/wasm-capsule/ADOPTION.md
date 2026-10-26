@@ -49,8 +49,11 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   wc-005 to stage. It is a lab check of name, signer and imports; it is no
   admission or launch decision (README.md, "Verify (wc-004)").
   wc-009a (task 020): `read_grants(path)` is the one reader of the lab grants
-  file (`wc-009.lab-grants/v1`, labelled "lab stand-in, not admission"), and its
-  list is the `granted` input (README.md, "Granted imports only (wc-009a)").
+  file (`wc-009.lab-grants/v2` since task 031, labelled "lab stand-in, not
+  admission"), and its list is the `granted` input (README.md, "Granted imports
+  only (wc-009a)"). Task 031: each grant names a right, `LAB_OPERATIONS` types
+  each import the runner can link, and a wrong right or an untyped import is
+  refused (README.md, "Typed lab operations (M1 B4 lab half)").
 - `wasm_capsule_tools::run` — the lab's engine runner, as library calls.
   `run_engine` (wc-005a, task 014) runs one test-only host engine on
   `entrypoint()`'s verified bytes, written from memory into a new `0o700`
@@ -376,6 +379,20 @@ Facts only; nothing here is proposed as a contract.
    later lane task (wc-009); this task adds no import check. Tied to
    https://github.com/Elacity/elastos-runtime/issues/463 and
    https://github.com/Elacity/elastos-runtime/issues/464.
+3. **Typed lab operations as input for a typed-operations model.** Task 031
+   (M1 B4 lab half): `pub const LAB_OPERATIONS` in `tools/src/verify.rs` is the
+   lab's one table of the imports its runner can link, each typed once (module
+   and name, inputs and outputs as Wasm value type names, the one right a grant
+   must name, effect `none`, `read` or `write`). Today it holds one entry,
+   `env.f`: inputs and outputs none, right `call`, effect `none`. A grants file
+   (`wc-009.lab-grants/v2`) names a right per grant; a grant naming a right the
+   operation does not need, and a module import with no typed entry, are
+   refused before any engine starts. It is offered as lab input for Anders's
+   typed-operations model, not as a contract. The lab does not check an
+   import's Wasm type against its entry: the audit's v1 API returns names
+   only. No manifest field is added; the module's own import section stays the
+   declaration (https://github.com/Elacity/elastos-runtime/issues/464). The
+   table and the grants are "lab stand-in, not admission".
 
 ## Not yet wired
 
