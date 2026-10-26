@@ -21,7 +21,7 @@
     "rules": [
       {
         "id": "startup-root-directory",
-        "justification": "macOS did-provider executable bound as PROVIDER_EXECUTABLE: file-read* of literal / is the startup root-directory read.",
+        "justification": "macOS did-provider executable bound as PROVIDER_EXECUTABLE: resolve the absolute program path through the root directory.",
         "rules": ["(allow file-read* (literal \"/\"))"]
       },
       {

@@ -122,7 +122,7 @@ pub struct Verifier {
     next_instance: u64,
     next_handle: u64,
     #[allow(dead_code)] // later slices fill the ledger
-    ledger: ledger::Ledger,
+    ledger: std::sync::Mutex<ledger::Ledger>,
 }
 
 impl Verifier {
@@ -133,7 +133,7 @@ impl Verifier {
             grants: HashMap::new(),
             next_instance: 0,
             next_handle: 0,
-            ledger: ledger::Ledger::new(),
+            ledger: std::sync::Mutex::new(ledger::Ledger::new()),
         }
     }
 

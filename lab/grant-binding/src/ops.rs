@@ -6,7 +6,7 @@
 //! child-journal, and child-journal does not permit either of them. The right
 //! comes from the resolved grant, not from the guest's claims.
 
-use crate::{Call, GuestRequest, Refuse, Verifier};
+use crate::{Call, GuestRequest, Handle, Refuse, Verifier};
 
 /// The operation the host asks to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,25 +65,28 @@ impl Verifier {
         }
     }
 
-    /// Creates a child journal when the grant carries its right and the path
-    /// is the owned root or a child under it.
+    /// Creates a child journal and returns its own handle. The grant must
+    /// carry the child-journal right, and the path must be the owned root or
+    /// a child under it. The new handle is `bind_grant` of that path.
+    #[rustfmt::skip]
     pub fn create_child_journal(
         &mut self,
         call: &Call,
         request: &GuestRequest,
         path: &str,
-    ) -> Result<(), OperateRefuse> {
+    ) -> Result<Handle, OperateRefuse> {
         self.operate(call, request, Operation::ChildJournal)?;
         #[rustfmt::skip]
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
-        Ok(())
+        self.bind_grant(grant.instance, path, grant.rights)
+            .map_err(OperateRefuse::Binding)
     }
 }
 
 #[cfg(test)]
-use crate::{guest, rights, Handle, InstanceId, Rights};
+use crate::{guest, rights, InstanceId, Rights};
 
 /// Registers one instance with a grant that carries `rights`.
 #[cfg(test)]
@@ -387,4 +390,52 @@ fn model_child_journal_create_on_a_sibling_instance_is_refused() {
         .expect_err("sibling instance");
     assert_eq!(refusal, OperateRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
+}
+
+#[test]
+fn model_child_journal_returns_its_own_handle() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let child = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("child journal handle");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+    assert_eq!(child_decision.identity, "agent-1");
+    assert_eq!(child_decision.session, "session-a");
+    assert_eq!(child_decision.instance, instance);
+    assert_eq!(
+        child_decision.rights,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        }
+    );
+    verifier
+        .use_path(&call, &guest(child), "UsersAI/agent-1/journal/page.md")
+        .expect("the child handle binds its own root");
+    let refusal = verifier
+        .use_path(&call, &guest(child), "UsersAI/agent-1/journal")
+        .expect_err("the parent root leaves the child root");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    let parent_decision = verifier
+        .use_grant(call, &guest(parent))
+        .expect("parent grant");
+    assert_eq!(parent_decision.owned_root, "UsersAI/agent-1/journal");
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("the parent handle keeps the parent root");
 }
