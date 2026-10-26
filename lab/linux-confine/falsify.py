@@ -112,6 +112,11 @@ CHECKS = [
 
 def cargo_check_aarch64(extra_env):
     env = os.environ.copy()
+    # A leftover CC_<target> wins over TARGET_CC and would hide the
+    # host-cc plant. Drop those so this check sees only extra_env.
+    for key in list(env):
+        if key == "CC" or key == "TARGET_CC" or key.startswith("CC_"):
+            env.pop(key)
     env.update(extra_env)
     return subprocess.run(
         [
