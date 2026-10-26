@@ -1,4 +1,4 @@
-use wasm_capsule_audit::{audit_component, Refusal};
+use wasm_capsule_audit::{audit, audit_component, Refusal};
 use wasmparser::{Parser, Payload, Validator};
 
 fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
@@ -6,6 +6,29 @@ fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
         audit_component(wasm, declared).expect_err("undeclared interface must be refused");
     assert_eq!(refusal, Refusal::UndeclaredInterface { name: name.into() });
     assert_eq!(refusal.to_string(), format!("undeclared interface {name}"));
+}
+
+fn component_with_two_import_sections() -> Vec<u8> {
+    // Share the instance type so only the core module separates the imports.
+    let wasm = wat::parse_str(
+        r#"(component
+            (type $empty (instance))
+            (import "elastos:bus/runtime@1.0.0" (instance (type $empty)))
+            (core module)
+            (import "wasi:filesystem/types@0.2.0" (instance (type $empty))))"#,
+    )
+    .unwrap();
+    // This fixture has no nested component, so every import section is top-level.
+    let sections = Parser::new(0)
+        .parse_all(&wasm)
+        .map(|payload| payload.unwrap())
+        .filter(|payload| matches!(payload, Payload::ComponentImportSection(_)))
+        .count();
+    assert_eq!(
+        sections, 2,
+        "fixture must have two top-level import sections"
+    );
+    wasm
 }
 
 #[test]
@@ -18,13 +41,7 @@ fn component_importing_only_a_declared_interface_passes() {
         Ok(vec![declared[1].into()])
     );
 
-    let sections = wat::parse_str(
-        r#"(component
-            (import "elastos:bus/runtime@1.0.0" (instance))
-            (core module)
-            (import "wasi:filesystem/types@0.2.0" (instance)))"#,
-    )
-    .unwrap();
+    let sections = component_with_two_import_sections();
     let both = ["wasi:filesystem/types@0.2.0", "elastos:bus/runtime@1.0.0"];
     assert_eq!(
         audit_component(&sections, &both),
@@ -53,13 +70,7 @@ fn component_importing_wasi_filesystem_is_refused_by_name() {
     .unwrap();
     assert_undeclared(&wasm, &[], "wasi:filesystem/types@0.2.0");
 
-    let sections = wat::parse_str(
-        r#"(component
-            (import "elastos:bus/runtime@1.0.0" (instance))
-            (core module)
-            (import "wasi:filesystem/types@0.2.0" (instance)))"#,
-    )
-    .unwrap();
+    let sections = component_with_two_import_sections();
     assert_undeclared(
         &sections,
         &["elastos:bus/runtime@1.0.0"],
@@ -86,6 +97,11 @@ fn a_different_version_of_a_declared_interface_is_refused() {
         ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.1.0"),
         ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.0.1"),
         ("elastos:bus/runtime@1.1.0", "elastos:bus/runtime@1.0.0"),
+        (
+            "elastos:bus/runtime@1.0.0",
+            "elastos:bus/runtime@1.0.0-rc.1",
+        ),
+        ("elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.0.0+b1"),
     ] {
         let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
         assert_undeclared(&wasm, &[declared], name);
@@ -176,6 +192,14 @@ fn component_refusals_follow_the_documented_order() {
     );
     assert!(Validator::new().validate_all(&invalid).is_err());
     let refusal = audit_component(&invalid, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::NotAComponent);
+    assert_eq!(refusal.to_string(), "not a component");
+
+    // (d) The Component encoding check precedes the custom-section check.
+    let module = wat::parse_str(r#"(module (@custom "x" "\00asm"))"#).unwrap();
+    Validator::new().validate_all(&module).unwrap();
+    assert_eq!(audit(&module, &[]), Err(Refusal::CodeInCustomSection));
+    let refusal = audit_component(&module, &[]).unwrap_err();
     assert_eq!(refusal, Refusal::NotAComponent);
     assert_eq!(refusal.to_string(), "not a component");
 }

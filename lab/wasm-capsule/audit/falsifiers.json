@@ -448,8 +448,8 @@
         },
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "    }\n    Ok(())\n}",
-          "new": "    }\n    if Validator::new().validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+          "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
+          "new": "            _ => {}\n        }\n    }\n    if Validator::new().validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
         }
       ],
       "tests": [
@@ -554,6 +554,76 @@
       "tests": [
         "custom_section_carrying_code_is_refused",
         "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA8a",
+      "title": "Run the encoding check after parsing and custom-section checks",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
+          "new": "    if Validator::new().validate_all(wasm).is_err() {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
+          "new": "            _ => {}\n        }\n    }\n    if !right_encoding {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA8b",
+      "title": "DeclaredImport loses its Eq derive in the API document",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/INTERFACE.md",
+          "old": "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct DeclaredImport {",
+          "new": "#[derive(Debug, Clone, PartialEq)]\npub struct DeclaredImport {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA9a",
+      "title": "Match interface versions while ignoring build metadata",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('+').next() == name.split('+').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA9b",
+      "title": "Match interface versions while ignoring the pre-release",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| match (declared.split_once('@'), name.split_once('@')) { (Some((declared_interface, declared_version)), Some((interface, version))) => declared_interface == interface && declared_version.split('-').next() == version.split('-').next(), _ => *declared == name.as_str(), }) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
       ]
     }
   ]
