@@ -40,7 +40,7 @@ exit: 3
 seconds: 0
 
 ===== step 5 as written =====
-command: 
+command:
 run=$(ls -dt "$HOME/Library/Application Support/elastos-demo-a14/runs/"*/ | head -1)
 printf "run_var=%s\n" "${run-}"
 if test -n "$run" && test -d "$run" && open "$run"; then
@@ -58,7 +58,7 @@ exit: 0
 seconds: 0
 
 ===== step 5 isolated demo home =====
-command: 
+command:
 run=$(ls -dt "$DEMO_A14_HOME/runs/"*/ | head -1)
 printf "run_var=%s\n" "${run-}"
 if test -n "$run" && test -d "$run"; then
