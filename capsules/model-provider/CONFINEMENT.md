@@ -52,6 +52,10 @@ technical OS permissions with no user approval prompt, not approved rights.
 The file is a lab stand-in for the Runtime generator's input, not a manifest
 field. The generator itself stays the Runtime's (Anders).
 
+`platform_baseline_rules_stay_narrow` fails if `startup-root-directory`
+widens in path or operation, or if `startup-sysctl` widens in operation or
+sysctl name.
+
 ## What the profile allows
 
 Each rule is load-bearing: removing it alone makes
@@ -530,6 +534,13 @@ profile does not grant".
   rule in that file. `startup-root-directory` and `startup-sysctl` are on
   the platform-baseline list. The test reads the profile and the fixture
   from disk. It starts no process and needs no sandbox.
+- `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
+  `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
+  `(allow sysctl-read)`. Each pin is written in the test. A wider path or
+  operation on the root read, or a wider operation or sysctl name on the
+  sysctl read, fails the test even when those two lines remain, so a fixture
+  and a profile that widen together still fail. The test reads `confine.sb`
+  from disk. It starts no process and needs no sandbox.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
@@ -653,6 +664,8 @@ allow_rules_trace_to_declared_rights.
 | F-cc30e | The declared-rights path points at a fixture rule `(allow file-read-data (literal "/tmp/cc-declared-rights-absent"))` | `allow_rules_trace_to_declared_rights` | That rule is not an allow line. |
 | F-cc30f | The `STORAGE_ROOT` allow is repeated on the next line | `allow_rules_trace_to_declared_rights` | That rule matches more than one allow line. |
 | F-cc31a | In the test, `model_provider_ops_under_profile` is renamed `model_provider_ops_under_profile_renamed` | `operations_section_cites_existing_tests` | The operations section cites that test, and the function is gone. |
+| F-cc35a | `(allow file-read-data (literal "/"))` becomes `(allow file-read* (literal "/"))` | `platform_baseline_rules_stay_narrow` | The root read's operation widens to `file-read*`. |
+| F-cc35b | One line, `(allow sysctl-write)`, is added after `(allow sysctl-read)`; the sysctl pin stays | `platform_baseline_rules_stay_narrow` | The added write is a wider sysctl operation while the pin remains. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -662,14 +675,16 @@ for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
 F-cc30c, F-cc30d, F-cc30e and F-cc31a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
-`confine.sb`.
+`confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
+F-cc35b needs no rebuild: the test reads confine.sb at runtime.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
 `sandbox-exec` is missing, the confined tests skip and pass, so each sandbox
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
-F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f and F-cc31a) are
+F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
+F-cc35a and F-cc35b) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`

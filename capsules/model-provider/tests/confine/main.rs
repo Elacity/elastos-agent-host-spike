@@ -2400,3 +2400,113 @@ fn allow_rules_trace_to_declared_rights() {
         );
     }
 }
+
+/// The two platform-baseline startup rules stay the narrow pins written here.
+///
+/// `startup-root-directory` is `(allow file-read-data (literal "/"))` and
+/// `startup-sysctl` is `(allow sysctl-read)`. Each pin must occur once. The
+/// pins are not read from the declared-rights fixture, so a fixture and a
+/// profile that widen together still fail. A wider grant fails even when the
+/// pin remains. The test reads `confine.sb` from `CARGO_MANIFEST_DIR`. It
+/// starts no process and needs no sandbox.
+///
+/// Falsifier: F-cc35a replaces the root pin with
+/// `(allow file-read* (literal "/"))`. F-cc35b appends `(allow sysctl-write)`
+/// after the sysctl pin.
+#[test]
+fn platform_baseline_rules_stay_narrow() {
+    fn root_operation_widens(line: &str) -> bool {
+        if line.contains("file-read*") {
+            return true;
+        }
+        let rest = line.strip_prefix("(allow ").unwrap_or(line);
+        let head = rest.split('(').next().unwrap_or(rest);
+        let head = head.trim().trim_end_matches(')');
+        head.split_whitespace()
+            .any(|token| token != "file-read-data")
+    }
+
+    fn root_path_widens(line: &str) -> bool {
+        if line.contains("subpath") {
+            return true;
+        }
+        let mut rest = line;
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('"') else {
+                return true;
+            };
+            if &after[..end] != "/" {
+                return true;
+            }
+            rest = &after[end + 1..];
+        }
+        false
+    }
+
+    let root_pin = "(allow file-read-data (literal \"/\"))";
+    let sysctl_pin = "(allow sysctl-read)";
+    let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
+    let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
+        panic!(
+            "confine.sb must be readable at {}: {err}",
+            profile_path.display()
+        )
+    });
+    let allow_lines: Vec<&str> = profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| line.starts_with("(allow "))
+        .collect();
+
+    // Wider grants are refused even when the narrow pin is still present.
+    let root_candidates: Vec<&str> = allow_lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            line.contains("file-read")
+                && !line.contains("STORAGE_PARENT")
+                && !line.contains("STORAGE_ROOT")
+                && !line.contains("PROVIDER_EXECUTABLE")
+        })
+        .collect();
+    let mut root_pins = 0usize;
+    for line in root_candidates {
+        if line == root_pin {
+            root_pins += 1;
+            continue;
+        }
+        if root_operation_widens(line) {
+            panic!("startup-root-directory operation widened: {line}");
+        }
+        if root_path_widens(line) {
+            panic!("startup-root-directory path widened: {line}");
+        }
+        panic!("startup-root-directory widened: {line}");
+    }
+    if root_pins != 1 {
+        panic!("startup-root-directory widened");
+    }
+
+    let mut sysctl_pins = 0usize;
+    for line in allow_lines {
+        if !line.contains("sysctl") {
+            continue;
+        }
+        if line == sysctl_pin {
+            sysctl_pins += 1;
+            continue;
+        }
+        if line.contains("sysctl-write") || line.contains("sysctl*") {
+            panic!("startup-sysctl operation widened: {line}");
+        }
+        if line.contains("sysctl-name") {
+            panic!("startup-sysctl sysctl name widened: {line}");
+        }
+        panic!("startup-sysctl widened: {line}");
+    }
+    if sysctl_pins != 1 {
+        panic!("startup-sysctl widened");
+    }
+}
