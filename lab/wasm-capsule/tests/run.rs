@@ -1226,6 +1226,91 @@ fn run_returns_the_verified_name_and_both_outputs() {
     assert_eq!(passed.wasmer(), b"same\n");
 }
 
+/// A stand-in engine `name` that records each start in `<its own path>.starts`,
+/// found from its own `$0`, never from an environment variable (the engine
+/// runs with none): `version` for a `--version` query, which prints a version,
+/// and `module <module path>` for a module run, which prints `same`.
+fn counting(folder: &Path, name: &str) -> PathBuf {
+    engine(
+        folder,
+        name,
+        &format!("printf 'version\\n' >> \"$0.starts\"\nprintf '{name} 0.0.0-stand-in\\n'\n"),
+        "printf 'module %s\\n' \"$4\" >> \"$0.starts\"\nprintf 'same\\n'\n",
+    )
+}
+
+/// How many starts of `kind` (`version` or `module`) the stand-in made by
+/// [`counting`] at `program` recorded; none if it was never started.
+fn starts(program: &Path, kind: &str) -> usize {
+    let record = PathBuf::from(format!("{}.starts", program.display()));
+    match fs::read_to_string(&record) {
+        Ok(text) => text
+            .lines()
+            .filter(|line| line.split(' ').next() == Some(kind))
+            .count(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("read {}: {error}", record.display()),
+    }
+}
+
+/// One `run_engine` call starts its engine for exactly one module run; one
+/// `run` call starts each engine for exactly one module run, two in all. Its
+/// `--version` queries (task 016) are counted apart. The counts are exact,
+/// never "at least one" (wc-005: one process per engine; P3, P10).
+#[test]
+fn run_engine_starts_its_engine_exactly_once() {
+    let (_bundle, value) = fixture();
+    let tmp = TempDir::new("run-starts");
+    let root = canonical(&tmp);
+    for engine_kind in ENGINES {
+        let engines = work_root(&root, &format!("{engine_kind}-engines"));
+        let program = counting(&engines, engine_kind.name());
+        let work = work_root(&root, &format!("{engine_kind}-work"));
+
+        assert_eq!(
+            ran(run_engine(&value, engine_kind, &program, &work)),
+            b"same\n"
+        );
+        let module_runs = starts(&program, "module");
+        assert_eq!(
+            module_runs, 1,
+            "{engine_kind}: one run_engine call started the engine {module_runs} times"
+        );
+        assert_eq!(
+            starts(&program, "version"),
+            0,
+            "{engine_kind}: run_engine asked --version"
+        );
+    }
+
+    let signed = signed_fixture();
+    let engines = work_root(&root, "two-engines");
+    let wasmtime = counting(&engines, "wasmtime");
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "two-work");
+
+    let passed = two_ran(run(&input(&signed, &wasmtime, &wasmer, &work)));
+    assert_eq!(passed.wasmtime(), b"same\n");
+    assert_eq!(passed.wasmer(), b"same\n");
+    let module_runs = [starts(&wasmtime, "module"), starts(&wasmer, "module")];
+    assert_eq!(
+        module_runs,
+        [1, 1],
+        "one run call started wasmtime and wasmer {module_runs:?} times"
+    );
+    assert_eq!(
+        module_runs.iter().sum::<usize>(),
+        2,
+        "two module runs in all"
+    );
+    let version_queries = [starts(&wasmtime, "version"), starts(&wasmer, "version")];
+    assert_eq!(
+        version_queries,
+        [1, 1],
+        "one run call asked wasmtime and wasmer --version {version_queries:?} times"
+    );
+}
+
 /// The two-engine runner's version refusal, and nothing else.
 fn version_refused(result: Result<TwoEngineRun, TwoEngineRefusal>) -> Refusal {
     match two_refused(result) {
