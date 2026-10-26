@@ -1,4 +1,4 @@
-use wasm_capsule_audit::{audit_component, Refusal};
+use wasm_capsule_audit::{audit, audit_component, Refusal};
 use wasmparser::{Parser, Payload, Validator};
 
 fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
@@ -93,6 +93,26 @@ fn a_different_version_of_a_declared_interface_is_refused() {
 }
 
 #[test]
+fn component_import_names_with_options_are_refused() {
+    for (name, option) in [
+        ("elastos:bus/runtime@1.0.0", r#"(versionsuffix "-rc.1")"#),
+        ("cache", r#"(implements "wasi:filesystem/types@0.2.0")"#),
+        ("elastos:bus/runtime@1.0.0", r#"(external-id "x")"#),
+    ] {
+        let source = format!(r#"(component (import "{name}" {option} (instance)))"#);
+        let wasm = wat::parse_str(&source).unwrap();
+        let result = audit_component(&wasm, &[name]);
+        assert_eq!(result, Err(Refusal::NotAComponent), "{source}");
+        assert_eq!(result.unwrap_err().to_string(), "not a component");
+    }
+
+    for name in ["cache", "elastos:bus/runtime@1.0.0"] {
+        let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
+        assert_eq!(audit_component(&wasm, &[name]), Ok(vec![name.into()]));
+    }
+}
+
+#[test]
 fn core_module_bytes_are_not_accepted_as_a_component() {
     let wasm = wat::parse_str("(module)").unwrap();
     let refusal = audit_component(&wasm, &[]).unwrap_err();
@@ -158,6 +178,14 @@ fn component_refusals_follow_the_documented_order() {
     let refusal = audit_component(&invalid, &[]).unwrap_err();
     assert_eq!(refusal, Refusal::NotAComponent);
     assert_eq!(refusal.to_string(), "not a component");
+
+    // (d) The Component encoding check precedes the custom-section check.
+    let module = wat::parse_str(r#"(module (@custom "x" "\00asm"))"#).unwrap();
+    Validator::new().validate_all(&module).unwrap();
+    assert_eq!(audit(&module, &[]), Err(Refusal::CodeInCustomSection));
+    let refusal = audit_component(&module, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::NotAComponent);
+    assert_eq!(refusal.to_string(), "not a component");
 }
 
 #[test]
@@ -193,6 +221,35 @@ fn component_custom_section_carrying_code_is_refused() {
             if let Err(refusal) = result {
                 assert_eq!(refusal.to_string(), "code in custom section");
             }
+        }
+    }
+
+    let mut hidden_name = vec![
+        0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01,
+        0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+    ];
+    hidden_name.extend_from_slice(&[b'x'; 75]);
+    for (name, expected) in [
+        (hidden_name, Err(Refusal::CodeInCustomSection)),
+        (vec![b'x'; 97], Ok(vec![])),
+    ] {
+        assert_eq!(name.len(), 97);
+        let mut wasm = wat::parse_str("(component)").unwrap();
+        let size_last_byte = wasm.len() + 2;
+        // Section id, padded size 98, name length 97, then the name; data is empty.
+        wasm.extend_from_slice(&[0x00, 0xe2, 0x00, 0x61]);
+        wasm.extend_from_slice(&name);
+        Validator::new().validate_all(&wasm).unwrap();
+        if expected.is_err() {
+            assert_eq!(
+                &wasm[size_last_byte..size_last_byte + 24],
+                wat::parse_str("(module (func))").unwrap()
+            );
+        }
+        let result = audit_component(&wasm, &[]);
+        assert_eq!(result, expected, "padded size with name {name:?}");
+        if let Err(refusal) = result {
+            assert_eq!(refusal.to_string(), "code in custom section");
         }
     }
 }

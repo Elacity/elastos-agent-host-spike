@@ -31,12 +31,15 @@ use elastos_model_contract::{
 };
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use test_support::FIXTURE_EVENT_TIMEOUT;
 
@@ -398,9 +401,11 @@ fn assert_serving(data: &Value) {
 }
 
 /// One run of the hosted offer: the `runs_create` that stores it and the
-/// `runs_get` that reads it back from the journal. The binary refuses hosted
-/// dispatch before any socket, so the run is stored as failed and needs no
-/// backend.
+/// `runs_get` that reads it back from the journal. Without
+/// `runtime_hosted_socket` the binary refuses hosted dispatch before any
+/// socket, so the run is stored as failed and needs no backend. With it, the
+/// run is sent to that socket and may still be running when `runs_create`
+/// answers; `settle` waits for its end.
 struct HostedRun {
     create: Value,
     get: Value,
@@ -442,6 +447,23 @@ impl HostedRun {
                 "run_id": access.run_id,
                 "runtime_binding": access
             }),
+        }
+    }
+
+    /// Reads the run with `runs_get` until it is terminal and returns it. A
+    /// run that does not settle within `FIXTURE_EVENT_TIMEOUT` fails the test.
+    fn settle(&self, provider: &mut Provider) -> Value {
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        loop {
+            let run = provider.ok(&self.get);
+            if run["terminal"].is_object() {
+                return run;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the run must settle within {FIXTURE_EVENT_TIMEOUT:?}: {run}"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -942,6 +964,212 @@ fn model_local_offer_accepted_when_unconfined() {
     let mut provider = Provider::start(Launch::Unconfined);
 
     assert_serving(&provider.ok(&fixture.request));
+
+    provider.shutdown();
+}
+
+/// A stand-in for the Runtime-owned hosted effect socket that an init config
+/// names in `runtime_hosted_socket`. It is bound under `/tmp`: the provider
+/// refuses a socket path of 104 bytes or more, and a path under the fixture's
+/// temporary root comes close to that. It answers every request as the
+/// Runtime refuses one before dispatch, `403` with
+/// `X-Elastos-Hosted-Access: refused`, and records the request line of each
+/// connection it accepts, so an empty record means no connection came.
+struct RuntimeHostedSocket {
+    path: PathBuf,
+    requests: Receiver<String>,
+    stop: Arc<AtomicBool>,
+    server: Option<JoinHandle<()>>,
+}
+
+impl RuntimeHostedSocket {
+    fn bind(label: &str) -> Self {
+        let path = resolved(Path::new("/tmp"))
+            .join(format!("mp-confine-{label}-{}.sock", std::process::id()));
+        // Only a killed run of this process id can have left this path.
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind the Runtime socket stand-in");
+        listener
+            .set_nonblocking(true)
+            .expect("a stoppable Runtime socket stand-in");
+        let (request_tx, requests) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let server = thread::spawn(move || {
+            while !stopping.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => refuse_hosted_effect(&stream, &request_tx),
+                    // Nothing to accept yet, or a connection that gave up.
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+        Self {
+            path,
+            requests,
+            stop,
+            server: Some(server),
+        }
+    }
+
+    /// The request line of every connection accepted so far.
+    fn received(&self) -> Vec<String> {
+        self.requests.try_iter().collect()
+    }
+}
+
+impl Drop for RuntimeHostedSocket {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Reads one request to its end, records its request line, then answers as
+/// the Runtime's refusal before dispatch. The line is recorded before the
+/// answer, so a run that settles on this answer always finds it recorded.
+fn refuse_hosted_effect(mut stream: &UnixStream, requests: &Sender<String>) {
+    // On macOS an accepted socket keeps the listener's non-blocking mode.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    let _ = reader.read_line(&mut request_line);
+    let mut body_bytes = 0;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim_end().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                body_bytes = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let _ = reader.read_exact(&mut vec![0; body_bytes]);
+    let _ = requests.send(request_line.trim_end().to_string());
+    let _ = stream.write_all(
+        b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
+          Content-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+}
+
+/// The hosted transport fixture shared by
+/// `model_hosted_run_fails_closed_under_profile` and its unconfined control:
+/// the Runtime socket stand-in, `init_request` with `runtime_hosted_socket`
+/// set to that socket, and one run of the hosted offer.
+struct HostedTransport {
+    storage: Storage,
+    socket: RuntimeHostedSocket,
+    request: Value,
+    run: HostedRun,
+}
+
+impl HostedTransport {
+    fn prepare(label: &str) -> Self {
+        let storage = Storage::prepare(label);
+        let socket = RuntimeHostedSocket::bind(label);
+        let mut request = init_request(&storage, None);
+        request["config"]["extra"]["runtime_hosted_socket"] = json!(socket.path);
+        Self {
+            run: HostedRun::new(&format!("request:{label}")),
+            storage,
+            socket,
+            request,
+        }
+    }
+}
+
+/// Under the profile, a hosted run fails closed at its transport. With
+/// `runtime_hosted_socket` set, the provider on macOS sends a hosted run's
+/// effect request over that Runtime-owned Unix socket
+/// (`backend_client_with_socket` and `effect_request` in `src/adapters.rs`),
+/// and the profile refuses the connect. The run settles within
+/// `FIXTURE_EVENT_TIMEOUT` as `failed`, with `transport_interrupted` and
+/// "model backend transport was interrupted"; the socket receives no
+/// connection; and the provider stays in service.
+/// `model_hosted_run_reaches_runtime_socket_when_unconfined` sends the same
+/// fixture and requests without the profile, and the request reaches the
+/// socket.
+///
+/// The provider logs no adapter fault, so the evidence is the run's terminal
+/// error, the socket's record and the control. F-cc10a (`(allow default)`,
+/// with `(deny network*)` removed) and F-cc10b (`(deny network*)` becomes
+/// `(allow network*)`, nothing else changes) each let the request reach the
+/// socket, and this test fails. `(allow default)` alone does not:
+/// `(deny network*)` still refuses the connect.
+#[test]
+fn model_hosted_run_fails_closed_under_profile() {
+    if !sandbox_available() {
+        return;
+    }
+    let fixture = HostedTransport::prepare("hosted-run");
+    let mut provider = Provider::start(Launch::Confined(&fixture.storage));
+    assert_serving(&provider.ok(&fixture.request));
+
+    provider.ok(&fixture.run.create);
+    let settled = fixture.run.settle(&mut provider);
+    assert_eq!(
+        fixture.socket.received(),
+        Vec::<String>::new(),
+        "the profile must refuse the connect, so the Runtime socket receives no connection"
+    );
+    assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "transport_interrupted",
+            "code": "transport_interrupted",
+            "message": "model backend transport was interrupted"
+        }),
+        "the refused connect must fail the run closed"
+    );
+
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
+}
+
+/// The control for `model_hosted_run_fails_closed_under_profile`: the same
+/// fixture and requests without the profile. The run's one request reaches
+/// the Runtime socket stand-in with a request line that starts with
+/// `POST /v1/hosted-effect `, and the stand-in's refusal settles the run as
+/// `hosted_effect_refused`. The profile is the only difference between the
+/// two runs. Off macOS the provider refuses every hosted run itself, before
+/// any socket, so there this control prints why it did not run.
+#[test]
+fn model_hosted_run_reaches_runtime_socket_when_unconfined() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted transport control: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let fixture = HostedTransport::prepare("hosted-run-control");
+    let mut provider = Provider::start(Launch::Unconfined);
+    assert_serving(&provider.ok(&fixture.request));
+
+    provider.ok(&fixture.run.create);
+    let settled = fixture.run.settle(&mut provider);
+    let received = fixture.socket.received();
+    assert!(
+        received.len() == 1 && received[0].starts_with("POST /v1/hosted-effect "),
+        "without the profile the run's one request must reach the Runtime socket: {received:?}"
+    );
+    assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "access_refused",
+            "code": "hosted_effect_refused",
+            "message": "Runtime refused the hosted request before provider dispatch."
+        }),
+        "the Runtime socket's refusal must settle the run"
+    );
 
     provider.shutdown();
 }

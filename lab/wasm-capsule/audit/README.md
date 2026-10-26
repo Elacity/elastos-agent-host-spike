@@ -4,11 +4,13 @@
 and refuses undeclared imports by module and name. `audit_component` lists the
 outermost Component's imports and requires each full interface name and version
 to match a declaration exactly. Both use one validation and parsing path, with
-one custom-section check at every depth. It scans the whole section content
-after the section id and size as one run: the name's length, the name and the
-data. Wasm magic `00 61 73 6D` at any offset returns `CodeInCustomSection`;
-content without that run passes. This byte heuristic leaves compressed or
-encoded content undecoded. [API v1](INTERFACE.md) defines the
+one custom-section check at every depth. It scans one run from the size's last
+byte through the section content: the name's length, the name and the data.
+A padded size can end in `00`; earlier size bytes are `0x80` or more and cannot
+be part of the magic. Wasm magic `00 61 73 6D` at any offset returns
+`CodeInCustomSection`; a section without that run passes, including padding
+alone. This byte heuristic leaves compressed or encoded content undecoded.
+[API v1](INTERFACE.md) defines the
 public types, validation rules and exact refusal strings; `AUDIT_API` stays 1.
 
 The crate never executes or instantiates a module. It makes no admission,
@@ -32,17 +34,23 @@ cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml
 The nine `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
 refusal order and API v1. The two retained `skeleton` tests pin the manifest
-and workspace boundary. The eight `component_imports` tests cover exact names
+and workspace boundary. The nine `component_imports` tests cover exact names
 and versions (including same-major versions), more than one import section,
 section order, unused declarations, core-module refusal, full Component validation,
-internal imports, and custom-section content in Components and embedded modules.
+internal imports, import names with options, and custom-section content in
+Components and embedded modules.
 Custom-section cases cover code in the name and data, runs across their boundary,
-and a run that starts in the name's length byte. Component cases cover a module
-header in the name at all four tested depths, plus plain names and data.
+and runs that start in the name's length byte or the size's last byte. Both entry
+points refuse a whole module hidden from the size's last byte and accept the
+same padded size with a plain name. Component cases also cover a module header
+in the name at all four tested depths, plus plain names and data.
 The API test pins the derives and `#[non_exhaustive]` lines in both the source
-and API document. Both refusal-order tests require full validation first,
-then custom-section checks, then the first undeclared entry. Their fixtures
-check section order in the encoded bytes and exact refusal variants and strings.
+and API document. Both refusal-order tests require the header or encoding check
+and full validation before custom-section checks, then the first undeclared
+entry. Their fixtures check section order in the encoded bytes and exact refusal
+variants and strings. Each wrong-encoding fixture validates and returns
+`CodeInCustomSection` through the matching entry point before the other entry
+point returns `Malformed` or `NotAComponent`.
 Component fixtures are built in the tests with the pinned `wat`; malformed
 fixtures also truncate, extend or splice those bytes. Tests read no external
 WIT files.
@@ -87,6 +95,11 @@ apply and verify each entry by hand in this workspace.
 | F-CWA4g | Skip the core header check | `malformed_module_is_refused` |
 | F-CWA5a | Match the interface name and major version only | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA5b | Read only the first nonempty top-level import section | `component_importing_wasi_filesystem_is_refused_by_name`, `component_importing_only_a_declared_interface_passes` |
+| F-CWA6a | Validate with every feature enabled, accepting import name options | `component_import_names_with_options_are_refused` |
+| F-CWA7a | Skip the size's last byte in the custom-section scan | `custom_section_carrying_code_is_refused`, `component_custom_section_carrying_code_is_refused` |
+| F-CWA7b | Refuse padding alone when a custom-section size ends in `00` | `custom_section_carrying_code_is_refused`, `component_custom_section_carrying_code_is_refused` |
+| F-CWA8a | Run the encoding check after parsing and custom-section checks | `audit_refusals_follow_the_documented_order`, `component_refusals_follow_the_documented_order` |
+| F-CWA8b | Remove `Eq` from `DeclaredImport`'s derive in the API document | `public_api_is_v1` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -99,7 +112,8 @@ cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
 
 Replace the test name with the entry's name. Use `--test skeleton` for F-CWA0a
 and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
-the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, and F-CWA5a/F-CWA5b:
+the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, F-CWA5a/F-CWA5b,
+F-CWA6a, F-CWA7a/F-CWA7b, and F-CWA8a (`component_refusals_follow_the_documented_order`):
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -162,3 +176,25 @@ checked by SHA-256. The clean format and locked-test checks passed all 19 tests
 offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation,
 API document, audit manifest, workspace manifest and workspace lockfile stayed
 unchanged.
+
+The cwa-006 in-tree run caught all 30 `caught` entries: all 37 named test runs
+built and failed at assertions. F-CWA6a accepted the version-suffix import as
+`elastos:bus/runtime@1.0.0`, failing the new option-refusal test. With the default
+validator, all three option cases returned `NotAComponent` and `not a component`,
+and both plain-name controls returned exactly their declared import. F-CWA0c
+failed before tests because `--locked` refused the nested workspace's missing
+lockfile. Every edited file restored byte-identical, checked by SHA-256. The
+clean format and locked-test checks passed all 20 tests offline with
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The implementation, API document,
+audit manifest, workspace manifest and workspace lockfile stayed unchanged.
+
+The cwa-007 in-tree run caught all 32 `caught` entries: all 41 required named
+test runs built and failed at assertions. F-CWA7a accepted the module hidden
+from the size's last byte in both custom-section tests; F-CWA7b refused their
+plain-name controls on padding alone. F-CWA3a and F-CWA3b kept their original
+bugs with updated anchors; F-CWA1d and F-CWA2d were caught unchanged. F-CWA0c
+failed before tests because `--locked` refused the nested workspace's missing
+lockfile. Every edited file restored byte-identical, checked by SHA-256. The
+clean format and locked-test checks passed all 20 tests offline with
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. The audit manifest, workspace
+manifest and workspace lockfile stayed unchanged.

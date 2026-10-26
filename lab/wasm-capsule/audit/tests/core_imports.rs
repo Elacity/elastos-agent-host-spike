@@ -190,6 +190,17 @@ fn audit_refusals_follow_the_documented_order() {
     let refusal = audit(&invalid, &[]).unwrap_err();
     assert_eq!(refusal, Refusal::Malformed);
     assert_eq!(refusal.to_string(), "malformed module");
+
+    // (d) The core header check precedes the custom-section check.
+    let component = wat::parse_str(r#"(component (@custom "x" "\00asm"))"#).unwrap();
+    Validator::new().validate_all(&component).unwrap();
+    assert_eq!(
+        audit_component(&component, &[]),
+        Err(Refusal::CodeInCustomSection)
+    );
+    let refusal = audit(&component, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::Malformed);
+    assert_eq!(refusal.to_string(), "malformed module");
 }
 
 #[test]
@@ -239,6 +250,35 @@ fn custom_section_carrying_code_is_refused() {
             "code in custom section",
             "{label}"
         );
+    }
+
+    let mut hidden_name = vec![
+        0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01,
+        0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+    ];
+    hidden_name.extend_from_slice(&[b'x'; 75]);
+    for (name, expected) in [
+        (hidden_name, Err(Refusal::CodeInCustomSection)),
+        (vec![b'x'; 97], Ok(vec![])),
+    ] {
+        assert_eq!(name.len(), 97);
+        let mut wasm = wat::parse_str("(module)").unwrap();
+        let size_last_byte = wasm.len() + 2;
+        // Section id, padded size 98, name length 97, then the name; data is empty.
+        wasm.extend_from_slice(&[0x00, 0xe2, 0x00, 0x61]);
+        wasm.extend_from_slice(&name);
+        Validator::new().validate_all(&wasm).unwrap();
+        if expected.is_err() {
+            assert_eq!(
+                &wasm[size_last_byte..size_last_byte + 24],
+                wat::parse_str("(module (func))").unwrap()
+            );
+        }
+        let result = audit(&wasm, &[]);
+        assert_eq!(result, expected, "padded size with name {name:?}");
+        if let Err(refusal) = result {
+            assert_eq!(refusal.to_string(), "code in custom section");
+        }
     }
 }
 

@@ -329,9 +329,11 @@ fn confined_provider_serves_did_operations_under_its_root() {
 /// `test_verify_did_recovery_rejects_overlong_did_via_shared_codec` and
 /// `test_verify_did_recovery_rejects_did_elastos_until_resolver_exists`.
 ///
-/// Falsifier: panic in the `hex::decode(sig_hex)` error branch of
-/// `verify_did_recovery` in `src/main.rs`; the confined process dies and this
-/// case fails because no response line comes back.
+/// Falsifiers: panic in the `hex::decode(sig_hex)` error branch of
+/// `verify_did_recovery` in `src/main.rs` (DID06); the confined process dies
+/// and this case fails because no response line comes back. Return
+/// `parse_error` instead of the signature refusal in that branch (DID11); the
+/// response no longer names `invalid_signature` and this case fails.
 #[test]
 fn verify_did_recovery_under_profile() {
     if !sandbox_available() {
@@ -384,8 +386,14 @@ fn verify_did_recovery_under_profile() {
 /// A write through a symlink that leaves the storage root is denied, and the
 /// provider reports it and stays in service.
 ///
-/// Falsifier: replace `(deny default)` with `(allow default)` (keeping
-/// `(version 1)` first); the outside write then succeeds and this test fails.
+/// The link case runs for two targets: an unrelated directory, and a sibling
+/// of `did/` under the same base directory, so the write grant must stop at
+/// `Init.base_path/did`.
+///
+/// Falsifiers: replace `(deny default)` with `(allow default)`, keeping
+/// `(version 1)` first (DID04); widen the write grant from `STORAGE_ROOT` to
+/// `STORAGE_PARENT` (DID18), so the sibling write succeeds and this test fails
+/// on that target.
 #[test]
 fn outside_write_denied() {
     if !sandbox_available() {
@@ -395,45 +403,55 @@ fn outside_write_denied() {
     let root = resolved(fixture.path());
     let outside = tempfile::tempdir().expect("unrelated base");
     let outside = resolved(outside.path());
-    let outside_target = outside.join("nickname.enc");
+    // A sibling of `did/` under the same base; the test creates it before it
+    // links so the refusal must come from the profile, not a missing path.
+    let sibling = root.join("sibling");
+    fs::create_dir_all(&sibling).expect("sibling directory under the same base");
     let mut provider = ConfinedProvider::start(&root);
     provider.init(&root);
-    provider.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
 
-    // Point the granted nickname file at an unrelated directory. The profile
-    // resolves the link, so the write target stays outside the grant.
+    // The profile resolves each link, so the write target stays outside the
+    // grant. Only the second target separates a grant on `did/` from one on
+    // its parent.
     let granted = root.join("did").join("nickname.enc");
-    fs::remove_file(&granted).expect("granted nickname file");
-    std::os::unix::fs::symlink(&outside_target, &granted).expect("outside symlink");
+    for target in [outside.join("nickname.enc"), sibling.join("nickname.enc")] {
+        let target_dir = target.parent().expect("target directory");
+        provider.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
+        fs::remove_file(&granted).expect("granted nickname file");
+        std::os::unix::fs::symlink(&target, &granted).expect("outside symlink");
 
-    let denied = provider.send(json!({ "op": "set_nickname", "nickname": "Outside" }));
-    assert_eq!(
-        denied["status"], "error",
-        "the outside write must be denied: {denied}"
-    );
-    assert_eq!(denied["code"], "storage_error");
-    assert!(
-        denied["message"]
-            .as_str()
-            .expect("denial must state a reason")
-            .starts_with("did-provider: failed to save nickname:"),
-        "the refusal must name the failed write: {denied}"
-    );
-    assert!(
-        !outside_target.exists(),
-        "nothing may land outside the storage root"
-    );
-    assert_eq!(
-        fs::read_dir(&outside).expect("outside directory").count(),
-        0,
-        "the outside directory must stay unchanged"
-    );
+        let denied = provider.send(json!({ "op": "set_nickname", "nickname": "Outside" }));
+        assert_eq!(
+            denied["status"], "error",
+            "the outside write must be denied: {denied}"
+        );
+        assert_eq!(denied["code"], "storage_error");
+        assert!(
+            denied["message"]
+                .as_str()
+                .expect("denial must state a reason")
+                .starts_with("did-provider: failed to save nickname:"),
+            "the refusal must name the failed write: {denied}"
+        );
+        assert!(
+            !target.exists(),
+            "nothing may land outside the storage root: {}",
+            target.display()
+        );
+        assert_eq!(
+            fs::read_dir(target_dir).expect("target directory").count(),
+            0,
+            "the target directory must stay unchanged: {}",
+            target_dir.display()
+        );
 
-    // Remove the escape and confirm the provider still serves its root.
-    fs::remove_file(&granted).expect("remove outside symlink");
-    provider.ok(json!({ "op": "set_nickname", "nickname": "Recovered" }));
-    let nickname = provider.ok(json!({ "op": "get_nickname" }));
-    assert_eq!(nickname["nickname"], "Recovered");
+        // Remove the escape and confirm the provider still serves its root.
+        fs::remove_file(&granted).expect("remove outside symlink");
+        provider.ok(json!({ "op": "set_nickname", "nickname": "Recovered" }));
+        let nickname = provider.ok(json!({ "op": "get_nickname" }));
+        assert_eq!(nickname["nickname"], "Recovered");
+    }
+
     provider.ok(json!({ "op": "get_did" }));
     provider.shutdown();
 }
@@ -441,10 +459,10 @@ fn outside_write_denied() {
 /// A read through a symlink that leaves the storage root is denied by the
 /// single shared loader, and the provider reports it and stays in service.
 ///
-/// Falsifier: restore the `if let Ok(Some(nick))` swallow in
-/// `try_load_nickname`; the denied read becomes "no nickname", `Init` returns
-/// ok and this test fails. Replacing `(deny default)` with `(allow default)`
-/// also makes the read succeed and fails this test.
+/// Falsifiers: replace the nickname read error with `.ok().flatten()` in
+/// `try_load_nickname` (DID03); the denied read becomes "no nickname", `Init`
+/// returns ok and this test fails. Replace `(deny default)` with
+/// `(allow default)` (DID04); the read succeeds and this test fails.
 #[test]
 fn outside_read_denied() {
     if !sandbox_available() {
@@ -624,7 +642,8 @@ fn stderr_is_drained_before_wait() {
 
 /// The one profile source denies the network and every default grant.
 ///
-/// Falsifier: remove `(deny network*)` from `confine.sb`; this test fails.
+/// Falsifier: replace `(deny network*)` with `(allow network*)` (DID05); this
+/// test fails on the missing explicit denial and the network grant.
 #[test]
 fn profile_denies_network() {
     let profile = fs::read_to_string(PROFILE_PATH).expect("single profile source");
