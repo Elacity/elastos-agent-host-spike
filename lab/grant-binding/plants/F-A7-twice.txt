@@ -5,7 +5,7 @@ test: ledger::model_settle_twice_is_refused
             None => return Err(SettleRefuse::NotOutstanding),
 --- new
             None => {
-                self.ledger.charged += measured;
+                ledger.charged += measured;
                 return Ok(measured);
             }
 --- end
