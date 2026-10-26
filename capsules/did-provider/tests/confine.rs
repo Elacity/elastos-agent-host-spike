@@ -6,9 +6,10 @@
 //! profile rule is the one thing that must hold. `profile_denies_network`
 //! asserts that rule on every platform.
 //!
-//! On macOS, the host OS `CONFINEMENT.md` declares confined, a missing
-//! `/usr/bin/sandbox-exec` fails the test. On any other OS the tests print why
-//! they did not run and return.
+//! `CONFINEMENT.md` says the confinement tests exercise these profiles on
+//! macOS through `/usr/bin/sandbox-exec`, and a test there that cannot run
+//! because that tool is missing fails the gate. On any other OS the tests
+//! print why they did not run and return.
 
 use serde_json::{json, Value};
 use std::fs;
@@ -19,9 +20,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-/// The host OSes whose "Host-OS status" in `CONFINEMENT.md` declares these
-/// profiles enforced through `/usr/bin/sandbox-exec`, so a confinement test
-/// there must run.
+/// The host OSes where `CONFINEMENT.md` says the confinement tests exercise
+/// these profiles through `/usr/bin/sandbox-exec`, so a test there must run,
+/// not skip.
 const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_did-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
@@ -40,18 +41,18 @@ fn ignored_falsifier_fixture() {
 
 /// Whether a sandbox test runs on this host.
 ///
-/// A present `sandbox_exec` runs the test on any OS. A missing one is a skip
-/// only on an OS whose profiles `CONFINEMENT.md` does not declare enforced; on
-/// a declared OS it is an error, because a skip there would pass a profile
-/// that was never exercised (P11).
+/// A present `sandbox_exec` runs the test on any OS. A missing one is an error
+/// on an OS where `CONFINEMENT.md` says the confinement tests exercise these
+/// profiles, because a test there must run, not skip, and a skip would pass a
+/// profile that was never exercised (P11). On any other OS it is a skip.
 fn sandbox_gate(os: &str, sandbox_exec: &Path) -> Result<bool, String> {
     if sandbox_exec.is_file() {
         return Ok(true);
     }
     if DECLARED_CONFINED_OS.contains(&os) {
         return Err(format!(
-            "{os} is declared confined in CONFINEMENT.md, so a confinement test on this OS \
-             must run, not skip: {} is absent",
+            "CONFINEMENT.md says the confinement tests exercise these profiles on {os}, \
+             so a test there must run, not skip: {} is absent",
             sandbox_exec.display()
         ));
     }
