@@ -1,0 +1,46 @@
+{
+  "id": "selftest-strace",
+  "started": true,
+  "init": 13135,
+  "open_pts_or_enforce": [
+    "13130 openat(AT_FDCWD, \"/tmp/fcl-enf-13130-1793058223483881178/probe\", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 3",
+    "13133 openat(AT_FDCWD, \"/dev/pts/10\", O_RDONLY|O_CLOEXEC|O_PATH) = 6",
+    "13137 openat(AT_FDCWD, \"/tmp/fcl-enf-13130-1793058223483881178/probe\", O_WRONLY|O_CLOEXEC) = -1 EACCES (Permission denied)",
+    "13137 openat(AT_FDCWD, \"/dev/pts/10\", O_RDONLY|O_NOCTTY|O_CLOEXEC <unfinished ...>",
+    "13130 openat(AT_FDCWD, \"/tmp/fcl-enf-13130-1793058223483881178\", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3"
+  ],
+  "truncate": [
+    "13137 truncate(\"/tmp/fcl-enf-13130-1793058223483881178/probe\", 0) = -1 EACCES (Permission denied)"
+  ],
+  "ioctl": [
+    "13137 ioctl(3, TIOCGWINSZ, 0x7ffcc855ba60) = -1 EACCES (Permission denied)"
+  ],
+  "execveat": [
+    "13137 execveat(3, \"\", NULL, NULL, AT_EMPTY_PATH) = -1 EPERM (Operation not permitted)"
+  ],
+  "memfd_create": [
+    "13137 memfd_create(\"e\", MFD_CLOEXEC <unfinished ...>"
+  ],
+  "rename": [
+    "13137 rename(\"/tmp/fcl-r5-strace-6km1gyq4/strace-store/_a/f\", \"/tmp/fcl-r5-strace-6km1gyq4/strace-store/_b/f\" <unfinished ...>"
+  ],
+  "make": [
+    "13137 symlink(\"t\", \"/tmp/fcl-r5-strace-6km1gyq4/strace-store/_sym\") = -1 EACCES (Permission denied)"
+  ],
+  "close_range": [
+    "13133 close_range(3, 4, 0)              = 0",
+    "13133 close_range(6, 6, 0)              = 0",
+    "13133 close_range(9, 10, 0)             = 0",
+    "13133 close_range(12, 4294967295, 0)    = 0"
+  ],
+  "seccomp": [
+    "13133 seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=57, filter=0x5601fca59310}) = 0",
+    "13136 seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=13, filter=0x5601fca59520}) = 0"
+  ],
+  "verdict": "self-test syscalls recorded",
+  "stderr_tail": "",
+  "lines": [
+    "hunter mode=wait pid=2",
+    "started did-provider pid=13135"
+  ]
+}

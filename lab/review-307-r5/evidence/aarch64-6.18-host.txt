@@ -1,0 +1,47 @@
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+mode=full
+host_uname=Linux 6.12.94+ x86_64
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+candidate=/tmp/wt-307-r5/candidate
+head=747cda4f0f2dfb5953baad1c62c44be1a0d84e71
+nonce=594bbbb204e23bbf3333bbc35dde7981
+=== rust target ===
+info: component rust-std for target aarch64-unknown-linux-gnu is up to date
+=== copy crate and allow cross probe build ===
+patched build.rs for cross probe + aarch64 linker
+patched probe/main.rs c_char for aarch64
+=== download Alpine kernel and minirootfs ===
+kernel=/tmp/fcl-r5-aarch64/kernel/boot/vmlinuz-virt
+d1876369b061ef3bc33314f490240efcd32b031393cb34c6f81134fa862fe472  /tmp/fcl-r5-aarch64/kernel/boot/vmlinuz-virt
+=== cross-build fail-closed-linux ===
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/fcl-r5-aarch64/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.33s
+  Executable unittests src/lib.rs (target/aarch64-unknown-linux-gnu/debug/deps/fail_closed_linux-6273f678765b9b71)
+   Compiling fail-closed-linux v0.0.0 (/tmp/fcl-r5-aarch64/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+  Executable tests/simulated.rs (target/aarch64-unknown-linux-gnu/debug/deps/simulated-5579aeb73ecd11b1)
+   Compiling fail-closed-linux v0.0.0 (/tmp/fcl-r5-aarch64/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+  Executable tests/real_kernel.rs (target/aarch64-unknown-linux-gnu/debug/deps/real_kernel-4f4610ee9eaf2a7d)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+/tmp/fcl-r5-aarch64/crate/guest-bins/lib EM_AARCH64=183
+/tmp/fcl-r5-aarch64/crate/guest-bins/simulated EM_AARCH64=183
+/tmp/fcl-r5-aarch64/crate/guest-bins/real_kernel EM_AARCH64=183
+/tmp/fcl-r5-aarch64/crate/guest-bins/fcl-launch EM_AARCH64=183
+=== compile guest helpers ===
+=== assemble initramfs ===
+=== pack initramfs ===
+199223 blocks
+-rw-r--r-- 1 ubuntu ubuntu 32M Oct 26 23:43 /tmp/fcl-r5-aarch64/guest.cpio.gz
+=== boot qemu-system-aarch64 TCG ===
+qemu_exit=1
+=== guest console tail ===
+qemu-system-aarch64: failed to find romfile "efi-virtio.rom"
+guest did not print the required TCG label

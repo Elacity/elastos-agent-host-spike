@@ -120,8 +120,37 @@ new = """    let _ = host;
 """
 if old not in text:
     raise SystemExit("build.rs host!=target skip not found")
-p.write_text(text.replace(old, new, 1))
-print("patched build.rs for cross probe")
+text = text.replace(old, new, 1)
+link = """        .args(["-C", "target-feature=+crt-static"])
+        .args(["--target", target])
+"""
+link_new = """        .args(["-C", "target-feature=+crt-static"])
+        .args(["--target", target])
+        .args(["-C", "linker=aarch64-linux-gnu-gcc"])
+"""
+if link not in text:
+    raise SystemExit("build.rs rustc linker site not found")
+p.write_text(text.replace(link, link_new, 1))
+print("patched build.rs for cross probe + aarch64 linker")
+PY
+# aarch64 c_char is u8. The author's probe uses *const i8, so rustc
+# --target aarch64 fails. Patch the copy only.
+python3 - "$SRC_COPY/probe/main.rs" <<'PY'
+from pathlib import Path
+p = Path(__import__("sys").argv[1])
+text = p.read_text()
+old = """    fn truncate(path: *const i8, length: i64) -> i32;
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
+    fn open(path: *const i8, flags: i32, ...) -> i32;"""
+# keep surrounding decls; only change i8 path pointers
+text2 = text.replace("fn truncate(path: *const i8, length: i64) -> i32;",
+                     "fn truncate(path: *const std::ffi::c_char, length: i64) -> i32;")
+text2 = text2.replace("fn open(path: *const i8, flags: i32, ...) -> i32;",
+                      "fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;")
+if text2 == text:
+    raise SystemExit("probe path pointer types not found")
+p.write_text(text2)
+print("patched probe/main.rs c_char for aarch64")
 PY
 
 echo "=== download Alpine kernel and minirootfs ==="
@@ -330,8 +359,9 @@ qemu-system-aarch64 \
     -kernel "$WORK/kernel/boot/vmlinuz-virt" \
     -initrd "$WORK/guest.cpio.gz" \
     -append "console=ttyAMA0 earlycon=pl011,0x09000000 panic=1 $APPEND_EXTRA" \
+    -L /usr/share/qemu \
     -fsdev local,id=ev,path="$EVIDENCE",security_model=mapped-xattr \
-    -device virtio-9p-pci,fsdev=ev,mount_tag=evidence \
+    -device virtio-9p-device,fsdev=ev,mount_tag=evidence \
     > "$QEMU_LOG" 2>&1
 qemu_rc=$?
 set -e

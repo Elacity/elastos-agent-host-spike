@@ -725,7 +725,7 @@ def hunt_selftest_strace(bins, tmp):
         "-o",
         str(log),
         "-e",
-        "trace=openat,truncate,ioctl,wait4,waitpid,execve,execveat,memfd_create,close_range,seccomp,rename,mknod,mkfifo,symlink",
+        "trace=openat,truncate,ioctl,wait4,waitpid,execve,execveat,memfd_create,close_range,seccomp,rename,mknod,symlink",
         str(LAUNCHER),
         "--provider",
         "did-provider",
