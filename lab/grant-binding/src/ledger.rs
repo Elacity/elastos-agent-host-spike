@@ -76,6 +76,7 @@ pub enum SettleRefuse {
     UnknownOutcome,
     NotOutstanding,
     AboveReservation,
+    ChargeOverflow,
     Binding(Refuse),
 }
 
@@ -86,6 +87,9 @@ impl std::fmt::Display for SettleRefuse {
             SettleRefuse::NotOutstanding => formatter.write_str("reservation is not outstanding"),
             SettleRefuse::AboveReservation => {
                 formatter.write_str("measured figure exceeds the reservation")
+            }
+            SettleRefuse::ChargeOverflow => {
+                formatter.write_str("settled charge does not fit in u64")
             }
             SettleRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
@@ -179,7 +183,11 @@ impl Verifier {
             return Err(SettleRefuse::AboveReservation);
         }
         let charge = measured;
-        ledger.charged += charge;
+        let charged = match ledger.charged.checked_add(charge) {
+            Some(charged) => charged,
+            None => return Err(SettleRefuse::ChargeOverflow),
+        };
+        ledger.charged = charged;
         ledger.held -= stored;
         ledger.open.remove(&reservation.id);
         Ok(charge)
@@ -624,4 +632,44 @@ fn model_settle_above_the_reservation_is_refused() {
     assert_eq!(after_settle.charged, 4);
     assert_eq!(after_settle.held, 0);
     assert!(!after_settle.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_settle_past_the_u64_charge_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(u64::MAX);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    let first = verifier
+        .reserve(&call, &request, u64::MAX - 3)
+        .expect("reserve");
+    assert_eq!(
+        verifier.settle(&call, &request, first, SettleOutcome::Known(u64::MAX - 3)),
+        Ok(u64::MAX - 3)
+    );
+    let after_first = books(&verifier);
+    assert_eq!(after_first.charged, u64::MAX - 3);
+    assert_eq!(after_first.held, 0);
+    let second = verifier.reserve(&call, &request, 10).expect("reserve");
+    let refusal = verifier
+        .settle(&call, &request, second, SettleOutcome::Known(4))
+        .expect_err("past the u64 charge");
+    assert_eq!(refusal, SettleRefuse::ChargeOverflow);
+    assert_eq!(refusal.to_string(), "settled charge does not fit in u64");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 10);
+    assert_eq!(after_refusal.charged, u64::MAX - 3);
+    assert_eq!(after_refusal.open.get(&second.id), Some(&10));
+    assert_eq!(
+        verifier.settle(&call, &request, second, SettleOutcome::Known(3)),
+        Ok(3)
+    );
+    let after_second = books(&verifier);
+    assert_eq!(after_second.charged, u64::MAX);
+    assert_eq!(after_second.held, 0);
+    assert!(!after_second.open.contains_key(&second.id));
 }
