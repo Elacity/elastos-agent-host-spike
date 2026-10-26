@@ -6404,7 +6404,7 @@ fn shared_sbpl_reader_mutation_fails_this_suite() {
     );
     assert!(
         shared_sbpl::profile_holds_scheme_comment(r"#\; x (allow file*)"),
-        "the include! copy must refuse every #\\ character literal"
+        "the shared reader copy must refuse every #\\ character literal"
     );
 }
 
