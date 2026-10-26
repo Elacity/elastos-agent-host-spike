@@ -21,6 +21,11 @@ source, at two different paths, into its own temp OUT_DIR, so a build path the
 artifact embeds shows up as a byte difference. No build output is written under
 lab/redteam/ or any owner tree.
 
+Task 008 places every copy at <prefix>/lab/wasm-capsule and links
+lab/capsule-identity and elastos beside it, so the lane's path dependencies
+resolve. Those two trees are symlinks, not copies. A plant is refused when
+its path resolves outside the wasm-capsule copy.
+
 The lane's guards a-e live in its BACKLOG (and in lab/redteam/README.md once
 task 005 lands it). The ones this probe touches:
 (a) a finding pins the merged commit, the PR and the sha256 of the tested bytes;
@@ -65,10 +70,23 @@ NO_NETWORK = {"CARGO_NET_OFFLINE": "true", "RUSTUP_AUTO_INSTALL": "0"}
 # The build outputs the lane's own .gitignore names: never copied as source.
 BUILD_OUTPUTS = ("target", "capsule.wasm", "receipt.txt")
 
-# Where each copy of the lane sits in its own temp dir. The two paths differ in
-# depth, length and a space, so an absolute build path embedded in the artifact
-# makes the two builds differ (the owner's own falsifier F-WC1 is such a bug).
-COPY_PATHS = ("a/wasm-capsule", "copy b/with a space/wasm-capsule")
+# Where each copy of the lane sits in its own temp dir: <prefix>/lab/wasm-capsule.
+# The prefixes differ in depth, length and a space (`a`, and `copy b/with a
+# space`), so an absolute build path embedded in the artifact makes the two
+# builds differ (the owner's own falsifier F-WC1 is such a bug). build_copy
+# links lab/capsule-identity and elastos beside the copy; it does not copy them.
+COPY_PATHS = (
+    "a/lab/wasm-capsule",
+    "copy b/with a space/lab/wasm-capsule",
+)
+
+# git status --porcelain of these three trees must stay empty: a plant and a
+# real-tree build write only under a temp root.
+REAL_TREES = ("lab/wasm-capsule", "lab/capsule-identity", "elastos")
+
+# Edit.apply refuses a path that resolves outside the wasm-capsule copy.
+# Traversal and a symlink that leaves the copy share this one reason.
+PLANT_ESCAPE = "refused: plant escapes the wasm-capsule copy"
 
 RECEIPT_SCHEMA = "wc-001.receipt/v1"
 RECEIPT_KEYS = (
@@ -152,14 +170,27 @@ class Edit:
     new: str
 
     def apply(self, lane):
-        path = lane / self.file
-        text = path.read_text()
+        """Replace `old` with `new` in one file inside `lane`.
+
+        The file must resolve inside `lane`. `..` and a symlink that leaves
+        the copy both resolve outside it, and both are refused with
+        PLANT_ESCAPE before any read or write.
+        """
+        root = Path(lane).resolve()
+        # One check: the resolved path, after `..` and symlinks, stays inside
+        # the copy. An absolute path replaces `root` on join, so it fails here too.
+        resolved = (root / self.file).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError(f"{PLANT_ESCAPE}: {self.file} resolves outside {root}") from None
+        text = resolved.read_text()
         if text.count(self.old) != 1:
             raise ValueError(
                 f"stale plant: {self.file} holds {text.count(self.old)} copies of "
                 f"{self.old!r}, not exactly one"
             )
-        path.write_text(text.replace(self.old, self.new))
+        resolved.write_text(text.replace(self.old, self.new))
 
 
 @dataclass(frozen=True)
@@ -185,13 +216,29 @@ class BuildFailed(Exception):
     expectedFailure marker on a probe test."""
 
 
-def build_copy(root, copy_path, plant):
-    """Copy the lane source to root/copy_path, plant the edits in that copy, and
-    run the copy's tools/build into root/out."""
-    source = root / copy_path
-    shutil.copytree(LANE_DIR, source, ignore=shutil.ignore_patterns(*BUILD_OUTPUTS))
-    for edit in plant:
-        edit.apply(source)
+def linked_deps(source):
+    """The capsule-identity and elastos paths beside a <prefix>/lab/wasm-capsule copy."""
+    source = Path(source)
+    if source.name != "wasm-capsule" or source.parent.name != "lab":
+        raise ValueError(f"copy path must end in lab/wasm-capsule: {source}")
+    prefix = source.parent.parent
+    return prefix / "lab" / "capsule-identity", prefix / "elastos"
+
+
+def assert_linked_layout(test, source):
+    """The wasm-capsule tree is a real copy; the two path deps are symlinks."""
+    identity, elastos = linked_deps(source)
+    test.assertFalse(source.is_symlink(), f"{source} must be a real copy, not a link")
+    for link, target in (
+        (identity, REPO_ROOT / "lab" / "capsule-identity"),
+        (elastos, REPO_ROOT / "elastos"),
+    ):
+        test.assertTrue(link.is_symlink(), f"{link} must be a symlink, not a copy")
+        test.assertEqual(link.resolve(), target.resolve(), link)
+
+
+def _run_tools_build(root, source):
+    """The one tools/build driver. Output goes to root/out, never the lane tree."""
     out = root / "out"
     argv = [str(source / "tools" / "build"), str(out)]
     command = shlex.join(["env", *(f"{key}={value}" for key, value in NO_NETWORK.items()), *argv])
@@ -210,8 +257,44 @@ def build_copy(root, copy_path, plant):
             f"{command}\ntimed out after {BUILD_TIMEOUT_S} s\n--- stderr ---\n{decoded(error.stderr)}"
         ) from None
     if proc.returncode != 0:
-        raise BuildFailed(f"{command}\nexited {proc.returncode}\n--- stderr ---\n{proc.stderr}")
+        detail = proc.stderr or ""
+        if proc.stdout:
+            detail = f"{detail}\n--- stdout ---\n{proc.stdout}"
+        raise BuildFailed(f"{command}\nexited {proc.returncode}\n--- stderr ---\n{detail}")
     return Build(source, out, command)
+
+
+def build_copy(root, copy_path, plant, *, links=True, copy=True):
+    """Copy the lane to root/copy_path, link its path deps, plant, and build.
+
+    The copy is <root>/<prefix>/lab/wasm-capsule. <prefix> is everything in
+    copy_path before `lab/wasm-capsule` (`a`, or `copy b/with a space`).
+    <root>/<prefix>/lab/capsule-identity and <root>/<prefix>/elastos are
+    symlinks to the repo trees. `links=False` omits both symlinks, so
+    tools/build fails closed. `copy=False` builds the real lane with this
+    same driver and applies no plant.
+    """
+    if not copy:
+        if plant:
+            raise ValueError("plants write only inside a wasm-capsule copy")
+        if not links:
+            raise ValueError("omitting links applies to a copy, not the real lane")
+        return _run_tools_build(root, LANE_DIR)
+
+    relative = Path(copy_path)
+    if relative.is_absolute() or relative.parts[-2:] != ("lab", "wasm-capsule"):
+        raise ValueError(f"copy path must end in lab/wasm-capsule: {copy_path}")
+    source = root / relative
+    shutil.copytree(LANE_DIR, source, ignore=shutil.ignore_patterns(*BUILD_OUTPUTS))
+    if links:
+        identity, elastos = linked_deps(source)
+        identity.symlink_to(
+            (REPO_ROOT / "lab" / "capsule-identity").resolve(), target_is_directory=True
+        )
+        elastos.symlink_to((REPO_ROOT / "elastos").resolve(), target_is_directory=True)
+    for edit in plant:
+        edit.apply(source)
+    return _run_tools_build(root, source)
 
 
 def parse_receipt(text):
@@ -378,6 +461,54 @@ class WasmCapsuleReceiptProbe(unittest.TestCase):
                 f"{evidence(self.builds)}"
             )
 
+    def test_linked_copy_matches_a_build_of_the_real_tree(self):
+        # The linked layout must not change the artifact. One tools/build of the
+        # real lane, into a temp OUT_DIR, matches the first linked copy byte
+        # for byte. A mismatch means the layout changed the capsule.
+        for build in self.builds:
+            assert_linked_layout(self, build.source)
+        lane_root = LANE_DIR.resolve()
+        side_effects = _lane_side_effects()
+        root = Path(tempfile.mkdtemp(prefix="redteam-008-real-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        real = build_copy(root, COPY_PATHS[0], (), copy=False)
+        self.assertEqual(real.source.resolve(), lane_root)
+        try:
+            real.out.resolve().relative_to(lane_root)
+        except ValueError:
+            wrote_into_lane = False
+        else:
+            wrote_into_lane = True
+        self.assertFalse(wrote_into_lane, f"{real.out} is inside {lane_root}")
+        self.assertEqual(_lane_side_effects(), side_effects)
+        self.assertEqual(git("status", "--porcelain", "--", *REAL_TREES), "")
+        first = self.builds[0]
+        a, b = first.wasm.read_bytes(), real.wasm.read_bytes()
+        if a != b:
+            at = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+            self.fail(
+                "the linked copy does not match a build of the real tree "
+                "(the layout changed the artifact)\n"
+                f"  copy {first.wasm}: sha256 {hashlib.sha256(a).hexdigest()}, {len(a)} bytes\n"
+                f"  real {real.wasm}: sha256 {hashlib.sha256(b).hexdigest()}, {len(b)} bytes\n"
+                f"  first difference at byte {at}\n"
+                f"  copy command: {first.command}\n"
+                f"  real command: {real.command}\n"
+                f"probe ran on HEAD {git('rev-parse', 'HEAD')}\n"
+                "local changes under the real trees: "
+                + (git("status", "--porcelain", "--", *REAL_TREES) or "none")
+            )
+
+
+def _lane_side_effects():
+    """Bytes of the lane outputs tools/build would write if OUT_DIR were the lane."""
+    found = {}
+    for name in ("capsule.wasm", "receipt.txt"):
+        path = LANE_DIR / name
+        found[name] = path.read_bytes() if path.is_file() else None
+    found["target"] = (LANE_DIR / "target").exists()
+    return found
+
 
 # Every probe test, and the three whose failure would be a finding.
 PROBE_TESTS = tuple(unittest.TestLoader().getTestCaseNames(WasmCapsuleReceiptProbe))
@@ -503,7 +634,12 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
             cls.skip_reason = None
 
     def setUp(self):
-        if self.skip_reason:
+        # The link falsifier and the plant boundary do not need a finished
+        # wasm artifact. Skipping either one would hide a broken layout.
+        if self.skip_reason and self._testMethodName not in (
+            "test_falsifier_missing_links_is_caught",
+            "test_plant_does_not_write_the_real_trees",
+        ):
             self.skipTest(self.skip_reason)
 
     def assert_caught(self, falsifier):
@@ -586,6 +722,101 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
         self.assertEqual(result.skipped, [], "a missing target must not count as a skip")
         self.assertEqual(len(result.errors), 1, result.errors)
         self.assertIn(str(lane / "tools" / "build"), result.errors[0][1])
+
+    def test_falsifier_missing_links_is_caught(self):
+        # The same build_copy, with the two links omitted. tools/build must
+        # fail, and BuildFailed must name the missing path. A skip, a pass,
+        # or an expectedFailure on that build is not a catch.
+        method = getattr(type(self), "test_falsifier_missing_links_is_caught")
+        self.assertFalse(getattr(method, "__unittest_expecting_failure__", False))
+        root = Path(tempfile.mkdtemp(prefix="redteam-008-nolink-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        source = root / COPY_PATHS[0]
+        identity, elastos = linked_deps(source)
+        missing = identity / "Cargo.toml"
+        try:
+            build_copy(root, COPY_PATHS[0], (), links=False)
+        except BuildFailed as error:
+            message = str(error)
+        else:
+            self.fail("tools/build passed without the path links; the falsifier was not caught")
+        self.assertTrue(source.joinpath("tools", "build").is_file(), "the copy must still be laid out")
+        self.assertFalse(identity.exists(), identity)
+        self.assertFalse(elastos.exists(), elastos)
+        self.assertFalse(identity.is_symlink(), identity)
+        self.assertFalse(elastos.is_symlink(), elastos)
+        canonical = identity.parent.resolve() / identity.name / "Cargo.toml"
+        named = [str(missing), str(canonical)]
+        self.assertTrue(
+            any(path in message for path in named),
+            f"BuildFailed must name the missing path ({named}):\n{message}",
+        )
+
+    def test_plant_does_not_write_the_real_trees(self):
+        # An ordinary plant edits a file inside the copy. Traversal and a
+        # symlink that leave the copy are refused, and their sentinel bytes
+        # stay put. The real lane, capsule-identity and elastos stay clean.
+        self.assertEqual(git("status", "--porcelain", "--", *REAL_TREES), "")
+        watched = (
+            LANE_DIR / "tools" / "build",
+            REPO_ROOT / "lab" / "capsule-identity" / "Cargo.toml",
+            REPO_ROOT / "elastos" / "Cargo.toml",
+        )
+        before = {path: path.read_bytes() for path in watched}
+        root = Path(tempfile.mkdtemp(prefix="redteam-008-plant-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        source = root / COPY_PATHS[0]
+        with self.assertRaises(BuildFailed) as caught:
+            build_copy(root, COPY_PATHS[0], BUILD_FAILS)
+        self.assertIn(FORCED_EXIT, str(caught.exception))
+        self.assertIn(FORCED_EXIT, (source / "tools" / "build").read_text())
+        self.assertNotIn(FORCED_EXIT, before[LANE_DIR / "tools" / "build"].decode())
+        assert_linked_layout(self, source)
+        for path, original in before.items():
+            self.assertEqual(path.read_bytes(), original, path)
+
+        self._assert_escape_refused(source, root / "traversal-sentinel.txt", traversal=True)
+        self._assert_escape_refused(source, root / "symlink-sentinel.txt", traversal=False)
+        outside = root / "outside-dir"
+        outside.mkdir()
+        nested = outside / "sentinel.txt"
+        nested.write_bytes(b"disposable-sentinel\n")
+        (source / "out-link").symlink_to(outside)
+        with self.subTest(escape="directory symlink"):
+            self._refuse(source, "out-link/sentinel.txt", nested)
+
+        for path, original in before.items():
+            self.assertEqual(path.read_bytes(), original, path)
+        status = git("status", "--porcelain", "--", *REAL_TREES)
+        self.assertEqual(status, "", status)
+
+    def _assert_escape_refused(self, source, sentinel, *, traversal):
+        sentinel.write_bytes(b"disposable-sentinel\n")
+        if traversal:
+            relative = os.path.relpath(sentinel, source)
+            self.assertIn("..", Path(relative).parts, relative)
+            label = "traversal"
+        else:
+            link = source / "sentinel-link"
+            link.symlink_to(sentinel)
+            relative = "sentinel-link"
+            self.assertTrue(link.is_symlink())
+            label = "symlink"
+        with self.subTest(escape=label):
+            self._refuse(source, relative, sentinel)
+
+    def _refuse(self, lane, relative, sentinel):
+        original = sentinel.read_bytes()
+        message = ""
+        try:
+            Edit(relative, "disposable-sentinel", "CHANGED-SENTINEL").apply(lane)
+        except ValueError as error:
+            message = str(error)
+        self.assertEqual(sentinel.read_bytes(), original, relative)
+        self.assertTrue(
+            message.startswith(PLANT_ESCAPE + ":"),
+            message or f"plant was not refused: {relative}",
+        )
 
 
 if __name__ == "__main__":
