@@ -1,16 +1,18 @@
 # The Linux design for the one file-profile contract
 
-The providers are not confined on Linux today, and nothing in this file is
-current behaviour. It covers the one contract that `did-provider`,
-`wallet-provider` and `model-provider` present: `check_profile_contract`, run
-over `FILE_PROFILES` in `tests/confine.rs`, with `(version 1)` first,
+The lab contract that `did-provider`, `wallet-provider` and `model-provider`
+present is the one file-profile contract: `check_profile_contract`, run over
+`FILE_PROFILES` in `tests/confine.rs`, with `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
-`STORAGE_PARENT` tokens, and the three shared rules verbatim. `confine.sb` stays
-each provider's one oracle. The contract is shared, so its Linux mapping is
-written once here, beside the one contract check (P10). The Linux policy that
-the Runtime would generate from the same approved declared rights must carry
-each oracle rule as this file maps it, and no second profile file exists (P10).
+`STORAGE_PARENT` tokens, and the three shared rules verbatim.
+This contract has no Linux enforcement or tests yet. The providers are not
+confined on Linux today, and nothing in this file is current behaviour.
+`confine.sb` stays each provider's one oracle. The contract is shared, so its
+Linux mapping is written once here, beside the one contract check (P10). The
+Linux policy that the Runtime would generate from the same approved declared
+rights must carry each oracle rule as this file maps it, and no second profile
+file exists (P10).
 
 ## The frame
 
