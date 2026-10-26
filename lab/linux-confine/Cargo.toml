@@ -1,0 +1,8 @@
+[package]
+name = "linux-confine"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Linux enforcement of the provider confinement profiles"
+
+[workspace]

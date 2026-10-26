@@ -1,0 +1,250 @@
+//! Linux enforcement of the three provider confinement profiles.
+//!
+//! The seatbelt files stay the oracle. This crate maps each of them onto one
+//! launch: a user namespace, empty capabilities, a Landlock ruleset, and a
+//! seccomp allow-list. The probe that runs inside that launch is freestanding,
+//! so it does not read a shared library. The shipping provider binaries are
+//! dynamically linked, and these profiles grant no library path, so this lab
+//! does not exec them.
+
+#![forbid(unsafe_code)]
+
+mod policy;
+mod profile;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+pub use policy::deny_network_by_default;
+pub use profile::{allow_rules, parse_profile, Allow, Profile};
+
+pub const NO_LANDLOCK: &str = "linux confinement refused: the kernel has no Landlock";
+pub const NO_SECCOMP: &str = "linux confinement refused: the kernel has no seccomp";
+pub const ABI_STORAGE: &str =
+    "linux confinement refused: the Landlock ABI cannot express the STORAGE_ROOT read and write";
+pub const ABI_IOCTL: &str =
+    "linux confinement refused: the Landlock ABI cannot express device ioctl";
+pub const NO_USERNS: &str = "linux confinement refused: user namespaces are turned off";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Op {
+    pub op: String,
+    pub result: String,
+    pub errno: Option<i32>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enforced {
+    pub abi: i32,
+    pub uid: i32,
+    pub caps: String,
+    pub nnp: i32,
+    pub netns: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub enforced: Enforced,
+    pub ops: Vec<Op>,
+    pub raw: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Launch {
+    pub deny_network: bool,
+    pub storage_root: PathBuf,
+    pub storage: PathBuf,
+    pub storage2: Option<PathBuf>,
+    pub outside: PathBuf,
+    pub parent: PathBuf,
+    pub copy: PathBuf,
+}
+
+pub fn explain_abi(abi: i32) -> Result<String, String> {
+    run(&["--explain-abi".to_string(), abi.to_string()])
+}
+
+pub fn block_landlock() -> Result<String, String> {
+    run(&["--block-landlock".to_string()])
+}
+
+pub fn block_seccomp() -> Result<String, String> {
+    run(&["--block-seccomp".to_string()])
+}
+
+pub fn block_userns(launch: &Launch) -> Result<String, String> {
+    let policy = write_policy(launch)?;
+    run(&["--block-userns".to_string(), policy.display().to_string()])
+}
+
+pub fn launch(launch: &Launch) -> Result<Report, String> {
+    let policy = write_policy(launch)?;
+    let raw = run(&[policy.display().to_string()])?;
+    parse_report(&raw).map_err(|err| format!("{err}\n{raw}"))
+}
+
+fn write_policy(launch: &Launch) -> Result<PathBuf, String> {
+    let parent = launch
+        .storage_root
+        .parent()
+        .ok_or("the storage root has no parent")?;
+    let path = parent.join("launch.policy");
+    let storage2 = launch
+        .storage2
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let body = format!(
+        "deny_network={}\nhelper={}\nstorage_root={}\nstorage={}\nstorage2={}\noutside={}\nparent={}\ncopy={}\n",
+        if launch.deny_network { "1" } else { "0" },
+        env_bin("LC_PROBE"),
+        launch.storage_root.display(),
+        launch.storage.display(),
+        storage2,
+        launch.outside.display(),
+        launch.parent.display(),
+        launch.copy.display(),
+    );
+    fs::write(&path, body).map_err(|err| format!("cannot write policy: {err}"))?;
+    Ok(path)
+}
+
+fn env_bin(key: &str) -> &'static str {
+    match key {
+        "LC_PROBE" => env!("LC_PROBE"),
+        "LC_SETUP" => env!("LC_SETUP"),
+        _ => "",
+    }
+}
+
+fn run(args: &[String]) -> Result<String, String> {
+    let output = Command::new(env!("LC_SETUP"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|err| format!("cannot start the confinement launcher: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let mut detail = stdout.trim().to_string();
+        if !stderr.trim().is_empty() {
+            if !detail.is_empty() {
+                detail.push('\n');
+            }
+            detail.push_str(stderr.trim());
+        }
+        if detail.is_empty() {
+            detail = format!("the launcher exited {:?}", output.status);
+        }
+        return Err(detail);
+    }
+    if stdout.trim().is_empty() {
+        return Err(format!("the launcher wrote nothing\n{stderr}"));
+    }
+    Ok(stdout)
+}
+
+pub fn parse_report(raw: &str) -> Result<Report, String> {
+    let mut enforced = None;
+    let mut ops = Vec::new();
+    for line in raw.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("enforced ") {
+            enforced = Some(parse_enforced(rest)?);
+        } else if line.starts_with("op=") {
+            ops.push(parse_op(line)?);
+        } else {
+            return Err(format!("unexpected launcher line: {line}"));
+        }
+    }
+    let enforced = enforced.ok_or("the launcher did not report enforcement")?;
+    Ok(Report {
+        enforced,
+        ops,
+        raw: raw.to_string(),
+    })
+}
+
+fn parse_enforced(rest: &str) -> Result<Enforced, String> {
+    let mut abi = None;
+    let mut uid = None;
+    let mut caps = None;
+    let mut nnp = None;
+    let mut netns = None;
+    for field in rest.split_whitespace() {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or_else(|| format!("bad enforcement field: {field}"))?;
+        match key {
+            "abi" => abi = Some(parse_i32(value)?),
+            "uid" => uid = Some(parse_i32(value)?),
+            "caps" => caps = Some(value.to_string()),
+            "nnp" => nnp = Some(parse_i32(value)?),
+            "netns" => netns = Some(value.to_string()),
+            _ => return Err(format!("unknown enforcement field: {key}")),
+        }
+    }
+    Ok(Enforced {
+        abi: abi.ok_or("enforcement omitted abi")?,
+        uid: uid.ok_or("enforcement omitted uid")?,
+        caps: caps.ok_or("enforcement omitted caps")?.to_string(),
+        nnp: nnp.ok_or("enforcement omitted nnp")?,
+        netns: netns.ok_or("enforcement omitted netns")?.to_string(),
+    })
+}
+
+fn parse_op(line: &str) -> Result<Op, String> {
+    let rest = line
+        .strip_prefix("op=")
+        .ok_or_else(|| format!("bad op line: {line}"))?;
+    let (op, rest) = rest
+        .split_once(" result=")
+        .ok_or_else(|| format!("op line has no result: {line}"))?;
+    let (result, errno, reason) = if let Some((result, rest)) = rest.split_once(" errno=") {
+        let (errno, reason) = rest
+            .split_once(" reason=")
+            .ok_or_else(|| format!("op line has no reason: {line}"))?;
+        (result, Some(parse_i32(errno)?), reason)
+    } else {
+        let (result, reason) = rest
+            .split_once(" reason=")
+            .ok_or_else(|| format!("op line has no reason: {line}"))?;
+        (result, None, reason)
+    };
+    if reason.is_empty() {
+        return Err(format!("op line has an empty reason: {line}"));
+    }
+    Ok(Op {
+        op: op.to_string(),
+        result: result.to_string(),
+        errno,
+        reason: reason.to_string(),
+    })
+}
+
+fn parse_i32(text: &str) -> Result<i32, String> {
+    text.parse::<i32>()
+        .map_err(|_| format!("not an integer: {text}"))
+}
+
+pub fn op<'a>(report: &'a Report, name: &str) -> Result<&'a Op, String> {
+    report
+        .ops
+        .iter()
+        .find(|op| op.op == name)
+        .ok_or_else(|| format!("missing {name}\n{}", report.raw))
+}
+
+/// The profile's declared allows, read from a file the macOS lane already
+/// wrote. This crate does not modify that file.
+pub fn read_profile(path: &Path) -> Result<Profile, String> {
+    let text =
+        fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    parse_profile(&text)
+}

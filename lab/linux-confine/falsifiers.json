@@ -1,0 +1,9 @@
+{
+  "id": "F-LC-SOCKET",
+  "file": "lab/linux-confine/src/policy.rs",
+  "old": "pub const DENY_SOCKET: bool = true;",
+  "new": "pub const DENY_SOCKET: bool = false;",
+  "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+  "caught": "socket denial did not hold",
+  "runner": "python3 lab/linux-confine/falsify.py"
+}
