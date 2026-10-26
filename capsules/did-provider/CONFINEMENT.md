@@ -73,6 +73,10 @@ host OS where a test proves its profile, so no status document records
 `did-provider` or `wallet-provider` as confined on Linux until that test
 exists (P10, P11). The status change lands when the Runtime side does.
 
+The Linux design for the same one contract is
+`../wallet-provider/CONFINEMENT-LINUX.md`: it is a design whose Linux tests do
+not exist yet, and it claims no current behaviour.
+
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the
@@ -191,6 +195,12 @@ The one runner applies and restores each registered falsifier with
 `python3 -I examples/agent-host/falsify.py --from capsules/did-provider/falsifiers.json`
 from the repository root; the list's edit paths are relative to
 `examples/agent-host`, and the sandbox entries need `/usr/bin/sandbox-exec`.
+
+A run of the list is evidence only where the sandbox tests run: on macOS
+without `/usr/bin/sandbox-exec` each sandbox test fails at the gate whatever
+the edit, and the runner runs no unmutated baseline, so a `CAUGHT` there proves
+nothing, while where the sandbox tests skip an entry that names one reads
+`SURVIVED`.
 
 ## Falsifiers
 
