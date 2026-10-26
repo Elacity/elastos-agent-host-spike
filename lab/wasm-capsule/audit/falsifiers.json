@@ -801,6 +801,22 @@
       "tests": [
         "declared_import_passes_and_only_that_one"
       ]
+    },
+    {
+      "id": "F-CWA18a",
+      "title": "Match an interface name that ends with a declared interface",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| name.ends_with(*declared)) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
     }
   ]
 }

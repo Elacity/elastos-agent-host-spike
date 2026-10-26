@@ -4,8 +4,16 @@ use wasmparser::{Parser, Payload, Validator};
 fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
     let refusal =
         audit_component(wasm, declared).expect_err(&format!("{declared:?} must refuse {name}"));
-    assert_eq!(refusal, Refusal::UndeclaredInterface { name: name.into() });
-    assert_eq!(refusal.to_string(), format!("undeclared interface {name}"));
+    assert_eq!(
+        refusal,
+        Refusal::UndeclaredInterface { name: name.into() },
+        "{declared:?}"
+    );
+    assert_eq!(
+        refusal.to_string(),
+        format!("undeclared interface {name}"),
+        "{declared:?}"
+    );
 }
 
 fn component_with_two_import_sections() -> Vec<u8> {
@@ -109,6 +117,7 @@ fn a_different_version_of_a_declared_interface_is_refused() {
         ("elastos:bus/runtime@1.0.0+b1", "elastos:bus/runtime@1.0.0"),
         ("elastos:bus/runtime@1.0.0", "elastos:bus/RUNTIME@1.0.0"),
         ("elastos:bus/RUNTIME@1.0.0", "elastos:bus/runtime@1.0.0"),
+        ("elastos:bus/runtime@1.0.0", "my-elastos:bus/runtime@1.0.0"),
     ] {
         let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
         assert_undeclared(&wasm, &[declared], name);
