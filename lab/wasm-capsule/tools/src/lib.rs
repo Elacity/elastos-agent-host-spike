@@ -16,8 +16,13 @@
 //! signature, through cc-capsule-identity, then the cx-wasm-audit crate's
 //! `audit` of the checked entrypoint module. It is a lab check, never an
 //! admission or launch decision.
+//!
+//! [`run`] is wc-005a's runner: one test-only host engine on a verified
+//! bundle's entrypoint bytes, written from memory into a new private folder,
+//! with no folder, env or network flag.
 
 pub mod bundle;
+pub mod run;
 pub mod verify;
 
 pub use capsule_identity::lab_cid as bundle_identity;
