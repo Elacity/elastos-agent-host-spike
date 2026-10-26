@@ -130,10 +130,10 @@ oracles and supplies contract evidence, not Linux execution evidence.
   `base_path/sibling`, and a sibling service under `ElastOS/SystemServices`.
   The provider answers `storage_error`, answers the next `status`, and can
   reinitialize its allowed root. Each attempted wallet directory stays absent.
-  A fourth case sends `Init` for `<STORAGE_PARENT>/Fresh` with no precreated
-  parent, so the walk reaches the granted parent and the first ungranted step
-  is the `mkdir`; the refusal is the create step itself, the base stays absent
-  and the next `status` answers ok.
+  A fourth case sends `Init` for `<STORAGE_PARENT>/Fresh`, where nothing is
+  precreated at `Fresh` or beneath it, so the walk reaches the granted parent
+  and the first ungranted step is the `mkdir`; the refusal is the create step
+  itself, the base stays absent and the next `status` answers ok.
 - `confined_outside_read_is_denied` plants a complete key in a sibling wallet.
   It adds literal fixture directory reads and file metadata reads to a copy
   of the single profile source. These grants let `Init` reach the key open;
@@ -222,9 +222,10 @@ binding is the only difference between the two runs.
   nothing. The test reads no file.
 - `allow_rule_removal_check_rejects_bad_inputs` checks the one source reader.
   A missing profile, a profile that does not parse, a missing list, a list that
-  is not JSON and a document without a `falsifiers` list each fail with a
-  reason that names that path, and there is no skip path. The fixtures are
-  built in the test and no process starts.
+  is not JSON, a document without a `falsifiers` list, an entry without an `id`
+  and an entry whose `id` is a number each fail with a reason that names that
+  path; an entry refusal also holds the words `string id`. There is no skip
+  path. The fixtures are built in the test and no process starts.
 - `file_profile_contract_rejects_a_profile_without_deny_network` builds a
   minimal profile from the contract's own head forms and shared rules inside
   the test. The check accepts it, then refuses the same profile without
@@ -491,6 +492,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append `(allow file-write* (subpath (param "STORAGE_PARENT")))` (WP65):
   `confined_outside_write_is_denied` fails on the new case's absence check
   because the fresh base beneath the parent is created.
+- Drop the string-id refusal from the one list reader (WP66):
+  `allow_rule_removal_check_rejects_bad_inputs` fails because an entry without
+  an id is dropped instead of refused.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

@@ -53,8 +53,11 @@ use std::process::Command;
 /// bypass the missing-heading and duplicate-heading refusals, WP64, which
 /// skips an unreadable `CONFINEMENT.md` instead of refusing it, and task 062's
 /// WP65, which appends a write grant on `STORAGE_PARENT`, so
-/// `confined_outside_write_is_denied` fails on its fresh-base absence check.
-const EXPECTED_FALSIFIERS: usize = 63;
+/// `confined_outside_write_is_denied` fails on its fresh-base absence check,
+/// and task 063's WP66, which restores the silent `filter_map` drop in the one
+/// list reader instead of refusing an entry without a string id, so
+/// `allow_rule_removal_check_rejects_bad_inputs` fails on its missing-id case.
+const EXPECTED_FALSIFIERS: usize = 64;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
