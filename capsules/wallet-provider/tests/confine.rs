@@ -1136,6 +1136,160 @@ fn check_file_profiles(capsules: &Path) -> Result<Vec<&'static str>, String> {
     Ok(checked)
 }
 
+/// The two file profiles whose allow rules the removal check reads. The model
+/// profile is out: its allow-rule removals live in
+/// `capsules/model-provider/confine-falsifiers.json` under that lane's own
+/// bar, so this check keeps one list per bar instead of a second copy (P10).
+const ALLOW_RULE_PROFILES: [&str; 2] = ["did-provider", "wallet-provider"];
+
+/// The real profiles the removal check reads and the parsed entries of their
+/// two lists. The entries are one list because wallet's list records the did
+/// profile's `STORAGE_PARENT` removal (WP11).
+#[derive(Debug)]
+struct AllowRuleSources {
+    profiles: Vec<(&'static str, String)>,
+    entries: Vec<Value>,
+}
+
+/// Reads `capsules/<name>/confine.sb` and `capsules/<name>/falsifiers.json`
+/// for the two profiles of `ALLOW_RULE_PROFILES`.
+///
+/// A missing or unreadable profile, a profile that does not parse, a missing
+/// or unreadable list, a list that is not JSON and a document without a
+/// `falsifiers` list are refusals with distinct reasons that name the path.
+/// There is no skip path.
+fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> {
+    let mut profiles = Vec::new();
+    for name in ALLOW_RULE_PROFILES {
+        let path = capsules.join(name).join("confine.sb");
+        profiles.push((name, read_allow_rule_profile(name, &path)?));
+    }
+    let mut entries = Vec::new();
+    for name in ALLOW_RULE_PROFILES {
+        let path = capsules.join(name).join("falsifiers.json");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                return Err(format!(
+                    "{name} falsifier list {} must be readable: {err}",
+                    path.display()
+                ))
+            }
+        };
+        let doc: Value = match serde_json::from_str(&text) {
+            Ok(doc) => doc,
+            Err(err) => {
+                return Err(format!(
+                    "{name} falsifier list {} must be valid JSON: {err}",
+                    path.display()
+                ))
+            }
+        };
+        let Some(list) = doc.get("falsifiers").and_then(Value::as_array) else {
+            return Err(format!(
+                "{name} falsifier list {} must hold a falsifiers list",
+                path.display()
+            ));
+        };
+        entries.extend(list.iter().cloned());
+    }
+    Ok(AllowRuleSources { profiles, entries })
+}
+
+/// Reads one profile for the removal check and proves that `profile_forms`
+/// accepts it, or refuses with a reason that names the profile and its path.
+/// There is no skip path.
+fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
+    let profile = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "{name} allow-rule profile {} must be readable: {err}",
+            path.display()
+        )
+    })?;
+    std::panic::catch_unwind(|| profile_forms(&profile))
+        .map_err(|reason| {
+            let detail = reason
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .unwrap_or("the profile does not parse");
+            format!(
+                "{name} allow-rule profile {} must parse: {detail}",
+                path.display()
+            )
+        })
+        .map(|_forms| profile)
+}
+
+/// The top-level allow forms of `profile` that no `entries` item removes.
+///
+/// An entry removes a form only when it expects a catch and one of its edits
+/// names this profile's `confine.sb` by the one runner's path rule, holds the
+/// form in its `old` forms and not in its `new` forms. A form that no entry
+/// removes comes back by name, so a new grant cannot enter a profile silently.
+///
+/// Falsifier: WP45 to WP48 drop each removal condition in turn;
+/// `allow_rule_removal_check_reports_an_unremoved_rule` fails on each.
+fn unremoved_allow_forms(name: &str, profile: &str, entries: &[Value]) -> Vec<String> {
+    let target = normalized_relative_path(&format!("../../capsules/{name}/confine.sb"));
+    profile_forms(profile)
+        .into_iter()
+        .filter(|form| form.starts_with("(allow "))
+        .filter(|form| {
+            !entries
+                .iter()
+                .any(|entry| entry_removes(entry, &target, form))
+        })
+        .collect()
+}
+
+/// Whether one list entry removes `form`. `expect` must be `caught`, because
+/// an entry that expects no catch proves nothing about a form.
+fn entry_removes(entry: &Value, target: &[String], form: &str) -> bool {
+    entry["expect"].as_str() == Some("caught")
+        && entry["edits"]
+            .as_array()
+            .is_some_and(|edits| edits.iter().any(|edit| edit_removes(edit, target, form)))
+}
+
+/// Whether one edit removes `form`: its file must name the profile by the
+/// runner's path rule, its `old` forms must include the form and its `new`
+/// forms must not.
+fn edit_removes(edit: &Value, target: &[String], form: &str) -> bool {
+    let Some(file) = edit["file"].as_str() else {
+        return false;
+    };
+    if normalized_relative_path(file).as_slice() != target {
+        return false;
+    }
+    let old = edit["old"].as_str().unwrap_or_default();
+    let new = edit["new"].as_str().unwrap_or_default();
+    profile_forms(old).iter().any(|candidate| candidate == form)
+        && !profile_forms(new).iter().any(|candidate| candidate == form)
+}
+
+/// Resolves a relative path the way the one runner does, from
+/// `examples/agent-host`: empty and `.` segments are dropped, and a `..`
+/// segment removes the segment before it. An edit names a profile only when
+/// the two normalized paths match, so a repository-relative path and the other
+/// provider's profile do not count.
+fn normalized_relative_path(path: &str) -> Vec<String> {
+    let mut segments: Vec<String> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if segments.last().is_some_and(|last| last != "..") {
+                    segments.pop();
+                } else {
+                    segments.push("..".to_string());
+                }
+            }
+            other => segments.push(other.to_string()),
+        }
+    }
+    segments
+}
+
 /// A minimal profile built from the contract's own pieces: the head forms and
 /// the shared rules. It copies no provider's profile.
 fn contract_fixture_profile(deny_network: bool) -> String {
@@ -1187,6 +1341,237 @@ fn both_file_profiles_bind_one_storage_parameter_contract() {
     assert!(
         checked.starts_with(&FILE_PROFILES),
         "the required file profiles must be checked first: {checked:?}"
+    );
+}
+
+/// Every top-level allow rule of the did and wallet profiles has a registered
+/// removal falsifier in one of their two lists.
+///
+/// The check reads `capsules/did-provider/confine.sb`,
+/// `capsules/wallet-provider/confine.sb` and those two providers'
+/// `falsifiers.json`. A form that no entry removes fails the test with its
+/// profile name and asks for a registered removal falsifier or deletion. An
+/// unreadable or unparsable source fails with its path; there is no skip path.
+/// The model profile is not read, because
+/// `capsules/model-provider/confine-falsifiers.json` holds its own bar. The
+/// test reads files and starts no process, so it runs on every platform.
+///
+/// Falsifier: WP44 appends `(allow file-read* (literal "/etc"))` to the did
+/// profile; this test fails on that form. WP49 to WP52 make each source
+/// refusal a skip, so `allow_rule_removal_check_rejects_bad_inputs` fails.
+#[test]
+fn every_did_and_wallet_allow_rule_has_a_registered_removal() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let sources = read_allow_rule_sources(capsules).unwrap_or_else(|err| panic!("{err}"));
+    for (name, profile) in &sources.profiles {
+        let unremoved = unremoved_allow_forms(name, profile, &sources.entries);
+        assert!(
+            unremoved.is_empty(),
+            "{name}: every top-level allow rule must get a registered removal \
+             falsifier or be deleted; no entry removes: {unremoved:?}"
+        );
+    }
+}
+
+/// The removal check reports an allow form that no entry removes, and only a
+/// complete removal counts.
+///
+/// A fixture profile of `(version 1)`, `(deny default)`, `(allow sysctl-read)`
+/// and `(allow process-exec)` with one entry that removes the sysctl rule
+/// returns exactly `(allow process-exec)`. An entry whose `new` still holds the
+/// form, whose `expect` is not `caught`, whose edit names the other provider's
+/// `confine.sb`, or whose `old` does not hold the form removes nothing. One
+/// entry for each form leaves nothing. The fixtures are built in the test; no
+/// file is read and no process starts.
+///
+/// Falsifier: WP45 drops the `expect` condition, WP46 the profile-path
+/// condition, WP47 the `old` condition and WP48 the `new` condition; this test
+/// fails on each because the bypassing entry then counts as a removal.
+#[test]
+fn allow_rule_removal_check_reports_an_unremoved_rule() {
+    let profile = "(version 1)\n(deny default)\n(allow sysctl-read)\n(allow process-exec)\n";
+    let removes_sysctl = json!({
+        "id": "F01",
+        "expect": "caught",
+        "edits": [{
+            "file": "../../capsules/did-provider/confine.sb",
+            "old": "(allow sysctl-read)",
+            "new": ";; Removed: sysctl-read grant.",
+        }],
+        "tests": ["every_did_and_wallet_allow_rule_has_a_registered_removal"],
+    });
+    assert_eq!(
+        unremoved_allow_forms(
+            "did-provider",
+            profile,
+            std::slice::from_ref(&removes_sysctl)
+        ),
+        vec!["(allow process-exec)"],
+        "the one entry removes only the sysctl rule"
+    );
+
+    let removes_exec = json!({
+        "id": "F02",
+        "expect": "caught",
+        "edits": [{
+            "file": "../../capsules/did-provider/confine.sb",
+            "old": "(allow process-exec)",
+            "new": ";; Removed: process-exec grant.",
+        }],
+        "tests": ["every_did_and_wallet_allow_rule_has_a_registered_removal"],
+    });
+    assert!(
+        unremoved_allow_forms(
+            "did-provider",
+            profile,
+            &[removes_sysctl.clone(), removes_exec]
+        )
+        .is_empty(),
+        "a complete removal for each rule leaves no form"
+    );
+
+    let bypasses = [
+        (
+            "expect",
+            json!({
+                "id": "F03",
+                "expect": "survives",
+                "edits": [{
+                    "file": "../../capsules/did-provider/confine.sb",
+                    "old": "(allow process-exec)",
+                    "new": ";; Removed: process-exec grant.",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
+        (
+            "profile path",
+            json!({
+                "id": "F04",
+                "expect": "caught",
+                "edits": [{
+                    "file": "../../capsules/wallet-provider/confine.sb",
+                    "old": "(allow process-exec)",
+                    "new": ";; Removed: process-exec grant.",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
+        (
+            "old",
+            json!({
+                "id": "F05",
+                "expect": "caught",
+                "edits": [{
+                    "file": "../../capsules/did-provider/confine.sb",
+                    "old": "(deny default)",
+                    "new": ";; Removed: default denial.",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
+        (
+            "new",
+            json!({
+                "id": "F06",
+                "expect": "caught",
+                "edits": [{
+                    "file": "../../capsules/did-provider/confine.sb",
+                    "old": "(allow process-exec)",
+                    "new": "(allow process-exec)\n(allow sysctl-read)",
+                }],
+                "tests": ["allow_rule_removal_check_reports_an_unremoved_rule"],
+            }),
+        ),
+    ];
+    for (condition, bypass) in bypasses {
+        let entries = [removes_sysctl.clone(), bypass];
+        assert_eq!(
+            unremoved_allow_forms("did-provider", profile, &entries),
+            vec!["(allow process-exec)"],
+            "an entry that bypasses the {condition} condition must not remove the rule"
+        );
+    }
+}
+
+/// The one source reader refuses each bad input with its own path-bearing
+/// reason.
+///
+/// A temporary `capsules/` directory holds one fixture profile and one fixture
+/// list per required provider: the valid pair returns both profiles and the
+/// combined entries. A missing profile, a profile that does not parse, a
+/// missing list, a list that is not JSON and a document without a `falsifiers`
+/// list are each a refusal with a distinct reason that names the offending
+/// path; there is no skip path. The fixtures are built in the test and no
+/// process starts.
+///
+/// Falsifier: WP49 turns the unreadable-profile refusal into a skip, WP53 the
+/// parse refusal, WP50 the unreadable-list one, WP51 the not-JSON one and
+/// WP52 the missing-list one; this test fails on each because the refusal does
+/// not come.
+#[test]
+fn allow_rule_removal_check_rejects_bad_inputs() {
+    let capsules = tempfile::tempdir().expect("temporary capsules directory");
+    let profile = "(version 1)\n(deny default)\n(allow sysctl-read)\n";
+    let list = r#"{"about": "fixture", "falsifiers": []}"#;
+    for name in ALLOW_RULE_PROFILES {
+        write_fixture_profile(capsules.path(), name, profile);
+        fs::write(capsules.path().join(name).join("falsifiers.json"), list)
+            .expect("fixture falsifier list");
+    }
+    let sources = read_allow_rule_sources(capsules.path()).expect("a valid fixture pair must read");
+    assert_eq!(
+        sources.profiles.len(),
+        ALLOW_RULE_PROFILES.len(),
+        "the reader must return both profiles"
+    );
+    assert!(
+        sources.entries.is_empty(),
+        "the fixture lists carry no entries"
+    );
+
+    let did_profile = capsules.path().join("did-provider").join("confine.sb");
+    fs::remove_file(&did_profile).expect("remove the fixture did profile");
+    let refusal =
+        read_allow_rule_sources(capsules.path()).expect_err("a missing profile must be refused");
+    assert!(
+        refusal.contains(&did_profile.display().to_string())
+            && refusal.contains("must be readable"),
+        "the refusal must name the missing profile path: {refusal}"
+    );
+    fs::write(&did_profile, "(deny default").expect("write a malformed fixture profile");
+    let refusal =
+        read_allow_rule_sources(capsules.path()).expect_err("a malformed profile must be refused");
+    assert!(
+        refusal.contains(&did_profile.display().to_string()) && refusal.contains("must parse"),
+        "the refusal must name the malformed profile path: {refusal}"
+    );
+    write_fixture_profile(capsules.path(), "did-provider", profile);
+
+    let did_list = capsules.path().join("did-provider").join("falsifiers.json");
+    fs::remove_file(&did_list).expect("remove the fixture did list");
+    let refusal =
+        read_allow_rule_sources(capsules.path()).expect_err("a missing list must be refused");
+    assert!(
+        refusal.contains(&did_list.display().to_string()) && refusal.contains("must be readable"),
+        "the refusal must name the missing list path: {refusal}"
+    );
+    fs::write(&did_list, "{").expect("write a malformed fixture list");
+    let refusal =
+        read_allow_rule_sources(capsules.path()).expect_err("a malformed list must be refused");
+    assert!(
+        refusal.contains(&did_list.display().to_string()) && refusal.contains("must be valid JSON"),
+        "the refusal must name the malformed list path: {refusal}"
+    );
+    fs::write(&did_list, r#"{"about": "fixture"}"#).expect("write a fixture list without entries");
+    let refusal = read_allow_rule_sources(capsules.path())
+        .expect_err("a list without a falsifiers list must be refused");
+    assert!(
+        refusal.contains(&did_list.display().to_string())
+            && refusal.contains("must hold a falsifiers list"),
+        "the refusal must name the list path: {refusal}"
     );
 }
 
