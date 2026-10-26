@@ -1,5 +1,27 @@
 # A14 installed demo
 
+## What you need, one time
+
+Do this list first. The paste below does not add these tools.
+
+- A Mac with at least 40 GB of free disk space.
+- The Terminal app (in Applications, then Utilities).
+- Apple's command line tools. In Terminal, type `xcode-select --install` and
+  follow the window. If it says they are already installed, that is fine. They
+  include `git`, `python3` and `ssh-keygen`, which signs the receipts.
+- Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
+  Terminal and open it again.
+- The Rust target the demo builds for:
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+- A brand-new clone made by the morning block (`git clone --branch`). Do not
+  run `git checkout` in a tree you already have. A zip from a browser can make
+  macOS refuse to run the built programs. Preflight reports
+  `com.apple.quarantine` and does not strip it.
+
 ## Sash's morning steps
 
 Paste this whole block. It is one script. A failed line stops the rest.
@@ -12,6 +34,8 @@ set -euo pipefail
 
 # 1. Brand-new folder. Refuse if that path already exists. Stop if install.sh is missing.
 branch=cursor/demo-a14-installed-demo-83e1
+# This repository is private. If git asks for a password, Ctrl-C and rerun with:
+#   A14_REMOTE=git@github.com:Elacity/elastos-agent-host-spike.git
 url=${A14_REMOTE:-https://github.com/Elacity/elastos-agent-host-spike.git}
 dest=${A14_CLONE:-"$HOME/a14-run-$(date +%Y%m%d-%H%M%S)"}
 if [ -e "$dest" ]; then
@@ -58,27 +82,6 @@ step passed or was refused, and why. Before it runs anything, it compares every
 installed part with two receipt files: `VERSIONS.json`, which the conformance
 check writes, and `INSTALL.json`, which the install writes. If one part is
 different, the demo stops and runs nothing.
-
-## What you need, one time
-
-- A Mac with at least 40 GB of free disk space.
-- The Terminal app (in Applications, then Utilities).
-- Apple's command line tools. In Terminal, type `xcode-select --install` and
-  follow the window. If it says they are already installed, that is fine. They
-  include `git`, `python3` and `ssh-keygen`, which signs the receipts.
-- Rust. Go to <https://rustup.rs> and run the one command it shows. Then close
-  Terminal and open it again.
-- A brand-new clone made by the morning block (`git clone --branch`). Do not
-  run `git checkout` in a tree you already have. A zip from a browser can make
-  macOS refuse to run the built programs. Preflight reports
-  `com.apple.quarantine` and does not strip it.
-
-The first time only, in the repository folder, add the Rust target the demo
-builds for:
-
-```bash
-rustup target add wasm32-unknown-unknown
-```
 
 ## Lines 1 and 2: the version to test
 
