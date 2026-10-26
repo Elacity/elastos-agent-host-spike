@@ -439,3 +439,24 @@ fn model_child_journal_returns_its_own_handle() {
         .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
         .expect("the parent handle keeps the parent root");
 }
+
+#[test]
+fn model_owned_root_needs_a_resource_segment() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "UsersAI/agent-1", rights())
+        .expect_err("agent principal is not a resource");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("a resource segment still binds");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("grant");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}

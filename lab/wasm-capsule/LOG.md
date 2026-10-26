@@ -816,3 +816,43 @@
   dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/` or pin changed. Retired-label greps from the
   repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
   lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 036 (build cleanup test watches the folder the build really uses; base `aecdfb314`): the probe
+  first, before any edit. With only `rm -rf "$TARGET_DIR"; ` taken out of the armed trap (`tools/build:41`), `cargo
+  test --locked --test reproducible build_script_fails_closed_after_an_unbound_variable` still passed ("test result:
+  ok. 1 passed"), and the build's `mktemp -d` folder stayed, empty, under `/var/folders/.../T/tmp.XXXXXXXXXX`, not
+  in the test's TMPDIR: the gap 035's review found is real. Reverted (`git status --short` empty) and that leaked
+  folder removed. Template probe: `mktemp -d "${TMPDIR:-/tmp}/wc-build.XXXXXX"` with `TMPDIR=<dir>/` made
+  `<dir>//wc-build.1UsW63` and with TMPDIR unset `/tmp/wc-build.KbfXPF`; the double slash does not matter, so no
+  strip. `tools/build` line 39 is now `TARGET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wc-build.XXXXXX")"`, with a comment
+  why (macOS `mktemp -d` alone ignores TMPDIR); nothing else changed but comments. `tests/reproducible.rs`: the
+  status test first calls `require_system_bash_3_2` (`/bin/bash --version` must name ` version 3.2.`, else it
+  fails "this test needs /bin/bash 3.2, where a `set -u` error reaches the EXIT trap with $? 0; found: ...", never a
+  SKIP); its planted copy also prints `wc-probe target dir: $TARGET_DIR` before the unbound expansion, and the test
+  asserts that folder's parent is its TMPDIR before its empty check. Hand check of the version guard (not a
+  `falsifiers.json` entry; `tests/reproducible.rs` is not a recovery target): with ` version 5.3.` in place of `
+  version 3.2.`, the test failed at `tests/reproducible.rs:103:5` with that message ("found: \"GNU bash, version
+  3.2.57(1)-release (arm64-apple-darwin25)\""), restored. New test `finished_build_leaves_its_tmpdir_empty`: one
+  real build of the lane through `run_build_with_env` with `TMPDIR` set to a new empty folder; the build succeeds
+  and the folder is empty. Falsifiers, all three runner-caught: F-WC1-TRAP-CLEANUP (the armed trap drops `rm -rf
+  "$TARGET_DIR"; `), F-WC1-CLEANUP-ON-SUCCESS (the last line becomes `trap ':' EXIT`) and F-WC1-TARGET-OUTSIDE-TMPDIR
+  (the target dir by a bare `mktemp -d` again; not in the task's list, added because the TMPDIR template is a new
+  rule and without it every test stayed green). Each planted by hand and restored: the status test failed at
+  `tests/reproducible.rs:180:5` ("the cleanup trap left [\"wc-build.Utmfkv\"] in the build's TMPDIR"), the new test
+  at `:204:5` ("a finished build left [\"wc-build.GNbiV6\"] in its TMPDIR"), and the status test at `:174:5` (the
+  target dir's parent is not the TMPDIR). Canonical runner, from the repo root, `python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC1-TRAP-CLEANUP F-WC1-CLEANUP-ON-SUCCESS
+  F-WC1-TARGET-OUTSIDE-TMPDIR F-WC1-TRAP-STATUS F-WC-README-COUNT`: "baseline: 3 named tests pass without an edit, 0
+  do not", each CAUGHT, "summary: 5 CAUGHT of 5". Then every `tools/build` anchor, `... F-WC1 F-WC3-COPY-DEPS
+  F-WC3-ARTIFACT-PIN F-WC-README-COUNT` (F-WC1 is a prefix): "baseline: 18 named tests pass without an edit, 0 do
+  not", "summary: 26 CAUGHT, 1 NOT RUN of 27", "not as expected: F-WC1-SPACED-PATH" (the runner's Cargo failure
+  marker, as tasks 032 and 035 recorded; it stays hand-proven), no `*.falsify-original` backup left. So every
+  `tools/build` anchor is still found once, and F-WC1-TRAP-STATUS (its anchor unchanged) is still CAUGHT.
+  F-WC-README-COUNT re-anchored to 165, the same bug as before. README: one Build sentence, the status test's
+  description and the new test, totals 165 (three task 036) and 101 runner-caught (the stray line break before "1),
+  each" is gone), a task 036 section. Consumer check, `cargo test --locked --manifest-path
+  lab/capsule-identity/Cargo.toml`: 123 passed, 0 failed. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `cargo test --locked` (100 passed, 2 ignored, 0 failed; the pinned `capsule.wasm` sha256,
+  every lab CID pin and the reproducibility test hold with no edit), `cargo fmt --check` and `cargo fmt -p
+  wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/` or
+  pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep
+  -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
