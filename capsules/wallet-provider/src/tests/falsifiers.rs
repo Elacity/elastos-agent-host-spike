@@ -115,7 +115,12 @@ use std::process::Command;
 /// justification that names another provider passes, and WP94 drops the
 /// empty-reason refusal, so a bare provider prefix passes;
 /// `declared_rights_trace_refuses_each_bad_input` fails on the matching case.
-const EXPECTED_FALSIFIERS: usize = 92;
+/// Task 076's WP95 drops the role refusal, so a file without the lab role
+/// passes, WP96 drops the provider refusal, so a file that names another
+/// provider passes, and WP97 drops the platform-baseline status refusal, so a
+/// baseline without its status sentence passes;
+/// `declared_rights_trace_refuses_each_bad_input` fails on the matching case.
+const EXPECTED_FALSIFIERS: usize = 95;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
