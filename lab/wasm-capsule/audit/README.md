@@ -244,3 +244,25 @@ byte-identical, checked by SHA-256. The clean format and locked-test checks
 passed all 20 tests offline with `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
 The implementation, API document, audit manifest, workspace manifest and
 workspace lockfile stayed unchanged.
+
+The cwa-012 in-tree run completed task 009's proof: its cwa-008 run left
+F-CWA8a, F-CWA8b and the re-anchored F-CWA4f unrun. Applied alone, F-CWA8a
+built and failed `audit_refusals_follow_the_documented_order` and
+`component_refusals_follow_the_documented_order` at case (d): `audit` returned
+`Err(CodeInCustomSection)` instead of `Err(Malformed)`, and `audit_component`
+returned `Err(CodeInCustomSection)` instead of `Err(NotAComponent)`.
+F-CWA8b built and failed `public_api_is_v1` with the assertion message
+`INTERFACE.md: expected line #[derive(Debug, Clone, PartialEq, Eq)] at offset -1 from pub struct DeclaredImport {`.
+F-CWA4f built and failed the same two refusal-order tests at case (c): `audit`
+returned `Err(CodeInCustomSection)` instead of `Err(Malformed)`, and
+`audit_component` returned `Err(CodeInCustomSection)` instead of
+`Err(NotAComponent)`. All five named tests ran separately with `--exact`.
+Every temporary edit restored byte-identical, checked by SHA-256;
+`audit/Cargo.lock` stayed absent, and the implementation, API document, tests,
+falsifier entries, audit manifest, workspace manifest and workspace lockfile
+stayed unchanged. The final full sweep covered all 39 entries: all 38 `caught`
+entries built and failed all 48 named test runs at assertions, and F-CWA0c
+failed before tests because `--locked` refused the nested workspace's missing
+lockfile. The clean format and locked-test checks passed before the first
+mutation and after the sweep, with all 20 tests passing offline under
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
