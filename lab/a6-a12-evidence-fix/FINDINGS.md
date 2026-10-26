@@ -7,10 +7,12 @@ count below comes from a command run in this session.
 ## Plain status
 
 #343 mints a real Runtime session token and calls real `validate`. A12
-census records the (dev, inode, ctime, full-content hash) set a run
-created, so a rename to `moved-away`, a leftover with no lab marker, a
-same-path delete+recreate that reuses an inode with the same bytes, and
-a 65 KiB in-place rewrite with mtime restored are found. The snapshot is
+census records the (dev, inode, ctime, full-content hash, file handle)
+set a run created, so a rename to `moved-away`, a leftover with no lab
+marker, a same-path delete+recreate that reuses an inode with the same
+bytes, and a 65 KiB in-place rewrite with mtime restored are found. On
+this ext4 host, unlink+recreate can recycle inode+ctime; the file
+handle still moves. The snapshot is
 taken before the Runtime starts; if the Runtime already wrote under the
 watch or under `/tmp/elastos`, that snapshot fails. The run-window watch
 also covers `$TMPDIR`, XDG cache/data/state/runtime dirs, and
@@ -63,8 +65,8 @@ No. Skip neither check.
   (plant M-A6-STUB-OK). This process plus pid 1 is FAIL (plant
   M-A6-LIVE-PIDS). PASS needs a real Runtime host.
 - **A12** roots honour a guarded `ELASTOS_TMP_ROOT` after realpath. Census
-  uses (dev, inode, ctime, full-content hash), not a name prefix, lab
-  marker, birth time, or size+mtime. The snapshot fails if the Runtime
+  uses (dev, inode, ctime, full-content hash, file handle), not a name
+  prefix, lab marker, birth time, or size+mtime. The snapshot fails if the Runtime
   already wrote under the watch or `/tmp/elastos`. The run-window watch
   includes `$TMPDIR`, XDG dirs, and Mac Library dirs. Writes use
   `O_NOFOLLOW` / `openat`. Symlink roots are resolved; a symlink loop is
@@ -140,7 +142,7 @@ M-A6-STUB-OK is CAUGHT.
 | M-A12-SNAP-IGNORE-LIVE | ignore `/tmp/elastos` in the late snapshot | `tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote` |
 | M-A12-NO-ISOLATION | drop the isolation-under check | `tests::a12_outside_isolation_tmp_root_is_refused` |
 | M-A12-INODE-REUSE | identity is only (dev,ino)+path | `tests::a12_inode_reuse_same_path_is_found` |
-| M-A12-NO-CTIME | FileId ctime is always 0 | `tests::a12_same_bytes_inode_reuse_is_found` |
+| M-A12-NO-HANDLE | FileId file handle is empty | `tests::a12_same_bytes_inode_reuse_is_found` |
 | M-A12-HASH-MTIME | large files hash size+mtime | `tests::a12_large_file_inplace_rewrite_mtime_restored_is_found` |
 | M-A12-TOCTOU-FOLLOW | write follows a symlink after the check | `tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside` |
 | M-A12-SIBLING-WATCH | extra watch roots are empty | `tests::a12_run_window_watches_tmpdir_xdg_library` |
@@ -170,7 +172,7 @@ M-A6-STUB-OK is CAUGHT.
 | M-A12-SNAP-IGNORE-LIVE | **CAUGHT** |
 | M-A12-NO-ISOLATION | **CAUGHT** |
 | M-A12-INODE-REUSE | **CAUGHT** |
-| M-A12-NO-CTIME | **CAUGHT** |
+| M-A12-NO-HANDLE | **CAUGHT** |
 | M-A12-HASH-MTIME | **CAUGHT** |
 | M-A12-TOCTOU-FOLLOW | **CAUGHT** |
 | M-A12-SIBLING-WATCH | **CAUGHT** |

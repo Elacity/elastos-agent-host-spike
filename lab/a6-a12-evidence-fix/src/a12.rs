@@ -63,8 +63,10 @@ pub fn live_runtime_tmp_root() -> PathBuf {
 
 /// Identity of one path at one moment.
 ///
-/// Time is inode ctime, not birth time. Large files hash full content,
-/// not size+mtime.
+/// Time is inode ctime (nsec), not birth time. Large files hash full
+/// content, not size+mtime. `file_handle` is the `name_to_handle_at`
+/// cookie (inode generation). On this ext4 host, unlink+recreate can
+/// reuse inode+dev+ctime with the same bytes; the handle still moves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub dev: u64,
@@ -72,6 +74,7 @@ pub struct FileId {
     pub ctime: i64,
     pub size: u64,
     pub content_hash: u64,
+    pub file_handle: Vec<u8>,
 }
 
 /// Paths and file identities present under a watch root at one moment.
@@ -440,6 +443,8 @@ fn inode_ctime(meta: &fs::Metadata) -> i64 {
     #[cfg(unix)]
     {
         meta.ctime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(meta.ctime_nsec())
     }
     #[cfg(not(unix))]
     {
@@ -460,6 +465,56 @@ fn content_hash(path: &Path, meta: &fs::Metadata) -> u64 {
     hasher.finish()
 }
 
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct RawFileHandle {
+    handle_bytes: u32,
+    handle_type: i32,
+    f_handle: [u8; 128],
+}
+
+fn file_handle_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+            return Vec::new();
+        };
+        let mut raw = RawFileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+            f_handle: [0; 128],
+        };
+        let mut mount_id: libc::c_int = 0;
+        let rc = unsafe {
+            libc::name_to_handle_at(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                (&mut raw as *mut RawFileHandle).cast(),
+                &mut mount_id,
+                0,
+            )
+        };
+        if rc != 0 {
+            return Vec::new();
+        }
+        let n = raw.handle_bytes as usize;
+        if n > raw.f_handle.len() {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(8 + n);
+        out.extend_from_slice(&mount_id.to_ne_bytes());
+        out.extend_from_slice(&raw.handle_type.to_ne_bytes());
+        out.extend_from_slice(&raw.f_handle[..n]);
+        out
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Vec::new()
+    }
+}
+
 fn file_id(path: &Path, meta: &fs::Metadata) -> FileId {
     let (dev, ino) = inode_of(meta);
     let size = file_len(meta);
@@ -469,6 +524,7 @@ fn file_id(path: &Path, meta: &fs::Metadata) -> FileId {
         ctime: inode_ctime(meta),
         size,
         content_hash: content_hash(path, meta),
+        file_handle: file_handle_bytes(path),
     }
 }
 
@@ -611,7 +667,7 @@ fn record_tree(
 }
 
 /// True when `path` was created, moved, or recreated after `before`.
-/// Identity is (dev, inode, ctime, size+full-content hash).
+/// Identity is (dev, inode, ctime, size+full-content hash, file handle).
 fn keep_created_path(before: &FsSnapshot, path: &Path, id: &FileId) -> bool {
     match before.ids.get(path) {
         None => true,

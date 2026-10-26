@@ -1,0 +1,8 @@
+id: M-A12-NO-HANDLE
+file: src/a12.rs
+test: tests::a12_same_bytes_inode_reuse_is_found
+--- old
+        file_handle: file_handle_bytes(path),
+--- new
+        file_handle: Vec::new(),
+--- end

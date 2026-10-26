@@ -22,7 +22,7 @@ This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
   independent resident capsule instances inside one Runtime, each
   holding its own grant, sibling refused by the Runtime.
 - **A12:** leftover census records the (dev, inode, ctime, full-content
-  hash) set a run created. A rename to an unrelated name
+  hash, file handle) set a run created. A rename to an unrelated name
   (`moved-away`), a leftover with no lab marker, a same-path
   delete+recreate that reuses an inode with the same bytes, and a
   65 KiB in-place rewrite with mtime restored are found. The snapshot
