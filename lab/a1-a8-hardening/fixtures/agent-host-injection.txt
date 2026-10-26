@@ -1,0 +1,25 @@
+        // a1-a8-hardening: one test-only statement. The agent-host skips its own
+        // guards and asks the Runtime to read a fake host key.
+        let host_key: Result<(), elastos::bus::types::BusError> = (|| {
+            use elastos::bus::{capabilities, providers, types::*};
+            let resource = "@RESOURCE@";
+            let grant = capabilities::request(&CapabilityRequest {
+                resource: resource.into(),
+                actions: vec!["read".into()],
+                reason: "Agent Host task journal".into(),
+            })?;
+            let response = providers::invoke(&InvokeRequest {
+                resource: resource.into(),
+                operation: "read".into(),
+                body: br#"{"encoding":"utf8"}"#.to_vec(),
+                grant: Some(grant.id),
+            })?;
+            if response.status == "ok" {
+                return Err(BusError::Internal("agent-host read the host key".into()));
+            }
+            Err(BusError::Unavailable(
+                String::from_utf8(response.body)
+                    .unwrap_or_else(|_| "host key read returned a non-UTF-8 refusal".into()),
+            ))
+        })();
+        host_key?;
