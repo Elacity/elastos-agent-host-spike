@@ -303,7 +303,7 @@
         }
       ],
       "tests": [
-        "imports_comments_and_half_lifecycles_are_not_resident"
+        "wit::tests::imports_comments_and_half_lifecycles_are_not_resident"
       ]
     },
     {
@@ -319,7 +319,7 @@
         }
       ],
       "tests": [
-        "coordinates_name_only_a_loopback_operator"
+        "http::tests::coordinates_name_only_a_loopback_operator"
       ]
     },
     {
@@ -335,7 +335,7 @@
         }
       ],
       "tests": [
-        "live_grants_need_the_global_scope"
+        "http::tests::live_grants_need_the_global_scope"
       ]
     },
     {
@@ -351,7 +351,7 @@
         }
       ],
       "tests": [
-        "a_settlement_record_is_consistent_about_its_settler"
+        "http::tests::a_settlement_record_is_consistent_about_its_settler"
       ]
     },
     {
@@ -367,7 +367,23 @@
         }
       ],
       "tests": [
-        "the_process_census_walks_only_below_the_runtime"
+        "http::tests::the_process_census_walks_only_below_the_runtime"
+      ]
+    },
+    {
+      "id": "F-RI-seed",
+      "title": "the seed sends its bytes as one string, which the localhost provider refuses",
+      "command": "resident-instances",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/resident-instances/src/http.rs",
+          "old": "    json!({\"path\": resource, \"content\": bytes, \"append\": false})\n",
+          "new": "    json!({\"path\": resource, \"content\": String::from_utf8_lossy(bytes), \"append\": false})\n"
+        }
+      ],
+      "tests": [
+        "http::tests::the_seed_sends_its_bytes_as_a_number_list"
       ]
     },
     {

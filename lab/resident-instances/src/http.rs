@@ -356,6 +356,11 @@ pub fn parse_live_grants(value: &Value) -> Result<Vec<LiveGrant>, String> {
         .collect()
 }
 
+/// The localhost provider takes `content` as a list of byte values.
+pub fn seed_body(resource: &str, bytes: &[u8]) -> Value {
+    json!({"path": resource, "content": bytes, "append": false})
+}
+
 /// Every process below `root` in a `ps -A -o pid=,ppid=` table.
 pub fn descendants(table: &str, root: u32) -> Result<Vec<u32>, String> {
     let mut pairs = Vec::new();
@@ -513,10 +518,16 @@ impl ResidentRuntime for OperatorRuntime {
     }
 
     fn seed(&mut self, resource: &str, bytes: &[u8]) -> Result<(), String> {
-        let content = std::str::from_utf8(bytes).map_err(|_| "seed bytes must be UTF-8")?;
-        let body = json!({"path": resource, "content": content, "append": false});
-        if self.call("POST", "/api/provider/localhost/write", Some(&body))?["status"] != "ok" {
-            return Err("the Runtime did not write the seed".to_owned());
+        let answer = self.call(
+            "POST",
+            "/api/provider/localhost/write",
+            Some(&seed_body(resource, bytes)),
+        )?;
+        if answer["status"] != "ok" {
+            return Err(format!(
+                "the Runtime did not write the seed: {}",
+                answer["code"]
+            ));
         }
         Ok(())
     }
@@ -675,6 +686,13 @@ mod tests {
             {"request_id": "r", "session_id": "s", "resource": "localhost://Public/x", "action": "read", "duration": "session"}
         ]});
         assert_eq!(parse_live_grants(&global).unwrap()[0].session, "s");
+    }
+
+    #[test]
+    fn the_seed_sends_its_bytes_as_a_number_list() {
+        let body = seed_body("localhost://Public/x", b"hi\n");
+        assert_eq!(body["content"], json!([104, 105, 10]));
+        assert_eq!(body["append"], false);
     }
 
     #[test]
