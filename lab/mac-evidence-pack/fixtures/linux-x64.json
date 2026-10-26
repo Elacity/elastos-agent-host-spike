@@ -1,0 +1,18 @@
+{
+  "os_name": "Linux",
+  "machine": "x86_64",
+  "translated": "0",
+  "uid": 1000,
+  "sudo_present": false,
+  "macos_version": "",
+  "home": "/home/sash",
+  "work": "/home/sash/mac-evidence-pack/run",
+  "cargo_home": "/home/sash/.cargo",
+  "rustc_path": "/home/sash/.cargo/bin/rustc",
+  "cargo_path": "/home/sash/.cargo/bin/cargo",
+  "xcode_path": "",
+  "sandbox_exec": false,
+  "free_kib": 41943040,
+  "python3": "/usr/bin/python3",
+  "git": "/usr/bin/git"
+}
