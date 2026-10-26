@@ -40,8 +40,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use test_support::FIXTURE_EVENT_TIMEOUT;
@@ -1028,16 +1028,37 @@ fn model_local_offer_accepted_when_unconfined() {
 /// A stand-in for the Runtime-owned hosted effect socket that an init config
 /// names in `runtime_hosted_socket`. It is bound under `/tmp`: the provider
 /// refuses a socket path of 104 bytes or more, and a path under the fixture's
-/// temporary root comes close to that. It answers every request as the
-/// Runtime refuses one before dispatch, `403` with
-/// `X-Elastos-Hosted-Access: refused`, and records the request line of each
-/// connection it accepts, so an empty record means no connection came.
+/// temporary root comes close to that. It counts each connection when
+/// `accept` returns it, before anything is read from it. Then it serves that
+/// connection on its own thread, so a connection that sends nothing holds up
+/// neither the accept loop nor the final observation: it reads the request to
+/// its end, records its request line, and answers as the Runtime refuses one
+/// before dispatch, `403` with `X-Elastos-Hosted-Access: refused`. `observe`
+/// first takes every connection still queued, so a count of zero means no
+/// connection came.
 struct RuntimeHostedSocket {
     path: PathBuf,
-    requests: Receiver<String>,
+    listener: Arc<UnixListener>,
+    record: Arc<Mutex<Observation>>,
     stop: Arc<AtomicBool>,
     server: Option<JoinHandle<()>>,
 }
+
+/// What the Runtime socket stand-in saw: every connection it accepted,
+/// counted when `accept` returned it, and the request line of each request it
+/// read to its end.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Observation {
+    connections: usize,
+    requests: Vec<String>,
+}
+
+const STAND_IN_RECORD: &str = "the Runtime socket stand-in's record";
+
+/// The stand-in's one answer: the Runtime's refusal before dispatch.
+const HOSTED_EFFECT_REFUSAL: &[u8] =
+    b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
+      Content-Length: 0\r\nConnection: close\r\n\r\n";
 
 impl RuntimeHostedSocket {
     fn bind(label: &str) -> Self {
@@ -1049,46 +1070,89 @@ impl RuntimeHostedSocket {
         listener
             .set_nonblocking(true)
             .expect("a stoppable Runtime socket stand-in");
-        let (request_tx, requests) = mpsc::channel();
+        let listener = Arc::new(listener);
+        let record = Arc::new(Mutex::new(Observation::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
-        let server = thread::spawn(move || {
-            while !stopping.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => refuse_hosted_effect(&stream, &request_tx),
-                    // Nothing to accept yet, or a connection that gave up.
-                    Err(_) => thread::sleep(Duration::from_millis(10)),
+        let server = {
+            let listener = Arc::clone(&listener);
+            let record = Arc::clone(&record);
+            let stopping = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    take_queued(&listener, &record);
+                    thread::sleep(Duration::from_millis(10));
                 }
-            }
-        });
+            })
+        };
         Self {
             path,
-            requests,
+            listener,
+            record,
             stop,
             server: Some(server),
         }
     }
 
-    /// The request line of every connection accepted so far.
-    fn received(&self) -> Vec<String> {
-        self.requests.try_iter().collect()
+    /// Stops the accept loop and waits for it to end. A connection that comes
+    /// later stays queued on the listener until `observe` takes it.
+    fn stop_accepting(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
+    }
+
+    /// The final observation. It stops the accept loop, then accepts every
+    /// connection still queued on the listener and counts each one, and
+    /// returns the connections counted and the request lines read so far. It
+    /// waits for no connection's request.
+    fn observe(mut self) -> Observation {
+        self.stop_accepting();
+        take_queued(&self.listener, &self.record);
+        self.record.lock().expect(STAND_IN_RECORD).clone()
     }
 }
 
 impl Drop for RuntimeHostedSocket {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(server) = self.server.take() {
-            let _ = server.join();
-        }
+        self.stop_accepting();
         let _ = fs::remove_file(&self.path);
     }
 }
 
-/// Reads one request to its end, records its request line, then answers as
-/// the Runtime's refusal before dispatch. The line is recorded before the
-/// answer, so a run that settles on this answer always finds it recorded.
-fn refuse_hosted_effect(mut stream: &UnixStream, requests: &Sender<String>) {
+/// Accepts the connections queued on `listener` one by one, and admits each,
+/// until `accept` returns no connection: none is left, or it failed, as for a
+/// connection that gave up before it was accepted. A failed `accept` counts
+/// nothing.
+fn take_queued(listener: &UnixListener, record: &Arc<Mutex<Observation>>) {
+    while let Ok((stream, _)) = listener.accept() {
+        admit(stream, record);
+    }
+}
+
+/// Counts a connection as soon as `accept` returns it, before anything is
+/// read from it, then serves it on its own thread, so a connection that sends
+/// nothing holds up no other.
+fn admit(stream: UnixStream, record: &Arc<Mutex<Observation>>) {
+    let record = Arc::clone(record);
+    record.lock().expect(STAND_IN_RECORD).connections += 1;
+    let serve = move || {
+        let request_line = read_request(&stream);
+        // The line is recorded before the answer, so a run that settles on
+        // this answer always finds it recorded.
+        record
+            .lock()
+            .expect(STAND_IN_RECORD)
+            .requests
+            .push(request_line);
+        let _ = (&stream).write_all(HOSTED_EFFECT_REFUSAL);
+    };
+    thread::spawn(serve);
+}
+
+/// Reads one request to its end, waiting at most `FIXTURE_EVENT_TIMEOUT` for
+/// each read, and returns its request line.
+fn read_request(stream: &UnixStream) -> String {
     // On macOS an accepted socket keeps the listener's non-blocking mode.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
@@ -1108,11 +1172,7 @@ fn refuse_hosted_effect(mut stream: &UnixStream, requests: &Sender<String>) {
         }
     }
     let _ = reader.read_exact(&mut vec![0; body_bytes]);
-    let _ = requests.send(request_line.trim_end().to_string());
-    let _ = stream.write_all(
-        b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
-          Content-Length: 0\r\nConnection: close\r\n\r\n",
-    );
+    request_line.trim_end().to_string()
 }
 
 /// The hosted transport fixture shared by
@@ -1147,14 +1207,14 @@ impl HostedTransport {
 /// (`backend_client_with_socket` and `effect_request` in `src/adapters.rs`),
 /// and the profile refuses the connect. The run settles within
 /// `FIXTURE_EVENT_TIMEOUT` as `failed`, with `transport_interrupted` and
-/// "model backend transport was interrupted"; the socket receives no
-/// connection; and the provider stays in service.
+/// "model backend transport was interrupted"; the socket stand-in's final
+/// observation counts no connection; and the provider stays in service.
 /// `model_hosted_run_reaches_runtime_socket_when_unconfined` sends the same
 /// fixture and requests without the profile, and the request reaches the
 /// socket.
 ///
 /// The provider logs no adapter fault, so the evidence is the run's terminal
-/// error, the socket's record and the control. F-cc10a (`(allow default)`,
+/// error, the stand-in's count and the control. F-cc10a (`(allow default)`,
 /// with `(deny network*)` removed) and F-cc10b (`(deny network*)` becomes
 /// `(allow network*)`, nothing else changes) each let the request reach the
 /// socket, and this test fails. `(allow default)` alone does not:
@@ -1171,9 +1231,9 @@ fn model_hosted_run_fails_closed_under_profile() {
     provider.ok(&fixture.run.create);
     let settled = fixture.run.settle(&mut provider);
     assert_eq!(
-        fixture.socket.received(),
-        Vec::<String>::new(),
-        "the profile must refuse the connect, so the Runtime socket receives no connection"
+        fixture.socket.observe().connections,
+        0,
+        "the profile must refuse the connect, so no connection reaches the Runtime socket"
     );
     assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
     assert_eq!(
@@ -1191,8 +1251,8 @@ fn model_hosted_run_fails_closed_under_profile() {
 }
 
 /// The control for `model_hosted_run_fails_closed_under_profile`: the same
-/// fixture and requests without the profile. The run's one request reaches
-/// the Runtime socket stand-in with a request line that starts with
+/// fixture and requests without the profile. The Runtime socket stand-in
+/// counts one connection, whose one request line starts with
 /// `POST /v1/hosted-effect `, and the stand-in's refusal settles the run as
 /// `hosted_effect_refused`. The profile is the only difference between the
 /// two runs. Off macOS the provider refuses every hosted run itself, before
@@ -1212,7 +1272,12 @@ fn model_hosted_run_reaches_runtime_socket_when_unconfined() {
 
     provider.ok(&fixture.run.create);
     let settled = fixture.run.settle(&mut provider);
-    let received = fixture.socket.received();
+    let observed = fixture.socket.observe();
+    assert_eq!(
+        observed.connections, 1,
+        "without the profile the run must reach the Runtime socket over one connection"
+    );
+    let received = observed.requests;
     assert!(
         received.len() == 1 && received[0].starts_with("POST /v1/hosted-effect "),
         "without the profile the run's one request must reach the Runtime socket: {received:?}"
@@ -1229,6 +1294,111 @@ fn model_hosted_run_reaches_runtime_socket_when_unconfined() {
     );
 
     provider.shutdown();
+}
+
+/// The Runtime socket stand-in counts a connection when `accept` returns it,
+/// before it reads anything. One client connects, sends nothing and stays
+/// open. The final observation counts that one connection, with no request
+/// line, and it returns in less than half of `FIXTURE_EVENT_TIMEOUT`, the
+/// stand-in's read timeout, so it waits for no request. The test uses no
+/// provider and no sandbox, so it runs on every Unix host.
+///
+/// Falsifier: F-cc15a moves the count back to after the request has been
+/// read. The silent connection is then not counted, or counted only once its
+/// read times out, and this test fails.
+#[test]
+fn runtime_socket_stand_in_counts_a_silent_connection() {
+    let socket = RuntimeHostedSocket::bind("silent-connection");
+    let _silent = UnixStream::connect(&socket.path).expect("a silent client of the stand-in");
+
+    let started = Instant::now();
+    let observed = socket.observe();
+    let took = started.elapsed();
+    assert_eq!(
+        observed,
+        Observation {
+            connections: 1,
+            requests: Vec::new(),
+        },
+        "the stand-in must count the silent connection when it accepts it"
+    );
+    assert!(
+        took < FIXTURE_EVENT_TIMEOUT / 2,
+        "the final observation must not wait for a request, but it took {took:?}"
+    );
+}
+
+/// The final observation first takes every connection still queued on the
+/// listener. The test stops the stand-in's accept loop, then connects two
+/// clients that send nothing. A Unix socket `connect` returns once the
+/// connection is queued, so both are still queued when `observe` starts, and
+/// only its own accepts can count them. The observation counts two
+/// connections and no request line. The test uses no provider and no sandbox.
+///
+/// Falsifier: F-cc15b removes that first step, so the observation counts
+/// neither queued connection, and this test fails.
+#[test]
+fn runtime_socket_stand_in_drains_queued_connections() {
+    let mut socket = RuntimeHostedSocket::bind("queued-connections");
+    socket.stop_accepting();
+    let _queued: Vec<UnixStream> = (0..2)
+        .map(|_| UnixStream::connect(&socket.path).expect("a client queued on the stand-in"))
+        .collect();
+
+    assert_eq!(
+        socket.observe(),
+        Observation {
+            connections: 2,
+            requests: Vec::new(),
+        },
+        "the final observation must take and count every connection still queued"
+    );
+}
+
+/// A connection that sends nothing does not hold up the stand-in's accept
+/// loop. A first client connects and stays silent. A second client then sends
+/// a whole hosted effect request, and it gets the stand-in's whole `403`
+/// answer within half of `FIXTURE_EVENT_TIMEOUT`, the stand-in's read
+/// timeout. The final observation counts both connections and records the
+/// second one's request line. The test uses no provider and no sandbox.
+///
+/// Falsifier: F-cc15c serves each connection on the accept loop itself, as
+/// the stand-in did before it counted at the accept. The second client then
+/// waits behind the silent one's read, and this test fails.
+#[test]
+fn runtime_socket_stand_in_accepts_behind_a_silent_connection() {
+    let socket = RuntimeHostedSocket::bind("behind-silent-connection");
+    let _silent = UnixStream::connect(&socket.path).expect("a silent client of the stand-in");
+    let mut client = UnixStream::connect(&socket.path).expect("a second client of the stand-in");
+    let limit = FIXTURE_EVENT_TIMEOUT / 2;
+    client
+        .set_read_timeout(Some(limit))
+        .expect("a bounded wait for the answer");
+
+    let started = Instant::now();
+    client
+        .write_all(b"POST /v1/hosted-effect HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+        .expect("send the second client's request");
+    let mut answer = Vec::new();
+    // A read that times out leaves the answer short, and the check says so.
+    let _ = client.read_to_end(&mut answer);
+    let took = started.elapsed();
+    assert!(
+        answer == HOSTED_EFFECT_REFUSAL && took < limit,
+        "the stand-in must answer a request behind a silent connection within {limit:?}, \
+         but it sent {} of {} answer bytes in {took:?}",
+        answer.len(),
+        HOSTED_EFFECT_REFUSAL.len()
+    );
+
+    assert_eq!(
+        socket.observe(),
+        Observation {
+            connections: 2,
+            requests: vec!["POST /v1/hosted-effect HTTP/1.1".to_string()],
+        },
+        "the stand-in must count both connections and record the second one's request line"
+    );
 }
 
 /// The stored-copy fixture shared by

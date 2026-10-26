@@ -1,29 +1,36 @@
 # wallet-provider confinement
 
-`confine.sb` is the one source for the wallet-provider sandbox profile (P10).
-The profile starts with `(version 1)` then `(deny default)`. Every operation
+`confine.sb` is the one oracle for the wallet-provider sandbox profile (one
+file, P10): the profile the Runtime generates for this provider must match it.
+The oracle starts with `(version 1)` then `(deny default)`. Every operation
 that no rule grants fails closed with a reason (P11).
 
 ## Profile parameters
 
-The Runtime passes resolved paths with `sandbox-exec -D`:
+The generated profile binds these three parameters, and the tests pass them
+with `sandbox-exec -D`:
 
-- `PROVIDER_EXECUTABLE` is the signed provider binary that the Runtime starts.
+- `PROVIDER_EXECUTABLE` is the provider binary the launch starts.
 - `STORAGE_ROOT` is `base_path/ElastOS/SystemServices/Wallet`.
 - `STORAGE_PARENT` is its parent, `base_path/ElastOS/SystemServices`.
 
-The Runtime creates the shared ancestors before launch, derives both storage
-parameters from the same canonical `Init.base_path`, and passes the original
-base to `Init`. The provider creates the final `Wallet` directory. Seatbelt
-grants recursive state access to that wallet directory alone. Literal read
-access to its existing parent lets the provider inspect and synchronize the
-directory while it creates Wallet. The parent receives no recursive grant.
+`../did-provider/` presents the same contract as this oracle: one profile file,
+the same three parameter tokens, literal startup access, one state subtree
+grant, and a real stdin/stdout process test.
+
+The bridge change creates the shared ancestors before launch, derives both
+storage parameters from the same canonical `Init.base_path`, and passes the
+original base to `Init`; the tests do the same. The provider creates the final
+`Wallet` directory. Seatbelt grants recursive state access to that wallet
+directory alone. Literal read access to its existing parent lets the provider
+inspect and synchronize the directory while it creates Wallet. The parent
+receives no recursive grant.
 
 ## What the profile allows
 
 | Rule | Why the provider needs it |
 | --- | --- |
-| `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the Runtime named. |
+| `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the launch named. |
 | `(allow file-read* (literal "/"))` | The kernel resolves every absolute path through the root directory. |
 | `(allow sysctl-read)` | The loader and the allocator read kernel facts at startup. |
 | `(allow file-read* (literal STORAGE_PARENT))` | Inspect and synchronize the existing parent during wallet directory creation. |
@@ -41,23 +48,30 @@ network allow rule, so a later change cannot add one without a failing test.
 
 ## The Runtime bridge change
 
-The Runtime bridge starts this provider under `/usr/bin/sandbox-exec -f
-confine.sb` and binds the storage root to the `STORAGE_ROOT` parameter and its
-parent to `STORAGE_PARENT`; `PROVIDER_EXECUTABLE` names the binary. The same
-bridge work, parameterized by the profile path and the storage root, starts
-`did-provider`, `wallet-provider` and `model-provider`, so the Runtime has one
-path for starting a provider under its profile (P10). The Runtime loads `confine.sb` only from
-the signed provider bundle, checks its hash, refuses any profile with
-`(allow default)` or a network allow, and fails closed with a reason; the
-provider proposes, the Runtime checks (P4, P11). If the profile cannot be
-applied, because the file is missing, does not parse or names a parameter the
-launch does not bind, `sandbox-exec` exits before the provider starts and gives
-its reason on standard error; the Runtime then refuses the start with that
-reason and never starts the provider another way (P11).
+The Runtime generates the provider's profile from the provider's approved
+declared rights; it does not load a profile that the provider supplies.
+`confine.sb` in this folder is the test oracle: the profile the Runtime
+generates for this provider must match it, with the same three parameters bound
+to the same paths. The test that compares them is the Runtime's half, outside
+this lane. The one contract check, `check_profile_contract`, holds every oracle
+to these terms, and the generated profile meets them too: `(version 1)` first,
+`(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
+no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
+`STORAGE_PARENT` parameter tokens, and the three shared rules verbatim.
+If the profile cannot be applied, because the file is missing, does not parse
+or names a parameter the launch does not bind, `sandbox-exec` exits before the
+provider starts and gives its reason on standard error; the Runtime then
+refuses the start with that reason and never starts the provider another way
+(P11).
 
-`../did-provider/` presents the same contract: one profile file, the same three
-parameter tokens, literal startup access, one state subtree grant, and a real
-stdin/stdout process test.
+One generator covers `did-provider`, `wallet-provider` and `model-provider`,
+parameterized by the provider's approved declared rights and its storage root,
+so the Runtime has one path for a provider's profile (P10). That bridge change
+is not built: the Runtime half that generates and enforces the profile is
+future work in `elastos/`, outside this lane. The tests launch this provider
+under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
+`startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
+refused when the profile cannot be applied.
 
 ## The model provider's inline profile
 
@@ -71,8 +85,8 @@ inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
 The model provider's own file profile, `../model-provider/confine.sb`,
-presents this contract and the shared test requires it; moving the Runtime
-from its inline policy to that file is part of the same bridge change.
+presents this contract as an oracle, and the shared test requires it; the
+generated profile for the model provider must match it too.
 
 ## Host-OS status
 
