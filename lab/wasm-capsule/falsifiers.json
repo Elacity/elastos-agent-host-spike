@@ -1,5 +1,5 @@
 {
-  "about": "wc-001, task 010 and task 009 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py has no \"lab\" command yet (ask R1), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
+  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . The canonical runner falsify.py now has a \"lab\" command, but its recovery targets do not name this lane's current edit files (ask R1, pending), so these are hand-proven, pending R1: proved by the repo's break -> named test fails -> revert method with `cargo test` in the lab workspace until R1 lands.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -636,6 +636,344 @@
       ],
       "tests": [
         "tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid"
+      ]
+    },
+    {
+      "id": "F-WC4a",
+      "title": "the verifier skips verify_checked_signature and trusts the signature's name, so bytes changed after signing pass or reach the audit",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    let _trusted_name = &signature.name;\n"
+        }
+      ],
+      "tests": [
+        "wasm_changed_after_signing_is_refused",
+        "manifest_changed_after_signing_is_refused",
+        "extra_file_after_signing_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC4b",
+      "title": "a bundle with no signature passes: the signature is checked only when there is one",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let signature = signature.ok_or(VerifyRefusal::Unsigned)?;\n    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    if let Some(signature) = signature {\n        verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    }\n"
+        }
+      ],
+      "tests": [
+        "unsigned_bundle_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC4c",
+      "title": "the verifier skips the audit call and returns no imports",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let imports: Vec<DeclaredImport> = {\n        let _ = (module, granted);\n        Vec::new()\n    };\n"
+        }
+      ],
+      "tests": [
+        "bundle_with_undeclared_import_is_refused_even_if_signed"
+      ]
+    },
+    {
+      "id": "F-WC4d",
+      "title": "the path form audits capsule.wasm read again by its path, not the checked bytes",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n    let module = std::fs::read(bundle.join(\"capsule.wasm\")).unwrap_or_default();\n    audit(&module, granted).map_err(VerifyRefusal::Audit)?;\n"
+        }
+      ],
+      "tests": [
+        "verifier_reads_no_bundle_file_by_path"
+      ]
+    },
+    {
+      "id": "F-WC4e",
+      "title": "the verifier passes an empty list to audit instead of the caller's grants",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let imports = audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n"
+        }
+      ],
+      "tests": [
+        "a_grant_reaches_the_audit_unchanged"
+      ]
+    },
+    {
+      "id": "F-WC4f",
+      "title": "*.seed is removed from the lane's .gitignore",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/.gitignore",
+          "old": "\n*.seed\n",
+          "new": "\n"
+        }
+      ],
+      "tests": [
+        "key_and_seed_files_are_ignored_by_git"
+      ]
+    },
+    {
+      "id": "F-WC4g",
+      "title": "a PEM private-key header line is appended to the tracked lane README",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "- F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT \u2014 a second signature check or a\n  second audit call in the tools crate.\n",
+          "new": "- F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT \u2014 a second signature check or a\n  second audit call in the tools crate.\n-----\u0042EGIN PRIVATE KEY-----\n"
+        }
+      ],
+      "tests": [
+        "no_key_material_is_tracked_in_the_lane"
+      ]
+    },
+    {
+      "id": "F-WC4-SCAN-SKIP-MISSING",
+      "title": "the key scan skips a listed file that is gone from the worktree but still in git's index",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tests/verify.rs",
+          "old": "        Err(error) => findings.push(format!(\"{path}: cannot read ({error})\")),\n",
+          "new": "        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}\n        Err(error) => findings.push(format!(\"{path}: cannot read ({error})\")),\n"
+        }
+      ],
+      "tests": [
+        "no_key_material_is_tracked_in_the_lane"
+      ]
+    },
+    {
+      "id": "F-WC4-SCAN-NAME-AFTER-READ",
+      "title": "the key scan checks a listed name only after the file reads",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tests/verify.rs",
+          "old": "    let mut findings = key_name_findings(path);\n    match fs::read(root.join(path)) {\n        Ok(bytes) => findings.extend(key_content_findings(path, &bytes)),\n",
+          "new": "    let mut findings = Vec::new();\n    match fs::read(root.join(path)) {\n        Ok(bytes) => findings.extend(key_material_findings(path, &bytes)),\n"
+        }
+      ],
+      "tests": [
+        "no_key_material_is_tracked_in_the_lane"
+      ]
+    },
+    {
+      "id": "F-WC4-ENTRY-SUBSTITUTE",
+      "title": "a missing entrypoint falls back to another bundled .wasm module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        .find(|entry| entry.path == entrypoint);\n",
+          "new": "        .find(|entry| entry.path == entrypoint)\n        .or_else(|| checked.entries().iter().find(|entry| entry.path.ends_with(\".wasm\")));\n"
+        }
+      ],
+      "tests": [
+        "missing_entrypoint_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC4-ENTRY-HARDCODED",
+      "title": "the verifier audits capsule.wasm, not the manifest's entrypoint",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        .find(|entry| entry.path == entrypoint);\n",
+          "new": "        .find(|entry| entry.path == \"capsule.wasm\");\n"
+        }
+      ],
+      "tests": [
+        "verifier_uses_manifest_entrypoint"
+      ]
+    },
+    {
+      "id": "F-WC4-WALK-REASON",
+      "title": "the walk's refusal is replaced by the unsigned reason",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    let checked = checked_bundle(bundle).map_err(|_| VerifyRefusal::Unsigned)?;\n"
+        }
+      ],
+      "tests": [
+        "verifier_preserves_upstream_refusals"
+      ]
+    },
+    {
+      "id": "F-WC4-SIG-REASON",
+      "title": "every signature-check refusal is replaced by the accepted-list refusal",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    verify_checked_signature(&checked, signature, accepted).map_err(|_| {\n        VerifyRefusal::Identity(IdentityRefusal::SignerNotAccepted {\n            did: signature.signer_did.clone(),\n        })\n    })?;\n"
+        }
+      ],
+      "tests": [
+        "verifier_preserves_upstream_refusals"
+      ]
+    },
+    {
+      "id": "F-WC4-AUDIT-REASON",
+      "title": "every audit refusal is replaced by malformed module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let imports = audit(module, granted).map_err(|_| VerifyRefusal::Audit(AuditRefusal::Malformed))?;\n"
+        }
+      ],
+      "tests": [
+        "verifier_preserves_upstream_refusals"
+      ]
+    },
+    {
+      "id": "F-WC4-ORDER-AUDIT-FIRST",
+      "title": "the audit runs before the signature check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    let module = entrypoint_module(&checked)?;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let module = entrypoint_module(&checked)?;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n"
+        }
+      ],
+      "tests": [
+        "verifier_preserves_check_order"
+      ]
+    },
+    {
+      "id": "F-WC4-ORDER-UNSIGNED-FIRST",
+      "title": "the path form refuses an unsigned bundle before the walk",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    signature.ok_or(VerifyRefusal::Unsigned)?;\n    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n"
+        }
+      ],
+      "tests": [
+        "verifier_preserves_check_order"
+      ]
+    },
+    {
+      "id": "F-WC4-SEALED-FIELD",
+      "title": "the verified value's checked bundle becomes a public field",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    checked: CheckedBundle,\n    imports: Vec<DeclaredImport>,\n",
+          "new": "    pub checked: CheckedBundle,\n    imports: Vec<DeclaredImport>,\n"
+        }
+      ],
+      "tests": [
+        "verified_bundle_is_sealed"
+      ]
+    },
+    {
+      "id": "F-WC4-SEALED-NEW",
+      "title": "the verified value gets a public constructor that checks nothing",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "impl VerifiedBundle {\n",
+          "new": "impl VerifiedBundle {\n    pub fn new(checked: CheckedBundle, imports: Vec<DeclaredImport>) -> Self {\n        VerifiedBundle { checked, imports }\n    }\n\n"
+        }
+      ],
+      "tests": [
+        "verified_bundle_is_sealed"
+      ]
+    },
+    {
+      "id": "F-WC4-SEALED-MUT",
+      "title": "the verified value gives mutable access to its import list",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    pub fn imports(&self) -> &[DeclaredImport] {\n        &self.imports\n    }\n",
+          "new": "    pub fn imports(&self) -> &[DeclaredImport] {\n        &self.imports\n    }\n\n    pub fn imports_mut(&mut self) -> &mut Vec<DeclaredImport> {\n        &mut self.imports\n    }\n"
+        }
+      ],
+      "tests": [
+        "verified_bundle_is_sealed"
+      ]
+    },
+    {
+      "id": "F-WC4-SECOND-SIG",
+      "title": "the path form checks the signature a second time itself",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n",
+          "new": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n    if let Some(signature) = signature {\n        verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    }\n"
+        }
+      ],
+      "tests": [
+        "verifier_has_one_check_path"
+      ]
+    },
+    {
+      "id": "F-WC4-SECOND-AUDIT",
+      "title": "the verifier audits the module a second time",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    Ok(VerifiedBundle { checked, imports })\n",
+          "new": "    audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    Ok(VerifiedBundle { checked, imports })\n"
+        }
+      ],
+      "tests": [
+        "verifier_has_one_check_path"
       ]
     }
   ]
