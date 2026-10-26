@@ -9,8 +9,9 @@ cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
 rustc=rustc 1.91.0 (f8297e351 2025-10-28)
 mode=full
 repo=/workspace
-head=5e0b11ac4a0070d0c7ff4115f3251e1148c89fab
-kernel=/tmp/linux-confine-aarch64/kernel/boot/vmlinuz-virt
+head=0ab7b013fdc4f1d564a8982b4c5b42456f1ca2a0
+nonce=4d90322703ac1e4d605d4e074b67cc73
+kernel=/tmp/linux-confine-aarch64-wt/kernel/boot/vmlinuz-virt
 helper_dir=/workspace/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
--rw-r--r-- 1 ubuntu ubuntu 63M Oct 26 22:32 /tmp/linux-confine-aarch64/guest.cpio.gz
+-rw-r--r-- 1 ubuntu ubuntu 63M Oct 26 23:10 /tmp/linux-confine-aarch64-wt/guest.cpio.gz
 qemu_exit=0

@@ -1,7 +1,7 @@
 
 running 1 test
 test provider_filter_refuses_clone_process ... 
-thread 'provider_filter_refuses_clone_process' (814) panicked at tests/confine.rs:137:9:
+thread 'provider_filter_refuses_clone_process' (874) panicked at tests/confine.rs:137:9:
 assertion `left == right` failed: denied clone must carry exact errno Some(1), not any failure
 enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
 op=in-memory result=ok reason=no file and no socket
@@ -73,5 +73,5 @@ failures:
 failures:
     provider_filter_refuses_clone_process
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.52s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.60s
 

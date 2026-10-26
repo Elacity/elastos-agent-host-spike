@@ -1,0 +1,76 @@
+# Deliberate failing guest test: elf --exact no_such_deliberate_fail
+# Host exit must be non-zero.
+
+# GENERATED from this guest run. Not a hand write-up.
+# nonce=001c326773584ae3af7bbd9b244bef2e
+# source=/workspace/lab/linux-confine/evidence/aarch64-qemu-system-6.18-fail-closed
+# mode=fail-closed
+
+C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+
+Never native aarch64. Never Jetson.
+
+## Standing suites (live rust output)
+
+| suite | status | exit | passed | failed | ignored | expected passed |
+| --- | --- | --- | --- | --- | --- | --- |
+| elf | SHORT | 0 | 0 | 0 | 0 | 6 |
+| aarch64 | MISSING | MISSING | 0 | 0 | 0 | 2 |
+| confine | MISSING | MISSING | 0 | 0 | 0 | 25 |
+| providers | MISSING | MISSING | 0 | 0 | 0 | 4 |
+
+## In-guest plants (live status files)
+
+| id | result |
+| --- | --- |
+
+## Guest markers
+
+nonce=001c326773584ae3af7bbd9b244bef2e
+guest_exit=1
+
+Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
+make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
+socketpair(AF_UNIX) stays the named C9 departure.
+
+This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
+It is not a Jetson and not any other aarch64 board.
+
+## Host check FAILED
+
+- elf: passed 0 < expected 6
+- elf: status=SHORT exit=0
+- aarch64: missing status file
+- aarch64: missing exit file
+- aarch64: passed 0 < expected 2
+- aarch64: ignored 0 < expected 1
+- aarch64: status=MISSING exit=MISSING
+- confine: missing status file
+- confine: missing exit file
+- confine: passed 0 < expected 25
+- confine: status=MISSING exit=MISSING
+- providers: missing status file
+- providers: missing exit file
+- providers: passed 0 < expected 4
+- providers: status=MISSING exit=MISSING
+
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+host_uname=Linux 6.12.94+ x86_64
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+mode=fail-closed
+repo=/workspace
+head=0ab7b013fdc4f1d564a8982b4c5b42456f1ca2a0
+nonce=001c326773584ae3af7bbd9b244bef2e
+kernel=/tmp/linux-confine-aarch64/kernel/boot/vmlinuz-virt
+helper_dir=/workspace/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+-rw-r--r-- 1 ubuntu ubuntu 63M Oct 26 23:06 /tmp/linux-confine-aarch64/guest.cpio.gz
+qemu_exit=0
+fail-closed: host exited non-zero as required (check_rc=1)
+
+FAIL_CLOSED_HOST_EXIT=1

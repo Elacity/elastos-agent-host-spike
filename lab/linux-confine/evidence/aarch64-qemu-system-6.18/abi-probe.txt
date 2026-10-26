@@ -1,6 +1,3 @@
-LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
-native=0
-jetson=0
 mode=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
 native=0
 jetson=0
@@ -17,4 +14,3 @@ ioctl_dev_ready=yes
 landlock_add_rule nr=445 ret=-1 errno=9 (Bad file descriptor)
 landlock_restrict_self nr=446 ret=-1 errno=9 (Bad file descriptor)
 SYS_landlock_create_ruleset=444 SYS_landlock_add_rule=445 SYS_landlock_restrict_self=446
-Linux (none) 6.18.58-0-virt #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15 aarch64 Linux

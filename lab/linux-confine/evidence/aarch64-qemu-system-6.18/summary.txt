@@ -1,6 +1,8 @@
 LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
 native=0
 jetson=0
+nonce=4d90322703ac1e4d605d4e074b67cc73
+repo=/workspace
 uid=1000 gid=1000
 confine_bin=/workspace/lab/linux-confine/guest-bins/confine
 providers_bin=/workspace/lab/linux-confine/guest-bins/providers
@@ -14,13 +16,13 @@ test host_helpers_match_host_elf_machine ... ok
 test matching_object_is_accepted ... ok
 test reads_archive_member_and_refuses_a_mixed_archive ... ok
 test reads_elf64_le_be_and_elf32_le ... ok
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
 elf PASS
 ======== suite aarch64 ========
 test aarch64_qemu_user_host_kernel ... ignored, needs aarch64-linux-gnu-gcc and qemu-aarch64; aarch64 build + qemu-user (host kernel); never native/Jetson
 test parse_errno_line_reads_ret_and_errno ... ok
 test qemu_user_mode_label_is_not_native_or_jetson ... ok
-test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
 aarch64 PASS
 ======== suite confine ========
 test a_low_landlock_abi_refuses_the_start ... ok
@@ -48,14 +50,14 @@ test unknown_allow_is_refused ... ok
 test user_namespace_absence_refuses_the_start ... ok
 test wallet_profile_permits_its_operations_and_refuses_the_rest ... enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
 test withheld_storage_rights_are_landlock_eacces ... NOT PROVEN: unconfined make-char is EPERM (no CAP_MKNOD in the initial user namespace; a user namespace also refuses char/block mknod). No same-test unconfined success on this machine.
-test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.79s
 confine PASS
 ======== suite providers ========
-test confined_process_cap_bnd_is_zero ... /proc/632/status CapBnd:	0000000000000000 comm=did-provider
+test confined_process_cap_bnd_is_zero ... /proc/685/status CapBnd:	0000000000000000 comm=did-provider
 test did_provider_binary_under_its_profile ... library /lib/aarch64-linux-gnu/libgcc_s.so.1 — libgcc_s.so.1: ldd lists this as a library the binary links, and the linker maps it executable
 test model_provider_binary_under_its_profile ... library /lib/aarch64-linux-gnu/libgcc_s.so.1 — libgcc_s.so.1: ldd lists this as a library the binary links, and the linker maps it executable
 test wallet_provider_binary_under_its_profile ... library /lib/aarch64-linux-gnu/libgcc_s.so.1 — libgcc_s.so.1: ldd lists this as a library the binary links, and the linker maps it executable
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.54s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.21s
 providers PASS
 ======== falsify.py-equivalent plants ========
 ----- F-LC-CAPBND -----
@@ -70,6 +72,12 @@ F-LC-PROVIDER-SOCKET CAUGHT
 F-LC-SOCKET CAUGHT
 ----- F-LC-ANY-ERRNO -----
 F-LC-ANY-ERRNO CAUGHT
+----- F-LC-SKIP-NETNS -----
+F-LC-SKIP-NETNS CAUGHT
+----- F-LC-DROP-SECCOMP -----
+F-LC-DROP-SECCOMP CAUGHT
+----- F-LC-WIDE-ROOT -----
+F-LC-WIDE-ROOT CAUGHT
 F-LC-WRONG-ARCH-CC NOT RUN in guest (host cargo check / TARGET_CC=cc)
 F-LC-QEMU-USER-LANDLOCK NOT RUN in guest (qemu-user host-kernel row)
 ======== end aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU) ========

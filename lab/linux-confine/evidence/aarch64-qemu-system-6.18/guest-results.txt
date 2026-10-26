@@ -1,0 +1,17 @@
+nonce=4d90322703ac1e4d605d4e074b67cc73
+suite=elf exit=0 passed=6 failed=0 ignored=0 status=PASS
+suite=aarch64 exit=0 passed=2 failed=0 ignored=1 status=PASS
+suite=confine exit=0 passed=25 failed=0 ignored=0 status=PASS
+suite=providers exit=0 passed=4 failed=0 ignored=0 status=PASS
+plant=F-LC-CAPBND status=CAUGHT
+plant=F-LC-BLOCK status=CAUGHT
+plant=F-LC-STORAGE status=CAUGHT
+plant=F-LC-PROVIDER-SOCKET status=CAUGHT
+plant=F-LC-SOCKET status=CAUGHT
+plant=F-LC-ANY-ERRNO status=CAUGHT
+plant=F-LC-SKIP-NETNS status=CAUGHT
+plant=F-LC-DROP-SECCOMP status=CAUGHT
+plant=F-LC-WIDE-ROOT status=CAUGHT
+plant=F-LC-WRONG-ARCH-CC status=NOT_RUN
+plant=F-LC-QEMU-USER-LANDLOCK status=NOT_RUN
+guest_fail=0

@@ -1,0 +1,69 @@
+
+running 1 test
+test did_profile_permits_its_operations_and_refuses_the_rest ... 
+thread 'did_profile_permits_its_operations_and_refuses_the_rest' (908) panicked at tests/confine.rs:254:5:
+socket denial did not hold: enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
+op=in-memory result=ok reason=no file and no socket
+op=storage-write result=ok reason=wrote under STORAGE_ROOT
+op=storage-read result=ok reason=read under STORAGE_ROOT
+op=storage2-write result=ok reason=wrote under STORAGE_ROOT
+op=storage2-read result=ok reason=read under STORAGE_ROOT
+op=outside-read result=refused errno=13 reason=landlock refused the read outside STORAGE_ROOT
+op=outside-write result=refused errno=13 reason=landlock refused the write outside STORAGE_ROOT
+op=parent-read result=refused errno=13 reason=the Landlock ABI cannot express the STORAGE_PARENT read, so the read is refused
+op=root-read result=refused errno=13 reason=no Landlock rule for the root directory read
+op=kernel-fact result=refused errno=13 reason=landlock refused the read of kernel state
+op=sysctl result=ok reason=read kernel identity
+op=socket result=ok reason=socket succeeded
+op=socket-unix result=ok reason=socket succeeded
+op=socketpair result=ok reason=socketpair succeeded
+op=socketpair-inet result=refused errno=95 reason=seccomp refused socketpair
+op=signal-host result=refused errno=3 reason=the pid namespace has no such host process
+op=make-sym result=refused errno=13 reason=landlock refused MAKE_SYM
+op=make-fifo result=refused errno=13 reason=landlock refused MAKE_FIFO
+op=make-sock result=refused errno=13 reason=landlock refused MAKE_SOCK
+op=make-char result=refused errno=13 reason=landlock refused MAKE_CHAR
+op=make-block result=refused errno=13 reason=landlock refused MAKE_BLOCK
+op=refer-mkdir result=ok reason=mkdir under STORAGE_ROOT
+op=refer result=refused errno=18 reason=landlock refused REFER
+op=ioctl-dev result=refused errno=13 reason=landlock refused IOCTL_DEV
+op=ptrace result=refused errno=1 reason=seccomp refused ptrace
+op=proc-self-mem result=refused errno=13 reason=landlock refused /proc/self/mem
+op=dev-null result=refused errno=13 reason=landlock refused /dev/null
+op=dev-zero result=refused errno=13 reason=landlock refused /dev/zero
+op=io-uring result=refused errno=14 reason=seccomp refused io_uring_setup
+op=bpf result=refused errno=1 reason=seccomp refused bpf
+op=unshare-user result=ok reason=unshare user succeeded
+op=unshare-net result=ok reason=unshare net succeeded
+op=setns result=refused errno=22 reason=seccomp refused setns
+op=keyctl result=refused errno=22 reason=seccomp refused keyctl
+op=mount result=refused errno=14 reason=seccomp refused mount
+op=clone result=ok reason=clone succeeded
+op=exec-unbound result=refused errno=13 reason=landlock refused exec of a file other than PROVIDER_EXECUTABLE
+op=exec-bound result=ok reason=process-exec of PROVIDER_EXECUTABLE
+
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/std/src/panicking.rs:698:5
+   1: core::panicking::panic_fmt
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:75:14
+   2: confine::prove
+             at ./workspace/lab/linux-confine/tests/confine.rs:254:5
+   3: confine::did_profile_permits_its_operations_and_refuses_the_rest
+             at ./workspace/lab/linux-confine/tests/confine.rs:372:5
+   4: confine::did_profile_permits_its_operations_and_refuses_the_rest::{{closure}}
+             at ./workspace/lab/linux-confine/tests/confine.rs:371:61
+   5: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+   6: core::ops::function::FnOnce::call_once
+             at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+
+failures:
+
+failures:
+    did_profile_permits_its_operations_and_refuses_the_rest
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.52s
+

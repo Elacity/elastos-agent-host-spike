@@ -18,17 +18,19 @@ mount -t tmpfs shm /dev/shm 2>/dev/null || true
 
 # Keep baked host worktree paths that live under /tmp. A tmpfs on /tmp
 # would hide CARGO_MANIFEST_DIR / LC_* helpers from a /tmp worktree.
+# Move /tmp aside to a path that does not already exist. `mv /tmp DEST`
+# into an existing directory would nest the tree at DEST/tmp.
 if [ -n "$(ls -A /tmp 2>/dev/null || true)" ]; then
-    mkdir -p /mnt/initramfs-tmp
-    mv /tmp /mnt/initramfs-tmp
+    mkdir -p /mnt
+    mv /tmp /mnt/baked-tmp
     mkdir /tmp
     mount -t tmpfs tmp /tmp
-    for ent in /mnt/initramfs-tmp/* /mnt/initramfs-tmp/.[!.]*; do
+    for ent in /mnt/baked-tmp/* /mnt/baked-tmp/.[!.]*; do
         [ -e "$ent" ] || continue
         base=$(basename "$ent")
         if [ -d "$ent" ]; then
             mkdir -p "/tmp/$base"
-            mount --bind "$ent" "/tmp/$base"
+            mount -o bind "$ent" "/tmp/$base"
         else
             cp -a "$ent" "/tmp/$base"
         fi
@@ -79,8 +81,8 @@ load_ko kernel/drivers/net/dummy.ko
 load_ko kernel/net/dummy.ko
 load_ko kernel/drivers/net/virtio_net.ko
 
-# Extra interface besides lo. dummy0 is enough; virtio-net is a bonus.
-if ip link add dummy0 type dummy; then
+# Extra interface besides lo. Loading dummy.ko often creates dummy0 already.
+if [ -d /sys/class/net/dummy0 ] || ip link add dummy0 type dummy; then
     ip link set dummy0 up || true
     echo "guest_nic=dummy0"
 else
@@ -115,6 +117,16 @@ fi
 chmod -R a+rX /workspace /lib /usr 2>/dev/null || true
 # A /tmp worktree is the baked host path; tester must be able to read it.
 chmod -R a+rX /tmp 2>/dev/null || true
+if [ -f /etc/lc-guest.env ]; then
+    # shellcheck disable=SC1091
+    . /etc/lc-guest.env
+    if [ -n "${LC_GUEST_HELPER_DIR:-}" ] && [ ! -x "$LC_GUEST_HELPER_DIR/lc-setup" ]; then
+        echo "HELPERS HIDDEN after /tmp restore: $LC_GUEST_HELPER_DIR"
+        ls -la "$LC_GUEST_HELPER_DIR" 2>/dev/null || ls -la /tmp /mnt/baked-tmp 2>/dev/null || true
+    else
+        echo "helpers_visible=$LC_GUEST_HELPER_DIR"
+    fi
+fi
 # Test binaries and helpers must be executable.
 find /workspace /tmp /lib -type f \( -name 'lc-*' -o -name 'confine' -o -name 'providers' -o -name 'elf' -o -name 'aarch64' -o -name 'did-provider' -o -name 'wallet-provider' -o -name 'model-provider' -o -name 'guest-landlock-probe' \) -exec chmod a+x {} \; 2>/dev/null || true
 

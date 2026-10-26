@@ -1,81 +1,50 @@
+# GENERATED from this guest run. Not a hand write-up.
+# nonce=4d90322703ac1e4d605d4e074b67cc73
+# source=/workspace/lab/linux-confine/evidence/aarch64-qemu-system-6.18
+# mode=full
+
 C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
 
 Never native aarch64. Never Jetson.
 
-## How this was run
+## Standing suites (live rust output)
 
-  lab/linux-confine/run-aarch64-guest.sh full
+| suite | status | exit | passed | failed | ignored | expected passed |
+| --- | --- | --- | --- | --- | --- | --- |
+| elf | PASS | 0 | 6 | 0 | 0 | 6 |
+| aarch64 | PASS | 0 | 2 | 0 | 1 | 2 |
+| confine | PASS | 0 | 25 | 0 | 0 | 25 |
+| providers | PASS | 0 | 4 | 0 | 0 | 4 |
 
-Host: Linux 6.12.94+ x86_64
-qemu-system-aarch64 8.2.2, -accel tcg, -cpu max, -M virt
-Cross compiler: aarch64-linux-gnu-gcc 13.3.0
-rustc 1.91.0, target aarch64-unknown-linux-gnu
-Guest kernel: Alpine virt 6.18.58-0-virt (linux-virt-6.18.58-r0.apk)
-Guest userspace: Alpine 3.23.5 minirootfs plus the Ubuntu aarch64 glibc loader
-Guest uid: 1000 (tester). Root would have CAP_MKNOD and would change the
-make-char / make-block controls.
+## In-guest plants (live status files)
 
-Landlock ABI inside the guest: 7 (ioctl_dev_ready=yes).
-Syscall numbers come from aarch64 <sys/syscall.h> (landlock_* = 444/445/446).
+| id | result |
+| --- | --- |
+| F-LC-CAPBND | CAUGHT |
+| F-LC-BLOCK | CAUGHT |
+| F-LC-STORAGE | CAUGHT |
+| F-LC-PROVIDER-SOCKET | CAUGHT |
+| F-LC-SOCKET | CAUGHT |
+| F-LC-ANY-ERRNO | CAUGHT |
+| F-LC-SKIP-NETNS | CAUGHT |
+| F-LC-DROP-SECCOMP | CAUGHT |
+| F-LC-WIDE-ROOT | CAUGHT |
+| F-LC-WRONG-ARCH-CC | NOT_RUN |
+| F-LC-QEMU-USER-LANDLOCK | NOT_RUN |
 
-## Standing suites inside the guest
+## Guest markers
 
-| suite      | result | detail                                      |
-| ---------- | ------ | ------------------------------------------- |
-| elf        | PASS   | 6 passed, 0 failed, 0 ignored               |
-| aarch64    | PASS   | 2 passed, 0 failed, 1 ignored (qemu-user)   |
-| confine    | PASS   | 25 passed, 0 failed, 0 ignored              |
-| providers  | PASS   | 4 passed, 0 failed, 0 ignored               |
+nonce=4d90322703ac1e4d605d4e074b67cc73
+guest_exit=0
 
-Ignored on purpose: aarch64_qemu_user_host_kernel. That row is qemu-user on
-the host kernel. It is not this guest.
-
-C9 rows that ran on the real aarch64 kernel:
-
-- user / mount / net / ipc / pid namespaces (netns=lo, uid 0 inside the userns)
-- CapBnd 0000000000000000 on did, wallet and model
-- seccomp allow-list using aarch64 syscall numbers; denied rows are EPERM
-- Landlock FS including IOCTL_DEV (ABI 7 >= 5); ioctl-dev is EACCES
-- exact-errno asserts on every denied row
-- fail-closed refusals: no Landlock, no seccomp, no user ns, ABI 4
-
-make-char and make-block stay NOT PROVEN as positive controls (same as
-x86_64): this uid has no CAP_MKNOD. Confined they are still Landlock EACCES.
-
-## In-guest falsify.py-equivalent plants
-
-| id                     | result    | notes                                      |
-| ---------------------- | --------- | ------------------------------------------ |
-| F-LC-CAPBND            | CAUGHT    | planted lc-setup, CapBnd test failed       |
-| F-LC-BLOCK             | CAUGHT    | planted lc-setup with test hooks           |
-| F-LC-STORAGE           | CAUGHT    | planted IOCTL_DEV on STORAGE_ROOT          |
-| F-LC-PROVIDER-SOCKET   | CAUGHT    | planted provider_deny_socket=0             |
-| F-LC-SOCKET            | CAUGHT    | planted confine binary, DENY_SOCKET=false  |
-| F-LC-ANY-ERRNO         | CAUGHT    | planted expect() + clone ENOSYS            |
-| F-LC-WRONG-ARCH-CC     | NOT RUN   | host cargo check / TARGET_CC=cc            |
-| F-LC-QEMU-USER-LANDLOCK| NOT RUN   | qemu-user host-kernel row                  |
-
-## What differs from the x86_64 host run
-
-The C9 permitted/denied results match. These fields differ, as expected:
-
-1. enforced abi=7 on Linux 6.18.58-0-virt. The x86_64 host (Linux 6.12.94+)
-   reports abi=6. Both are >= 5, so IOCTL_DEV is expressed on both.
-2. Dynamic linker and libraries are aarch64 glibc paths
-   (/lib/ld-linux-aarch64.so.1, /lib/aarch64-linux-gnu/libc.so.6,
-   libgcc_s.so.1, and libm.so.6 on wallet and model). x86_64 uses
-   /lib64/ld-linux-x86-64.so.2 and /lib/x86_64-linux-gnu/*.
-3. Seccomp AUDIT_ARCH_AARCH64 and aarch64 SYS_* numbers. Tests assert errno
-   and reasons, not the numbers.
-4. First guest run lost the model unbound-exec errno=13 line: the launcher
-   prints `enforced` before execve, and TCG scheduled the test to read
-   stderr before the EACCES line. providers.rs now waits up to 5s for
-   errno=13. That is a harness wait, not a weaker filter. Re-run: 4/4.
-
-## What remains for real ARM hardware
+Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
+make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
+socketpair(AF_UNIX) stays the named C9 departure.
 
 This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
-It is not a Jetson and not any other aarch64 board. A production claim
-for ARM still needs the same suites on that board, kernel >= 6.7 so
-Landlock ABI >= 5 can express IOCTL_DEV, with the shipping binaries
-linked the way that board ships them.
+It is not a Jetson and not any other aarch64 board.
+
+## Host check PASSED
+
+Every standing suite matched its expected counts.
+Every official in-guest plant was CAUGHT.
