@@ -1,0 +1,9 @@
+scratch/
+*.component.wasm
+target/
+probe/
+*.rlib
+*.rmeta
+experiments.log
+strace-first.log
+strace-second.log
