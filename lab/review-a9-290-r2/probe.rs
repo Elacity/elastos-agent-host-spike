@@ -2,7 +2,6 @@
 //! Prints `FINDING\tid\tVERDICT\ttitle\tdetail` lines. Writes nothing into #290.
 
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -591,11 +590,11 @@ fn host_same_uid() {
         .host_root(&b)
         .unwrap()
         .join("../../../agent-a/session-a/1/note.txt");
-    let host_read = fs::read(&from_b);
+    let host_read = fs::read(&from_b).ok();
     let host = launch::host_journey();
     finding(
         "host-same-uid",
-        if host_read.as_deref() == Ok(&b"hello-a"[..])
+        if host_read.as_deref() == Some(&b"hello-a"[..])
             && host.state == RowState::NeedsConfinement
         {
             "HOLDS"

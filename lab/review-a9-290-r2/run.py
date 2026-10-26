@@ -191,7 +191,7 @@ def main() -> int:
         if "ignored" in line.lower() and "test" in line.lower()
     ]
     test_names = [
-        line.split(":", 1)[0]
+        line[: -len(": test")]
         for line in listed.stdout.splitlines()
         if line.endswith(": test")
     ]
