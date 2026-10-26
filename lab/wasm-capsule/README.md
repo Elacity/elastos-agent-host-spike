@@ -98,7 +98,11 @@ fresh isolated target dir, and `--remap-path-prefix` for the source tree,
 maximum, 1024 pages ("Module memory maximum discovery (wc-010d0)", "The capsule
 declares its maximum (task 032)"). A failing build exits non-zero even after
 its cleanup trap, also for a `set -u` error on this Mac's `/bin/bash` 3.2.57
-(task 035, `build_script_fails_closed_after_an_unbound_variable`).
+(task 035, `build_script_fails_closed_after_an_unbound_variable`). The fresh
+target dir is made inside `$TMPDIR` (`/tmp` when it is unset) from an explicit
+`mktemp -d` template, since macOS `mktemp -d` alone ignores `TMPDIR`; both the
+failure trap and the trap the last line re-arms remove it (task 036,
+`finished_build_leaves_its_tmpdir_empty`).
 
 ### Receipt
 
@@ -1297,8 +1301,13 @@ hosting cannot be claimed for wasmer.
 - `build_script_fails_closed_after_an_unbound_variable` — task 035: a copy of
   `tools/build` with `: "$WC_UNSET_PROBE"` right after its cleanup trap, run
   with `/bin/bash` 3.2.57 and that variable unset, exits non-zero with bash's
-  `unbound variable` line, writes no capsule or receipt, and leaves its own
-  TMPDIR empty.
+  `unbound variable` line and writes no capsule or receipt. Task 036: it first
+  fails with a clear reason unless `/bin/bash --version` names 3.2 (never a
+  SKIP); the planted copy also prints its target dir, which must be inside the
+  TMPDIR the test gives it, so the check that this TMPDIR is left empty watches
+  the folder the trap deletes.
+- `finished_build_leaves_its_tmpdir_empty` — task 036: one real build with
+  TMPDIR set to a new empty folder succeeds and leaves that folder empty.
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
@@ -1697,23 +1706,22 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 
 ## Falsifiers
 
-`falsifiers.json` holds 162 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 165 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032 and one task 035.
+031, two task 032, one task 035 and three task 036.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 98, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 101, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032 and 035: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2 + 2 +
-1), each
-run by the canonical runner with its summary line quoted.
+029, 031, 032, 035 and 036: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 + 2 +
+2 + 1 + 3), each run by the canonical runner with its summary line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -2223,3 +2231,26 @@ error, the same as at the script's end (LOG.md, task 035, has the probes), so
 it turns 0 into 1 and keeps any other status. The script's last line re-arms
 a plain `rm -rf` trap, so a finished build exits 0. Task 035 also re-anchors
 F-WC-README-COUNT to the new total, the same bug as before.
+
+Task 036's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 036). `tools/build` now makes its target dir inside `$TMPDIR`, so
+each anchor is a `tools/build` line and each named test fails at its
+assertion:
+
+- F-WC1-TRAP-CLEANUP — the armed trap drops `rm -rf "$TARGET_DIR"; ` and
+  keeps its status rule, so a failed build leaves its target dir
+  (`build_script_fails_closed_after_an_unbound_variable`, "the cleanup trap
+  left [...] in the build's TMPDIR").
+- F-WC1-CLEANUP-ON-SUCCESS — the last line re-arms `trap ':' EXIT`, so a
+  finished build leaves its target dir (`finished_build_leaves_its_tmpdir_empty`,
+  "a finished build left [...] in its TMPDIR").
+- F-WC1-TARGET-OUTSIDE-TMPDIR — the target dir is made by a bare `mktemp -d`
+  again, which on macOS ignores `TMPDIR`
+  (`build_script_fails_closed_after_an_unbound_variable`, "tools/build made its
+  target dir [...] outside the TMPDIR it was given").
+
+Before task 036 the empty-TMPDIR check watched nothing: with `rm -rf
+"$TARGET_DIR"; ` taken out of the armed trap, the status test still passed
+(LOG.md, task 036, has the probe). Task 036 also re-runs F-WC1-TRAP-STATUS
+(still caught) and re-anchors F-WC-README-COUNT to the new total, the same bug
+as before.
