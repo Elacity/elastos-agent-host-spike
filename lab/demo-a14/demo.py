@@ -539,11 +539,13 @@ def run_demo(
     say(f"A14 installed demo: {layout.install}")
     problems = version_gate(layout, read(layout.repo))
     if problems:
+        installed = (layout.install / "INSTALL.json").exists()
         refuse(
             say,
-            "the installed versions do not match VERSIONS.json. No journey was run.",
+            ("the installed versions do not match VERSIONS.json" if installed else "the demo is not installed")
+            + ". No journey was run.",
             problems,
-            "run `bash lab/demo-a14/install.sh` again, then run this command again.",
+            "run `bash lab/demo-a14/install.sh`, then run this command again.",
         )
         return EXIT_REFUSED
     receipt_bytes = (layout.install / "VERSIONS.json").read_bytes()

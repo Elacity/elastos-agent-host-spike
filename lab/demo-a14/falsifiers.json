@@ -111,8 +111,8 @@
       "edits": [
         {
           "file": "lab/demo-a14/demo.py",
-          "old": "    problems = version_gate(layout, read(layout.repo))\n    if problems:\n        refuse(\n",
-          "new": "    problems = version_gate(layout, read(layout.repo))\n    if False:\n        refuse(\n"
+          "old": "    problems = version_gate(layout, read(layout.repo))\n    if problems:\n        installed = ",
+          "new": "    problems = version_gate(layout, read(layout.repo))\n    if False:\n        installed = "
         }
       ],
       "tests": ["test_refused_run_starts_no_journey"]

@@ -277,6 +277,13 @@ class RunBinding(TempCase):
         self.assertIn("installed elastos differs from VERSIONS.json runtime_sha256", out)
         self.assertFalse((self.fx.layout.install.parent / "runs").exists())
 
+    def test_run_without_install_names_it(self):
+        shutil.rmtree(self.fx.layout.install)
+        code, out, runner = self.run_demo()
+        self.assertEqual(code, demo.EXIT_REFUSED)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("REFUSED: the demo is not installed. No journey was run.", out)
+
     def test_matching_run_walks_every_step(self):
         code, out, runner = self.run_demo()
         _, _, steps = demo.load_journeys()
