@@ -1623,78 +1623,134 @@ fn push_separator(current: &mut String) {
 }
 
 fn profile_holds_scheme_comment(profile: &str) -> bool {
-    let chars: Vec<char> = profile.chars().collect();
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        if in_string && ch == '\\' {
-            escaped = true;
-            i += 1;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            i += 1;
-            continue;
-        }
-        if !in_string && ch == '#' && i + 1 < chars.len() && matches!(chars[i + 1], ';' | '|') {
-            return true;
-        }
-        if !in_string && ch == ';' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        i += 1;
-    }
-    false
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = profile_characters(profile);
+    }))
+    .is_err()
 }
 
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
-    assert!(
-        !profile_holds_scheme_comment(profile),
-        "the profile must refuse Scheme comment form #; or #|: {profile}"
-    );
     let mut characters = Vec::new();
+    let mut chars = profile.chars().peekable();
     let mut in_string = false;
-    let mut in_comment = false;
-    let mut escaped = false;
-    for ch in profile.chars() {
-        if in_comment {
-            in_comment = ch != '\n';
-            if !in_comment {
-                characters.push((ch, false));
+    let mut at_token_boundary = true;
+    while let Some(ch) = chars.next() {
+        let allowed = ch == '\t' || ch == '\n' || (ch >= ' ' && ch <= '~');
+        assert!(
+            allowed,
+            "the profile must refuse a non-ASCII or format character: {profile}"
+        );
+        if in_string {
+            if ch == '\\' {
+                let Some(esc) = chars.next() else {
+                    panic!("the profile must not end early: unclosed string in {profile}");
+                };
+                let esc_allowed = esc == '\\' || esc == '"' || esc == 'n' || esc == 't';
+                assert!(
+                    esc_allowed,
+                    "the profile must refuse unknown string escape \\{esc}: {profile}"
+                );
+                characters.push(('\\', true));
+                characters.push((esc, true));
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+                at_token_boundary = true;
+                characters.push((ch, true));
+                continue;
+            }
+            characters.push((ch, true));
+            continue;
+        }
+        if ch == ';' && at_token_boundary {
+            loop {
+                match chars.peek().copied() {
+                    None => break,
+                    Some('\n') => {
+                        let nl = chars.next().expect("peeked newline");
+                        characters.push((nl, false));
+                        at_token_boundary = true;
+                        break;
+                    }
+                    Some(next) => {
+                        let next_ok = next == '\t' || (next >= ' ' && next <= '~');
+                        assert!(
+                            next_ok,
+                            "the profile must refuse a non-ASCII or format character: {profile}"
+                        );
+                        chars.next();
+                    }
+                }
             }
             continue;
         }
-        if escaped {
-            characters.push((ch, true));
-            escaped = false;
-            continue;
-        }
-        if in_string && ch == '\\' {
-            characters.push((ch, true));
-            escaped = true;
-            continue;
+        if ch == '#' {
+            if !at_token_boundary {
+                panic!(
+                    "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                );
+            }
+            let mut token = String::from("#");
+            while let Some(&next) = chars.peek() {
+                let symbol = next.is_ascii_alphanumeric()
+                    || next == '*'
+                    || next == '_'
+                    || next == '-'
+                    || next == '+'
+                    || next == '.'
+                    || next == '/'
+                    || next == '%';
+                if !symbol {
+                    break;
+                }
+                token.push(chars.next().expect("peeked hash-token character"));
+            }
+            match token.as_str() {
+                "#t" | "#f" | "#include" => {
+                    for part in token.chars() {
+                        characters.push((part, false));
+                    }
+                    at_token_boundary = false;
+                    continue;
+                }
+                _ => {
+                    panic!(
+                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                    );
+                }
+            }
         }
         if ch == '"' {
-            in_string = !in_string;
+            in_string = true;
+            at_token_boundary = false;
             characters.push((ch, true));
             continue;
         }
-        if !in_string && ch == ';' {
-            in_comment = true;
+        if ch == ' ' || ch == '\t' || ch == '\n' {
+            characters.push((ch, false));
+            at_token_boundary = true;
             continue;
         }
-        characters.push((ch, in_string));
+        if ch == '(' || ch == ')' {
+            characters.push((ch, false));
+            at_token_boundary = true;
+            continue;
+        }
+        let symbol = ch.is_ascii_alphanumeric()
+            || ch == '*'
+            || ch == '_'
+            || ch == '-'
+            || ch == '+'
+            || ch == '.'
+            || ch == '/'
+            || ch == '%';
+        assert!(
+            symbol,
+            "the profile must refuse a character the grammar does not name {ch:?}: {profile}"
+        );
+        characters.push((ch, false));
+        at_token_boundary = false;
     }
     assert!(
         !in_string,

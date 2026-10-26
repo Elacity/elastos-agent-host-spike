@@ -1890,17 +1890,96 @@ fn rust_source_without_comments(source: &str) -> String {
 /// Whether `source` holds a `#[test] fn <function>(` item that `cargo test
 /// -- --list` would list. A match inside a string, a comment, a host-false
 /// `#[cfg(...)]` item, or an unused `macro_rules` body is not a citation.
-/// The live cargo list is the claim when the snippet compiles alone.
+///
+/// The tiny-crate list is the claim when `source` compiles alone. When that
+/// command cannot run, a cited test counts only if the real provider command
+/// `cargo test -p <crate> --test confine -- --list` names it, with the same
+/// features as the owner suite. Those list lines are split on the last `: `.
+/// There is no source-walk fallback: if no list command can run, the citation
+/// fails. That drops `#[cfg(feature = "never")]` and `#[cfg(false)]`.
 fn rust_holds_cited_test(source: &str, function: &str) -> bool {
     match rust_cargo_lists_test(source, function) {
         Some(listed) => listed,
-        None => rust_source_holds_listed_test(source, function),
+        None => {
+            static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            let names = NAMES.get_or_init(|| {
+                let mut names = Vec::new();
+                let mut roots = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+                if let Ok(cwd) = std::env::current_dir() {
+                    roots.push(cwd);
+                }
+                let mut capsules = None;
+                for root in roots {
+                    let mut dir = root.as_path();
+                    loop {
+                        let candidate = dir.join("capsules");
+                        if candidate
+                            .join("wallet-provider")
+                            .join("Cargo.toml")
+                            .is_file()
+                        {
+                            capsules = Some(candidate);
+                            break;
+                        }
+                        match dir.parent() {
+                            Some(parent) => dir = parent,
+                            None => break,
+                        }
+                    }
+                    if capsules.is_some() {
+                        break;
+                    }
+                }
+                let Some(capsules) = capsules else {
+                    return names;
+                };
+                for (dir_name, crate_name) in [
+                    ("wallet-provider", "wallet-provider"),
+                    ("model-provider", "model-provider"),
+                    ("did-provider", "did-provider"),
+                ] {
+                    let listed = std::process::Command::new("cargo")
+                        .args([
+                            "test", "-p", crate_name, "--test", "confine", "--", "--list",
+                        ])
+                        .current_dir(capsules.join(dir_name))
+                        .env("CARGO_TERM_COLOR", "never")
+                        .output();
+                    let Ok(listed) = listed else {
+                        continue;
+                    };
+                    if !listed.status.success() {
+                        continue;
+                    }
+                    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+                        let Some((name, rest)) = line.rsplit_once(": ") else {
+                            continue;
+                        };
+                        if !rest.starts_with("test") {
+                            continue;
+                        }
+                        if let Some(fn_name) = name
+                            .rsplit("::")
+                            .next()
+                            .and_then(|part| part.rsplit(": ").next())
+                        {
+                            if !fn_name.is_empty() {
+                                names.push(fn_name.to_string());
+                            }
+                        }
+                    }
+                }
+                names
+            });
+            names.iter().any(|name| name == function)
+        }
     }
 }
 
 /// `cargo test -- --list` on a tiny crate whose only test file is `source`.
-/// `None` when cargo cannot compile that snippet alone, so the source walk
-/// is the fallback.
+/// `None` when cargo cannot compile that snippet alone. The citation then
+/// uses the real `cargo test -p <crate> --test confine -- --list` list, or
+/// fails if that command cannot run. There is no source-walk fallback.
 fn rust_cargo_lists_test(source: &str, function: &str) -> Option<bool> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1943,6 +2022,9 @@ fn rust_cargo_lists_test(source: &str, function: &str) -> Option<bool> {
 }
 
 /// Whether one `cargo test -- --list` line names `function` as a listed test.
+/// The tiny-crate matcher still splits on the first `:`, so a namespaced
+/// `other::present_case: test` line does not count there. The real provider
+/// list in `rust_holds_cited_test` splits on the last `: `.
 fn rust_list_line_names_test(line: &str, function: &str) -> bool {
     let Some((name, rest)) = line.split_once(':') else {
         return false;
@@ -1951,6 +2033,18 @@ fn rust_list_line_names_test(line: &str, function: &str) -> bool {
         return false;
     }
     name.rsplit("::").next() == Some(function)
+}
+
+/// The test function on one real `cargo test -- --list` line. Split on the
+/// last `: ` so `other::present_case: test` keeps the namespaced name.
+fn rust_real_list_line_function(line: &str) -> Option<&str> {
+    let (name, rest) = line.rsplit_once(": ")?;
+    if !rest.starts_with("test") {
+        return None;
+    }
+    name.rsplit("::")
+        .next()
+        .and_then(|part| part.rsplit(": ").next())
 }
 
 /// Source walk used when cargo cannot list the snippet. Comments, unused
@@ -5102,6 +5196,123 @@ fn file_profile_contract_refuses_scheme_comments() {
     }
 }
 
+/// `#\;` is a Scheme character, not a line comment. A `;` reader would hide
+/// the later forms; this reader refuses the `#` form so the grant stays
+/// visible as a refusal.
+///
+/// Falsifier: treat `;` as a line comment after `#\`; then
+/// `#\;(version 0)(allow file*)` passes the contract and this test fails.
+#[test]
+fn file_profile_contract_refuses_hash_backslash_semicolon() {
+    let complete = contract_fixture_profile(true);
+    let extra = "#\\;(version 0)(allow file*)";
+    let profile = format!("{complete}{extra}\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a Scheme #\\; character must be refused");
+    assert!(
+        refusal.contains("fixture-provider") && (refusal.contains('#') || refusal.contains("#;")),
+        "the refusal must name the # reader form {extra}: {refusal}"
+    );
+}
+
+/// A zero-width space between `#` and `;` is a format character. The reader
+/// refuses it anywhere, so it cannot hide a later grant.
+///
+/// Falsifier: skip non-ASCII checks; then `#\\u{200b};(version 0)(allow file*)`
+/// passes the contract and this test fails.
+#[test]
+fn file_profile_contract_refuses_zwsp_hash_semicolon() {
+    let complete = contract_fixture_profile(true);
+    let extra = "#\u{200b};(version 0)(allow file*)";
+    let profile = format!("{complete}{extra}\n");
+    let refusal = check_profile_contract("fixture-provider", &profile)
+        .expect_err("a zero-width space in the profile must be refused");
+    assert!(
+        refusal.contains("fixture-provider"),
+        "the refusal must name the profile: {refusal}"
+    );
+}
+
+/// A `#[cfg(feature = "never")]` test that does not compile as the tiny crate
+/// is not a citation. The source walk is gone; the real cargo list does not
+/// name `present_case`.
+///
+/// Falsifier: restore the source-walk fallback; then this planted test counts
+/// and this test fails.
+#[test]
+fn citation_refuses_feature_gated_test_when_cargo_cannot_list() {
+    let source = concat!(
+        "use missing_crate::Thing;\n",
+        "#[cfg(feature = \"never\")]\n",
+        "#[test]\n",
+        "fn present_case() {\n",
+        "    let _ = Thing;\n",
+        "}\n"
+    );
+    assert!(
+        rust_cargo_lists_test(source, "present_case").is_none(),
+        "the tiny crate cannot compile a missing import"
+    );
+    assert!(
+        !rust_holds_cited_test(source, "present_case"),
+        "a feature-gated test the real cargo list omits must not count"
+    );
+}
+
+/// `#[cfg(false)]` does not compile on rustc 1.91. The citation fails because
+/// the tiny crate cannot list it and the source walk is gone.
+///
+/// Falsifier: restore the source-walk fallback; then this planted test counts
+/// and this test fails.
+#[test]
+fn citation_refuses_cfg_false_when_cargo_cannot_list() {
+    let source = concat!(
+        "use missing_crate::Thing;\n",
+        "#[cfg(false)]\n",
+        "#[test]\n",
+        "fn present_case() {\n",
+        "    let _ = Thing;\n",
+        "}\n"
+    );
+    assert!(
+        rust_cargo_lists_test(source, "present_case").is_none(),
+        "rustc 1.91 rejects cfg(false) as experimental"
+    );
+    assert!(
+        !rust_holds_cited_test(source, "present_case"),
+        "#[cfg(false)] must not count as a citation"
+    );
+}
+
+/// The real cargo list parser splits on the last `: `, so a namespaced
+/// `other::present_case: test` line names `present_case`.
+///
+/// Falsifier: split on the first `: `; then this line names `other` and this
+/// test fails.
+#[test]
+fn cargo_list_parser_splits_on_the_last_colon_space() {
+    assert_eq!(
+        rust_real_list_line_function("other::present_case: test"),
+        Some("present_case"),
+        "a namespaced cargo list line must count"
+    );
+    assert_eq!(
+        rust_real_list_line_function("tests/confine.rs: present_case: test"),
+        Some("present_case"),
+        "a path-prefixed cargo list line must count"
+    );
+    assert_eq!(
+        rust_real_list_line_function("present_case: test"),
+        Some("present_case"),
+        "a bare cargo list line must count"
+    );
+    assert_eq!(
+        rust_real_list_line_function("other::present_case: test (ignored)"),
+        Some("present_case"),
+        "an ignored namespaced line must still name the function"
+    );
+}
+
 /// The leftover denylist helper treats an empty prefix as a host-wide read.
 ///
 /// Falsifier: drop the empty-prefix arm in `filter_is_root_wide`; this test
@@ -5825,91 +6036,151 @@ fn push_separator(current: &mut String) {
     }
 }
 
-/// Whether `profile` holds a Scheme `#;` datum comment or `#|...|#` block
-/// comment outside a string. `sandbox-exec` reads those forms; this checker
-/// refuses them so a later `(allow …)` cannot hide behind a `#;` line comment.
+/// Whether `profile` holds a form the SBPL reader refuses: a `#` reader
+/// token, a non-ASCII or format character, an unknown string escape, or any
+/// other character the grammar does not name. The name is kept so review
+/// probes still extract this function. A later `(allow …)` cannot hide
+/// behind `#;`, `#\;`, `#|`, or a format character between `#` and `;`.
 fn profile_holds_scheme_comment(profile: &str) -> bool {
-    let chars: Vec<char> = profile.chars().collect();
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        if in_string && ch == '\\' {
-            escaped = true;
-            i += 1;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            i += 1;
-            continue;
-        }
-        if !in_string && ch == '#' && i + 1 < chars.len() && matches!(chars[i + 1], ';' | '|') {
-            return true;
-        }
-        if !in_string && ch == ';' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        i += 1;
-    }
-    false
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = profile_characters(profile);
+    }))
+    .is_err()
 }
 
-/// The characters the profile reader consumes, each marked with whether it
-/// sits inside a double-quoted string. A `;` outside a string starts a comment
-/// that runs to the end of its line; the newline that ends the comment stays
-/// as a separator, so a comment inside a form keeps its two tokens apart.
-/// Inside a string a backslash escapes the next character, so a `;`, `(` and
-/// `)` there stay text and a quote does not end the string. A Scheme `#;`
-/// datum comment or `#|` block comment is refused, because a `;` reader would
-/// hide the next form and a `#;` reader would keep it. An unclosed string is
+/// Fail-closed SBPL reader. It accepts only ASCII printable characters plus
+/// tab and newline, `;` line comments at token boundaries, balanced parens
+/// (checked by `profile_forms`), double-quoted strings with the escape set
+/// `\\`, `\"`, `\n`, `\t`, and symbols from the SBPL token class the file
+/// profiles use: a letter, `*`, or `%`, then letters, digits, `* _ - + . / %`.
+/// A number token is digits. Every `#` reader form is refused, including
+/// `#\`, `#;`, `#|`, `#!`, `#+`, `#-`, and `#"`. The grammar names only
+/// `#t`, `#f`, and `#include` as hash tokens, because `(if #t …)` fixtures
+/// and a bare `#include` atom use them. A non-ASCII or zero-width character
+/// anywhere is refused. An unknown escape is refused. An unclosed string is
 /// a refusal with its own reason.
 fn profile_characters(profile: &str) -> Vec<(char, bool)> {
-    assert!(
-        !profile_holds_scheme_comment(profile),
-        "the profile must refuse Scheme comment form #; or #|: {profile}"
-    );
     let mut characters = Vec::new();
+    let mut chars = profile.chars().peekable();
     let mut in_string = false;
-    let mut in_comment = false;
-    let mut escaped = false;
-    for ch in profile.chars() {
-        if in_comment {
-            in_comment = ch != '\n';
-            if !in_comment {
-                characters.push((ch, false));
+    let mut at_token_boundary = true;
+    while let Some(ch) = chars.next() {
+        let allowed = ch == '\t' || ch == '\n' || (ch >= ' ' && ch <= '~');
+        assert!(
+            allowed,
+            "the profile must refuse a non-ASCII or format character: {profile}"
+        );
+        if in_string {
+            if ch == '\\' {
+                let Some(esc) = chars.next() else {
+                    panic!("the profile must not end early: unclosed string in {profile}");
+                };
+                let esc_allowed = esc == '\\' || esc == '"' || esc == 'n' || esc == 't';
+                assert!(
+                    esc_allowed,
+                    "the profile must refuse unknown string escape \\{esc}: {profile}"
+                );
+                characters.push(('\\', true));
+                characters.push((esc, true));
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+                at_token_boundary = true;
+                characters.push((ch, true));
+                continue;
+            }
+            characters.push((ch, true));
+            continue;
+        }
+        if ch == ';' && at_token_boundary {
+            loop {
+                match chars.peek().copied() {
+                    None => break,
+                    Some('\n') => {
+                        let nl = chars.next().expect("peeked newline");
+                        characters.push((nl, false));
+                        at_token_boundary = true;
+                        break;
+                    }
+                    Some(next) => {
+                        let next_ok = next == '\t' || (next >= ' ' && next <= '~');
+                        assert!(
+                            next_ok,
+                            "the profile must refuse a non-ASCII or format character: {profile}"
+                        );
+                        chars.next();
+                    }
+                }
             }
             continue;
         }
-        if escaped {
-            characters.push((ch, true));
-            escaped = false;
-            continue;
-        }
-        if in_string && ch == '\\' {
-            characters.push((ch, true));
-            escaped = true;
-            continue;
+        if ch == '#' {
+            if !at_token_boundary {
+                panic!(
+                    "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                );
+            }
+            let mut token = String::from("#");
+            while let Some(&next) = chars.peek() {
+                let symbol = next.is_ascii_alphanumeric()
+                    || next == '*'
+                    || next == '_'
+                    || next == '-'
+                    || next == '+'
+                    || next == '.'
+                    || next == '/'
+                    || next == '%';
+                if !symbol {
+                    break;
+                }
+                token.push(chars.next().expect("peeked hash-token character"));
+            }
+            match token.as_str() {
+                "#t" | "#f" | "#include" => {
+                    for part in token.chars() {
+                        characters.push((part, false));
+                    }
+                    at_token_boundary = false;
+                    continue;
+                }
+                _ => {
+                    panic!(
+                        "the profile must refuse Scheme comment form #; or #| or other reader form: {profile}"
+                    );
+                }
+            }
         }
         if ch == '"' {
-            in_string = !in_string;
+            in_string = true;
+            at_token_boundary = false;
             characters.push((ch, true));
             continue;
         }
-        if !in_string && ch == ';' {
-            in_comment = true;
+        if ch == ' ' || ch == '\t' || ch == '\n' {
+            characters.push((ch, false));
+            at_token_boundary = true;
             continue;
         }
-        characters.push((ch, in_string));
+        if ch == '(' || ch == ')' {
+            characters.push((ch, false));
+            at_token_boundary = true;
+            continue;
+        }
+        let symbol = ch.is_ascii_alphanumeric()
+            || ch == '*'
+            || ch == '_'
+            || ch == '-'
+            || ch == '+'
+            || ch == '.'
+            || ch == '/'
+            || ch == '%';
+        assert!(
+            symbol,
+            "the profile must refuse a character the grammar does not name {ch:?}: {profile}"
+        );
+        characters.push((ch, false));
+        at_token_boundary = false;
     }
     assert!(
         !in_string,

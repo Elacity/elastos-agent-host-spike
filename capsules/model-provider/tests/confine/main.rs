@@ -999,6 +999,23 @@ fn model_storage_keeps_param_string_case() {
     );
 }
 
+/// The model copy uses the shared fail-closed reader. `#\;` and a
+/// zero-width space are refused, so a later grant cannot hide.
+///
+/// Falsifier: treat `;` as a line comment after `#\`; then
+/// `#\;(version 0)(allow file*)` parses and this test fails.
+#[test]
+fn model_reader_refuses_hash_reader_forms() {
+    assert!(
+        model_profile_holds_scheme_comment("#\\;(version 0)(allow file*)"),
+        "the model copy must refuse a Scheme #\\; character"
+    );
+    assert!(
+        model_profile_holds_scheme_comment("#\u{200b};(version 0)(allow file*)"),
+        "the model copy must refuse a zero-width space"
+    );
+}
+
 /// The confined provider serves `init`, `status` and `offers_list`, and
 /// `init` creates the journal root with `runs/` under `STORAGE_ROOT`.
 ///
@@ -2457,144 +2474,25 @@ fn collect_model_allows(form: &str, out: &mut Vec<String>) {
     }
 }
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../wallet-provider/tests/sbpl_reader.rs"
+));
+
 fn model_push_separator(current: &mut String) {
-    if !current.is_empty() && !current.ends_with('(') {
-        current.push(' ');
-    }
+    push_separator(current);
 }
 
 fn model_profile_holds_scheme_comment(profile: &str) -> bool {
-    let chars: Vec<char> = profile.chars().collect();
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        if in_string && ch == '\\' {
-            escaped = true;
-            i += 1;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            i += 1;
-            continue;
-        }
-        if !in_string && ch == '#' && i + 1 < chars.len() && matches!(chars[i + 1], ';' | '|') {
-            return true;
-        }
-        if !in_string && ch == ';' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        i += 1;
-    }
-    false
+    profile_holds_scheme_comment(profile)
 }
 
 fn model_profile_characters(profile: &str) -> Vec<(char, bool)> {
-    assert!(
-        !model_profile_holds_scheme_comment(profile),
-        "the profile must refuse Scheme comment form #; or #|: {profile}"
-    );
-    let mut characters = Vec::new();
-    let mut in_string = false;
-    let mut in_comment = false;
-    let mut escaped = false;
-    for ch in profile.chars() {
-        if in_comment {
-            in_comment = ch != '\n';
-            if !in_comment {
-                characters.push((ch, false));
-            }
-            continue;
-        }
-        if escaped {
-            characters.push((ch, true));
-            escaped = false;
-            continue;
-        }
-        if in_string && ch == '\\' {
-            characters.push((ch, true));
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            characters.push((ch, true));
-            continue;
-        }
-        if !in_string && ch == ';' {
-            in_comment = true;
-            continue;
-        }
-        characters.push((ch, in_string));
-    }
-    assert!(
-        !in_string,
-        "the profile must not end early: unclosed string in {profile}"
-    );
-    characters
+    profile_characters(profile)
 }
 
 fn model_profile_forms(profile: &str) -> Vec<String> {
-    let mut forms = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    let mut space_due = false;
-    for (ch, in_string) in model_profile_characters(profile) {
-        if in_string {
-            if space_due {
-                model_push_separator(&mut current);
-            }
-            space_due = false;
-            current.push(ch);
-            continue;
-        }
-        if depth == 0 && (ch.is_whitespace() || ch == '(') && !current.is_empty() {
-            forms.push(std::mem::take(&mut current));
-        }
-        match ch {
-            _ if ch.is_whitespace() => space_due = true,
-            '(' | ')' => {
-                if space_due {
-                    model_push_separator(&mut current);
-                }
-                space_due = false;
-                current.push(ch);
-                if ch == '(' {
-                    depth += 1;
-                } else {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 && !current.is_empty() {
-                        forms.push(std::mem::take(&mut current));
-                    }
-                }
-            }
-            _ => {
-                if space_due {
-                    model_push_separator(&mut current);
-                }
-                space_due = false;
-                current.push(ch);
-            }
-        }
-    }
-    if depth == 0 && !current.is_empty() {
-        forms.push(std::mem::take(&mut current));
-    }
-    assert!(
-        current.is_empty(),
-        "the profile must not end early: unclosed form {current}"
-    );
-    forms
+    profile_forms(profile)
 }
 
 /// A storage right may not claim a root-wide read: an unfiltered file-read,
