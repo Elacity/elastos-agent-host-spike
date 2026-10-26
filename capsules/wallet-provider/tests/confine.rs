@@ -1904,7 +1904,7 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
             if !rust_source_holds_listed_test(source, function) {
                 return false;
             }
-            let mut roots = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+            let mut roots = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
             if let Ok(cwd) = std::env::current_dir() {
                 roots.push(cwd);
             }
@@ -2036,8 +2036,17 @@ fn rust_holds_cited_test(source: &str, function: &str) -> bool {
                 Some(
                     String::from_utf8_lossy(&listed.stdout)
                         .lines()
-                        .filter_map(rust_real_list_line_function)
-                        .map(|name| name.to_string())
+                        .filter_map(|line| {
+                            let (name, rest) = line.rsplit_once(": ")?;
+                            if !rest.starts_with("test") {
+                                return None;
+                            }
+                            name.rsplit("::")
+                                .next()
+                                .and_then(|part| part.rsplit(": ").next())
+                                .filter(|part| !part.is_empty())
+                                .map(|part| part.to_string())
+                        })
                         .collect::<Vec<_>>(),
                 )
             });
