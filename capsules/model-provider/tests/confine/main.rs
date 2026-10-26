@@ -98,7 +98,7 @@ fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
         Ok(true) => true,
         Ok(false) => {
             eprintln!(
-                "SKIP model-provider confinement test: {} is absent; \
+                "SKIPPED: NOT RUN: model-provider confinement test: {} is absent; \
                  the profile was not exercised on this machine",
                 sandbox_exec.display()
             );
@@ -881,10 +881,10 @@ fn operations_section_cites_existing_tests() {
 /// and this test fails.
 #[test]
 fn operations_section_does_not_cite_a_comment() {
-    let source = "// fn allow_rules_trace_to_declared_rights()\nfn model_provider_ops_under_profile() {}\n";
+    let source =
+        "// fn allow_rules_trace_to_declared_rights()\nfn model_provider_ops_under_profile() {}\n";
     assert!(
-        !rust_source_without_comments(source)
-            .contains("fn allow_rules_trace_to_declared_rights("),
+        !rust_source_without_comments(source).contains("fn allow_rules_trace_to_declared_rights("),
         "a comment must not count as a function declaration"
     );
     assert!(
@@ -906,14 +906,18 @@ fn model_allow_forms_read_split_and_nested_allows() {
     let split = "(version 1)\n(deny default)\n(allow\n    file-read* (subpath \"/\"))\n";
     let forms = model_allow_forms(split);
     assert!(
-        forms.iter().any(|form| form.contains("file-read*") && form.contains("subpath \"/\"")),
+        forms
+            .iter()
+            .any(|form| form.contains("file-read*") && form.contains("subpath \"/\"")),
         "the split allow form must be one allow: {forms:?}"
     );
 
     let nested = "(version 1)\n(deny default)\n(if #t (allow default))\n(begin (allow network*))\n(import \"bsd.sb\")\n";
     let forms = model_allow_forms(nested);
     assert!(
-        forms.iter().any(|form| form == "(allow default)" || form.contains("allow default")),
+        forms
+            .iter()
+            .any(|form| form == "(allow default)" || form.contains("allow default")),
         "a nested allow default must be visible: {forms:?}"
     );
     assert!(
@@ -948,6 +952,10 @@ fn model_trace_refuses_a_root_wide_storage_read() {
 /// Every allow rule in `confine.sb` is load-bearing here: each `F-cc1-rm-*`
 /// entry in `confine-falsifiers.json` removes one rule and this test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_provider_ops_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1067,6 +1075,10 @@ fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
 /// widened to `STORAGE_PARENT`) let the redirected `init` succeed, and this
 /// test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_outside_write_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1176,6 +1188,10 @@ fn only_record(runs: &Path) -> PathBuf {
 /// root; F-cc1e (no fixture rule) stops `runs_get` at the record's existence
 /// check (`model run is unreadable`), before the open.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_outside_read_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1283,6 +1299,10 @@ const CREATE_FIXTURE_RULE: &str =
 /// fixture rule; the sandbox then refuses the inspect first, and `init`
 /// answers `journal_corrupt`.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_outside_create_reports_access_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1380,6 +1400,10 @@ impl LocalEngine {
 /// `(allow file-read*)` added) each let the same `init` answer ok, and this
 /// test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_local_offer_fails_closed_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1637,6 +1661,10 @@ impl HostedTransport {
 /// socket, and this test fails. `(allow default)` alone does not:
 /// `(deny network*)` still refuses the connect.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_hosted_run_fails_closed_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1675,10 +1703,14 @@ fn model_hosted_run_fails_closed_under_profile() {
 /// two runs. Off macOS the provider refuses every hosted run itself, before
 /// any socket, so there this control prints why it did not run.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_hosted_run_reaches_runtime_socket_when_unconfined() {
     if !cfg!(target_os = "macos") {
         eprintln!(
-            "SKIP model-provider hosted transport control: off macOS the provider \
+            "SKIPPED: NOT RUN: model-provider hosted transport control: off macOS the provider \
              refuses every hosted run before any socket"
         );
         return;
@@ -1964,6 +1996,10 @@ impl StoredCopy {
 /// F-cc14c keep the exec rule word for word, so the one shape check still
 /// passes them.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_unbound_program_refused_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -2025,6 +2061,10 @@ fn model_unbound_program_refused_under_profile() {
 /// it prints a skip reason and returns. On macOS a missing `sandbox-exec`
 /// fails the test.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn model_bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -2061,6 +2101,10 @@ fn model_bound_copy_serves_under_profile() {
 /// real binary's digest is unchanged at the end. The test kills and waits on
 /// the process `start` returned. It does not call `shutdown`.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn byte_different_file_at_bound_path_starts() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -2268,6 +2312,10 @@ fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, 
 /// stderr lines it reads, so case (a) still exits 65 and this test fails
 /// because no line gives the reason.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -2327,16 +2375,125 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     );
 }
 
-/// Top-level `(allow ...)` lines, the model's first copy of the trace parser.
-/// Nested forms and a split `(allow` are added by the sexp walk below.
+/// Allow forms at any nesting depth, including a split `(allow` form.
 fn model_allow_forms(profile: &str) -> Vec<String> {
-    profile
-        .lines()
-        .filter(|line| !line.starts_with(";;"))
-        .map(str::trim)
-        .filter(|line| line.starts_with("(allow "))
-        .map(str::to_string)
-        .collect()
+    let mut forms = Vec::new();
+    for form in model_profile_forms(profile) {
+        collect_model_allows(&form, &mut forms);
+    }
+    forms
+}
+
+fn collect_model_allows(form: &str, out: &mut Vec<String>) {
+    if form.starts_with("(allow ") {
+        out.push(form.to_string());
+    }
+    let Some(inner) = form.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return;
+    };
+    for child in model_profile_forms(inner) {
+        collect_model_allows(&child, out);
+    }
+}
+
+fn model_push_separator(current: &mut String) {
+    if !current.is_empty() && !current.ends_with('(') {
+        current.push(' ');
+    }
+}
+
+fn model_profile_characters(profile: &str) -> Vec<(char, bool)> {
+    let mut characters = Vec::new();
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut escaped = false;
+    for ch in profile.chars() {
+        if in_comment {
+            in_comment = ch != '\n';
+            if !in_comment {
+                characters.push((ch, false));
+            }
+            continue;
+        }
+        if escaped {
+            characters.push((ch, true));
+            escaped = false;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            characters.push((ch, true));
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            characters.push((ch, true));
+            continue;
+        }
+        if !in_string && ch == ';' {
+            in_comment = true;
+            continue;
+        }
+        characters.push((ch, in_string));
+    }
+    assert!(
+        !in_string,
+        "the profile must not end early: unclosed string in {profile}"
+    );
+    characters
+}
+
+fn model_profile_forms(profile: &str) -> Vec<String> {
+    let mut forms = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut space_due = false;
+    for (ch, in_string) in model_profile_characters(profile) {
+        if in_string {
+            if space_due {
+                model_push_separator(&mut current);
+            }
+            space_due = false;
+            current.push(ch);
+            continue;
+        }
+        if depth == 0 && (ch.is_whitespace() || ch == '(') && !current.is_empty() {
+            forms.push(std::mem::take(&mut current));
+        }
+        match ch {
+            _ if ch.is_whitespace() => space_due = true,
+            '(' | ')' => {
+                if space_due {
+                    model_push_separator(&mut current);
+                }
+                space_due = false;
+                current.push(ch);
+                if ch == '(' {
+                    depth += 1;
+                } else {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && !current.is_empty() {
+                        forms.push(std::mem::take(&mut current));
+                    }
+                }
+            }
+            _ => {
+                if space_due {
+                    model_push_separator(&mut current);
+                }
+                space_due = false;
+                current.push(ch);
+            }
+        }
+    }
+    if depth == 0 && !current.is_empty() {
+        forms.push(std::mem::take(&mut current));
+    }
+    assert!(
+        current.is_empty(),
+        "the profile must not end early: unclosed form {current}"
+    );
+    forms
 }
 
 /// A storage right may not claim a root-wide read.
@@ -2348,7 +2505,54 @@ fn model_is_root_wide_read(form: &str) -> bool {
 
 /// Drops Rust comments so a citation cannot point at a commented-out `fn`.
 fn rust_source_without_comments(source: &str) -> String {
-    source.to_string()
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_line = false;
+    let mut in_block = false;
+    while let Some(ch) = chars.next() {
+        if in_line {
+            if ch == '\n' {
+                in_line = false;
+                out.push(ch);
+            }
+            continue;
+        }
+        if in_block {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_line = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The model's copy of the operations citation filter: `model_` names and
@@ -2429,6 +2633,13 @@ fn allow_rules_trace_to_declared_rights() {
     for entry in rights {
         if rule_strings(entry).is_empty() {
             panic!("declared right has no rule: {}", entry_id(entry));
+        }
+        if entry_id(entry) == "storage" {
+            for rule in rule_strings(entry) {
+                if model_is_root_wide_read(rule) {
+                    panic!("storage must not claim a root-wide read: {rule}");
+                }
+            }
         }
     }
     for entry in baseline {

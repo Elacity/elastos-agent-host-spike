@@ -655,6 +655,7 @@ fn find_engine(name: &str) -> Option<PathBuf> {
 }
 
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn each_engine_prints_the_fixed_output() {
     let tmp = TempDir::new("run-real");
     let root = canonical(&tmp);
@@ -669,8 +670,7 @@ fn each_engine_prints_the_fixed_output() {
     let mut ran_any = false;
     for engine_kind in ENGINES {
         let Some(program) = find_engine(engine_kind.name()) else {
-            eprintln!("SKIPPED: {engine_kind} not found on PATH (no result, not a PASS)");
-            continue;
+            panic!("NOT RUN: {engine_kind} not found on PATH (not proof)");
         };
         let stdout = ran(run_engine(&value, engine_kind, &program, &work));
         assert_eq!(
@@ -683,7 +683,7 @@ fn each_engine_prints_the_fixed_output() {
         ran_any = true;
     }
     if !ran_any {
-        eprintln!("SKIPPED: no engine found; this test proves nothing here");
+        panic!("NOT RUN: no engine found; this test proves nothing here");
     }
 }
 
@@ -920,6 +920,7 @@ fn two_refused(result: Result<TwoEngineRun, TwoEngineRefusal>) -> TwoEngineRefus
 }
 
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn same_name_same_output_on_wasmtime_and_wasmer() {
     let mut missing = Vec::new();
     let mut programs = Vec::new();
@@ -930,11 +931,10 @@ fn same_name_same_output_on_wasmtime_and_wasmer() {
         }
     }
     if !missing.is_empty() {
-        eprintln!(
-            "SKIPPED: {} not found on PATH; the two-engine proof needs both (no result, not a PASS)",
+        panic!(
+            "NOT RUN: {} not found on PATH; the two-engine proof needs both (not proof)",
             missing.join(" and ")
         );
-        return;
     }
     let tmp = TempDir::new("run2-real");
     let root = canonical(&tmp);
@@ -1742,6 +1742,7 @@ fn receipt_write_refuses_an_existing_path() {
 }
 
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn real_receipt_names_both_installed_engines() {
     let mut missing = Vec::new();
     let mut programs = Vec::new();
@@ -1752,11 +1753,10 @@ fn real_receipt_names_both_installed_engines() {
         }
     }
     if !missing.is_empty() {
-        eprintln!(
-            "SKIPPED: {} not found on PATH; the real receipt needs both (no result, not a PASS)",
+        panic!(
+            "NOT RUN: {} not found on PATH; the real receipt needs both (not proof)",
             missing.join(" and ")
         );
-        return;
     }
     let tmp = TempDir::new("run3-real");
     let root = canonical(&tmp);
@@ -1939,6 +1939,7 @@ fn zero_grants_zero_imports_runs() {
 /// real `wasmtime` and `wasmer` on PATH print `FIXED_OUTPUT`, with nothing
 /// linked. An engine not found prints SKIPPED and gives no result.
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn zero_grants_zero_imports_runs_on_both_real_engines() {
     let mut missing = Vec::new();
     let mut programs = Vec::new();
@@ -1949,11 +1950,10 @@ fn zero_grants_zero_imports_runs_on_both_real_engines() {
         }
     }
     if !missing.is_empty() {
-        eprintln!(
-            "SKIPPED: {} not found on PATH; the zero-grants real run needs both (no result, not a PASS)",
+        panic!(
+            "NOT RUN: {} not found on PATH; the zero-grants real run needs both (not proof)",
             missing.join(" and ")
         );
-        return;
     }
     let tmp = TempDir::new("run9-zero-real");
     let root = canonical(&tmp);
@@ -2259,24 +2259,21 @@ fn declared_memory_cap_comes_from_the_manifest() {
     }
 }
 
-/// The real `wasmtime` on PATH, by an absolute path, or `None` after a
-/// SKIPPED line: an engine not found gives no result, never a PASS.
-fn real_wasmtime(test: &str) -> Option<PathBuf> {
-    let program = find_engine(Engine::Wasmtime.name());
-    if program.is_none() {
-        eprintln!("SKIPPED: wasmtime not found on PATH; {test} needs it (no result, not a PASS)");
-    }
-    program
+/// The real `wasmtime` on PATH, by an absolute path. Missing is NOT RUN,
+/// never a PASS.
+fn real_wasmtime(test: &str) -> PathBuf {
+    find_engine(Engine::Wasmtime.name()).unwrap_or_else(|| {
+        panic!("NOT RUN: wasmtime not found on PATH; {test} needs it (not proof)")
+    })
 }
 
 /// wc-010b, real engine: a signed, verified module that grows its memory by
 /// 1023 pages, to exactly the declared 64 MB, runs under the cap on
 /// `wasmtime`, and `memory.grow` returns the old size, 1.
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn capsule_grows_within_the_declared_cap_on_wasmtime() {
-    let Some(program) = real_wasmtime("the within-cap run") else {
-        return;
-    };
+    let program = real_wasmtime("the within-cap run");
     let tmp = TempDir::new("run10-within");
     let root = canonical(&tmp);
     let (_, value) = verified_bundle(&root, "bundle", &grow_module(GROW_TO_THE_CAP));
@@ -2297,10 +2294,9 @@ fn capsule_grows_within_the_declared_cap_on_wasmtime() {
 /// 1024 pages, one page past the declared 64 MB, is refused on `wasmtime`: the
 /// grow traps, so the engine fails with its trap on stderr.
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn memory_grow_past_the_declared_cap_traps_on_wasmtime() {
-    let Some(program) = real_wasmtime("the past-cap run") else {
-        return;
-    };
+    let program = real_wasmtime("the past-cap run");
     let tmp = TempDir::new("run10-past");
     let root = canonical(&tmp);
     let (_, value) = verified_bundle(&root, "bundle", &grow_module(GROW_PAST_THE_CAP));
@@ -2348,10 +2344,9 @@ const TWO_MEMORY_MODULE: &[u8] = &[
 /// 4 MB; on `wasmtime` it is refused at start, with `max-memories=1`'s own
 /// reason on stderr, and never runs.
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn second_memory_cannot_double_the_declared_cap_on_wasmtime() {
-    let Some(program) = real_wasmtime("the two-memory run") else {
-        return;
-    };
+    let program = real_wasmtime("the two-memory run");
     let tmp = TempDir::new("run10-two-memories");
     let root = canonical(&tmp);
     let value = verified_bundle_declaring(&root, "bundle", TWO_MEMORY_MODULE, 2);
@@ -2424,6 +2419,7 @@ fn built_capsule_declares_the_manifest_memory_as_its_maximum() {
 /// an engine inside an engine. An engine not found prints SKIPPED and gives no
 /// result.
 #[test]
+#[ignore = "NOT RUN: needs wasmtime or wasmer on PATH"]
 fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
     let mut missing = Vec::new();
     let mut programs = Vec::new();
@@ -2434,11 +2430,10 @@ fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
         }
     }
     if !missing.is_empty() {
-        eprintln!(
-            "SKIPPED: {} not found on PATH; the capped built-capsule run needs both (no result, not a PASS)",
+        panic!(
+            "NOT RUN: {} not found on PATH; the capped built-capsule run needs both (not proof)",
             missing.join(" and ")
         );
-        return;
     }
     let tmp = TempDir::new("run10-built");
     let root = canonical(&tmp);

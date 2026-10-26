@@ -70,7 +70,7 @@ fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
         Ok(true) => true,
         Ok(false) => {
             eprintln!(
-                "SKIP did-provider confinement test: {} is absent; \
+                "SKIPPED: NOT RUN: did-provider confinement test: {} is absent; \
                  the profile was not exercised on this machine",
                 sandbox_exec.display()
             );
@@ -404,6 +404,10 @@ impl Drop for ConfinedProvider {
 /// signature; both travel unchanged to `verify`. The test renders no signing
 /// payload and constructs no signature of its own.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn confined_provider_serves_did_operations_under_its_root() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -494,6 +498,10 @@ fn confined_provider_serves_did_operations_under_its_root() {
 /// `parse_error` instead of the signature refusal in that branch (DID11); the
 /// response no longer names `invalid_signature` and this case fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn verify_did_recovery_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -554,6 +562,10 @@ fn verify_did_recovery_under_profile() {
 /// `STORAGE_PARENT` (DID18), so the sibling write succeeds and this test fails
 /// on that target.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn outside_write_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -623,6 +635,10 @@ fn outside_write_denied() {
 /// returns ok and this test fails. Replace `(deny default)` with
 /// `(allow default)` (DID04); the read succeeds and this test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn outside_read_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -700,6 +716,10 @@ fn outside_read_denied() {
 /// half. Append a write grant on `STORAGE_PARENT` (DID28); the write half
 /// succeeds, so this test fails on its `set_nickname` refusal.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -811,6 +831,10 @@ fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
 /// `STORAGE_ROOT` grant (DID10); the first provider cannot persist its persona
 /// key, so this test fails on that call's answer.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn persona_key_beneath_storage_parent_is_not_adopted() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -912,6 +936,10 @@ fn persona_key_beneath_storage_parent_is_not_adopted() {
 /// standard error in `unanswered` (DID24); the denied start's failure names no
 /// `execvp()` denial, so this test fails on that assertion at the first case.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1063,6 +1091,10 @@ fn assert_startup_is_refused(
 /// not exist (DID21); the provider stays alive to the deadline instead of
 /// being refused, and this test fails on its first case.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1170,6 +1202,10 @@ impl StoredCopy {
 /// the copy starts and stays alive to the deadline, so this test fails on its
 /// deadline assertion.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn unbound_copy_is_refused_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1244,6 +1280,10 @@ fn unbound_copy_is_refused_under_profile() {
 /// holds a write grant over `STORAGE_ROOT`, where the copy lies, so the copy
 /// changes and this test fails on its bytes assertion.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1376,15 +1416,22 @@ fn profile_denies_network() {
         "the profile must deny the network explicitly"
     );
     for form in forms {
-        assert!(
-            !(form.starts_with("(allow ") && form.contains("network")),
-            "network grant: {form}"
-        );
-        assert!(
-            !(form.starts_with("(allow ")
-                && form.split([' ', '(', ')']).any(|token| token == "default")),
-            "default grant: {form}"
-        );
+        let mut stack = vec![form];
+        while let Some(list) = stack.pop() {
+            assert!(
+                !(list.starts_with("(allow ") && list.contains("network")),
+                "network grant: {list}"
+            );
+            assert!(
+                !(list.starts_with("(allow ")
+                    && list.split([' ', '(', ')']).any(|token| token == "default")),
+                "default grant: {list}"
+            );
+            assert!(!list.starts_with("(import"), "import form: {list}");
+            if let Some(inner) = list.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                stack.extend(profile_forms(inner));
+            }
+        }
     }
 }
 

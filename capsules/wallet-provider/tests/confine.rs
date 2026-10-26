@@ -71,7 +71,7 @@ fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
         Ok(true) => true,
         Ok(false) => {
             eprintln!(
-                "SKIP wallet-provider confinement test: {} is absent; \
+                "SKIPPED: NOT RUN: wallet-provider confinement test: {} is absent; \
                  the profile was not exercised on this machine",
                 sandbox_exec.display()
             );
@@ -643,6 +643,10 @@ fn read_store(root: &Path) -> Value {
 /// Falsifier: deny the storage-root write in `confine.sb`; `Init` then fails
 /// and this test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn confined_provider_serves_wallet_operations_under_its_root() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -720,6 +724,10 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 /// Falsifier: replace `(deny default)` with `(allow default)`; the outside
 /// `Init` then succeeds and this test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn confined_outside_write_is_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -800,6 +808,10 @@ fn confined_outside_write_is_denied() {
 /// Falsifier: add a sibling-file read allowance to `confine.sb`; the outside
 /// `Init` then adopts the planted key and this test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn confined_outside_read_is_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -869,6 +881,10 @@ fn confined_outside_read_is_denied() {
 /// planted key then loads, `init` answers ok and this test fails on its
 /// refusal.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn planted_key_beneath_storage_parent_is_not_read() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -940,6 +956,10 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// refusal. Remove the storage-root grant (WP18); the granted `init` fails, so
 /// this test fails on its ok.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn account_operations_beneath_storage_parent_are_refused() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1078,6 +1098,10 @@ fn plant_storage_key(wallet_dir: &Path) {
 /// error from `unanswered` (WP29); every failure loses `sandbox-exec`'s line
 /// and this test fails.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn startup_is_refused_when_the_profile_cannot_be_applied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1228,6 +1252,10 @@ impl StoredCopy {
 /// the copy starts and stays alive to the deadline, so this test fails on its
 /// deadline assertion.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn unbound_copy_is_refused_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1297,6 +1325,10 @@ fn unbound_copy_is_refused_under_profile() {
 /// `ok`, and `shutdown` exits 0. The binding is the only difference between
 /// the two runs.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn bound_copy_serves_under_profile() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1341,6 +1373,10 @@ fn bound_copy_serves_under_profile() {
 /// standard error in `unanswered` (WP42); the denied start's failure names no
 /// `execvp()` denial, so this test fails on that assertion at the first case.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn startup_denial_reports_its_reason() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -1520,6 +1556,134 @@ fn is_default_allow(form: &str) -> bool {
     form.starts_with("(allow ") && form.split([' ', '(', ')']).any(|token| token == "default")
 }
 
+/// Whether `form` is an `(import ...)` list, at any depth.
+fn is_import(form: &str) -> bool {
+    let Some(rest) = form.strip_prefix("(import") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with([' ', '"', '(', ')'])
+}
+
+/// Whether `form` is an allow that reads the host root: a `file-read` operation
+/// with `(literal "/")` or `(subpath "/")`.
+fn is_root_wide_read(form: &str) -> bool {
+    if !form.starts_with("(allow ") {
+        return false;
+    }
+    let reads_file = form.split([' ', '(', ')']).any(|token| {
+        token == "file-read*"
+            || token == "file-read-data"
+            || token == "file-read-metadata"
+            || token.starts_with("file-read")
+    });
+    reads_file && (form.contains("(literal \"/\")") || form.contains("(subpath \"/\")"))
+}
+
+/// Every list in `form`, the form itself first, then each nested list.
+fn nested_lists(form: &str) -> Vec<String> {
+    let mut lists = Vec::new();
+    collect_nested_lists(form, &mut lists);
+    lists
+}
+
+fn collect_nested_lists(form: &str, lists: &mut Vec<String>) {
+    if !form.starts_with('(') {
+        return;
+    }
+    lists.push(form.to_string());
+    let Some(inner) = form.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return;
+    };
+    for child in profile_forms(inner) {
+        collect_nested_lists(&child, lists);
+    }
+}
+
+/// Rust source with `//` and `/* */` comments removed. A citation must name
+/// a remaining `fn`, not a comment.
+fn rust_source_without_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_line = false;
+    let mut in_block = false;
+    while let Some(ch) = chars.next() {
+        if in_line {
+            if ch == '\n' {
+                in_line = false;
+                out.push(ch);
+            }
+            continue;
+        }
+        if in_block {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_line = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The one pinned justification for a platform-baseline id. A prefix plus
+/// a placeholder letter is refused.
+fn platform_baseline_justification_text(name: &str, id: &str) -> Result<String, String> {
+    let prefix = platform_baseline_justification(name);
+    let reason = match (name, id) {
+        ("did-provider", "startup-root-directory") => {
+            "resolve the absolute program path through the root directory."
+        }
+        ("wallet-provider", "startup-root-directory") => {
+            "the kernel resolves every absolute path through the root directory."
+        }
+        ("model-provider", "startup-root-directory") => {
+            "file-read-data of literal / is the startup root-directory read."
+        }
+        ("model-provider", "startup-sysctl") => {
+            "sysctl-read is the startup page-size read, with no write and no added sysctl name."
+        }
+        (_, "startup-root-directory") => {
+            "file-read* of literal / is the startup root-directory read."
+        }
+        (_, "startup-sysctl") => {
+            "sysctl-read is the startup read of kernel facts by the loader and the allocator."
+        }
+        _ => {
+            return Err(format!(
+                "{name} platform baseline {id} has no pinned justification"
+            ))
+        }
+    };
+    Ok(format!("{prefix}{reason}"))
+}
+
 /// Whether `form` is a top-level allow rule that grants `process-exec`: one of
 /// its operation names, the bare tokens directly inside the allow form before
 /// or after a nested filter or a string, is `process*` or starts with
@@ -1594,14 +1758,20 @@ fn profile_denies_network() {
         "the profile must deny by default"
     );
     for form in &forms {
-        assert!(
-            !is_default_allow(form),
-            "the profile must reject allow default, including after deny default: {form}"
-        );
-        assert!(
-            !is_network_allow(form),
-            "the profile must not grant network access: {form}"
-        );
+        for list in nested_lists(form) {
+            assert!(
+                !is_default_allow(&list),
+                "the profile must reject allow default, including after deny default: {list}"
+            );
+            assert!(
+                !is_network_allow(&list),
+                "the profile must not grant network access: {list}"
+            );
+            assert!(
+                !is_import(&list),
+                "the profile must reject (import ...): {list}"
+            );
+        }
     }
 }
 
@@ -1686,16 +1856,21 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
     }
     let mut exec_allows = Vec::new();
     for form in &forms {
-        if is_default_allow(form) {
-            return Err(format!("{name} must reject (allow default): {form}"));
-        }
-        if is_network_allow(form) {
-            return Err(format!(
-                "{name} must not grant network access; a network allow is refused: {form}"
-            ));
-        }
-        if is_exec_allow(form) {
-            exec_allows.push(form.as_str());
+        for list in nested_lists(form) {
+            if is_default_allow(&list) {
+                return Err(format!("{name} must reject (allow default): {list}"));
+            }
+            if is_network_allow(&list) {
+                return Err(format!(
+                    "{name} must not grant network access; a network allow is refused: {list}"
+                ));
+            }
+            if is_import(&list) {
+                return Err(format!("{name} must reject (import ...): {list}"));
+            }
+            if is_exec_allow(&list) {
+                exec_allows.push(list);
+            }
         }
         let mut rest = form.as_str();
         while let Some(at) = rest.find(PARAM_PREFIX) {
@@ -1835,7 +2010,6 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             ));
         }
     }
-    let prefix = platform_baseline_justification(name);
     for (entry, claim) in baseline_rules.iter().zip(&baseline) {
         let Some(justification) = entry["justification"].as_str() else {
             return Err(format!(
@@ -1843,16 +2017,10 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
                 claim.id
             ));
         };
-        if !justification.starts_with(&prefix) {
+        let expected = platform_baseline_justification_text(name, &claim.id)?;
+        if justification != expected {
             return Err(format!(
-                "{name} platform baseline {} justification must start with {prefix:?}",
-                claim.id
-            ));
-        }
-        if justification[prefix.len()..].trim().is_empty() {
-            return Err(format!(
-                "{name} platform baseline {} justification must start with {prefix:?} \
-                 and give a reason",
+                "{name} platform baseline {} justification must be {expected:?}",
                 claim.id
             ));
         }
@@ -1928,6 +2096,17 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             .map(|claim| claim.id.as_str());
         if claimant != Some(expected) {
             return Err(format!("{name} rule {rule} must be claimed by {expected}"));
+        }
+    }
+    for claim in &rights {
+        if claim.id == "storage" {
+            for rule in &claim.rules {
+                if is_root_wide_read(rule) {
+                    return Err(format!(
+                        "{name} storage must not claim a root-wide read: {rule}"
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -2349,7 +2528,7 @@ fn operations_table_citation_problems(
                 continue;
             }
         };
-        if !source.contains(&format!("fn {function}(")) {
+        if !rust_source_without_comments(&source).contains(&format!("fn {function}(")) {
             problems.push(format!(
                 "{document_name} CONFINEMENT.md: {span} names a function that {} does not hold",
                 path.display()
@@ -2369,6 +2548,7 @@ fn operations_table_citation_problems(
 fn allow_forms(profile: &str) -> Vec<String> {
     profile_forms(profile)
         .into_iter()
+        .flat_map(|form| nested_lists(&form))
         .filter(|form| form.starts_with("(allow "))
         .collect()
 }
@@ -2493,23 +2673,19 @@ fn declared_rights_fixture(provider: &str) -> Value {
             {"id": "bound-executable", "rules": [SHARED_RULES[0]]},
         ],
     });
-    let prefix = platform_baseline_justification(provider);
     fixture[PLATFORM_BASELINE] = json!({
         "status": platform_baseline_status(provider),
         "rules": [
             {
                 "id": "startup-root-directory",
-                "justification": format!(
-                    "{prefix}file-read* of literal / is the startup root-directory read."
-                ),
+                "justification": platform_baseline_justification_text(provider, "startup-root-directory")
+                    .expect("pinned startup-root-directory justification"),
                 "rules": [STARTUP_RULES[0]],
             },
             {
                 "id": "startup-sysctl",
-                "justification": format!(
-                    "{prefix}sysctl-read is the startup read of kernel facts by the loader \
-                     and the allocator."
-                ),
+                "justification": platform_baseline_justification_text(provider, "startup-sysctl")
+                    .expect("pinned startup-sysctl justification"),
                 "rules": [STARTUP_RULES[1]],
             },
         ],
@@ -2748,7 +2924,7 @@ fn declared_rights_trace_refuses_each_bad_input() {
     assert!(
         reason.starts_with(name)
             && reason.contains("startup-root-directory")
-            && reason.contains("must start with"),
+            && reason.contains("must be"),
         "a justification with another provider's prefix must be refused by id: {reason}"
     );
 
@@ -2760,7 +2936,7 @@ fn declared_rights_trace_refuses_each_bad_input() {
     assert!(
         reason.starts_with(name)
             && reason.contains("startup-root-directory")
-            && reason.contains("must start with"),
+            && reason.contains("must be"),
         "a platform-baseline justification without a reason must be refused by id: {reason}"
     );
 
@@ -2892,10 +3068,8 @@ fn declared_rights_trace_refuses_each_bad_input() {
     );
 
     let mut declared = read();
-    declared[PLATFORM_BASELINE]["rules"][0]["justification"] = json!(format!(
-        "{}x",
-        platform_baseline_justification(name)
-    ));
+    declared[PLATFORM_BASELINE]["rules"][0]["justification"] =
+        json!(format!("{}x", platform_baseline_justification(name)));
     let reason = refuse(&declared, &profile);
     assert!(
         reason.contains("startup-root-directory")
@@ -3872,7 +4046,8 @@ fn file_profile_contract_refuses_nested_grants() {
     let refusal = check_profile_contract("fixture-provider", &nested_exec)
         .expect_err("a nested second exec allow must fail");
     assert!(
-        refusal.contains("fixture-provider") && refusal.contains("more than one process-exec allow"),
+        refusal.contains("fixture-provider")
+            && refusal.contains("more than one process-exec allow"),
         "the refusal must name the nested extra exec: {refusal}"
     );
 
@@ -4360,6 +4535,10 @@ fn a_bare_top_level_value_is_its_own_form() {
 /// premise of `a_bare_top_level_value_is_its_own_form`. It checks that premise,
 /// not a rule, so it carries no falsifier entry.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn the_bare_value_fixture_loads_under_sandbox_exec() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
@@ -4389,6 +4568,10 @@ fn the_bare_value_fixture_loads_under_sandbox_exec() {
 /// exit shows the fixture's premise. It checks that premise, not a rule, so it
 /// carries no falsifier entry.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "NOT RUN: sandbox-exec is macOS only"
+)]
 fn the_string_fixture_loads_under_sandbox_exec() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
