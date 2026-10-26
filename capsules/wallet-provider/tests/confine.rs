@@ -1393,6 +1393,21 @@ fn is_default_allow(form: &str) -> bool {
     form.starts_with("(allow ") && form.split([' ', '(', ')']).any(|token| token == "default")
 }
 
+/// Whether `form` is a top-level allow rule that grants `process-exec`: one of
+/// its operation names, the tokens after `allow` before the first filter, is
+/// `process*` or starts with `process-exec`, and each of those grants it. This
+/// is the one copy of the rule, used by the shared file-profile contract
+/// check (P10).
+fn is_exec_allow(form: &str) -> bool {
+    let Some(rest) = form.strip_prefix("(allow ") else {
+        return false;
+    };
+    let operations = rest.split('(').next().unwrap_or_default();
+    operations
+        .split_whitespace()
+        .any(|operation| operation == "process*" || operation.starts_with("process-exec"))
+}
+
 /// The profile denies every network operation: it starts from `(deny default)`
 /// and grants no network rule. The provider has no network path of its own,
 /// so this rule is what keeps that true if a later change adds one.
@@ -1441,8 +1456,9 @@ const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-prov
 
 /// The one file-profile contract every file profile declares: `(version 1)`
 /// first, `(deny default)` second, an explicit `(deny network*)`, no
-/// `(allow default)`, no network allow, only the canonical parameter tokens,
-/// and the three shared rules verbatim. The profile the Runtime generates must
+/// `(allow default)`, no network allow, exactly one `process-exec` allow (the
+/// shared exec rule), only the canonical parameter tokens, and the three
+/// shared rules verbatim. The profile the Runtime generates must
 /// match it; that Runtime bridge change is not built. Every refusal names the
 /// profile and the rule.
 fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
@@ -1460,6 +1476,7 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             "{name} must deny the network explicitly with (deny network*)"
         ));
     }
+    let mut exec_allows = Vec::new();
     for form in &forms {
         if is_default_allow(form) {
             return Err(format!("{name} must reject (allow default): {form}"));
@@ -1468,6 +1485,9 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             return Err(format!(
                 "{name} must not grant network access; a network allow is refused: {form}"
             ));
+        }
+        if is_exec_allow(form) {
+            exec_allows.push(form.as_str());
         }
         let mut rest = form.as_str();
         while let Some(at) = rest.find(PARAM_PREFIX) {
@@ -1484,6 +1504,17 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             }
             rest = &tail[end..];
         }
+    }
+    if exec_allows.len() > 1 {
+        let quoted = exec_allows[1..]
+            .iter()
+            .map(|form| format!("`{form}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{name} holds more than one process-exec allow, so it has a second exec path (P10); \
+             the extra rules are {quoted}"
+        ));
     }
     for rule in SHARED_RULES {
         if !forms.iter().any(|form| form == rule) {
@@ -2523,6 +2554,43 @@ fn file_profile_contract_rejects_an_allow_default() {
         refusal.contains("fixture-provider") && refusal.contains("must reject (allow default)"),
         "the refusal must name the profile and the rule: {refusal}"
     );
+}
+
+/// The one contract check refuses a profile that holds a second exec allow,
+/// whichever form grants it, and names the profile, the extra rule and the
+/// reason. A fixture profile that appends `(allow process-exec (literal
+/// "/bin/sh"))` keeps its own removal for the 055 removal check, and the 056
+/// and 059 copy tests still launch and refuse copies of the provider binary,
+/// because `PROVIDER_EXECUTABLE` stays the only bound binary, so neither test
+/// sees a second exec path. The fixtures are built in the test; no file is
+/// read and no process starts.
+///
+/// Falsifier: WP69 disables the second-exec-allow refusal in
+/// `check_profile_contract`; this test fails because the `/bin/sh` fixture
+/// passes.
+#[test]
+fn file_profile_contract_rejects_a_second_exec_allow() {
+    let complete = contract_fixture_profile(true);
+    check_profile_contract("fixture-provider", &complete).expect(
+        "a profile with the version, default denial, network denial and shared rules must pass",
+    );
+    for grant in [
+        r#"(allow process-exec (literal "/bin/sh"))"#,
+        SHARED_RULES[0],
+        r#"(allow process* (literal "/bin/sh"))"#,
+    ] {
+        let profile = format!("{complete}{grant}\n");
+        let refusal = check_profile_contract("fixture-provider", &profile)
+            .expect_err("a profile with a second exec allow must fail");
+        assert!(
+            refusal.contains("fixture-provider") && refusal.contains(grant),
+            "the refusal must name the profile and the extra rule: {refusal}"
+        );
+        assert!(
+            refusal.contains("more than one process-exec allow"),
+            "the refusal must say there is more than one process-exec allow: {refusal}"
+        );
+    }
 }
 
 /// The one contract check refuses a profile that binds a parameter token

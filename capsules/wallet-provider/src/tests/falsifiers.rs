@@ -60,8 +60,12 @@ use std::process::Command;
 /// and task 064's WP67, which drops the section check's character-before rule,
 /// so `XDID1` names `DID1`, and WP68, which drops its character-after rule, so
 /// `DID1a` names `DID1`; `falsifier_section_check_reports_missing_and_stale_ids`
-/// fails on the matching case because the missing-id problem does not come.
-const EXPECTED_FALSIFIERS: usize = 66;
+/// fails on the matching case because the missing-id problem does not come,
+/// and task 066's WP69, which disables the second-exec-allow refusal in
+/// `check_profile_contract`, so
+/// `file_profile_contract_rejects_a_second_exec_allow` fails because the
+/// `/bin/sh` fixture passes.
+const EXPECTED_FALSIFIERS: usize = 67;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
