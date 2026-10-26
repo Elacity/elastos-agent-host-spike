@@ -416,6 +416,67 @@ Neither file is in the runner's recovery list
 (`examples/agent-host/falsify.py`, `PROVIDER_TARGETS`). The runner still runs
 them. The provider lane adds those two recovery lines after this task merges.
 
+## Verify is not admit (M1 check B1)
+
+The rule: a valid signature grants nothing by itself. A bundle whose test-key
+signature verifies is still not admitted, and it gets no grant. This library
+checks identity only, and it sits in no admission or launch path.
+
+What the tests show, on the `agent-host` fixture. Its manifest asks for a grant
+through `capabilities`, and it has its `asks.json`. A fresh in-memory test key
+signs it:
+
+- The signature is valid: `verify_name_signature` returns `Ok(())` when that
+  key's DID is accepted.
+- After signing, and again after verifying, the bundle's lab CID is still
+  `43a918a5…c054`, and the parent folder still holds only the bundle folder.
+  So no byte the lab CID covers changed, and no file appeared next to the
+  bundle. The tests compare before and after. They cannot see a file that
+  was written and then removed in between.
+- After verifying, the bundle's `capsule.json`, parsed with the Runtime's own
+  `CapsuleManifest`, still has no `signature`. So no lab signature reaches
+  the field the Runtime's own capsule check reads
+  (`elastos/crates/elastos-runtime/src/signature/verifier.rs:79-83`).
+- Each check stands alone. Right after that success, the same signature is
+  refused with an empty accepted list, and with a list that holds only
+  another fresh key's DID. Both refusals give the accepted-list reason. A
+  success leaves no standing approval.
+- The library's public functions are exactly the identity checks: `lab_cid`,
+  `lab_cid_observed`, `checked_bundle`, `checked_bundle_observed`,
+  `check_name` and its checked form `CheckedBundle::check_name`,
+  `CheckedBundle::cid`, `CheckedBundle::entries`, `encode_entries`,
+  `entry_kind`, `entry_path`, `name_signature_message`, `sign_bundle`,
+  `verify_checked_signature` and `verify_name_signature`. Each answers "do
+  these bytes match this name" or "did this key sign this name". None takes
+  or returns a grant, an admission or a launch value. A test keeps the list:
+  a new public function fails it until someone lists it on purpose.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| A valid signature verifies, and signing and verifying change no covered byte, add no entry next to the bundle, and leave no lab signature in `capsule.json`; a success approves nothing for the next check | `valid_signature_grants_nothing_by_itself` | F-CI7a, F-CI7b, F-CI7c |
+| The library exports only identity checks | `the_harness_exports_only_identity_checks` | F-CI7d |
+
+The tests are in `tests/not_admission.rs`. F-CI7a makes `sign_bundle` write
+the signature's hex into `capsule.json`'s `signature` field, the way the
+Runtime's own signer fills that field (`verifier.rs:139-150`). F-CI7b makes a
+successful verify write `<bundle>.admitted`. F-CI7c makes verify remember each
+name and signer it passed, and pass them again with no accepted-list check.
+F-CI7d adds a public `admit` step.
+
+What the tests cannot show. Admission and grants are the Runtime's, not this
+lab's. PRINCIPLES.md 13 (lines 134-135): "admission is a separate decision
+made under each Runtime's trust policy". PRINCIPLES.md 8 (lines 88-91):
+"every operation still requires its Runtime-verified capability". The
+manifest's `capabilities` are only upper bounds that the Runtime may
+authorize (`CapsuleManifest::resource_authority_bounds`,
+`elastos/crates/elastos-common/src/manifest.rs:418-429`). Moving grant
+decisions into Runtime policy is Runtime issue 464,
+https://github.com/Elacity/elastos-runtime/issues/464. So these tests say
+nothing about what the Runtime would decide. They do not run the Runtime, and
+they model no admission or grant, not even in a test.
+
+Claim scope: one Mac, these fixtures, test keys only.
+
 ## Why a lab CID and not the Runtime's CID
 
 The Runtime names a published capsule by the CID its IPFS provider returns when
@@ -476,6 +537,7 @@ tests/encoding.rs        order, boundaries, label, one file per path
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
 tests/name_signature.rs  a test key signs the printed lab CID; verification only
+tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/refusals.rs        each refusal and its reason
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -483,21 +545,22 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 81 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 86 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
 to F-CI9j (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers)),
-and task 004's F-CI4a to F-CI4y (see
-[the test-key signature](#test-key-publisher-signature-lab-proposal)).
+task 004's F-CI4a to F-CI4z (see
+[the test-key signature](#test-key-publisher-signature-lab-proposal)),
+and task 007's F-CI7a to F-CI7d (see
+[verify is not admit](#verify-is-not-admit-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
-error. Every entry except F-CI4h and F-CI4i edits a file the runner restores
-after a killed run: `src/lib.rs`, `tests/common/mod.rs` or
-`fixtures/wc001-core/capsule.json`. F-CI4h edits this lane's `.gitignore` and
-F-CI4i edits this file. Those two are not in the runner's recovery list. The
-runner still runs them. The provider lane adds both lines after this task
-merges.
+error. Every entry except F-CI4h, F-CI4i and F-CI4z edits a file the runner
+restores after a killed run: `src/lib.rs`, `tests/common/mod.rs` or
+`fixtures/wc001-core/capsule.json`. F-CI4h edits this lane's `.gitignore`,
+F-CI4i edits this file, and F-CI4z edits `tests/name_signature.rs`. Those
+three are not in the runner's recovery list. The runner still runs them.
 
 Task 009 moved code without changing an older entry. The root manifest check
 and the encoder call moved from `lab_cid_observed` into
@@ -517,8 +580,9 @@ python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers
 ```
 
 At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
-46 of 46). At task 004 it reported `summary: 81 CAUGHT of 81`. The runner
-does not print why a test failed. Tasks 003, 009 and 004 prove each of their
-falsifiers by break, named test fails, revert.
+46 of 46). At task 004 it reported `summary: 81 CAUGHT of 81`. At task 007
+it reported `summary: 86 CAUGHT of 86` (with the id prefix `F-CI7`: 4 of 4).
+The runner does not print why a test failed. Tasks 003, 009, 004 and 007
+prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
