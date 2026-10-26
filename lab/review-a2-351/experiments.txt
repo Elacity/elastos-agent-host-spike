@@ -1,0 +1,23 @@
+A2 #351 adversarial review experiments
+HEAD a97a6373181f526af2eba17fe95d2898201ab63d
+DRIVER a842b56f569b2f7e68a7426e2268e43fa7abf707c533cceffe62ea01ea9d37e3
+GUEST b234ac47ca4f52de27b17ff999ec2af6b9694135e53bf059e49c16897df058e4
+TWO-PROC first_exit=0 PROCESS first pid=13387
+TWO-PROC second_exit=0 PROCESS second pid=13397
+TWO-PROC first_rows={'WRITE': 'PASS', 'STALE': 'PASS'}
+TWO-PROC second_rows={'RESUME': 'PASS', 'WRITE2': 'PASS'}
+TWO-PROC state_keys=['bytes', 'first_pid', 'revision', 'sha256'] first_pid=13387
+TWO-PROC runtime-data files=8 store_exists_after_first_exit=yes
+TWO-PROC same_printed_pid=False
+PLANT F-REV-HARDCODED-HARNESS-PASS: MISSED — Proof.row accepted six hardcoded PASSes; A2_counted=True
+PLANT F-REV-NOT-RUN-UPGRADE: CAUGHT — RESUME was NOT RUN; it cannot become PASS
+PLANT F-REV-HARDCODED-DRIVER-PASS: MISSED — WRITE=PASS STALE=PASS STOP=PASS counted=False journal_on_disk=False first_exit=0
+  note: harness treated a hardcoded ROW WRITE PASS as a real PASS
+PLANT F-REV-SKIPPED-STALE: CAUGHT — WRITE=PASS STALE=NOT RUN can_resume=False
+PLANT F-REV-STOP-NONZERO: MISSED — first_exit=1 STOP=PASS WRITE=PASS
+PLANT F-REV-SECOND-STALE-WRITE: CAUGHT — WRITE=PASS RESUME=PASS WRITE2=FAIL
+PLANT F-REV-OLDER-JOURNAL: CAUGHT — RESUME=FAIL WRITE2=None exit=0
+PLANT F-REV-STORE-WIPE: CAUGHT — started=True RESUME=None WRITE2=None exit=1 error=True
+PLANT F-REV-GUEST-HASH: MISSED — before=b234ac47ca4f52de27b17ff999ec2af6b9694135e53bf059e49c16897df058e4 after=5828f669f99526a9eb0f436e951ddfba48b25e037c7191a52abf18a90ee63e60; harness logs the hash and never compares it, so a changed guest still proceeds
+  mutated-guest first WRITE=PASS STALE=PASS exit=0
+  note: mutated guest still produced WRITE PASS
