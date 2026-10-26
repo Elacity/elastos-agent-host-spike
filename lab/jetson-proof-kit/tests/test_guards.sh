@@ -151,8 +151,8 @@ while IFS= read -r line; do
     case "$line" in
         '' | \#*) continue ;;
     esac
-    id=$(printf '%s\n' "$line" | awk '{ print $1 }')
-    status=$(printf '%s\n' "$line" | awk '{ print $2 }')
+    id=$(printf '%s\n' "$line" | awk -F '\t' '{ print $1 }')
+    status=$(printf '%s\n' "$line" | awk -F '\t' '{ print $2 }')
     assert_eq "committed_$id" "$status" "NOT RUN"
 done <"$kit/evidence.txt"
 

@@ -5,3 +5,5 @@
   builds with `-j 4`, and writes `evidence.txt`. Path and memory guards have
   tests. F-JPK-OUTSIDE and F-JPK-MEM are the two falsifiers. Jetson rows stay
   NOT RUN.
+- 26 Oct 2026, cloud: `tests/test_guards.sh` reads evidence as TSV so `NOT RUN`
+  stays one status. 26 passed. Both falsifiers caught on copies.
