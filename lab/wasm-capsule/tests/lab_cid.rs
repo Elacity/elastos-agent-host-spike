@@ -121,9 +121,18 @@ fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
         ["read", "_bundle"].concat(),
         ["open", "_regular"].concat(),
     ];
-    // The shared crate's name, and the one line in the lane that imports it.
+    // The shared crate's naming functions, and the one line in the lane that
+    // names one of them. wc-004's verifier and its tests import the shared
+    // crate's checked bundle and name signature too; those name a bundle only
+    // through `checked_bundle`, the same walk, never through these.
+    let naming = [
+        ["lab", "_cid"].concat(),
+        ["lab", "_cid_observed"].concat(),
+        ["checked_bundle", "_observed"].concat(),
+        ["encode", "_entries"].concat(),
+    ];
     let shared_crate = ["capsule", "_identity"].concat();
-    let the_one_export = format!("pub use {shared_crate}::lab_cid as bundle_identity;");
+    let the_one_export = format!("pub use {shared_crate}::{} as bundle_identity;", naming[0]);
 
     let files = lane_files(&lane_dir());
     let mut found = Vec::new();
@@ -135,7 +144,7 @@ fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
                     found.push(format!("{path}:{}: {needle}", number + 1));
                 }
             }
-            if line.contains(shared_crate.as_str()) {
+            if naming.iter().any(|name| names_word(line, name)) {
                 imports.push((path.as_str(), line.trim()));
             }
         }
@@ -149,4 +158,15 @@ fn the_lane_keeps_no_bundle_name_rule_of_its_own() {
         [("tools/src/lib.rs", the_one_export.as_str())],
         "the shared naming function must be imported only by the one export"
     );
+}
+
+/// Whether `line` holds `word` as a whole identifier: no identifier character
+/// just before or just after it.
+fn names_word(line: &str, word: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    line.match_indices(word).any(|(at, _)| {
+        let before = line[..at].chars().next_back();
+        let after = line[at + word.len()..].chars().next();
+        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+    })
 }

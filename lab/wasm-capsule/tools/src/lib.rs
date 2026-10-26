@@ -11,8 +11,14 @@
 //!
 //! [`bundle`] holds the rules of the `tools/bundle` command, which writes a
 //! new bundle of the two and prints its lab CID.
+//!
+//! [`verify`] is wc-004's one verify path: a checked bundle's in-memory name
+//! signature, through cc-capsule-identity, then the cx-wasm-audit crate's
+//! `audit` of the checked entrypoint module. It is a lab check, never an
+//! admission or launch decision.
 
 pub mod bundle;
+pub mod verify;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 

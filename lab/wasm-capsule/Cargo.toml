@@ -3,10 +3,11 @@
 # members. The root package `capsule`: the guest lives in capsule/src, the
 # host-side build and verification tooling lives in tests/ (never compiled into
 # the capsule). `audit/`: the cx-wasm-audit lane's `wasm-capsule-audit` crate,
-# the one import-audit path (PRINCIPLES P10) for wc-004's verifier. And
-# `tools/`: `wasm-capsule-tools`, the lab's host-side library, which names a
-# lab bundle only through cc-capsule-identity's lab CID (`bundle_identity`, one
-# re-export) and holds this capsule's manifest bytes.
+# the one import-audit path (PRINCIPLES P10), which wc-004's verifier calls.
+# And `tools/`: `wasm-capsule-tools`, the lab's host-side library, which names
+# a lab bundle only through cc-capsule-identity's lab CID (`bundle_identity`,
+# one re-export), holds this capsule's manifest bytes and holds wc-004's one
+# verify path (`wasm_capsule_tools::verify`).
 #
 # `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
 # act on the root package `capsule` only (there is no `default-members`), so
@@ -29,12 +30,22 @@ crate-type = ["cdylib", "rlib"]
 # The named tests in tests/ name bundles through the tools crate's
 # `bundle_identity`, and read this capsule's manifest with the Runtime's own
 # `CapsuleManifest` (a read-only path dependency on `elastos-common`, parsed
-# with `serde_json`, the crate that type is read with). Cargo builds a
-# dev-dependency only for tests, never for the capsule, and `capsule` keeps no
-# `[dependencies]` (P18).
+# with `serde_json`, the crate that type is read with). wc-004's tests also
+# call cc-capsule-identity's `checked_bundle` and `sign_bundle` and the
+# Runtime's `encode_signing_key_did` directly (read-only path dependencies),
+# name `wasm_capsule_audit`'s types and API version, and make each test key
+# fresh in memory with `ed25519-dalek` and `rand`'s `OsRng`, as
+# cc-capsule-identity's own tests do. All of them are the versions the
+# lockfile already held. Cargo builds a dev-dependency only for tests, never
+# for the capsule, and `capsule` keeps no `[dependencies]` (P18).
 [dev-dependencies]
+capsule-identity = { path = "../capsule-identity" }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 elastos-common = { path = "../../elastos/crates/elastos-common" }
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
+rand = "0.8"
 serde_json = "1.0"
+wasm-capsule-audit = { path = "audit" }
 wasm-capsule-tools = { path = "tools" }
 
 # The reproducible-build knobs the capsule is compiled with (Cargo honours
