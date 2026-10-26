@@ -1,9 +1,11 @@
 # capsule-identity lab: one lab CID over a whole bundle
 
 Lab tooling for the cc-capsule-identity lane (ci-1: tasks 001 and 005; ci-2:
-task 003). It names a capsule bundle by one deterministic **lab CID** over all
-of its bytes: the manifest and every payload file (PRINCIPLES 13 and 15). It
-checks a claimed name against the bytes and never trusts it.
+task 003; ci-8: task 009). It names a capsule bundle by one deterministic
+**lab CID** over all of its bytes: the manifest and every payload file
+(PRINCIPLES 13 and 15). It checks a claimed name against the bytes and never
+trusts it. It also returns the name together with the bytes it covers, so a
+caller never needs to read a bundle twice.
 
 ## What it is, and what it is not
 
@@ -54,10 +56,10 @@ def lab_cid(files):  # {bundle path: bytes}
     return "lab-cid:sha256:" + h.hexdigest()
 ```
 
-In Rust, `lab_cid` walks a bundle and `encode_entries` is the encoder. They are
-the only code that names a bundle; tests call them and copy neither.
-`check_name` checks a claimed name by calling `lab_cid`; it computes no name of
-its own.
+In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle
+and `encode_entries` is the encoder. They are the only code that names a
+bundle; tests call them and copy neither. `check_name` checks a claimed name by
+calling `lab_cid`; it computes no name of its own.
 
 ## Fixtures and their pinned lab CIDs
 
@@ -195,7 +197,10 @@ call the root a link.
    same handle.
 
 **One walk.** `lab_cid(bundle)` is `lab_cid_observed(bundle, observer)` with an
-observer that does nothing. The observer is the tests' seam: the walk tells it
+observer that does nothing, and `lab_cid_observed` is the lab CID of
+`checked_bundle_observed(bundle, observer)`, which runs the walk (see
+[the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers)). The
+observer is the tests' seam: the walk tells it
 about each entry at two moments, `BeforeOpen` (name and listed kind known,
 nothing open) and `AfterCheck` (handle open and checked, nothing read or listed
 yet). It returns nothing, so it cannot steer the walk. No other code walks a
@@ -227,6 +232,69 @@ at each moment and show both outcomes.
 - A filesystem whose listing does not report entry types gets every entry
   refused as a `special file`. APFS reports them.
 - A name that is not UTF-8 is refused, never converted.
+
+## Checked bundle: the name and the bytes it covers
+
+`checked_bundle(bundle)` returns a `CheckedBundle`. It holds the bundle's lab
+CID and every regular file the walk read: each file's bundle path and the
+bytes read from its checked handle. One walk and one manifest check make it.
+`lab_cid` is that same walk and returns only the value's `cid()`, so a bundle
+is still walked, checked and named in one place (P10).
+
+**Use the entries; never read the folder again.** A caller that audits, stages
+or signs a bundle takes the bytes from `entries()` of the same value. A path
+form reads the folder a second time, and a file changed between the two reads
+would be used under a name that does not cover it. The value closes that gap:
+the bytes it hands out are the bytes its lab CID names.
+
+- Its fields are private. Only `checked_bundle` and `checked_bundle_observed`
+  make one, and nothing changes one: there is no public constructor, no `&mut`
+  access and no `Deserialize`. So its lab CID always names its entries:
+  `encode_entries(entries())` gives `cid()`.
+- It holds a name and bytes, never a decision. It is no trust, admission or
+  launch value. Holding one means only "these bytes give this lab CID".
+- The entries come in the walk's order. The encoder sorts them; a caller that
+  needs an order sorts them by path.
+- It lives in memory only. It has no file or serialized form, and nothing
+  writes or stages its entries anywhere.
+
+**The checked name check.** `checked.check_name(claimed)` is the checked form
+of `check_name(bundle, claimed)`. Both run the one claim check (the
+`lab-cid:sha256:` label and 64 lowercase hex characters) and the one compare,
+with the same refusals and texts. The checked form judges the lab CID the value
+holds and reads nothing, so it judges exactly the bytes in `entries()`, even
+after the folder has changed. `check_name(bundle, claimed)` reads the folder as
+it is now, so after a change the two answer differently, and each is right
+about the bytes it judged.
+
+The public API another lab may call:
+
+| Call | Gives |
+| --- | --- |
+| `checked_bundle(bundle: &Path) -> Result<CheckedBundle, Refusal>` | the lab CID and the bytes it names; a refusal is exactly `lab_cid`'s, variant and text |
+| `CheckedBundle::cid(&self) -> LabCid` | the lab CID of the entries |
+| `CheckedBundle::entries(&self) -> &[BundleEntry]` | every regular file the walk read, as `path` and `content` |
+| `CheckedBundle::check_name(&self, claimed: &str) -> Result<(), Refusal>` | `Ok(())` when `claimed` is this lab CID; otherwise `NotALabCid` or `NameMismatch` |
+
+`checked_bundle_observed(bundle, observe)` is the tests' seam, as
+`lab_cid_observed` is. `lab_cid`, `lab_cid_observed` and `check_name` reach the
+walk only through it.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The value's lab CID names its entries, and they are each fixture's committed files with their bytes | `checked_bundle_returns_the_bytes_its_lab_cid_names` | F-CI9b |
+| A file swapped for a link after its handle is checked: the value keeps the checked bytes, never the outside file's | `checked_entries_are_the_bytes_the_walk_checked` (`tests/walk.rs`) | F-CI9a |
+| A bundle `lab_cid` refuses gets the same refusal, variant and text, and no value | `checked_bundle_refuses_what_lab_cid_refuses` | F-CI9c |
+| One manifest check, in the seam | `checked_bundle_checks_the_manifest_once` | F-CI9c (moved out), F-CI9g (a second one) |
+| Private fields; the seam is the one place that builds one; no `&mut` | `checked_bundle_fields_are_private` | F-CI9d (public field), F-CI9e (constructor), F-CI9f (`&mut` lab CID) |
+| The checked form judges the bytes it holds; the path form reads the folder now | `checked_name_check_judges_the_checked_bytes` | F-CI3g, F-CI9h (no compare), F-CI9i (bare hex), F-CI9j (walks again) |
+| The checked form refuses a lab CID its bytes do not give | `checked_name_check_refuses_a_mismatch` | F-CI3g, F-CI9h |
+| The checked form calls the one claim check and the one compare, and reads nothing | `checked_name_check_shares_the_claim_check_and_the_compare` | F-CI9h, F-CI9i, F-CI9j |
+
+The tests are in `tests/checked_bundle.rs` unless the table names another
+file. F-CI3g skips the one compare, so it lists the checked form's two tests
+too: a checked form with a compare of its own would leave
+`checked_name_check_refuses_a_mismatch` passing, and F-CI3g would not count.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -271,12 +339,14 @@ runs `lab/wasm-capsule/tools/build`, so it also needs that lane's toolchain.
 
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
-src/lib.rs               lab_cid, lab_cid_observed, check_name, the encoder and the walk
+src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
+                         the encoder and the walk
 fixtures/                content-sample, web-app, wc001-core, agent-host
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
+tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/encoding.rs        order, boundaries, label, one file per path
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
@@ -287,14 +357,24 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 46 planted bugs in the provider format: round 1's
-F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, and task 003's F-CI3a to
-F-CI3p (no F-CI3e or F-CI3f: see
-[above](#what-the-lab-cid-ignores-and-what-it-covers)). Each has
-`"command": "capsule-identity"` and `expect: "caught"`, and counts only when
-every named test fails for its stated reason, never from a build error. Each
-edits one of the files the runner restores after a killed run: `src/lib.rs`,
-`tests/common/mod.rs` or `fixtures/wc001-core/capsule.json`.
+`falsifiers.json` holds 56 planted bugs in the provider format: round 1's
+F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
+(no F-CI3e or F-CI3f: see
+[above](#what-the-lab-cid-ignores-and-what-it-covers)), and task 009's F-CI9a
+to F-CI9j (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers)).
+Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
+only when every named test fails for its stated reason, never from a build
+error. Each edits one of the files the runner restores after a killed run:
+`src/lib.rs`, `tests/common/mod.rs` or `fixtures/wc001-core/capsule.json`.
+
+Task 009 moved code without changing an older entry. The root manifest check
+and the encoder call moved from `lab_cid_observed` into
+`checked_bundle_observed`, and 003's compare moved into `compare_name`, each
+byte for byte, so every older edit's text is still found exactly once. The
+comment line after `encode_entries(&entries)` in `checked_bundle_observed`
+keeps that call on its own line, as the edits of F-CI1k, F-CI1l, F-CI3a,
+F-CI3b and F-CI3i expect; without it, rustfmt joins the call and the line
+after it.
 
 The canonical runner runs the list. Its `capsule-identity` command builds and
 tests `lab/capsule-identity/Cargo.toml`, runs each named test alone with
@@ -304,7 +384,7 @@ tests `lab/capsule-identity/Cargo.toml`, runs each named test alone with
 python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json
 ```
 
-At task 003, on this Mac, it reported `summary: 46 CAUGHT of 46`. The runner
-does not print why a test failed. Task 003 also proved each of its
-falsifiers by hand: plant the edit, run each named test alone, read its failure
-message, restore the file and compare its SHA-256.
+At task 009, on this Mac, it reported `summary: 56 CAUGHT of 56` (at task 003:
+46 of 46). The runner does not print why a test failed. Tasks 003 and 009 also
+proved each of their falsifiers by hand: plant the edit, run each named test
+alone, read its failure message, restore the file and compare its SHA-256.
