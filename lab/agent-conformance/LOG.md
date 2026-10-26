@@ -4268,3 +4268,379 @@ was 0 ahead and 10 behind. This offline builder made zero network requests
 and zero Git mutations. The supervisor owns remote refresh, base compatibility,
 commit, independent review and publication. All ten changed files are inside
 `lab/agent-conformance/`.
+
+## 027 — Kill one worker and measure orphan settlement
+
+Added the kill-worker journey through the existing two-instance collector,
+overlap decision, controller, settlement formatter and census. The harness
+records one SIGKILL and each Home's `run` start count. The absent-policy journey
+now measures and settles its pending request after the client wait ends.
+All task edits stay in this lane; the probe builds, dependencies and Runtime
+sources retain their existing bytes.
+
+Source inspection confirmed `run_cmd.rs:225-269`,
+`resource_bridge.rs:1423-1454`, and `capability/pending.rs:16-17` as the relevant
+client lifetime, wait and pending-timeout boundaries. The first isolated live
+kill run passed in 12.315 seconds, with signal 9, orphan count 1 before and 0
+after fixture settlement, a 2.009508-second quiet window, and three passing
+root censuses. The earlier sandbox attempt stopped at the loopback bind with
+`Operation not permitted`; it is environmental SKIPPED evidence only. The
+same test passed with local process and loopback access. Every Cargo run used
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane-owned
+build directories, and the shared heavy-build lease. Available disk space was
+48.9 GiB, above the documented 12 GiB build allowance plus 2 GiB free.
+
+The checked settlement line uses local labels, exit signal and times. The
+fixture carries request IDs and credentials in memory. Its exact orphan denial
+is `fixture settlement: worker killed`. The sibling's expected cross-read is
+the sole permitted later request for instance-1's resource; every retry from
+any session is refused. This interpretation preserves 023's required sibling
+outcome. Cleanup keeps live grants `BLOCKED(AC-021-GRANTS)`.
+
+### Falsifier checks
+
+Each entry ran manually in three steps using its exact `falsifiers.json`
+edit: baseline, planted, then byte restoration and the same test again.
+The command was `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml --test <effects|report> <name> -- --exact
+--nocapture`. All named tests failed while planted. Local raw results and
+measured command times are under ignored `target/task-027/`.
+
+#### F-kill-retry — CAUGHT
+
+Baseline: `killed_worker_settlement_recorded_without_retry`, exit 0, 11.537 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 11.38s
+```
+
+Planted: `killed_worker_settlement_recorded_without_retry`, exit 101, 17.814 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 16.01s
+overlap journey failed: "no-retry check: instance-1 must start exactly once"
+```
+
+Restored: `killed_worker_settlement_recorded_without_retry`, exit 0, 15.251 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 13.85s
+```
+
+#### F-kill-sibling — CAUGHT
+
+Baseline: `killed_worker_settlement_recorded_without_retry`, exit 0, 12.136 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 11.18s
+```
+
+Planted: `killed_worker_settlement_recorded_without_retry`, exit 101, 12.330 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 11.38s
+instance read acceptance failed: "sibling check: instance-2 must finish its own read and receive its sibling denial"
+```
+
+Restored: `killed_worker_settlement_recorded_without_retry`, exit 0, 12.639 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 11.70s
+```
+
+#### F-kill-record — CAUGHT
+
+Baseline: `killed_worker_settlement_recorded_without_retry`, exit 0, 11.621 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 10.90s
+```
+
+Planted: `killed_worker_settlement_recorded_without_retry`, exit 101, 12.383 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 10.92s
+required instance settlement evidence: "kill: recorded SIGKILL and signal 9 exit are required"
+```
+
+Restored: `killed_worker_settlement_recorded_without_retry`, exit 0, 13.664 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 11.82s
+```
+
+#### F-kill-monitor — CAUGHT
+
+Baseline: `grants::tests::kill_refuses_requests_from_any_session`, exit 0, 1.244 seconds.
+
+```text
+test grants::tests::kill_refuses_requests_from_any_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+```
+
+Planted: `grants::tests::kill_refuses_requests_from_any_session`, exit 101, 1.052 seconds.
+
+```text
+test grants::tests::kill_refuses_requests_from_any_session ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+no-retry check must refuse a worker request from any session
+```
+
+Restored: `grants::tests::kill_refuses_requests_from_any_session`, exit 0, 0.876 seconds.
+
+```text
+test grants::tests::kill_refuses_requests_from_any_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+```
+
+#### F-orphan-settlement — CAUGHT
+
+Baseline: `killed_worker_settlement_recorded_without_retry`, exit 0, 12.821 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 12.03s
+```
+
+Baseline: `no_policy_file_does_not_mean_allow`, exit 0, 37.732 seconds.
+
+```text
+test no_policy_file_does_not_mean_allow ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 37.62s
+```
+
+Planted: `killed_worker_settlement_recorded_without_retry`, exit 101, 13.992 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 12.35s
+instance read acceptance failed: "kill: orphan measurement is missing"
+```
+
+Planted: `no_policy_file_does_not_mean_allow`, exit 101, 36.737 seconds.
+
+```text
+test no_policy_file_does_not_mean_allow ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 36.60s
+cleanup grant census failed; see checked reason
+```
+
+Restored: `killed_worker_settlement_recorded_without_retry`, exit 0, 13.757 seconds.
+
+```text
+test killed_worker_settlement_recorded_without_retry ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 12.58s
+```
+
+Restored: `no_policy_file_does_not_mean_allow`, exit 0, 37.662 seconds.
+
+```text
+test no_policy_file_does_not_mean_allow ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 37.54s
+```
+
+#### F-kill-receipt — CAUGHT
+
+Baseline: `instance_receipt_requires_both_launches_and_scope`, exit 0, 1.044 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+Planted: `instance_receipt_requires_both_launches_and_scope`, exit 101, 1.152 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+each launched instance identity is required
+```
+
+Restored: `instance_receipt_requires_both_launches_and_scope`, exit 0, 0.930 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+#### F-instance-evidence — CAUGHT
+
+Baseline: `grants::tests::instance_journey_requires_all_printed_surfaces`, exit 0, 1.093 seconds.
+
+```text
+test grants::tests::instance_journey_requires_all_printed_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+```
+
+Planted: `grants::tests::instance_journey_requires_all_printed_surfaces`, exit 101, 1.037 seconds.
+
+```text
+test grants::tests::instance_journey_requires_all_printed_surfaces ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.03s
+assertion `left == right` failed
+  left: Err("credential check requires a complete report")
+ right: Err("required instance journey evidence is missing")
+```
+
+Restored: `grants::tests::instance_journey_requires_all_printed_surfaces`, exit 0, 0.712 seconds.
+
+```text
+test grants::tests::instance_journey_requires_all_printed_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+```
+
+#### F-instance-receipt — CAUGHT
+
+Baseline: `instance_receipt_requires_both_launches_and_scope`, exit 0, 0.728 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.01s
+```
+
+Planted: `instance_receipt_requires_both_launches_and_scope`, exit 101, 1.159 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+each launched instance identity is required
+```
+
+Restored: `instance_receipt_requires_both_launches_and_scope`, exit 0, 0.783 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+#### F-cancel-receipt — CAUGHT
+
+Baseline: `instance_receipt_requires_both_launches_and_scope`, exit 0, 0.777 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+Planted: `instance_receipt_requires_both_launches_and_scope`, exit 101, 1.546 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+each launched instance identity is required
+```
+
+Restored: `instance_receipt_requires_both_launches_and_scope`, exit 0, 0.788 seconds.
+
+```text
+test instance_receipt_requires_both_launches_and_scope ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+#### F-cleanup-report — CAUGHT
+
+Baseline: `cleanup_report_keeps_scope_and_grant_blocker`, exit 0, 0.884 seconds.
+
+```text
+test cleanup_report_keeps_scope_and_grant_blocker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+Planted: `cleanup_report_keeps_scope_and_grant_blocker`, exit 101, 1.047 seconds.
+
+```text
+test cleanup_report_keeps_scope_and_grant_blocker ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+assertion failed: text.contains("granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows")
+```
+
+Restored: `cleanup_report_keeps_scope_and_grant_blocker`, exit 0, 0.987 seconds.
+
+```text
+test cleanup_report_keeps_scope_and_grant_blocker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+The moved receipt and cleanup-scope anchors were checked above. The two
+older cleanup planting anchors now insert at the shared cleanup call. The
+pre-existing F-census-a anchor remains stale on this base; this task leaves
+that separate follow-up unchanged. All six new anchors match exactly once.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name or URL where code/content needs a hash? | No | `tests/effects.rs:31` reuses hash-based staging; `src/report.rs:180` requires both launched probe identities for the kill row. |
+| 2. New ambient capsule or UI authority? | No | `tests/common/grants.rs:599` retains explicit Runtime grant/deny decisions. All changed paths belong to the lab. |
+| 3. Second path or copy of an operation rule? | No | `tests/common/grants.rs:547` owns both orphan settlements; `:426` formats cancel, kill and absent-policy lines; `tests/effects.rs:312` calls the existing census for client roots. |
+| 4. Does the trusted Runtime core grow? | No | `src/harness.rs:533` and `tests/common/grants.rs:483` hold the new fixture behavior; Runtime sources retain their bytes. |
+| 5. New refusals deny by default with clear reasons? | Yes | `tests/common/grants.rs:289` refuses retries with fixed reasons; `:547` refuses unrelated pending requests and requires an empty list after settlement. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The existing `probe/src/lib.rs:138` requests authority and `:146` invokes the provider. This task adds zero probe code. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/effects.rs:646`, `tests/common/grants.rs:1421` and `tests/report.rs:670` have the recorded baseline/planted/restored results above. F-orphan-settlement failed both named live tests. |
+| 8. Identity, admission and allowance remain separate? | Yes | `src/report.rs:180` checks identity evidence; `tests/common/grants.rs:599` decides each resource request. Killing a worker grants zero resource authority. |
+
+The task changes `ThrowawayHome::spawn` and `RunningInstances::kill_worker`
+in `src/harness.rs`; `Controller::poll`, `settle_orphan`, `quiet_after_kill`,
+`print_settlement` and their acceptance checks in `tests/common/grants.rs`;
+and the shared `exercise_read` journey in `tests/effects.rs`. The existing
+report renderer, `run.sh`, RUNBOOK and GAPS add the honest A11/A12 label.
+The cleanup, receipt and evidence tests retain their assertions and cover the
+new row. The shared physical census and its lsof implementation retain their
+code; the kill journey invokes that existing path for each client root.
+
+### Final author gate and retention
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`
+passed in 0.107 seconds. `bash lab/agent-conformance/run.sh` passed with exit
+0 in 236.852 seconds, within the unchanged 600-second bound. It ran the lane
+command with `--locked`, all tests and `--show-output`, using
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. The table has 67 passing tests,
+zero failed or skipped tests, ten existing BLOCKED tests, and a passing A14
+receipt. Earlier rows keep their grades. The new row reads:
+
+```text
+killed_worker_settlement_recorded_without_retry | PASS | kill-worker settlement, lab half of A11 (A12 census); orphan settled by the fixture (AC-027-ORPHAN)
+```
+
+The same-run receipt is local and uncommitted at
+`target/run-table.i6L2Ex/VERSIONS.json`, with SHA-256
+`d16d4244faffc1a272e36f1d92db3dbf82c9bf7337e030a65c7cb21c232ab3b5`.
+It reports complete identity, `cargo_success: true`, `command_success: true`
+and `suite_outcome: BLOCKED`. It identifies the uncommitted builder candidate
+at HEAD `c215763e92c1135421ce1926f8278751758e637a`, with `dirty: true`.
+This is author evidence; the supervisor owns the committed-candidate gate and
+independent review. The report contains exactly one kill settlement line:
+
+```text
+kill settlement: instance-1 exit:None signal:Some(9) elapsed:0.051250s kill_at:0.025964s; instance-2 exit:Some(1) signal:None elapsed:0.318572s kill_at:0.000000s; first:0.025639s overlap:0.024706s since_decision:5.899277s; reason:fixture settlement: worker killed; orphan_before:1 orphan_after:0; settled by the fixture; quiet:2.008535s; kill-worker settlement, lab half of A11 (A12 census)
+absent-policy settlement: instance-1 exit:Some(1) signal:None elapsed:30.710404s kill_at:0.000000s; first:0.000000s overlap:0.000000s since_decision:0.000000s; reason:fixture settlement: client wait ended; orphan_before:1 orphan_after:0; settled by the fixture
+```
+
+Additional checks passed: `git diff --check`, `bash -n
+lab/agent-conformance/run.sh`, `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 method contracts),
+`node --test scripts/check-product-data.test.mjs` (99 passed),
+`(cd elastos && cargo fmt --all -- --check)`, and
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+The manifests, lockfile and probe source match HEAD. Every changed path is
+inside `lab/agent-conformance/`.
+
+The existing `report --check-earlier-runs` passed after the full gate. Its
+root-holder census found zero process holders before removal of the 16
+expected-failure and sandbox-refused fixture roots owned by this task.
+The local ignored lifecycle inventory records those removals, the proof
+folder, receipt, reusable build outputs and active worktree, with supervisor
+review/removal conditions. Earlier owners' state stays under their ownership.
+The shared heavy-build lease is released. Cached upstream divergence at the
+final check was 0 ahead and 13 behind. This builder used offline dependencies
+and made zero Git mutations. The supervisor owns remote refresh, base
+compatibility, commit, review and publication.

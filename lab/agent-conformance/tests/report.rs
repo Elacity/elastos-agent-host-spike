@@ -651,7 +651,7 @@ fn cleanup_report_keeps_scope_and_grant_blocker() {
     let results = "test granted_read_succeeds ... ok\ntest run_leaves_no_live_grant ... ignored, blocked: AC-021-GRANTS\n";
     let (text, passed) = table(listed, results, true);
     assert!(passed);
-    assert!(text.contains("granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker journeys not yet included"));
+    assert!(text.contains("granted_read_succeeds | PASS | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows"));
     assert!(text.contains("run_leaves_no_live_grant | BLOCKED (AC-021-GRANTS) | cleanup census"));
     let (text, passed) = table(listed, &results.replace("... ok", "... FAILED"), false);
     assert!(!passed);
@@ -683,6 +683,7 @@ fn instance_receipt_requires_both_launches_and_scope() {
         "two_instances_overlap_with_separate_grants",
         "instance_grant_does_not_authorise_sibling",
         "cancelled_instance_settles_with_reason_sibling_completes",
+        "killed_worker_settlement_recorded_without_retry",
     ] {
         let render = |observations: &[Observation]| {
             render_run(
@@ -696,6 +697,8 @@ fn instance_receipt_requires_both_launches_and_scope() {
         assert!(complete.passed);
         let scope = if name == "cancelled_instance_settles_with_reason_sibling_completes" {
             "cancel at the pending-request point, lab half of A10 (A12 census)"
+        } else if name == "killed_worker_settlement_recorded_without_retry" {
+            "kill-worker settlement, lab half of A11 (A12 census); orphan settled by the fixture (AC-027-ORPHAN)"
         } else {
             "process-isolation lab half of A3, A6 and A9"
         };
