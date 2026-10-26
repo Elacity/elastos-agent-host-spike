@@ -179,8 +179,16 @@ same way, at the same place under `STORAGE_ROOT`, binds it as
 `init` with its offer ready, creates `runs/` beside itself, and exits cleanly
 after `shutdown`. The binding is the only difference between the two runs. So
 a program in the provider's own storage cannot run, and only the bound path
-runs. Which binary is bound is the Runtime half (see "The Runtime half");
-these tests do not check it.
+runs. Which binary the Runtime binds stays the Runtime half (see "The Runtime
+half"). `byte_different_file_at_bound_path_starts` shows the profile binds
+`PROVIDER_EXECUTABLE` by path: a byte-different file at the bound path, in a
+temporary directory, gets past the profile's exec refusal. The launch is an
+exit other than status 71 with `execvp()` and `Operation not permitted`, or
+a process still running after 2 seconds. The launch helper records the sha256
+when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
+when the file changes (`bound_executable_digest_mismatch_refuses_start`).
+That refusal is a lab stand-in for the Runtime's launch-by-hash check (M1 B1,
+Anders's half), not the Runtime's check.
 
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
@@ -485,6 +493,18 @@ profile does not grant".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
   answers `init`, creates `runs/` and exits cleanly after `shutdown`.
+- `byte_different_file_at_bound_path_starts`: a copy of the provider binary
+  in a temporary directory, with its last byte flipped, bound as
+  `PROVIDER_EXECUTABLE` and started. The copy's digest differs from the real
+  binary. The launch gets past the profile's exec refusal: it is an exit
+  other than status 71 with `execvp()` and `Operation not permitted`, or a
+  process still running after 2 seconds. The real binary's digest is
+  unchanged. It runs under `sandbox-exec`, as the other confined tests do.
+- `bound_executable_digest_mismatch_refuses_start`: the launch helper records
+  the sha256 of a copy of `/usr/bin/true`, one byte is appended, and the
+  start that passes the recorded digest panics with `PROVIDER_EXECUTABLE
+  digest mismatch` before `spawn`. The panic names the path and both
+  digests. It needs no sandbox.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
@@ -552,7 +572,7 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the twelve
+uses command `provider`. Each mutates `confine.sb` only, except the thirteen
 entries that edit `tests/confine/main.rs`: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
@@ -561,7 +581,8 @@ part of how the hosted run's wait loop holds its deadline, F-cc17a returns
 `Ok(false)` from the declared-OS branch of `sandbox_gate`, F-cc17b
 returns `false` from the error arm of `sandbox_available`, F-cc19a starts
 the program directly when the profile file does not exist, and F-cc19b
-keeps none of the stderr lines `Provider::ended` reads.
+keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
+the digest compare in refuse_changed_provider_executable.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -596,20 +617,22 @@ keeps none of the stderr lines `Provider::ended` reads.
 | F-cc17b | In the test, the error arm of `sandbox_available` returns `false` instead of failing the test | `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` | A missing `sandbox-exec` on macos returns, and a confined test would pass; this test fails because the call returned `false`. |
 | F-cc19a | When the profile file does not exist, `sandboxed` starts the program directly, without `sandbox-exec` | `startup_is_refused_when_the_profile_cannot_be_applied` | Case (a)'s launch starts the provider unconfined, it answers `init`, and the test fails at its first check. |
 | F-cc19b | `Provider::ended` keeps none of the stderr lines it reads | `startup_is_refused_when_the_profile_cannot_be_applied` | Case (a) still exits 65, but no line gives `sandbox-exec`'s reason. |
+| F-cc29a | In the test, `refuse_changed_provider_executable` skips the digest compare | `bound_executable_digest_mismatch_refuses_start` | The changed file starts. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
-for the F-cc15, F-cc16, F-cc17 and F-cc19 entries. Its startup recovery restores
-`tests/confine/main.rs` after a killed run (provider task 015), as it restores
+for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries. Its startup
+recovery restores `tests/confine/main.rs` after a killed run (provider task
+015), as it restores
 `confine.sb`.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
 `sandbox-exec` is missing, the confined tests skip and pass, so each sandbox
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
-F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a and F-cc17b) are
+F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b and F-cc29a) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`

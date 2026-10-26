@@ -13,9 +13,12 @@
 //! made from the one profile source, so a `confine.sb` edit reaches it too.
 //! Its program launch binds one path as `PROVIDER_EXECUTABLE` and starts the
 //! program it names, that path or another, under `confine.sb`, so the
-//! profile's exec rule alone decides whether that program runs. Its profile
-//! launch starts the real provider binary under a given profile path with
-//! exactly the bindings it is given. Its idle launch starts `/bin/sleep` on
+//! profile's exec rule alone decides whether that program runs. Before
+//! `spawn`, a launch that binds `PROVIDER_EXECUTABLE` records that file's
+//! sha256 and refuses to start when the file no longer has that digest.
+//! `Unconfined` and `Idle` do not bind the parameter. Its profile launch
+//! starts the real provider binary under a given profile path with exactly
+//! the bindings it is given. Its idle launch starts `/bin/sleep` on
 //! the same pipes and never writes an answer, so a test can run the one
 //! receive to its timeout without the provider binary.
 //!
@@ -41,7 +44,7 @@ use elastos_model_contract::{
 use serde_json::{json, Value};
 use std::any::Any;
 use std::fs;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -231,10 +234,13 @@ enum Launch<'a> {
     Fixture(&'a Storage, &'a FixtureProfile),
     /// Under `confine.sb`, starting `program` with `executable` bound as
     /// `PROVIDER_EXECUTABLE` and the storage parameters bound as usual.
+    /// `bound_digest` is a sha256 recorded earlier for `executable`. `None`
+    /// records the file at this launch.
     Program {
         storage: &'a Storage,
         executable: &'a Path,
         program: &'a Path,
+        bound_digest: Option<String>,
     },
     /// The real provider binary under `profile`, with exactly `bindings`.
     Profile {
@@ -293,6 +299,34 @@ fn sandboxed(profile: &Path, bindings: &[(&'static str, PathBuf)], program: &Pat
     command
 }
 
+/// The sha256 of the file a launch binds as `PROVIDER_EXECUTABLE`.
+fn record_provider_executable(path: &Path) -> String {
+    test_support::sha256_file(path)
+}
+
+/// Refuses the launch when `path` no longer has the digest `bound`.
+fn refuse_changed_provider_executable(path: &Path, bound: &str) {
+    let now = test_support::sha256_file(path);
+    if now != bound {
+        panic!(
+            "PROVIDER_EXECUTABLE digest mismatch: {} was bound as {bound} and is now {now}",
+            path.display()
+        );
+    }
+}
+
+/// Records `path` when this launch has no earlier digest, then refuses a file
+/// that no longer has the digest bound for `PROVIDER_EXECUTABLE`.
+fn check_provider_executable(path: &Path, recorded: Option<&str>) {
+    match recorded {
+        Some(recorded) => refuse_changed_provider_executable(path, recorded),
+        None => {
+            let recorded = record_provider_executable(path);
+            refuse_changed_provider_executable(path, &recorded);
+        }
+    }
+}
+
 /// The real provider binary speaking its line-delimited JSON protocol, or the
 /// idle hold, which never writes an answer.
 struct Provider {
@@ -307,10 +341,12 @@ impl Provider {
         let binary = resolved(Path::new(PROVIDER_BINARY));
         let mut command = match launch {
             Launch::Confined(storage) => {
+                check_provider_executable(&binary, None);
                 let bindings = canonical_bindings(storage, &binary);
                 sandboxed(Path::new(PROFILE_PATH), &bindings, &binary)
             }
             Launch::Fixture(storage, fixture) => {
+                check_provider_executable(&binary, None);
                 let mut bindings = canonical_bindings(storage, &binary).to_vec();
                 bindings.extend(fixture.parameters.iter().cloned());
                 sandboxed(&fixture.path, &bindings, &binary)
@@ -319,11 +355,21 @@ impl Provider {
                 storage,
                 executable,
                 program,
+                bound_digest,
             } => {
+                check_provider_executable(executable, bound_digest.as_deref());
                 let bindings = canonical_bindings(storage, executable);
                 sandboxed(Path::new(PROFILE_PATH), &bindings, program)
             }
-            Launch::Profile { profile, bindings } => sandboxed(profile, bindings, &binary),
+            Launch::Profile { profile, bindings } => {
+                if let Some((_, path)) = bindings
+                    .iter()
+                    .find(|(name, _)| *name == "PROVIDER_EXECUTABLE")
+                {
+                    check_provider_executable(path, None);
+                }
+                sandboxed(profile, bindings, &binary)
+            }
             Launch::Unconfined => Command::new(&binary),
             Launch::Idle => {
                 let mut command = Command::new("/bin/sleep");
@@ -415,7 +461,7 @@ impl Provider {
         panic!(
             "the provider process exited before answering {}: {}",
             request["op"],
-            describe(self.wait())
+            describe(self.wait(FIXTURE_EVENT_TIMEOUT))
         )
     }
 
@@ -423,15 +469,8 @@ impl Provider {
     /// status from `wait`, and the stderr lines no earlier read took, read
     /// from the stderr channel until the stream closes.
     fn ended(&mut self) -> Ended {
-        let status = self.wait();
-        let mut stderr = Vec::new();
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            match self.stderr.recv_timeout(left) {
-                Ok(line) => stderr.push(line),
-                Err(_) => break,
-            }
-        }
+        let status = self.wait(FIXTURE_EVENT_TIMEOUT);
+        let stderr = self.collect_stderr(FIXTURE_EVENT_TIMEOUT);
         Ended { status, stderr }
     }
 
@@ -484,8 +523,8 @@ impl Provider {
         None
     }
 
-    fn wait(&mut self) -> Option<ExitStatus> {
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+    fn wait(&mut self, limit: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + limit;
         loop {
             match self
                 .child
@@ -499,12 +538,52 @@ impl Provider {
         }
     }
 
+    /// Collects the remaining stderr lines, waiting at most `limit` for the
+    /// stream to close. A zero limit drains only the lines already queued.
+    fn collect_stderr(&self, limit: Duration) -> Vec<String> {
+        let deadline = Instant::now() + limit;
+        let mut stderr = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.stderr.recv_timeout(left) {
+                Ok(line) => stderr.push(line),
+                Err(_) => break,
+            }
+        }
+        stderr
+    }
+
+    /// The exit status if the process ends within `limit`, and the stderr
+    /// lines read by then. `None` means the process is still running after
+    /// `limit`. After an exit, stderr is read until the stream closes, so a
+    /// refusal line is not lost. A process still running is not waited past
+    /// `limit`.
+    fn outcome_within(&mut self, limit: Duration) -> (Option<ExitStatus>, Vec<String>) {
+        let status = self.wait(limit);
+        let stderr = self.collect_stderr(if status.is_some() {
+            limit
+        } else {
+            Duration::ZERO
+        });
+        (status, stderr)
+    }
+
+    /// Stops a process `start` returned. A process that has already exited is
+    /// waited. This does not ask the process to answer `shutdown`.
+    fn kill_and_wait(&mut self) {
+        self.stdin.take();
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+
     /// Stops the provider through its protocol and requires a clean exit.
     fn shutdown(mut self) {
         let data = self.ok(&json!({ "op": "shutdown" }));
         assert_eq!(data["shutdown"], true, "shutdown must be acknowledged");
         self.stdin.take();
-        let status = self.wait();
+        let status = self.wait(FIXTURE_EVENT_TIMEOUT);
         assert!(
             status.is_some_and(|status| status.success()),
             "the provider must exit cleanly after shutdown: {}",
@@ -515,11 +594,7 @@ impl Provider {
 
 impl Drop for Provider {
     fn drop(&mut self) {
-        self.stdin.take();
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        self.kill_and_wait();
     }
 }
 
@@ -1759,6 +1834,7 @@ fn model_unbound_program_refused_under_profile() {
         storage: &fixture.storage,
         executable: &fixture.binary,
         program: &fixture.copy,
+        bound_digest: None,
     });
 
     if let Some(answer) = provider.answer(&init_request(&fixture.storage, None)) {
@@ -1818,6 +1894,7 @@ fn model_bound_copy_serves_under_profile() {
         storage: &fixture.storage,
         executable: &fixture.copy,
         program: &fixture.copy,
+        bound_digest: None,
     });
 
     assert_serving(&provider.ok(&init_request(&fixture.storage, None)));
@@ -1826,6 +1903,169 @@ fn model_bound_copy_serves_under_profile() {
         "init must create runs/ under STORAGE_ROOT beside the copy"
     );
     provider.shutdown();
+}
+
+/// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
+/// the profile's exec refusal.
+///
+/// The copy is made in a temporary directory, never at the real provider
+/// binary's path and never in the directory that holds that binary. Its last
+/// byte is flipped, so its digest differs from the real binary. The launch
+/// binds the copy and starts it, with `bound_digest: None`, so the helper
+/// records the copy as it is. The profile's exec refusal is exit 71 and a
+/// stderr line that contains both `execvp()` and `Operation not permitted`.
+/// This test fails if that pair appears. Any other outcome, an exit that is
+/// not that pair or a process still running after 2 seconds, means the
+/// profile did not apply that refusal. The real binary's digest is unchanged
+/// at the end. The test kills and waits on the process `start` returned. It
+/// does not call `shutdown`.
+#[test]
+fn byte_different_file_at_bound_path_starts() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let recorded = record_provider_executable(&binary);
+    let root = test_support::temp_root_path("model-provider-confine", "byte-different");
+    fs::create_dir_all(&root).expect("temporary directory");
+    let root = resolved(&root);
+    let binary_dir = binary
+        .parent()
+        .expect("the provider binary's directory")
+        .to_path_buf();
+    assert_ne!(
+        root, binary_dir,
+        "the temporary directory must not be the directory that holds the provider binary"
+    );
+    let copy_path = root.join(binary.file_name().expect("the provider binary's file name"));
+    fs::copy(&binary, &copy_path).expect("copy the provider binary");
+    let mut flipped = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&copy_path)
+        .unwrap_or_else(|err| panic!("the copy must be writable: {err}"));
+    let len = flipped
+        .metadata()
+        .unwrap_or_else(|err| panic!("the copy's length must be readable: {err}"))
+        .len();
+    assert!(len > 0, "the copy must have a last byte");
+    flipped
+        .seek(SeekFrom::End(-1))
+        .expect("the copy's last byte must be reachable");
+    let mut byte = [0u8; 1];
+    flipped
+        .read_exact(&mut byte)
+        .expect("the copy's last byte must be readable");
+    byte[0] = byte[0].wrapping_add(1);
+    flipped
+        .seek(SeekFrom::End(-1))
+        .expect("the copy's last byte must be reachable");
+    flipped
+        .write_all(&byte)
+        .expect("the copy's last byte must change");
+    drop(flipped);
+    let copy = resolved(&copy_path);
+    assert_ne!(
+        copy, binary,
+        "the copy must not be the real provider binary"
+    );
+    assert_ne!(
+        copy.parent(),
+        Some(binary_dir.as_path()),
+        "the copy must not sit in the directory that holds the provider binary"
+    );
+    assert_ne!(
+        test_support::sha256_file(&copy),
+        recorded,
+        "the copy's digest must differ from the real provider binary"
+    );
+
+    let storage = Storage::prepare("byte-different-launch");
+    let mut provider = Provider::start(Launch::Program {
+        storage: &storage,
+        executable: &copy,
+        program: &copy,
+        bound_digest: None,
+    });
+    let (status, stderr) = provider.outcome_within(Duration::from_secs(2));
+    provider.kill_and_wait();
+    let refused = status.and_then(|status| status.code()) == Some(71)
+        && stderr
+            .iter()
+            .any(|line| line.contains("execvp()") && line.contains("Operation not permitted"));
+    assert!(
+        !refused,
+        "host OS {}: a byte-different file at the bound path gets past the profile's exec \
+         refusal, so the launch must not be exit 71 with execvp() and Operation not permitted, \
+         but status {} had that refusal: {stderr:?}",
+        std::env::consts::OS,
+        describe(status)
+    );
+    assert_eq!(
+        test_support::sha256_file(&binary),
+        recorded,
+        "the real provider binary's digest must be unchanged"
+    );
+}
+
+/// The launch helper refuses to start when the file bound as
+/// `PROVIDER_EXECUTABLE` no longer has the digest it recorded.
+///
+/// The test copies `/usr/bin/true` into a temporary directory, records its
+/// sha256, and appends one byte. `Launch::Program` passes that recorded
+/// digest and the changed path as both executable and program. The helper
+/// panics before `spawn`. The panic names `PROVIDER_EXECUTABLE digest
+/// mismatch`, the path, and both digests. If `start` returns, the test kills
+/// and waits, then fails because the helper started the changed file. The
+/// test does not call `sandbox_available` and does not need `sandbox-exec`.
+///
+/// Falsifier: F-cc29a skips the digest compare in
+/// `refuse_changed_provider_executable`, so the changed file starts and this
+/// test fails.
+#[test]
+fn bound_executable_digest_mismatch_refuses_start() {
+    let root = test_support::temp_root_path("model-provider-confine", "digest-mismatch");
+    fs::create_dir_all(&root).expect("temporary directory");
+    let program = resolved(&root).join("true");
+    fs::copy("/usr/bin/true", &program).expect("copy /usr/bin/true");
+    let program = resolved(&program);
+    let recorded = record_provider_executable(&program);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&program)
+        .unwrap_or_else(|err| panic!("the copy must be open for append: {err}"));
+    file.write_all(&[0])
+        .expect("append one byte to the bound file");
+    drop(file);
+    let now = test_support::sha256_file(&program);
+    assert_ne!(now, recorded, "the changed file's digest must differ");
+
+    let storage = Storage::prepare("digest-mismatch");
+    let path = program.display().to_string();
+    let settled = catch_unwind(AssertUnwindSafe(|| {
+        Provider::start(Launch::Program {
+            storage: &storage,
+            executable: &program,
+            program: &program,
+            bound_digest: Some(recorded.clone()),
+        })
+    }));
+    match settled {
+        Err(payload) => {
+            let failure = panic_text(payload);
+            assert!(
+                failure.contains("PROVIDER_EXECUTABLE digest mismatch")
+                    && failure.contains(&path)
+                    && failure.contains(&recorded)
+                    && failure.contains(&now),
+                "the refusal must name the mismatch, the path and both digests: {failure}"
+            );
+        }
+        Ok(mut provider) => {
+            provider.kill_and_wait();
+            panic!("the helper started the changed file");
+        }
+    }
 }
 
 /// One launch whose profile cannot be applied is refused, and the refusal
