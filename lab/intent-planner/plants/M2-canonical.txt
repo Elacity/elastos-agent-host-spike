@@ -1,0 +1,9 @@
+id: M2
+file: src/lib.rs
+test: plan_altered_after_approval_is_refused
+--- old
+        if review.canonical != plan.canonical() {
+            return Err(Refuse::PlanAltered);
+        }
+--- new
+--- end

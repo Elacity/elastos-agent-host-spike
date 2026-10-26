@@ -1,0 +1,16 @@
+id: M7
+file: src/lib.rs
+test: blocked_journal_effect_comes_from_a_bus_round_trip
+--- old
+            let reply = runtime_bridge::invoke_journal(
+                &grant.token,
+                &step.resource,
+                Some(self.audit.path()),
+            )
+            .map_err(|_| Refuse::Bridge)?;
+--- new
+            let reply = runtime_bridge::BridgeReply {
+                code: runtime_bridge::STORAGE_BRIDGE_CODE.to_owned(),
+                message: runtime_bridge::STORAGE_BRIDGE_GAP.to_owned(),
+            };
+--- end

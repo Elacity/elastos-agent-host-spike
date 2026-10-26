@@ -1,0 +1,11 @@
+id: M5
+file: src/lib.rs
+test: grant_lookup_uses_covers_for_the_exact_resource
+--- old
+    grants
+        .iter()
+        .find(|grant| grant.covers(step))
+        .ok_or(Refuse::OutsidePlan)
+--- new
+    grants.iter().next().ok_or(Refuse::OutsidePlan)
+--- end

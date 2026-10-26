@@ -1,0 +1,12 @@
+id: M3
+file: src/lib.rs
+test: reordered_approved_steps_are_refused
+--- old
+        if steps != plan.steps.as_slice() {
+            return Err(Refuse::OutsidePlan);
+        }
+--- new
+        if steps.len() != plan.steps.len() {
+            return Err(Refuse::OutsidePlan);
+        }
+--- end
