@@ -381,7 +381,8 @@ closed with a reason rather than a panic, and no test can reach it.
 **The value.** `VerifiedBundle` holds the checked bundle, which of its
 entries is the entrypoint (found by step 3, the one manifest read) and the
 audit's own import list, read through `cid()`, `entries()`, `entrypoint()` and
-`imports()`. `entrypoint()` returns the checked entry the manifest's
+`imports()`; since wc-009a also the grants the module does not import, through
+`unused_grants()`. `entrypoint()` returns the checked entry the manifest's
 `entrypoint` names, the module the audit read, so no caller reads the manifest
 again. Its fields are private, and it has no public constructor, no `&mut`
 access and no `Deserialize`, so a value exists only as `verify_checked` made
@@ -389,7 +390,9 @@ it. wc-005a's runner (task 014) writes `entrypoint()`'s bytes.
 
 **The checked bytes, never the folder again.** The audit reads the module
 bytes the signed name covers, from the checked value. The verifier reads no
-file by a path. If the folder changes after `checked_bundle`, `verify_checked`
+bundle file by a path; its one file read is the caller's lab grants file, in
+`read_grants` (wc-009a, below), which is never part of the bundle. If the
+folder changes after `checked_bundle`, `verify_checked`
 on the held value still judges the held bytes, and `verify_bundle` on the
 changed folder is refused with the identity lane's mismatch reason.
 
@@ -402,9 +405,9 @@ inside each test. If a file form is ever wanted, cc-capsule-identity owns it.
 
 **Granted imports.** The module's own import section is the declaration
 (Rong, 26 Oct, ruling (c)). The granted list goes to `audit` unchanged, and the
-result is exactly the module's imports. Ordinary callers pass an empty list
-until wc-009, which will pass the lab grants file's list to this same call;
-only the grant tests here pass a non-empty list. The granted list is a lab
+result is exactly the module's imports. Since wc-009a (task 020) the two-engine
+`run` passes the list `read_grants` read from the lab grants file to this same
+call ("Granted imports only (wc-009a)", below). The granted list is a lab
 stand-in, not admission.
 
 **Claim scope.** An offline lab check, on this one Mac with test keys only,
@@ -500,6 +503,7 @@ pub struct RunInput<'a> {
     pub bundle: &'a Path,                       // the bundle folder
     pub signature: Option<&'a NameSignature>,   // in memory only
     pub accepted: &'a [String],                 // accepted signer DIDs
+    pub granted: &'a [DeclaredImport],          // wc-009a: from read_grants
     pub wasmtime: &'a Path,                     // absolute program paths
     pub wasmer: &'a Path,
     pub work_root: &'a Path,
@@ -510,10 +514,10 @@ A library function; there is no command, no binary and no signature file. Every
 input is in the struct; nothing is read from the environment. In order, the
 first refusal is the answer:
 
-1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, &[])`
-   is called once, with no grants. A refusal comes back unchanged as
-   `TwoEngineRefusal::Verify`, printing exactly as the verifier prints it;
-   nothing is written and no engine is started;
+1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, input.granted)`
+   is called once, with the caller's granted imports unchanged (wc-009a). A
+   refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
+   as the verifier prints it; nothing is written and no engine is started;
 2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
    (the next section). A refusal comes back as `TwoEngineRefusal::Version`, and
    no module run starts;
@@ -535,7 +539,8 @@ outputs. Two successful runs with different stdout are refused with
 On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
 was checked against, taken from the verified value, never by naming the folder
 again), both raw stdouts, `wasmtime()` and `wasmer()` (or `stdout(engine)`), and
-from task 016 each engine's observed `version(engine)` and `status(engine)`.
+from task 016 each engine's observed `version(engine)` and `status(engine)`,
+and from task 020 `linked()` and `unused_grants()`, the verifier's own lists.
 Its fields are private, so only `run` makes one. `run` writes no receipt; the
 caller writes one with `receipt::write_receipt` (next section).
 
@@ -648,6 +653,200 @@ The tests, in `tests/runtime_abi.rs`:
   inventing a field, and the evidence for the gap "No summary of Wasm imports
   in the manifest".
 
+## Granted imports only (wc-009a)
+
+```rust
+wasm_capsule_tools::verify::read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal>
+```
+
+**The link rule, in Rong's words (W2 (c), through Flint, 26 Oct 08:27).** "The
+module's own import section in the signed capsule.wasm IS the declaration; it is
+in the lab-cid closure and covered by the signature, and cx-wasm-audit's cwa-001
+import list is the one reader for it (P10). Link rule: link an import only if it
+is in the signed module AND in the lab grants file; the grants file stays
+outside the bundle, labelled 'lab stand-in, not admission'. No unsigned
+declaration file."
+
+So there is no declaration file here. The declaration is the module's own
+import section, inside `capsule.wasm`, so inside the lab CID and under the
+signature. The grants file is the caller's input, like the bundle path; it sits
+outside the bundle and is never part of the lab CID.
+
+**The grants file.** JSON, read once with `fs::read` and parsed from memory,
+exactly:
+
+```json
+{"schema": "wc-009.lab-grants/v1", "label": "lab stand-in, not admission", "imports": [{"module": "env", "name": "f"}]}
+```
+
+An empty `imports` list is valid. The label is exactly "lab stand-in, not
+admission": the file stands in for the Runtime's grant decision
+(https://github.com/Elacity/elastos-runtime/issues/464), and is never
+admission. `read_grants` returns the grants in file order. It is the one grants
+reader and lives in `tools/src/verify.rs`, beside the verifier input it feeds;
+no other code in the tools crate reads grants or imports. Each refusal has its
+own reason, after `<path>: `:
+
+- `the grants file cannot be read: <OS error>`;
+- `the grants file is not JSON: <serde_json's reason>`;
+- `the grants file is not a JSON object`;
+- `the grants file has an unknown key "<key>"`;
+- `the grants file has no "<schema|label|imports>" key`;
+- `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v1"`;
+- `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
+- `the grants file's imports is not a list`;
+- `grant <index> is not an object of exactly two strings, module and name`;
+- `the grant <module>.<name> is listed twice`.
+
+A key written twice in one JSON object is not refused: `serde_json` keeps its
+last value, so the file reads as that value. This is a known limit of the lab
+reader, not a claim.
+
+**How it links.** The caller passes `read_grants`'s list as
+`RunInput::granted`, and `run` passes it unchanged to its one `verify_bundle`
+call, so to the verifier's one `audit(module, granted)` call. There is no
+second import check, parser or walk. A module with an import that is not
+granted is refused there, `undeclared import <module>.<name>`, and never
+reaches an engine: no run folder is made and neither engine is started, not
+even for `--version`. On success the run reports:
+
+- `linked()`: the audit's own list, the imports both in the signed module and
+  granted, in section order;
+- `unused_grants()`: the grants the module does not import, in file order.
+  They link nothing; they are reported. The verifier works them out once from
+  the audit's list and the grants, with no second import read.
+
+**Allowed through, not hosted (wc-009b).** The runner gives the engines no host
+function of its own yet. A granted import is only let through verification; no
+engine is given a function for it. This capsule has zero imports, so its run
+needs none. Hosting a granted import in both engines is wc-009b, after this
+task, and starts with a read-only discovery.
+
+**Who decides (Q8, Flint, 26 Oct 10:40).** The Runtime's launch path verifies
+the accepted record, the selected platform variant and the installed contents.
+Those checks are Runtime work, outside this lane. The grants file is "lab
+stand-in, not admission" everywhere: this lane decides no admission, launch or
+publisher trust, and its lab name is not the Runtime's CID.
+
+## Memory cap discovery (wc-010a)
+
+Read-only discovery for wc-010 ("fixed bare memory with a host-enforced
+limit"). No runner, argv, receipt, test or `falsifiers.json` change; `run.rs`
+still passes no memory flag. Facts are what each engine's CLI does on this Mac
+only, at base `a5b4e8a105fca181469ce15b2b84c03b86f0266d`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0`. Each
+engine ran as its own process from a shell (no engine inside an engine, no
+VM, no Docker). This is not the ~4 GB DigitCapsule and not any-RTOS loading.
+
+**The declared size.** `elastos/crates/elastos-common/src/manifest.rs` at this
+base: `CapsuleManifest` has `#[serde(default)] pub resources: ResourceLimits`
+(lines 102-103); `ResourceLimits` has `#[serde(default = "default_memory")]
+pub memory_mb: u32` (lines 1167-1169), and `fn default_memory() -> u32 { 64 }`
+(lines 1188-1190). `capsule/capsule.json` has no `resources` key
+(`grep -n resources lab/wasm-capsule/capsule/capsule.json` prints nothing,
+exit 1), so this capsule declares the default, 64 MB. The manifest does not say
+whether MB is 10^6 or 2^20 bytes; the probes read it as 64 × 2^20 =
+67108864 bytes = 1024 Wasm pages of 64 KiB. wc-010b must state the same
+reading. No field was invented and `capsule.json` is unchanged.
+
+**The probe modules** (WAT text under the git-ignored `target/wc010a/`, never
+committed; both engines took the `.wat` file directly, so no `wat` crate step
+was needed):
+
+```wat
+(module
+  (memory (export "memory") 1)
+  (func (export "grow") (param i32) (result i32)
+    local.get 0
+    memory.grow))
+```
+
+`grow.wat` starts at 1 page and has no declared maximum. `memory.grow` returns
+the old size in pages (1) on success and -1 on failure. Growing by 1023 pages
+reaches exactly 1024 pages (64 MB, at the cap); growing by 1024 reaches 1025
+pages (67174400 bytes, past it). `big-min.wat` is
+`(module (memory (export "memory") 1025) (func (export "size") (result i32) memory.size))`:
+its own minimum is one page above the cap.
+
+### wasmtime 45.0.1: FOUND
+
+The flag, from `wasmtime -W help`:
+
+```text
+  -W                         max-memory-size=N -- Maximum size, in bytes, that a linear memory is allowed to reach.
+  -W                trap-on-grow-failure[=y|n] -- Force a trap to be raised on `memory.grow` and `table.grow` failure instead of returning -1 from these instructions.
+```
+
+Unit: bytes, so 64 MB is `-W max-memory-size=67108864`. Runs from
+`lab/wasm-capsule/target/wc010a/`, engine path `/opt/homebrew/bin/wasmtime`
+(each first stderr line is the CLI's own `--invoke` warning, quoted as
+printed):
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (i) within the cap | `wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1023` | 0 | `1` | ``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future`` |
+| (ii) past the cap | `wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1024` | 0 | `-1` | the same warning |
+| (ii-t) past the cap, trap flag | `wasmtime run -W max-memory-size=67108864,trap-on-grow-failure=y --invoke grow grow.wat 1024` | 1 | (none) | the same warning, then ``Error: failed to run main module `grow.wat` `` and, last, `2: forcing trap when growing memory to 67174400 bytes` |
+| (i-t) within the cap, trap flag | `wasmtime run -W max-memory-size=67108864,trap-on-grow-failure=y --invoke grow grow.wat 1023` | 0 | `1` | the same warning |
+| (iii) past 64 MB, no flag | `wasmtime run --invoke grow grow.wat 1024` | 0 | `1` | the same warning |
+| start, above-cap minimum | `wasmtime run -W max-memory-size=67108864 --invoke size big-min.wat` | 1 | (none) | ``Error: failed to run main module `big-min.wat` ``, then `0: failed to instantiate "big-min.wat"` and `1: memory minimum size of 1025 pages exceeds memory limits` |
+| start, no flag | `wasmtime run --invoke size big-min.wat` | 0 | `1025` | ``warning: using `--invoke` with a function that returns values is experimental and may break in the future`` |
+
+(iii) returning `1` where (ii) returned `-1`, on the same module and argument,
+shows the flag, not the module, made the grow fail.
+
+### wasmer 7.5.0: SKIPPED
+
+No memory cap flag in its help. Searched `wasmer run --help` and
+`wasmer --help` (both exit 0) case-insensitively for `memory`, `grow`, `trap`,
+`limit`, `pages`, `max`, `heap`, `size`, `resource`, `rlimit` and `bytes`.
+`wasmer --help` matched none. `wasmer run --help` matched only lines about
+other things: `--enable-experimental-unaligned-memory-accesses`,
+`--enable-bulk-memory`, `--enable-multi-memory`, `--enable-memory64` (Wasm
+features), `--with-compact-on-growth` (journal compaction), a CPU back-off
+"maximum amount of time", and `--stack-size <STACK_SIZE>` with "Set the default
+stack size (default is 1048576)" (the stack, not linear memory). So this CLI
+gives no way to cap a module's linear memory, and a cap cannot be claimed for
+wasmer. The contrast and start runs, engine path `/opt/homebrew/bin/wasmer`,
+from the same folder (stderr empty, 0 bytes, on each):
+
+| Run | Command | Exit | stdout |
+|---|---|---|---|
+| (iii) past 64 MB, no flag | `wasmer run --invoke grow grow.wat 1024` | 0 | `1` |
+| grow to 65536 pages (the wasm32 limit), no flag | `wasmer run --invoke grow grow.wat 65535` | 0 | `1` |
+| start, above-cap minimum | `wasmer run --invoke size big-min.wat` | 0 | `1025` |
+
+### The answer for wc-010b
+
+- wasmtime: **grow returns -1** with `-W max-memory-size=67108864`; adding
+  `-W trap-on-grow-failure=y` turns that -1 into a **trap** (exit 1,
+  "forcing trap when growing memory to 67174400 bytes"); a module whose own
+  minimum is above the cap is **start refused** ("memory minimum size of 1025
+  pages exceeds memory limits").
+- wasmer: **SKIPPED** (no memory cap flag in `wasmer run --help` or
+  `wasmer --help`); no flag turns a failed grow into a trap, and with no cap
+  the grow past 64 MB succeeds.
+- The two engines differ. Rong's draft name
+  `memory_grow_past_limit_traps_on_both` is not right: only wasmtime traps,
+  and only with the extra flag. wc-010b's wasmer memory test must report
+  SKIPPED with the reason above, never PASS.
+
+**Peak memory for wc-010's receipt.** `/usr/bin/time -l` prints a "maximum
+resident set size" line. This is the **engine process's resident memory**, not
+the capsule's linear memory:
+
+- `/usr/bin/time -l /opt/homebrew/bin/wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1023`
+  printed `            14696448  maximum resident set size` (and
+  `             5538248  peak memory footprint`).
+- `/usr/bin/time -l /opt/homebrew/bin/wasmer run --invoke grow grow.wat 1023`
+  printed `            19218432  maximum resident set size` (and
+  `             5374408  peak memory footprint`).
+
+Both runs grew linear memory to 64 MB, yet each process's resident size is
+below that: untouched pages are not resident. So this number is no measure of
+the capsule's declared or used linear memory.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -745,20 +944,36 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   before unsigned, unsigned before the audit, the signature before the
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
-  field, exactly six public functions (`verify_checked`, `verify_bundle` and
-  the four accessors), no `&mut self`, no `Deserialize`, `Default` or trait
-  impl for the value, and one literal that makes it, in `verify_checked`.
+  field, exactly eight public functions (`verify_checked`, `verify_bundle`,
+  `read_grants` and the five accessors, `unused_grants()` among them), no
+  `&mut self`, no `Deserialize`, `Default` or trait impl for the value, and one
+  literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
-  `verify_checked_signature` once and `audit` once, parses a manifest once
-  (one `from_slice`, one call of `manifest_entrypoint`), uses neither
-  `verify_name_signature` nor `audit_component`, `verify_bundle` only walks
-  and delegates, and `entrypoint()` reads no manifest.
+  `verify_checked_signature` once and `audit` once, parses JSON twice (one
+  `from_slice` in `manifest_entrypoint`, one in `parse_grants`), calls
+  `manifest_entrypoint` once, reads one file with `fs::read` (in
+  `read_grants`), calls `parse_grants` once and `read_grants` never (the caller
+  does), uses neither `verify_name_signature` nor `audit_component`,
+  `verify_checked` reads no grants, `verify_bundle` only walks and delegates,
+  and `entrypoint()` reads no manifest.
 - `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
 - `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
   `tools/src`, comments stripped, name no `wasmparser`.
 - `verifier_reads_no_bundle_file_by_path` — the verifier, comments stripped,
   has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
-  `read_to_end`.
+  `read_to_end` outside `read_grants`, and `read_grants` has exactly one
+  `fs::read` and none of the others.
+- `grants_file_refusals_keep_their_reason` (wc-009a) — `GRANTS_SCHEMA` and
+  `GRANTS_LABEL` are exactly `wc-009.lab-grants/v1` and `lab stand-in, not
+  admission`; an empty list and two grants read in file order; a missing file
+  keeps `NotFound` and its OS text; and 19 malformed files (not JSON, a list or
+  a string document, an unknown key, each missing key, another or a number
+  schema, another label and one with a trailing space, imports as an object,
+  six bad entries, the same pair twice) each give their exact text.
+- `unused_grants_excludes_linked_and_preserves_file_order` (wc-009a) — the
+  module that imports `env.f`, granted `z.last`, `env.f`, `a.first`:
+  `imports()` is `[env.f]`, `unused_grants()` is `[z.last, a.first]`, and the
+  lab CID and the entries are the bundle's own two files.
 - `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
   --cached --others --exclude-standard -z` lists in the lane: no `.key` or
   `.seed` name, no PEM private-key line, no 32-byte file that is not UTF-8.
@@ -809,8 +1024,10 @@ puts it under the `/var` link):
   An engine not found prints `SKIPPED` and gives no result, never a PASS.
 - `runner_uses_only_explicit_inputs` — the runner's source, comments
   stripped: no environment read, no file read, no manifest or module parse, no
-  walk or lower-level verify call, exactly one `verify_bundle` call (task 015's
-  `run`, with no grants), and `entrypoint()` is its one source of module bytes.
+  walk or lower-level verify call, no grants read or parse, exactly one
+  `verify_bundle` call (task 015's `run`, passing `input.granted`, task 020),
+  `input.granted` used nowhere else, and `entrypoint()` is its one source of
+  module bytes.
 - `runner_reuses_shared_writer` — the runner writes through
   `bundle::write_new_file` once and has no writer of its own (`OpenOptions`,
   `fs::write`, `create_new` and the like).
@@ -894,18 +1111,46 @@ Task 019's two:
   opens "## Falsifiers" exactly once, and fails naming both numbers when they
   differ.
 
+wc-009a's run tests (task 020), in `tests/run.rs`. Each signs its bundle with a
+fresh key, writes a lab grants file beside the bundle, reads it with
+`read_grants` and runs `run` on task 019's counting stand-ins. "Each engine
+once" is exactly one `--version` query and one module run per engine; a refusal
+is zero of both:
+
+- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes, with an
+  empty grants file: it runs, each engine once, `linked()` and
+  `unused_grants()` are empty.
+- `zero_grants_zero_imports_runs_on_both_real_engines` — the same on the real
+  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`, nothing is
+  linked. If either is not found it prints `SKIPPED`, never a PASS.
+- `declared_not_granted_import_refuses_instantiation_by_name` — the signed
+  module that imports `env.f`, with an empty grants file: refused as
+  `TwoEngineRefusal::Verify(VerifyRefusal::Audit(Undeclared { module: "env",
+  name: "f" }))`, text exactly `undeclared import env.f`; no run folder, and
+  zero starts of either kind.
+- `valid_signature_with_empty_grants_file_links_nothing` — the zero-import
+  8-byte module, validly signed, with an empty grants file: `linked()` is empty.
+- `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`
+  (Rong's rename of `granted_but_undeclared_is_refused`) — the zero-import
+  module, grants `[env.f]`: it runs, `linked()` is empty, `unused_grants()` is
+  exactly `[env.f]`.
+- `granted_import_is_linked` — the module that imports `env.f`, grants
+  `[env.f]`: it passes verification, `linked()` is exactly `[env.f]`, each
+  engine once, and both run folders hold the verified module.
+
 ## Falsifiers
 
-`falsifiers.json` holds 122 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 139 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016) and two task 019. Each requires all its named tests to fail
-at an assertion. `readme_falsifier_total_matches_falsifiers_json` holds the
-total to the file.
+wc-005c (task 016), two task 019 and 17 wc-009a (task 020). Each requires all
+its named tests to fail at an assertion.
+`readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 
-Two kinds of evidence, kept apart. Runner-caught: 58, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016 and 019: 1 + 1 + 23 + 11 +
-20 + 2), each run by the canonical runner with its summary line quoted.
+Two kinds of evidence, kept apart. Runner-caught: 75, the sections below
+marked runner-caught (tasks 012, 017, 014, 015, 016, 019 and 020: 1 + 1 + 23 +
+11 + 20 + 2 + 17), each run by the canonical runner with its summary line
+quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -1185,3 +1430,44 @@ killed run cannot restore it for F-WC5-START-TWICE; `README.md` is one:
 - F-WC-README-COUNT — the total in this section's first sentence becomes one
   less than the file holds (`readme_falsifier_total_matches_falsifiers_json`,
   at its comparison).
+
+wc-009a's 17 (task 020), runner-caught (the canonical runner's summary line is
+in LOG.md, task 020). Every anchor is in `tools/src/verify.rs`, a recovery
+target:
+
+- F-WC9-LINK-ALL — the verifier drops the audit's `Undeclared` refusal, so a
+  module with an import that is not granted reaches both engines
+  (`declared_not_granted_import_refuses_instantiation_by_name`).
+- F-WC9-GRANT-INJECT — the linked list is the grants list, not the audit's
+  result, so a grant for an import the module does not have is reported as
+  linked (`grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`).
+- F-WC9-GRANTS-LABEL — the reader stops checking the label
+  (`grants_file_refusals_keep_their_reason`).
+- F-WC9-GRANTS-SCHEMA, -UNKNOWN-KEY, -IMPORTS-NOT-LIST, -ENTRY-EXTRA-KEY,
+  -ENTRY-NOT-STRING and -DUPLICATE — the reader drops one more check, so a
+  wrong schema, an unknown key, a non-list `imports` (read as empty), an entry
+  with a third key, a number name (taken as its JSON text) or a pair granted
+  twice is read (`grants_file_refusals_keep_their_reason`).
+- F-WC9-GRANTS-CAUSE, -NOT-JSON, -NOT-OBJECT and -MISSING-KEY — an unreadable
+  file loses its OS cause, a file that is not JSON is read as no grants, a
+  document that is not an object is refused as a missing key, or a missing key
+  is read as null and refused as a wrong value
+  (`grants_file_refusals_keep_their_reason`).
+- F-WC9-UNUSED-KEEPS-USED and -UNUSED-REORDER — the unused grants keep the
+  linked one, or come back in reverse file order
+  (`unused_grants_excludes_linked_and_preserves_file_order`).
+- F-WC9-GRANTS-READ-TWICE and -PARSE-TWICE — the reader reads the file, or
+  parses its bytes, a second time (`verifier_has_one_check_path`, and for the
+  read also `verifier_reads_no_bundle_file_by_path`).
+
+Task 020 also re-anchored four entries, each the same bug as before:
+F-WC5a, F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (`run` now passes
+`input.granted`, not `&[]`, to `verify_bundle`; F-WC5a, which removes the
+verified value, gains a fourth edit that fills `linked` and `unused_grants`
+empty, so it still builds) and F-WC4-SEALED-NEW (the
+planted constructor fills the new `unused` field, so it still compiles and is
+caught by `verified_bundle_is_sealed`). That `run` forwards `input.granted` is
+held by `runner_uses_only_explicit_inputs` and `granted_import_is_linked`; its
+planted bug (`&[]` in place of `input.granted`, in `tools/src/run.rs`) has no
+`falsifiers.json` entry, because `run.rs` is not a recovery target (ask R2), and
+is hand-proven, pending R1 (LOG.md, task 020), outside every count above.

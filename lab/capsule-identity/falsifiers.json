@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017 and 018). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018 and 019). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -3014,6 +3014,171 @@
       ],
       "tests": [
         "encoder_refuses_a_path_with_an_empty_or_dot_part"
+      ]
+    },
+    {
+      "id": "F-CI19a",
+      "title": "README's rule drifts: the extracted Python's raw-leaf codec 0x55 becomes 0x70 before it runs",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    Ok(block.to_owned())\n",
+          "new": "    Ok(block.replace(\"0x55\", \"0x70\"))\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19b",
+      "title": "the Rust encoder's raw-leaf codec becomes 0x56, so Rust and README's Python disagree",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const RAW_CODEC: u8 = 0x55;\n",
+          "new": "const RAW_CODEC: u8 = 0x56;\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19c",
+      "title": "the README block is not found and the run returns no answers, so the check covers no bundle",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "const ENCODING_HEADING: &str = \"## The encoding\\n\";\n",
+          "new": "const ENCODING_HEADING: &str = \"## The Encoding\\n\";\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let block = readme_python_block()?;\n",
+          "new": "    let Ok(block) = readme_python_block() else {\n        return Ok(Vec::new());\n    };\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19d",
+      "title": "the interpreter is a program that does not exist: the test must fail, not skip",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "pub const PYTHON: &str = \"python3\";\n",
+          "new": "pub const PYTHON: &str = \"python3-not-installed\";\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19e",
+      "title": "the exit status is not checked: a valid CID followed by exit 1 is taken",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    if !output.status.success() {\n        return Err(format!(\n            \"{interpreter} -I exited with {}: {stderr}\",\n            output.status\n        ));\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19f",
+      "title": "a run that prints nothing gives an empty answer instead of a refusal",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        [] => Err(format!(\"{interpreter} -I printed nothing: {stderr}\")),\n",
+          "new": "        [] => Ok(String::new()),\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19g",
+      "title": "a run that prints more than one line gives its first line instead of a refusal",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        _ => Err(format!(\n            \"{interpreter} -I printed {} lines, not one: {stdout:?}\",\n            lines.len()\n        )),\n",
+          "new": "        _ => Ok(lines[0].to_owned()),\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19h",
+      "title": "the driver imports hashlib, a second home for the rule's hash",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "import json, os, sys\n",
+          "new": "import hashlib, json, os, sys\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19i",
+      "title": "python3 runs without -I, so the folder and the environment can change what it imports",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .arg(\"-I\")\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
+      ]
+    },
+    {
+      "id": "F-CI19j",
+      "title": "python3 runs from the lane folder, not a fresh empty temp folder",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .current_dir(fresh.path())\n",
+          "new": "        .current_dir(lane_dir())\n"
+        }
+      ],
+      "tests": [
+        "readme_python_recomputes_every_lab_cid_pin"
       ]
     }
   ]

@@ -511,7 +511,7 @@ keeps its existing grade and labels pending/grant cleanup as unmeasured.
 ## Two seeded instances (023)
 
 The rows `two_instances_overlap_with_separate_grants` and
-`instance_grant_does_not_authorise_sibling` prove the
+`instance_grant_does_not_authorise_sibling` each run one shared journey and prove the
 **process-isolation lab half of A3, A6 and A9**. Run `run.sh` under the shared
 build lease. Read the checked `instance overlap:`, `fixture controller:` and
 `fixture read:` lines beside the operator census and that run's VERSIONS.json.
@@ -522,7 +522,9 @@ file through the Runtime provider route with distinct bytes. Both clients
 request their own read, check every byte in the guest, then request the other
 file. Each barrier waits for one pending snapshot with two distinct sessions
 and two live children. Its monotonic bound is ten seconds, below the Runtime's
-30-second decision wait. The controller grants each own read for its session,
+30-second decision wait. The final check requires a recorded decision from
+both barriers. One pure `barrier_decision` function checks request shape for
+the controller and synthetic tests. The controller grants each own read for its session,
 then denies each sibling read with the fixture reason. Both stderr captures
 must contain that delivered refusal. The existing collector drains both client
 groups; the operator's existing stop and census run before capture checks.
@@ -543,6 +545,17 @@ F-ac3b grants instance 2 the sibling read; F-ac3c moves its own file into
 instance 1's directory; F-ac3d starts the second client after the first exits.
 Run each entry's named tests at baseline, with its exact edits, and after byte
 restoration. LOG.md records the commands and libtest results.
+
+F-overlap-second-barrier inserts the stage-1 shortcut in `Overlap::ready`;
+both the synthetic wiring test and the existing live journey must fail.
+F-overlap-sessions, F-overlap-sibling-new and F-overlap-alive remove the
+corresponding barrier checks. The alive test starts bounded `true` and `sleep`
+children through `RunningInstances::start` with its fixed system PATH.
+F-seed-dotdot removes the seed parent-segment refusal. Run each named test
+with `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+--test effects TEST_NAME -- --exact --show-output` under the same lease and
+600-second bound, at baseline, planted and restored. Every named test must
+fail with its planted bug before the entry receives CAUGHT credit.
 
 
 ## Pending-request cancellation

@@ -393,8 +393,16 @@ def restore_interruptions(saved):
 
 
 class BackupCollision(Exception):
-    """A backup this run did not create is already there. The link decides
-    ownership: this run stops before it touches the caller's bytes."""
+    """A backup or temporary file this run did not create is already there.
+    The name decides ownership: this run stops before it touches the caller's
+    bytes."""
+
+
+def remove_own_tmp(tmp):
+    """Remove the temporary file this run created, and only that file: a name
+    this run did not create is never removed (task 029)."""
+    if tmp is not None and tmp.exists():
+        tmp.unlink()
 
 
 class Mutation:
@@ -446,10 +454,31 @@ class Mutation:
                     raise LookupError(f"{name}: the original text is found {count} times, not once")
                 text = text.replace(edit["old"], edit["new"])
             texts[path] = text
+        owned_tmp = None
         try:
             for path, text in texts.items():
                 original = path.read_bytes()
                 backup = path.with_name(path.name + BACKUP_SUFFIX)
+                tmp = path.with_name(path.name + ".falsify-tmp")
+                # Ownership of the temporary file comes from its exclusive
+                # create, and that decision comes before the backup link: a
+                # name that already exists belongs to another run or to a
+                # killed run's leftover, and writing through it would change
+                # a file this run does not own (P11).
+                try:
+                    try:
+                        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                    except FileExistsError as error:
+                        raise BackupCollision(
+                            f"{tmp}: a temporary file this run did not create; "
+                            "the edit is not applied") from error
+                    owned_tmp = tmp
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                        stream.write(text)
+                except BaseException:
+                    remove_own_tmp(owned_tmp)
+                    owned_tmp = None
+                    raise
                 # The link decides ownership: a backup that already exists
                 # belongs to another run, and consuming it would put that
                 # run's original back. Signals stay off across the link and
@@ -465,15 +494,17 @@ class Mutation:
                             "the edit is not applied") from error
                     self.applied.append((path, backup, original))
                     own_backup(backup)
+                except BaseException:
+                    remove_own_tmp(owned_tmp)
+                    owned_tmp = None
+                    raise
                 finally:
                     restore_interruptions(saved)
-                tmp = path.with_name(path.name + ".falsify-tmp")
                 try:
-                    tmp.write_text(text, encoding="utf-8")
                     os.replace(tmp, path)
                 finally:
-                    if tmp.exists():
-                        tmp.unlink()
+                    remove_own_tmp(owned_tmp)
+                    owned_tmp = None
             # Inside the try: an interrupt after the last replacement but
             # before __enter__ returns must still restore (task 004).
             return self
@@ -2921,6 +2952,66 @@ def a_backup_this_run_did_not_make_is_refused():
     return ok
 
 
+def a_temporary_file_this_run_did_not_create_is_refused():
+    """A name planted at the temporary-file name, here a hard link to a file
+    beside the repository, is refused with its own reason before the backup
+    link: neither file changes, the plant keeps its inode and no backup
+    appears (task 029)."""
+    ok = True
+    try:
+        tree = refusal_tree()
+        inside = tree / "inside.txt"
+        inside.write_bytes(b"inside original\n")
+        outside = SELF_TEST_DIR / "outside.txt"
+        tmp = inside.with_name(inside.name + ".falsify-tmp")
+        os.link(outside, tmp)
+        planted = os.stat(tmp).st_ino
+        before = tree_state(SELF_TEST_DIR)
+        want = (False, "BACKUP TAKEN",
+                f"{tmp}: a temporary file this run did not create; "
+                "the edit is not applied")
+        got = refused_edit(edit_entry("inside.txt", "inside original"), tree)
+        backup = inside.with_name(inside.name + BACKUP_SUFFIX)
+        kept = (tree_state(SELF_TEST_DIR) == before
+                and tmp.exists() and os.stat(tmp).st_ino == planted
+                and os.path.samefile(tmp, outside))
+        print(f"self-test: a temporary file this run did not create is refused: "
+              f"{got[1]} ({got[2]}), kept={kept}, backup left={backup.exists()}")
+        if got != want or not kept or backup.exists():
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_backup_refusal_removes_this_runs_temporary_file():
+    """A backup planted before the edit makes the link refuse after this run
+    created its temporary file: that file is removed and the caller's backup
+    keeps its bytes (task 029)."""
+    ok = True
+    try:
+        tree = refusal_tree()
+        inside = tree / "inside.txt"
+        inside.write_bytes(b"inside original\n")
+        backup = inside.with_name(inside.name + BACKUP_SUFFIX)
+        tmp = inside.with_name(inside.name + ".falsify-tmp")
+        backup.write_bytes(b"a caller's backup\n")
+        want = (False, "BACKUP TAKEN",
+                f"{backup} is a backup this run did not create; "
+                "the edit is not applied")
+        got = refused_edit(edit_entry("inside.txt", "inside original"), tree)
+        kept = (inside.read_bytes() == b"inside original\n"
+                and backup.read_bytes() == b"a caller's backup\n")
+        left = tmp.exists()
+        print(f"self-test: a backup refusal removes this run's temporary file: "
+              f"{got[1]} ({got[2]}), kept={kept}, temporary left={left}")
+        if got != want or not kept or left:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -2990,6 +3081,10 @@ SELF_TEST_CASES = {
     "a nested run keeps the caller's backup": a_nested_run_keeps_the_callers_backup,
     "released backups are recovered again": released_backups_are_recovered_again,
     "a backup this run did not make is refused": a_backup_this_run_did_not_make_is_refused,
+    "a temporary file this run did not create is refused":
+        a_temporary_file_this_run_did_not_create_is_refused,
+    "a backup refusal removes this run's temporary file":
+        a_backup_refusal_removes_this_runs_temporary_file,
 }
 
 

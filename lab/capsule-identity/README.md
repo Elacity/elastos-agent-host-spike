@@ -86,7 +86,10 @@ with its length, and each file's bytes are their own block, named by hash, so
 two different bundles never make the same root.
 
 The same rule in a few lines of Python, which gives every pin below from the
-committed fixture files:
+committed fixture files. This block is the committed outside check: the test
+`readme_python_recomputes_every_lab_cid_pin` runs it (see
+[the cross-implementation check](#the-cross-implementation-check)), so it
+cannot drift from the Rust encoder without a test failing:
 
 ```python
 import hashlib
@@ -151,8 +154,9 @@ lab does not link, and any new crate here would make the locks of
 crate) stale. So the lab adds no crate.
 
 Each profile setting has a named test and a falsifier (`tests/encoding.rs`;
-the pins are checked against an uncommitted `python3 -I` recomputation written
-from these rules, not from the Rust code):
+every pin is also recomputed by the Python block above, written from these
+rules and not from the Rust code, in
+`readme_python_recomputes_every_lab_cid_pin`):
 
 | Setting | Named test | Falsifier |
 | --- | --- | --- |
@@ -175,8 +179,8 @@ from these rules, not from the Rust code):
 | An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
 | Two entries with one path are refused | `encoder_refuses_a_duplicate_path` | F-CI1r |
 
-The three pins these tests add are in `tests/common/mod.rs`, and each matches
-the `python3 -I` check (the first is also blocked task 010's pin): the
+The three pins these tests add are in `tests/common/mod.rs`, and the Python
+block gives each of them too (the first is also blocked task 010's pin): the
 chunk-limit bundle (`content-sample`'s `capsule.json` and
 `sample.example` as 262144 zero bytes, built in a temp dir and never
 committed) is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`;
@@ -186,6 +190,54 @@ committed) is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`;
 and a newline is `bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy`.
 The directory-block test builds 1100 empty files with 200-byte names in a temp
 dir.
+
+### The cross-implementation check
+
+`readme_python_recomputes_every_lab_cid_pin` (`tests/cross_implementation.rs`)
+makes the Python block above a second implementation under test (Rong's DR-2:
+"one non-Kubo checker that recomputes the CID"; Anders's Q2 and Q3:
+cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
+
+1. `readme_python_block` takes the one ```` ```python ```` block of this
+   section from the committed README, as it is. A missing section, no block,
+   two blocks or an unclosed block is refused with its reason.
+2. A short driver, `README_PYTHON_DRIVER`, follows it. It reads
+   `{bundle path: hex}` JSON from stdin, calls the block's `lab_cid` and prints
+   its answer. It holds no part of the rule: the test checks that it has no
+   `hashlib`, `sha256`, `varint`, `base64`, `B32`, base32 alphabet, `def` or
+   `lambda`, and calls `lab_cid(` once. So this block stays the only Python
+   copy of the rule (P10).
+3. Each bundle is its own `python3 -I -c` run from a fresh, empty temp
+   folder. The driver first checks that it runs under `-I` and that its folder
+   is empty, or it exits with its reason.
+4. It never skips. A `python3` that cannot start
+   (`python3 -I could not run: <error>`), a non-zero exit (even after it
+   printed a valid CID), no output, or more than one line is refused with its
+   own reason, and the test asserts each of these reasons.
+5. For each of the 11 pins, the Python answer, the pin constant and the
+   printed `encode_entries` result for the same files must be equal, and the
+   test asserts that it checked exactly 11 bundles. The 11 are the seven
+   pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
+   `model`, `provider-variant-a`, `provider-variant-b`), the recipe, and the
+   chunk-limit, empty-file and long-name bundles above, which are built as
+   entries in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   built on each machine, so it is not checked here.
+
+| Rule | Named test | Falsifier |
+| --- | --- | --- |
+| README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
+| Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
+| A missing block is no pass: exactly 11 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
+| A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
+| No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
+| More than one line is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19g (first line taken) |
+| The driver holds no rule | `readme_python_recomputes_every_lab_cid_pin` | F-CI19h (`import hashlib`) |
+| It runs isolated | `readme_python_recomputes_every_lab_cid_pin` | F-CI19i (no `-I`) |
+| It runs from a fresh, empty folder | `readme_python_recomputes_every_lab_cid_pin` | F-CI19j (the lane folder) |
+
+Not shown: Kubo itself, and Python on another machine. The check is two
+implementations on one Mac (Python 3.9.6 here), not an outside IPFS tool.
 
 ## Fixtures and their pinned lab CIDs
 
@@ -1109,9 +1161,12 @@ One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0
 (f8297e351 2025-10-28). The swap tests make each change happen at a chosen
 moment through the observer; they do not prove the walk against every timing
 on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and
-Kubo itself (none is installed on this Mac; the pins are checked by an
-uncommitted `python3 -I` recomputation written from the byte rules). The
-tests pin the single-block, non-sharded subset of the profile only.
+Kubo itself (none is installed on this Mac). The outside check is the
+README's Python block, written from the byte rules: the committed test
+`readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
+3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
+value for the same files. The tests pin the single-block, non-sharded subset
+of the profile only.
 
 ## Run
 
@@ -1133,6 +1188,8 @@ generator in tests). There is no dependency on `elastos-server` or
 `zerocopy` is locked at 0.8.62 because 0.8.63's derive crate is not in that
 cache. `wc001_capsule_bundle_gets_a_stable_lab_cid` runs
 `lab/wasm-capsule/tools/build`, so it also needs that lane's toolchain.
+`readme_python_recomputes_every_lab_cid_pin` runs `python3` from `PATH`; with
+no `python3` it fails, it does not skip.
 
 ## Layout
 
@@ -1147,10 +1204,12 @@ recipes/                 provider-variant.recipe, the variants' lab stand-in rec
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
                          the refusal asserts both signature checks share, the
-                         key-material scan
+                         key-material scan, the python3 -I run of README's rule
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
+tests/cross_implementation.rs
+                         README's Python rule, the pins and the encoder agree
 tests/encoding.rs        order, boundaries, the printed form, one file per path,
                          each UnixFS profile setting
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
@@ -1168,7 +1227,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 181 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 191 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1187,7 +1246,9 @@ F-CI12a and F-CI12b (see [three kinds](#three-kinds-share-the-package-rules)), a
 F-CI15a to F-CI15z and F-CI15aa to F-CI15af, task 016's F-CI16a to
 F-CI16i, and task 017's F-CI17a (all three: see
 [the variant binding](#lab-variant-binding-outside-the-bundles)), and task
-018's F-CI18a to F-CI18s (see [the encoding](#the-encoding)).
+018's F-CI18a to F-CI18s (see [the encoding](#the-encoding)), and task
+019's F-CI19a to F-CI19j (see
+[the cross-implementation check](#the-cross-implementation-check)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry except F-CI4h and F-CI4i edits a file the runner
@@ -1197,7 +1258,9 @@ and F-CI4i edits this file. Those two are not in the runner's recovery list.
 The runner still runs them. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
-`new` and tests unchanged.
+`new` and tests unchanged. Task 019's entries edit only `src/lib.rs`
+(F-CI19b) and `tests/common/mod.rs`, which holds the code that takes the
+Python block out of this file and runs it, so no entry edits this file.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1268,8 +1331,10 @@ task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 `F-CI16`: 9 of 9). At task 017, with the id prefix `F-CI17`, it reported
 `summary: 1 CAUGHT of 1`. At task 018 it reported
 `summary: 181 CAUGHT of 181` (`baseline: 112 named tests pass without an edit,
-0 do not`; with the id prefix `F-CI18`: 19 of 19).
+0 do not`; with the id prefix `F-CI18`: 19 of 19). At task 019 it reported
+`summary: 191 CAUGHT of 191` (`baseline: 113 named tests pass without an edit,
+0 do not`; F-CI19a to F-CI19j each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017 and 018 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018 and 019 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
