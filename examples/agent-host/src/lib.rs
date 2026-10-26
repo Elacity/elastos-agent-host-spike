@@ -3925,6 +3925,19 @@ enum ResumeOutcome {
     FormatNotSupported(&'static str),
 }
 
+/// How a new launch opens this task's journal. It never writes over a
+/// newer stored journal.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenOutcome {
+    /// Nothing was stored. This journal was written with create_only.
+    Created,
+    /// A stored format-2 journal was loaded. Nothing was written.
+    Loaded,
+    /// No write grant. Nothing was sent.
+    Denied,
+}
+
 /// An append records a step. It waits while an earlier append has no result,
 /// so a lost reply is never followed by a second write.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4190,6 +4203,66 @@ fn stored_task_refusal(
     match reread_journal(bus, cursor, grant) {
         Err(FORMAT_1_REASON) => Some(FORMAT_1_REASON),
         _ => None,
+    }
+}
+
+/// On a new launch, load the latest stored format-2 journal. Nothing is
+/// stored, or there is no read grant: `Ok(None)`, so the caller may write
+/// with create_only. A format 1 journal, or a stored journal that breaks
+/// the path rule, is refused with that reason. This never writes.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn load_latest_journal(
+    bus: &mut impl ResourceBus,
+    cursor: &mut JournalCursor,
+    grant: Option<&JournalGrant>,
+) -> Result<Option<Journal>, &'static str> {
+    let Some(grant) = grant else {
+        return Ok(None);
+    };
+    match read_stored_journal(bus, cursor, grant) {
+        Ok((stored, head, revision)) => {
+            cursor.revision = Some(revision);
+            cursor.head = head;
+            cursor.stale = false;
+            Ok(Some(stored))
+        }
+        Err(Some(reason)) => Err(reason),
+        Err(None) => Ok(None),
+    }
+}
+
+/// Open this task's journal on a new launch: load the latest stored
+/// format-2 journal, or write this one with create_only when nothing is
+/// stored. A stored format 1 journal is refused. A conflict that is not
+/// format 1 is refused, so a newer stored journal is not overwritten.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn open_task_journal(
+    bus: &mut impl ResourceBus,
+    journal: &mut Journal,
+    cursor: &mut JournalCursor,
+    grants: &JournalGrants,
+) -> Result<OpenOutcome, &'static str> {
+    match load_latest_journal(bus, cursor, grants.read.as_ref()) {
+        Ok(Some(stored)) => {
+            *journal = stored;
+            Ok(OpenOutcome::Loaded)
+        }
+        Err(reason) => Err(reason),
+        Ok(None) => match append_journal(bus, journal, cursor, grants.write.as_ref()) {
+            AppendOutcome::Denied => Ok(OpenOutcome::Denied),
+            AppendOutcome::Written => Ok(OpenOutcome::Created),
+            AppendOutcome::Conflict => {
+                if let Some(reason) = stored_task_refusal(bus, cursor, grants.read.as_ref()) {
+                    Err(reason)
+                } else {
+                    Err("conflict")
+                }
+            }
+            AppendOutcome::Held => Err("held"),
+            AppendOutcome::TooLarge => Err("too large"),
+            AppendOutcome::Refused => Err("refused"),
+            AppendOutcome::Unknown => Err("unknown"),
+        },
     }
 }
 
@@ -8077,36 +8150,30 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the journal did not round-trip through format 2".to_string(),
             ));
         }
-        // Ask for the two journal grants. With no write grant the append is
-        // denied and nothing is sent; with both, the journal is written and
-        // read back.
+        // Ask for the two journal grants. A stored format-2 journal is
+        // loaded and not overwritten. With no write grant the first write
+        // is denied and nothing is sent; with both and nothing stored, the
+        // journal is written and read back. A stored format 1 journal is
+        // refused with its reason.
         let mut cursor = journal_cursor("agent-host", "demo").map_err(|_| {
             elastos::bus::types::BusError::Invalid("the journal id was refused".to_string())
         })?;
         let grants = request_journal_grants(&mut WasmBus, &cursor);
-        let appended = append_journal(
-            &mut WasmBus,
-            &mut journal,
-            &mut cursor,
-            grants.write.as_ref(),
-        );
-        let followed = match (&grants.write, appended) {
-            (None, AppendOutcome::Denied) => {
-                cursor.revision.is_none()
+        let opened = match open_task_journal(&mut WasmBus, &mut journal, &mut cursor, &grants) {
+            Ok(opened) => opened,
+            Err(reason) => {
+                return Err(elastos::bus::types::BusError::Invalid(reason.to_string()));
+            }
+        };
+        let followed = match opened {
+            OpenOutcome::Denied => {
+                grants.write.is_none()
+                    && cursor.revision.is_none()
                     && journal.steps.last().is_some_and(|step| {
                         step.kind == ProposalKind::JournalAppend && step.state == StepState::Denied
                     })
             }
-            (Some(_), AppendOutcome::Conflict) => {
-                // A stored format 1 journal: the task shows why and stops.
-                if let Some(reason) =
-                    stored_task_refusal(&mut WasmBus, &mut cursor, grants.read.as_ref())
-                {
-                    return Err(elastos::bus::types::BusError::Invalid(reason.to_string()));
-                }
-                false
-            }
-            (Some(_), AppendOutcome::Written) => {
+            OpenOutcome::Created => {
                 cursor.revision.is_some()
                     && reread_journal(&mut WasmBus, &mut cursor, grants.read.as_ref()).is_ok_and(
                         |stored| {
@@ -8117,7 +8184,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                         },
                     )
             }
-            _ => false,
+            OpenOutcome::Loaded => cursor.revision.is_some() && cursor.pending.is_none(),
         };
         if !followed
             || cursor.pending.is_some()
@@ -16481,6 +16548,79 @@ mod tests {
         let step = last_step(&journal);
         assert!(step.has_result);
         assert_eq!(step.new, "conflict");
+    }
+
+    /// Write through the FakeRuntime bridge, refuse a stale if_revision with
+    /// revision_conflict, then start a new runtime on the same store and
+    /// read back the latest revision. Always-on: no WASM artifact.
+    #[test]
+    fn a_journal_survives_a_new_launch_and_a_stale_write_is_refused() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        let grants = request_journal_grants(&mut runtime, &cursor);
+        assert_eq!(
+            open_task_journal(&mut runtime, &mut journal, &mut cursor, &grants),
+            Ok(OpenOutcome::Created)
+        );
+        let v1 = cursor.revision.clone().unwrap();
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        let v2 = cursor.revision.clone().unwrap();
+        let latest = runtime.stored.clone().unwrap();
+        assert_ne!(v1, v2);
+
+        let mut stale_cursor = cursor.clone();
+        stale_cursor.revision = Some(v1);
+        stale_cursor.stale = false;
+        let mut stale_journal = journal.clone();
+        admit_user(&mut stale_journal, "stale replay");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut stale_journal,
+                &mut stale_cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Conflict
+        );
+        assert_eq!(stale_cursor.stale, true);
+        assert_eq!(runtime.stored.as_deref(), Some(latest.as_slice()));
+
+        let mut launched = FakeRuntime {
+            resource: runtime.resource.clone(),
+            stored: runtime.stored.clone(),
+            calls: Vec::new(),
+            lose_reply: false,
+            drop_write: false,
+            refuse_grants: false,
+        };
+        let mut fresh = journal_cursor("demo-agent", "task-1").unwrap();
+        assert!(fresh.revision.is_none());
+        let mut empty = two_turns();
+        let grants = request_journal_grants(&mut launched, &fresh);
+        assert_eq!(
+            open_task_journal(&mut launched, &mut empty, &mut fresh, &grants),
+            Ok(OpenOutcome::Loaded)
+        );
+        let (decoded, _, head) = decode_journal(&latest).unwrap();
+        assert_eq!(empty, decoded);
+        assert_eq!(fresh.head, head);
+        assert_eq!(fresh.revision.as_deref(), Some(v2.as_str()));
+        assert!(fresh.pending.is_none());
+        assert_eq!(launched.stored.as_deref(), Some(latest.as_slice()));
+        assert!(launched.calls.iter().all(|(op, _)| op != "write"));
+
+        let read = reread_journal(&mut launched, &mut fresh, grants.read.as_ref()).unwrap();
+        assert_eq!(read, decoded);
+        assert_eq!(fresh.revision.as_deref(), Some(v2.as_str()));
     }
 
     #[test]
