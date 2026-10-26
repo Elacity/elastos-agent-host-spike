@@ -581,10 +581,18 @@ Read at `01f6add1f`. `every_lab_cid_consumer_is_in_the_adoption_note`
 `Cargo.toml` under `lab/` outside this lane and keeps those whose
 `[dependencies]` or `[dev-dependencies]` has a `capsule-identity` key with a
 `path`, written as one inline table. That set must equal the list, both ways,
-and the failure names each path that is missing or extra. A manifest that
-names the crate in any other form (another table, a dotted header, no `path`)
-fails the scan with its line, so it is never skipped. When a lab crate adds a
-path dependency on this crate, this lane's tests fail until the list names it.
+and the failure names each path that is missing or extra. The scan reads each
+manifest as TOML statements (`manifest_statements`): a comment is dropped, a
+string, one-line or multi-line, is one piece of text and never a table or a
+key, and a quoted key is read with its escapes decoded, so
+`"capsule-identity"` is the same key. Cargo reads no dependency under
+`[package]`, so its text (a description, metadata) is passed over. A manifest
+that names the crate in any other form (another table, a dotted header or key,
+no `path`, a `package` rename) fails the scan with its line, and so does a
+manifest the reader cannot read (a string never closed, an escape TOML does
+not define, a bracket out of balance), so a consumer is never skipped. When a
+lab crate adds a path dependency on this crate, this lane's tests fail until
+the list names it.
 
 **The pin rule.** A consumer's pin comes from its own `python3 -I` script,
 written only from [the encoding](#the-encoding) and Python's standard library,
@@ -621,7 +629,9 @@ identity check only: it adds no admission, grant or launch step.
 | --- | --- | --- |
 | The list is every lab crate with a path dependency on this crate, and only those | `every_lab_cid_consumer_is_in_the_adoption_note` | F-CI22a (only `lab/*/Cargo.toml` is read), F-CI22b (the key `capsule_identity`), F-CI22c (the heading the helper looks for) |
 | The note states the outside recomputation | `the_adoption_note_states_the_outside_recomputation` | F-CI22c |
-| The scan never skips: a missing note, an unread line, an unreadable manifest and a form it does not read each fail with their reason | `the_consumer_scan_refuses_what_it_cannot_read` | F-CI22d (a form it does not read counts as none), F-CI22e (an unreadable manifest reads as empty), F-CI22f (a list line it cannot read is skipped) |
+| The scan never skips: a missing note, an unread line, an unreadable manifest and a form it does not read each fail with their reason | `the_consumer_scan_refuses_what_it_cannot_read` | F-CI22d (a form it does not read counts as none), F-CI22e (an unreadable manifest reads as empty), F-CI22f (a list line it cannot read is skipped), F-CI22j (a quoted key or rename does not name the crate), F-CI22q (any value counts as a `path` table) |
+| A string is text, never structure, and a quoted key is read decoded: an escaped key is found, and a `[package]` description that holds a dependency's lines declares none | `the_consumer_scan_refuses_what_it_cannot_read` | F-CI22g (escapes kept as written), F-CI22h (a multi-line string read line by line), F-CI22i (`[package]` not passed over) |
+| The manifest reader refuses what is not TOML, each with its line and reason | `the_manifest_reader_refuses_what_is_not_toml` | F-CI22g, F-CI22h, F-CI22k (an unknown escape), F-CI22l (a one-line string runs on), F-CI22m (a `]` that closes nothing), F-CI22n (a bracket never closed), F-CI22o (an escape that is not a character), F-CI22p (a `\` inside a multi-line line) |
 
 ## Test-key publisher signature (lab proposal)
 
@@ -1364,7 +1374,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 203 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 214 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1386,7 +1396,7 @@ F-CI16i, and task 017's F-CI17a (all three: see
 018's F-CI18a to F-CI18s (see [the encoding](#the-encoding)), and task
 019's F-CI19a to F-CI19j, and task 020's F-CI20a to F-CI20f (both: see
 [the cross-implementation check](#the-cross-implementation-check)), and task
-022's F-CI22a to F-CI22f (see
+022's F-CI22a to F-CI22q (see
 [for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
@@ -1485,8 +1495,8 @@ task 016 it reported `summary: 161 CAUGHT of 161` (with the id prefix
 0 do not`; F-CI19a to F-CI19j each CAUGHT). At task 020 it reported
 `summary: 197 CAUGHT of 197` (`baseline: 115 named tests pass without an edit,
 0 do not`; F-CI20a to F-CI20f and the widened F-CI19d each CAUGHT).
-At task 022 it reported `summary: 203 CAUGHT of 203` (`baseline: 118 named
-tests pass without an edit, 0 do not`; F-CI22a to F-CI22f each CAUGHT).
+At task 022 it reported `summary: 214 CAUGHT of 214` (`baseline: 119 named
+tests pass without an edit, 0 do not`; F-CI22a to F-CI22q each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020 and 022 prove each of their falsifiers by break, named test fails, revert.
 

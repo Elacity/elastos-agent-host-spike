@@ -737,48 +737,305 @@ pub fn read_manifest(path: &str) -> Result<String, String> {
 
 /// Whether the manifest `text`, at `path`, has a `capsule-identity` key with
 /// a `path` in its `[dependencies]` or `[dev-dependencies]` table, written as
-/// one inline table on its line. A comment does not count. Any other line
-/// that names the crate (another table, a dotted header, no inline `path`)
-/// is refused with its line, so a consumer written in a form this reader
-/// does not take fails the scan instead of being missed.
+/// one inline table. It reads [`manifest_statements`], so a comment, and the
+/// text inside a string, are never read as a key or a table, and a quoted
+/// key is read with its escapes decoded. Cargo reads no dependency under
+/// `[package]`, whose strings (a description, metadata) are text, so that
+/// table is passed over. Any other statement with a key, a word or a string
+/// that names the crate (another table, a dotted header or key, no inline
+/// `path`, a `package` rename) is refused with its first line, so a consumer
+/// written in a form this reader does not take fails the scan instead of
+/// being missed.
 pub fn depends_on_this_crate(path: &str, text: &str) -> Result<bool, String> {
-    let mut table = "";
+    let mut table: Vec<String> = Vec::new();
     let mut found = false;
-    for (index, line) in text.lines().enumerate() {
-        let code = line.split('#').next().unwrap_or_default().trim();
-        if code.starts_with('[') {
-            table = code;
+    for statement in manifest_statements(path, text)? {
+        let tokens = &statement.tokens;
+        let header = tokens.first() == Some(&Token::Mark('['));
+        if header {
+            table = names_in(tokens);
         }
-        if !code.contains(CRATE_KEY) {
+        let (key, value) = match tokens.iter().position(|token| *token == Token::Mark('=')) {
+            Some(at) if !header => (names_in(&tokens[..at]), &tokens[at + 1..]),
+            _ => (Vec::new(), &tokens[..0]),
+        };
+        let place = table.first().or(key.first());
+        if place.is_some_and(|name| name == "package") || !tokens.iter().any(names_this_crate) {
             continue;
         }
-        let (key, value) = code.split_once('=').unwrap_or((code, ""));
-        let dependencies = matches!(table, "[dependencies]" | "[dev-dependencies]");
-        if dependencies && key.trim() == CRATE_KEY && has_inline_path(value) {
+        let dependencies =
+            matches!(&table[..], [one] if one == "dependencies" || one == "dev-dependencies");
+        if dependencies && key == [CRATE_KEY] && has_inline_path(value) {
             found = true;
         } else {
             return Err(format!(
-                "{path}:{}: {line:?} names {CRATE_KEY} in a form the scan does not read",
-                index + 1
+                "{path}:{}: {:?} names {CRATE_KEY} in a form the scan does not read",
+                statement.line, statement.source
             ));
         }
     }
     Ok(found)
 }
 
-/// Whether `value` is one inline table with a `path` key.
-fn has_inline_path(value: &str) -> bool {
-    let value = value.trim();
-    let Some(inner) = value
-        .strip_prefix('{')
-        .and_then(|rest| rest.strip_suffix('}'))
-    else {
+/// Whether `token` is a word or a string that holds this crate's key.
+fn names_this_crate(token: &Token) -> bool {
+    matches!(token, Token::Word(text) | Token::Text(text) if text.contains(CRATE_KEY))
+}
+
+/// The words and strings of `tokens`, in order: a header's table names or a
+/// statement's dotted key.
+fn names_in(tokens: &[Token]) -> Vec<String> {
+    tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Word(text) | Token::Text(text) => Some(text.clone()),
+            Token::Mark(_) => None,
+        })
+        .collect()
+}
+
+/// Whether `value` is one inline table with a `path` key of its own.
+fn has_inline_path(value: &[Token]) -> bool {
+    if value.first() != Some(&Token::Mark('{')) || value.last() != Some(&Token::Mark('}')) {
         return false;
-    };
-    inner.split(',').any(|part| {
-        part.split_once('=')
-            .is_some_and(|(key, _)| key.trim() == "path")
+    }
+    let mut depth = 0;
+    value.windows(3).any(|three| {
+        match three[0] {
+            Token::Mark('{' | '[') => depth += 1,
+            Token::Mark('}' | ']') => depth -= 1,
+            _ => {}
+        }
+        let key = matches!(&three[1], Token::Word(text) | Token::Text(text) if text == "path");
+        let opens = matches!(three[0], Token::Mark('{' | ','));
+        depth == 1 && opens && key && three[2] == Token::Mark('=')
     })
+}
+
+/// One piece of a manifest statement: a mark (`[ ] { } = , .`), a bare word,
+/// or a string with its escapes decoded.
+#[derive(Debug, PartialEq)]
+pub enum Token {
+    Mark(char),
+    Word(String),
+    Text(String),
+}
+
+/// A manifest statement: a table header or a `key = value`, with every line
+/// of any string, array or inline table it opens. `line` is its first line's
+/// number and `source` that line as written.
+#[derive(Debug, PartialEq)]
+pub struct Statement<'a> {
+    pub line: usize,
+    pub source: &'a str,
+    pub tokens: Vec<Token>,
+}
+
+/// The statements of the manifest `text`, at `path`, read as TOML: comments
+/// dropped, each string one token with its escapes decoded, and a statement
+/// ending only at a line end outside any string, array or inline table. A
+/// string never closed, an escape TOML does not define, and a bracket out of
+/// balance are each refused with the line and the reason.
+pub fn manifest_statements<'a>(path: &str, text: &'a str) -> Result<Vec<Statement<'a>>, String> {
+    let sources: Vec<&str> = text.lines().collect();
+    let chars: Vec<char> = text.chars().collect();
+    let mut lexer = Lexer {
+        chars: &chars,
+        at: 0,
+        line: 1,
+    };
+    let mut statements = Vec::new();
+    let mut tokens = Vec::new();
+    let mut start = 1;
+    let mut depth = 0usize;
+    let mut word = String::new();
+    let refuse = |line: usize, reason: String| format!("{path}:{line}: {reason}");
+    while let Some(c) = lexer.peek(0) {
+        if tokens.is_empty() && word.is_empty() {
+            start = lexer.line;
+        }
+        if !(c.is_whitespace() || "[]{}=,.#\"'".contains(c)) {
+            word.push(c);
+            lexer.at += 1;
+            continue;
+        }
+        if !word.is_empty() {
+            tokens.push(Token::Word(std::mem::take(&mut word)));
+        }
+        match c {
+            '#' => lexer.skip_comment(),
+            '"' | '\'' => {
+                let line = lexer.line;
+                tokens.push(Token::Text(
+                    lexer.string().map_err(|why| refuse(line, why))?,
+                ));
+            }
+            '\n' if depth == 0 => {
+                lexer.next();
+                if !tokens.is_empty() {
+                    let source = sources[start - 1];
+                    let tokens = std::mem::take(&mut tokens);
+                    statements.push(Statement {
+                        line: start,
+                        source,
+                        tokens,
+                    });
+                }
+            }
+            '[' | '{' | ']' | '}' | '=' | ',' | '.' => {
+                if "[{".contains(c) {
+                    depth += 1;
+                } else if "]}".contains(c) {
+                    depth = depth
+                        .checked_sub(1)
+                        .ok_or_else(|| refuse(lexer.line, format!("a {c:?} closes nothing")))?;
+                }
+                tokens.push(Token::Mark(c));
+                lexer.next();
+            }
+            _ => {
+                lexer.next();
+            }
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(Token::Word(word));
+    }
+    if depth != 0 {
+        return Err(refuse(
+            start,
+            "a bracket opened here is never closed".to_owned(),
+        ));
+    }
+    if !tokens.is_empty() {
+        statements.push(Statement {
+            line: start,
+            source: sources[start - 1],
+            tokens,
+        });
+    }
+    Ok(statements)
+}
+
+/// The characters of a manifest and where the reader is in them.
+struct Lexer<'c> {
+    chars: &'c [char],
+    at: usize,
+    line: usize,
+}
+
+impl Lexer<'_> {
+    fn peek(&self, ahead: usize) -> Option<char> {
+        self.chars.get(self.at + ahead).copied()
+    }
+
+    /// The next character, counting lines.
+    fn next(&mut self) -> Option<char> {
+        let c = self.peek(0)?;
+        self.at += 1;
+        if c == '\n' {
+            self.line += 1;
+        }
+        Some(c)
+    }
+
+    /// Passes over a comment, up to its line's end.
+    fn skip_comment(&mut self) {
+        while self.peek(0).is_some_and(|c| c != '\n') {
+            self.at += 1;
+        }
+    }
+
+    /// The string that starts here, one-line or multi-line, basic or literal,
+    /// with a basic string's escapes decoded.
+    fn string(&mut self) -> Result<String, String> {
+        let quote = self.next().expect("a quote");
+        let multi = self.peek(0) == Some(quote) && self.peek(1) == Some(quote);
+        if multi {
+            self.at += 2;
+            if self.peek(0) == Some('\n') {
+                self.next();
+            }
+        }
+        let mut text = String::new();
+        loop {
+            let Some(c) = self.next() else {
+                return Err("a string is never closed".to_owned());
+            };
+            match c {
+                '\n' if !multi => return Err("a one-line string is never closed".to_owned()),
+                '\\' if quote == '"' => self.escape(multi, &mut text)?,
+                _ if c == quote && !multi => return Ok(text),
+                _ if c == quote => {
+                    // Up to two quotes may end the text just before the
+                    // closing three.
+                    let mut run = 1;
+                    while self.peek(0) == Some(quote) && run < 5 {
+                        self.at += 1;
+                        run += 1;
+                    }
+                    let closes = run >= 3;
+                    let kept = if closes { run - 3 } else { run };
+                    text.extend(std::iter::repeat(quote).take(kept));
+                    if closes {
+                        return Ok(text);
+                    }
+                }
+                _ => text.push(c),
+            }
+        }
+    }
+
+    /// The escape after a `\` in a basic string, pushed to `text` decoded.
+    /// In a multi-line string, a `\` at a line's end drops the line break
+    /// and the white space after it.
+    fn escape(&mut self, multi: bool, text: &mut String) -> Result<(), String> {
+        let Some(c) = self.next() else {
+            return Err("a string is never closed".to_owned());
+        };
+        let simple = match c {
+            'b' => Some('\u{8}'),
+            't' => Some('\t'),
+            'n' => Some('\n'),
+            'f' => Some('\u{c}'),
+            'r' => Some('\r'),
+            'e' => Some('\u{1b}'),
+            '"' => Some('"'),
+            '\\' => Some('\\'),
+            _ => None,
+        };
+        if let Some(decoded) = simple {
+            text.push(decoded);
+            return Ok(());
+        }
+        let digits = match c {
+            'x' => 2,
+            'u' => 4,
+            'U' => 8,
+            ' ' | '\t' | '\r' | '\n' if multi => {
+                let mut rest = c;
+                while rest == ' ' || rest == '\t' || rest == '\r' {
+                    rest = self.next().unwrap_or('\0');
+                }
+                if rest != '\n' {
+                    return Err("a \\ in a multi-line string is not at a line's end".to_owned());
+                }
+                while self.peek(0).is_some_and(char::is_whitespace) {
+                    self.next();
+                }
+                return Ok(());
+            }
+            _ => return Err(format!("the escape \\{c} is not TOML's")),
+        };
+        let hex: String = (0..digits).filter_map(|_| self.next()).collect();
+        let decoded = u32::from_str_radix(&hex, 16)
+            .ok()
+            .filter(|_| hex.len() == digits && hex.chars().all(|d| d.is_ascii_hexdigit()))
+            .and_then(char::from_u32)
+            .ok_or_else(|| format!("the escape \\{c}{hex} is not a character"))?;
+        text.push(decoded);
+        Ok(())
+    }
 }
 
 /// The driver run after README's block. It holds no part of the naming

@@ -84,6 +84,32 @@ fn the_consumer_scan_refuses_what_it_cannot_read() {
         Ok(false)
     );
 
+    // A quoted key is read with its escapes decoded, so a consumer that
+    // spells the key another valid way is still found (Codex, 022 round 1).
+    for key in [
+        r#""capsule-identity""#,
+        r#""capsule\U0000002didentity""#,
+        r#""capsule-identity""#,
+        "'capsule-identity'",
+    ] {
+        let text = format!("[dependencies]\n{key} = {{ path = \"../capsule\\u002didentity\" }}\n");
+        assert_eq!(reads(&text), Ok(true), "{text}");
+    }
+    // A `#` inside a string is text, not a comment.
+    assert_eq!(
+        reads("[dependencies]\ncapsule-identity = { path = \"../a#b\" }\n"),
+        Ok(true)
+    );
+
+    // The text of a string is never a table or a key (Codex, 022 round 1):
+    // a `[package]` description that holds a dependency's lines declares
+    // none, in either kind of multi-line string.
+    let held = "[dependencies]\ncapsule-identity = { path = \"../capsule-identity\" }\n";
+    for quotes in ["\"\"\"", "'''"] {
+        let text = format!("[package]\ndescription = {quotes}\n{held}{quotes}\n[dependencies]\n");
+        assert_eq!(reads(&text), Ok(false), "{text}");
+    }
+
     // Any other form that names the crate fails with its line.
     for (text, line, shown) in [
         (
@@ -101,6 +127,18 @@ fn the_consumer_scan_refuses_what_it_cannot_read() {
             2,
             "capsule-identity = \"0.1\"".to_owned(),
         ),
+        (
+            "[dependencies]\nci = { package = \"capsule\\u002didentity\", path = \"../ci\" }\n"
+                .to_owned(),
+            2,
+            "ci = { package = \"capsule\\u002didentity\", path = \"../ci\" }".to_owned(),
+        ),
+        (
+            "[dependencies]\nx = { path = \"../x\", note = \"\"\"\ncapsule-identity\n\"\"\" }\n"
+                .to_owned(),
+            2,
+            "x = { path = \"../x\", note = \"\"\"".to_owned(),
+        ),
     ] {
         assert_eq!(
             reads(&text),
@@ -109,4 +147,67 @@ fn the_consumer_scan_refuses_what_it_cannot_read() {
             ))
         );
     }
+}
+
+#[test]
+fn the_manifest_reader_refuses_what_is_not_toml() {
+    let path = "lab/x/Cargo.toml";
+    for (text, reason) in [
+        ("name = \"x\n", "1: a one-line string is never closed"),
+        ("[package]\nd = \"\"\"\nx\n", "2: a string is never closed"),
+        ("name = \"\\q\"\n", "1: the escape \\q is not TOML's"),
+        (
+            "name = \"\\u00zz\"\n",
+            "1: the escape \\u00zz is not a character",
+        ),
+        (
+            "d = \"\"\"a\\ b\"\"\"\n",
+            "1: a \\ in a multi-line string is not at a line's end",
+        ),
+        ("]\n", "1: a ']' closes nothing"),
+        ("x = [\n1,\n", "1: a bracket opened here is never closed"),
+    ] {
+        assert_eq!(
+            manifest_statements(path, text),
+            Err(format!("{path}:{reason}")),
+            "{text:?}"
+        );
+        assert_eq!(
+            depends_on_this_crate(path, text),
+            Err(format!("{path}:{reason}"))
+        );
+    }
+
+    // What the reader keeps: one statement per header or key, a multi-line
+    // string or array kept whole with its first line, and escapes decoded.
+    let text = "[a] # note\nb = \"\"\"\nx\\\n   y\"\"\"\nc = [\n'1',\n]\n";
+    let word = |text: &str| Token::Word(text.to_owned());
+    let string = |text: &str| Token::Text(text.to_owned());
+    assert_eq!(
+        manifest_statements(path, text),
+        Ok(vec![
+            Statement {
+                line: 1,
+                source: "[a] # note",
+                tokens: vec![Token::Mark('['), word("a"), Token::Mark(']')],
+            },
+            Statement {
+                line: 2,
+                source: "b = \"\"\"",
+                tokens: vec![word("b"), Token::Mark('='), string("xy")],
+            },
+            Statement {
+                line: 5,
+                source: "c = [",
+                tokens: vec![
+                    word("c"),
+                    Token::Mark('='),
+                    Token::Mark('['),
+                    string("1"),
+                    Token::Mark(','),
+                    Token::Mark(']'),
+                ],
+            },
+        ])
+    );
 }

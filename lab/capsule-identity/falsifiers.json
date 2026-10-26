@@ -3347,8 +3347,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        } else {\n            return Err(format!(\n                \"{path}:{}: {line:?} names",
-          "new": "        } else if false {\n            return Err(format!(\n                \"{path}:{}: {line:?} names"
+          "old": "        } else {\n            return Err(format!(\n                \"{path}:{}: {:?} names",
+          "new": "        } else if false {\n            return Err(format!(\n                \"{path}:{}: {:?} names"
         }
       ],
       "tests": [
@@ -3381,6 +3381,184 @@
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "            _ => {\n                let what = \"a manifest path and pins, parse or both\";\n                return Err(format!(\"the adoption note's line {line:?} is not {what}\"));\n            }\n",
           "new": "            _ => continue,\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI22g",
+      "title": "a basic string keeps its escapes as written, so the key \"capsule\\u002didentity\" is not read as capsule-identity and its consumer is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                '\\\\' if quote == '\"' => self.escape(multi, &mut text)?,\n",
+          "new": "                '\\\\' if quote == '\"' => text.push(c),\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read",
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22h",
+      "title": "a multi-line string is not read as one string, so its lines are read as manifest structure",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let multi = self.peek(0) == Some(quote) && self.peek(1) == Some(quote);\n",
+          "new": "        let multi = false;\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read",
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22i",
+      "title": "the [package] table is not passed over, so a description that holds a dependency's lines fails the scan",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if place.is_some_and(|name| name == \"package\") || !tokens.iter().any(names_this_crate) {\n",
+          "new": "        if !tokens.iter().any(names_this_crate) {\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI22j",
+      "title": "only bare words name the crate, so a quoted key or a package rename that names it is skipped",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    matches!(token, Token::Word(text) | Token::Text(text) if text.contains(CRATE_KEY))\n",
+          "new": "    matches!(token, Token::Word(text) if text.contains(CRATE_KEY))\n"
+        }
+      ],
+      "tests": [
+        "the_consumer_scan_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI22k",
+      "title": "an escape TOML does not define is dropped instead of refused",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            _ => return Err(format!(\"the escape \\\\{c} is not TOML's\")),\n",
+          "new": "            _ => return Ok(()),\n"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22l",
+      "title": "a one-line string runs on past its line instead of being refused there",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                '\\n' if !multi => return Err(\"a one-line string is never closed\".to_owned()),\n",
+          "new": "                '\\n' if false => return Err(\"a one-line string is never closed\".to_owned()),\n"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22m",
+      "title": "a closing bracket that closes nothing is let pass",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                    depth = depth\n                        .checked_sub(1)\n                        .ok_or_else(|| refuse(lexer.line, format!(\"a {c:?} closes nothing\")))?;\n",
+          "new": "                    depth = depth.saturating_sub(1);\n"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22n",
+      "title": "a bracket never closed at the manifest's end is let pass",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    if depth != 0 {\n        return Err(refuse(\n",
+          "new": "    if false {\n        return Err(refuse(\n"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22o",
+      "title": "an escape that is not a character reads as a question mark instead of being refused",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            .ok_or_else(|| format!(\"the escape \\\\{c}{hex} is not a character\"))?;\n",
+          "new": "            .unwrap_or('?');\n"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22p",
+      "title": "a backslash and a space inside a multi-line string's line is dropped instead of refused",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                if rest != '\\n' {\n                    return Err(\"a \\\\ in a multi-line string",
+          "new": "                if false {\n                    return Err(\"a \\\\ in a multi-line string"
+        }
+      ],
+      "tests": [
+        "the_manifest_reader_refuses_what_is_not_toml"
+      ]
+    },
+    {
+      "id": "F-CI22q",
+      "title": "any value counts as an inline table with a path, so a version-only dependency on the crate is read as a path dependency",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "fn has_inline_path(value: &[Token]) -> bool {\n",
+          "new": "fn has_inline_path(value: &[Token]) -> bool {\n    return true;\n"
         }
       ],
       "tests": [
