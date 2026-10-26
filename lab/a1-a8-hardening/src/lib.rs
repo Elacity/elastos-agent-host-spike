@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -277,8 +278,18 @@ impl Run {
     }
 }
 
-/// A fresh root under this lane's target with its own HOME, data dir and
-/// TMPDIR. `finish` removes it after a pass; a failed test keeps it.
+/// Size and inode of `runtime/capability-requests.jsonl` at guest launch.
+/// Readers use only bytes appended after this snapshot. A changed inode
+/// after a known file is a different file, not an append.
+#[derive(Clone, Debug)]
+pub struct ReceiptCursor {
+    pub path: PathBuf,
+    pub inode: Option<u64>,
+    pub size: u64,
+}
+
+/// A fresh root from `mktemp -d` with its own HOME, data dir and TMPDIR.
+/// `finish` removes it after a pass; a failed test keeps it.
 pub struct Home {
     root: PathBuf,
     home: PathBuf,
@@ -293,12 +304,29 @@ struct Spawned {
     stderr: File,
 }
 
+fn mktemp_root() -> PathBuf {
+    let mut command = Command::new("mktemp");
+    command.arg("-d");
+    if cfg!(target_os = "macos") {
+        command.arg("-t").arg("a8-home");
+    } else {
+        let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        command.arg(format!("{tmp}/a8-home.XXXXXX"));
+    }
+    let output = command.output().expect("start mktemp");
+    assert!(
+        output.status.success(),
+        "mktemp failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = String::from_utf8(output.stdout).expect("mktemp path is UTF-8");
+    PathBuf::from(path.trim())
+}
+
 impl Home {
     pub fn new() -> Self {
-        let parent = lane().join("target/homes");
-        fs::create_dir_all(&parent).expect("create the homes directory");
-        let root = parent.join(fresh("home"));
-        fs::create_dir(&root).expect("create a fresh throwaway root");
+        let root = mktemp_root();
         let home = root.join("home");
         let data = data_dir(&home);
         let temp = root.join("tmp");
@@ -425,14 +453,59 @@ impl Home {
         }
     }
 
+    pub fn receipts_path(&self) -> PathBuf {
+        self.data.join("runtime/capability-requests.jsonl")
+    }
+
+    /// Fail if a leftover or planted receipt file is already in this Home.
+    pub fn assert_receipts_absent(&self) {
+        let path = self.receipts_path();
+        assert!(
+            !path.exists(),
+            "capability-requests.jsonl must not exist before the guest is launched ({})",
+            path.display()
+        );
+    }
+
+    /// Record size and inode at launch. The file must be absent; size is 0
+    /// and inode is none until the Runtime creates it.
+    pub fn snapshot_receipts(&self) -> ReceiptCursor {
+        let path = self.receipts_path();
+        match fs::metadata(&path) {
+            Ok(meta) => ReceiptCursor {
+                path,
+                inode: Some(meta.ino()),
+                size: meta.len(),
+            },
+            Err(_) => ReceiptCursor {
+                path,
+                inode: None,
+                size: 0,
+            },
+        }
+    }
+
     /// Host-side `request_capability` receipts the Runtime wrote under this
     /// Home. The guest has no filesystem and cannot add a row.
     pub fn capability_requests(&self) -> Vec<CapabilityRequestRecord> {
-        let path = self.data.join("runtime/capability-requests.jsonl");
+        self.capability_requests_since(&ReceiptCursor {
+            path: self.receipts_path(),
+            inode: None,
+            size: 0,
+        })
+    }
+
+    /// Only lines appended after `cursor`. A replaced inode after a known
+    /// file is refused. Partial last lines are dropped.
+    pub fn capability_requests_since(
+        &self,
+        cursor: &ReceiptCursor,
+    ) -> Vec<CapabilityRequestRecord> {
         for _ in 0..8 {
-            match read_capability_requests(&path) {
-                Some(records) => return records,
-                None => std::thread::sleep(Duration::from_millis(20)),
+            match read_capability_requests_since(cursor) {
+                Ok(records) => return records,
+                Err(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(Some(reason)) => panic!("{reason}"),
             }
         }
         Vec::new()
@@ -453,9 +526,7 @@ impl Default for Home {
 impl Drop for Home {
     fn drop(&mut self) {
         if !self.finished {
-            if let Ok(relative) = self.root.strip_prefix(repository()) {
-                eprintln!("retained throwaway root: {}", relative.display());
-            }
+            eprintln!("retained throwaway root: {}", self.root.display());
         }
     }
 }
@@ -466,22 +537,100 @@ pub struct CapabilityRequestRecord {
     pub action: String,
     pub resource: String,
     pub code: String,
+    pub capsule_id: Option<String>,
+    pub principal_id: Option<String>,
+    pub session_id: Option<String>,
+    pub module_hash: Option<String>,
 }
 
-fn read_capability_requests(path: &Path) -> Option<Vec<CapabilityRequestRecord>> {
-    let text = fs::read_to_string(path).ok()?;
-    Some(
-        text.lines()
-            .filter_map(|line| {
-                let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                Some(CapabilityRequestRecord {
-                    action: value.get("action")?.as_str()?.to_string(),
-                    resource: value.get("resource")?.as_str()?.to_string(),
-                    code: value.get("code")?.as_str()?.to_string(),
-                })
-            })
-            .collect(),
-    )
+fn optional_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_capability_record(line: &str) -> Option<CapabilityRequestRecord> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    Some(CapabilityRequestRecord {
+        action: value.get("action")?.as_str()?.to_string(),
+        resource: value.get("resource")?.as_str()?.to_string(),
+        code: value.get("code")?.as_str()?.to_string(),
+        capsule_id: optional_string(&value, "capsule_id"),
+        principal_id: optional_string(&value, "principal_id"),
+        session_id: optional_string(&value, "session_id"),
+        module_hash: optional_string(&value, "module_hash")
+            .or_else(|| optional_string(&value, "guest_hash"))
+            .or_else(|| optional_string(&value, "wasm_hash")),
+    })
+}
+
+fn read_capability_requests_since(
+    cursor: &ReceiptCursor,
+) -> Result<Vec<CapabilityRequestRecord>, Option<String>> {
+    let meta = match fs::metadata(&cursor.path) {
+        Ok(meta) => meta,
+        Err(_) => return Err(None),
+    };
+    if let Some(inode) = cursor.inode {
+        if meta.ino() != inode {
+            return Err(Some(format!(
+                "capability-requests.jsonl inode changed after launch (was {inode}, now {})",
+                meta.ino()
+            )));
+        }
+        if meta.len() < cursor.size {
+            return Err(Some(format!(
+                "capability-requests.jsonl shrank after launch (was {}, now {})",
+                cursor.size,
+                meta.len()
+            )));
+        }
+    }
+    let mut file = File::open(&cursor.path).map_err(|_| None)?;
+    file.seek(SeekFrom::Start(cursor.size)).map_err(|_| None)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|_| None)?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        if let Some(last) = text.rfind('\n') {
+            text.truncate(last + 1);
+        } else {
+            text.clear();
+        }
+    }
+    Ok(text.lines().filter_map(parse_capability_record).collect())
+}
+
+/// The component id the Runtime printed on a `[run]` line. Guest-controlled
+/// error text is ignored.
+pub fn assigned_component_id(text: &str) -> Option<String> {
+    text.lines()
+        .filter(|line| line.starts_with("[run] "))
+        .find_map(|line| {
+            line.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == ',')
+                .find(|word| is_component_id(word))
+                .map(str::to_string)
+        })
+}
+
+fn is_component_id(word: &str) -> bool {
+    let Some(rest) = word.strip_prefix("component-") else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    matches!(
+        (
+            parts.next().map(str::len),
+            parts.next().map(str::len),
+            parts.next().map(str::len),
+            parts.next().map(str::len),
+            parts.next().map(str::len),
+            parts.next(),
+        ),
+        (Some(8), Some(4), Some(4), Some(4), Some(12), None)
+    ) && rest.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
 fn read_capture(file: &mut File) -> String {

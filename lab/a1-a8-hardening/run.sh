@@ -19,8 +19,15 @@ cargo test --locked --no-fail-fast --manifest-path "$lane/Cargo.toml" -- --nocap
 grep -E '^(a1|a8) ' "$out" || true
 
 result() {
-    local line
+    local line authorship
     line=$(grep -E "^test $1 \.\.\. " "$out" | head -n 1 || true)
+    if [ "$1" = "agent_host_host_key_read_is_refused" ]; then
+        authorship=$(grep -E "^a8 authorship: needs runtime: " "$out" | head -n 1 || true)
+        if [ -n "$authorship" ] && [[ "$line" == *" ... ok" ]]; then
+            printf 'NEEDS RUNTIME (%s)' "${authorship#a8 authorship: needs runtime: }"
+            return
+        fi
+    fi
     case "$line" in
         *" ... ok") printf 'PASS' ;;
         *" ... FAILED") printf 'FAIL' ;;
