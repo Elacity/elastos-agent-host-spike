@@ -51,9 +51,8 @@ impl Default for RealKernel {
 
 /// Write end of the helper-to-parent handoff pipe for init's host pid.
 static HANDOFF_WRITE: AtomicI32 = AtomicI32::new(-1);
-/// Write end of the init-to-parent pipe for the provider's host pid.
-static IDENTITY_WRITE: AtomicI32 = AtomicI32::new(-1);
-/// Read end of the parent-to-init ack pipe. Init waits here before reaping.
+/// Read end of the parent-to-init ack pipe. Init waits here before reaping
+/// so `/proc/<provider>/exe` stays visible.
 static ACK_READ: AtomicI32 = AtomicI32::new(-1);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
@@ -300,15 +299,11 @@ impl Kernel for RealKernel {
             return Err(errno());
         }
         if provider > 0 {
-            if let Err(err) = write_provider_host_pid() {
-                close_fault_write(self);
-                return Err(err);
-            }
             close_fault_write(self);
             wait_for_identity_ack();
             reap_namespace();
         }
-        close_identity_and_ack();
+        close_ack();
         // SAFETY: if init dies, the provider dies with it.
         unsafe {
             libc::prctl(
@@ -576,20 +571,11 @@ impl Kernel for RealKernel {
                 return Err(Fault::os(Step::Pipe, err));
             }
         };
-        let [ident_read, ident_write] = match pipe2_cloexec() {
-            Ok(pair) => pair,
-            Err(err) => {
-                close_pair(fault_read, fault_write);
-                close_pair(handoff_read, handoff_write);
-                return Err(Fault::os(Step::Pipe, err));
-            }
-        };
         let [ack_read, ack_write] = match pipe2_cloexec() {
             Ok(pair) => pair,
             Err(err) => {
                 close_pair(fault_read, fault_write);
                 close_pair(handoff_read, handoff_write);
-                close_pair(ident_read, ident_write);
                 return Err(Fault::os(Step::Pipe, err));
             }
         };
@@ -601,7 +587,6 @@ impl Kernel for RealKernel {
             let err = errno();
             close_pair(fault_read, fault_write);
             close_pair(handoff_read, handoff_write);
-            close_pair(ident_read, ident_write);
             close_pair(ack_read, ack_write);
             return Err(Fault::os(Step::Fork, err));
         }
@@ -609,11 +594,9 @@ impl Kernel for RealKernel {
             unsafe {
                 libc::close(fault_read);
                 libc::close(handoff_read);
-                libc::close(ident_read);
                 libc::close(ack_write);
             }
             HANDOFF_WRITE.store(handoff_write, Ordering::Relaxed);
-            IDENTITY_WRITE.store(ident_write, Ordering::Relaxed);
             ACK_READ.store(ack_read, Ordering::Relaxed);
             if plan.test_empty_pipe {
                 unsafe { libc::_exit(REFUSAL_EXIT_CODE) };
@@ -630,8 +613,8 @@ impl Kernel for RealKernel {
                     fault_write,
                     lie_rights: plan.test_lie_rights,
                     lie_enforcement: plan.test_lie_enforcement,
-                    keep: [handoff_write, ident_write, ack_read, -1, -1, -1, -1, -1],
-                    keep_n: 3,
+                    keep: [handoff_write, ack_read, -1, -1, -1, -1, -1, -1],
+                    keep_n: 2,
                 },
                 plan,
             ) {
@@ -648,7 +631,6 @@ impl Kernel for RealKernel {
         unsafe {
             libc::close(fault_write);
             libc::close(handoff_write);
-            libc::close(ident_write);
             libc::close(ack_read);
         }
 
@@ -660,11 +642,6 @@ impl Kernel for RealKernel {
         reap_if_exited(helper, 100);
 
         let init_pid = (got_pid == 4).then(|| u32::from_le_bytes(pid_buf));
-
-        let mut provider_buf = [0u8; 4];
-        let (got_provider, _) = read_all(ident_read, &mut provider_buf);
-        unsafe { libc::close(ident_read) };
-        let provider_pid = (got_provider == 4).then(|| u32::from_le_bytes(provider_buf));
 
         let mut buf = [0u8; Fault::ENCODED_LEN * 2];
         let (got, read_error) = read_all(fault_read, &mut buf);
@@ -685,16 +662,10 @@ impl Kernel for RealKernel {
                         return Err(Fault::empty_pipe());
                     }
                 };
-                let provider = match provider_pid {
-                    Some(pid) if pid > 0 => pid,
-                    _ => {
-                        unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
-                        reap(init as libc::pid_t);
-                        unsafe { libc::close(ack_write) };
-                        return Err(Fault::exec_identity());
-                    }
-                };
-                if !exe_identity_ok(plan.exe_dev_ino(), proc_exe_dev_ino(provider)) {
+                // Init is landlocked and cannot read /proc. The parent is
+                // outside. It finds the provider under init and checks
+                // /proc/<pid>/exe against the expected binary.
+                if !exe_matches_expected(init, plan.exe_dev_ino()) {
                     unsafe { libc::kill(init as libc::pid_t, libc::SIGKILL) };
                     reap(init as libc::pid_t);
                     unsafe { libc::close(ack_write) };
@@ -761,66 +732,76 @@ fn close_pair(a: RawFd, b: RawFd) {
     }
 }
 
-fn write_provider_host_pid() -> Result<(), Errno> {
-    let fd = IDENTITY_WRITE.load(Ordering::Relaxed);
-    if fd < 0 {
-        return Err(libc::EBADF);
-    }
-    let pid = first_child_host_pid()?;
-    let bytes = pid.to_le_bytes();
-    unsafe {
-        libc::write(fd, bytes.as_ptr().cast(), bytes.len());
-        libc::close(fd);
-    }
-    IDENTITY_WRITE.store(-1, Ordering::Relaxed);
-    Ok(())
-}
-
-fn first_child_host_pid() -> Result<u32, Errno> {
-    for _ in 0..50 {
-        if let Some(pid) = read_thread_children() {
-            if pid > 0 {
-                return Ok(pid);
+/// Parent-side: `/proc/<init>/exe` is the init image. The provider is the
+/// first child. Init waits on the ack pipe, so a fast exit stays a zombie
+/// long enough for `/proc/<pid>/exe` to stay visible.
+fn exe_matches_expected(init: u32, expected: (u64, u64)) -> bool {
+    for _ in 0..200 {
+        if let Some(pid) = first_child_now(init) {
+            if exe_identity_ok(expected, proc_exe_dev_ino(pid)) {
+                return true;
             }
+        }
+        if !process_alive(init) {
+            return false;
         }
         unsafe { libc::usleep(1000) };
     }
-    Err(libc::ESRCH)
+    false
 }
 
-fn read_thread_children() -> Option<u32> {
-    let mut buf = [0u8; 32];
-    // SAFETY: the path is a constant C string; `buf` is a valid destination.
-    let len = unsafe {
-        let fd = libc::open(
-            c"/proc/thread-self/children".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        );
-        if fd < 0 {
-            return None;
-        }
-        let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
-        libc::close(fd);
-        if n <= 0 {
-            return None;
-        }
-        n as usize
-    };
-    let mut value: u32 = 0;
-    let mut digits = 0;
-    for &byte in buf.iter().take(len) {
-        match byte {
-            b'0'..=b'9' => {
-                value = value
-                    .checked_mul(10)
-                    .and_then(|v| v.checked_add(u32::from(byte - b'0')))?;
-                digits += 1;
+fn first_child_now(init: u32) -> Option<u32> {
+    let path = format!("/proc/{init}/task/{init}/children");
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(pid) = text
+            .split_whitespace()
+            .next()
+            .and_then(|word| word.parse().ok())
+        {
+            // The children file can name a namespace-local pid. Keep it
+            // only when that pid's host PPid is init.
+            if pid > 0 && pid_has_ppid(pid, init) {
+                return Some(pid);
             }
-            b' ' | b'\n' => break,
-            _ => return None,
         }
     }
-    (digits > 0).then_some(value)
+    child_by_ppid(init)
+}
+
+fn pid_has_ppid(pid: u32, init: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_ppid(&stat))
+        == Some(init)
+}
+
+fn child_by_ppid(init: u32) -> Option<u32> {
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for entry in dir.flatten() {
+        let pid: u32 = match entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        {
+            Some(pid) if pid != init => pid,
+            _ => continue,
+        };
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        if parse_ppid(&stat) == Some(init) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn parse_ppid(stat: &str) -> Option<u32> {
+    let close = stat.rfind(')')?;
+    let mut parts = stat[close + 1..].split_whitespace();
+    let _state = parts.next()?;
+    parts.next()?.parse().ok()
 }
 
 fn wait_for_identity_ack() {
@@ -849,14 +830,10 @@ fn wait_for_identity_ack() {
     }
 }
 
-fn close_identity_and_ack() {
-    let ident = IDENTITY_WRITE.swap(-1, Ordering::Relaxed);
-    if ident >= 0 {
-        unsafe { libc::close(ident) };
-    }
-    let ack = ACK_READ.swap(-1, Ordering::Relaxed);
-    if ack >= 0 {
-        unsafe { libc::close(ack) };
+fn close_ack() {
+    let fd = ACK_READ.swap(-1, Ordering::Relaxed);
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
     }
 }
 
