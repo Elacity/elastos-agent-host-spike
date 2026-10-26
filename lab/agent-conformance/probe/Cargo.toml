@@ -8,5 +8,9 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+read = []
+network = []
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wit-bindgen = "=0.57.1"
