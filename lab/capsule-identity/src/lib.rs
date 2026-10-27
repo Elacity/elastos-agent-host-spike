@@ -50,7 +50,11 @@
 //!    is `01 70 12 20` and the SHA-256 of its block (dag-pb codec `0x70`).
 //!    The Tsize of a link to a directory is that directory's block length
 //!    plus the Tsizes of its links. A block over 262144 bytes is refused: no
-//!    HAMT shard.
+//!    HAMT shard. Kubo shards later, by an estimate of its links' size, so
+//!    this refusal comes first and fails closed. The largest root block the
+//!    lab names (262144 bytes) got the same CID from Kubo with the
+//!    provider's HAMT config, unsharded (task 053,
+//!    `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!

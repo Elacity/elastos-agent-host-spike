@@ -96,6 +96,30 @@ pub fn two_level_bytes() -> Vec<u8> {
     (0..45_613_057u32).map(|i| (i % 251) as u8).collect()
 }
 
+/// content-sample with the empty files of [`directory_at_limit_files`]`(0)`
+/// added: its root block is exactly 262144 bytes, the largest directory block
+/// the lab names. Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_AT_LIMIT_LAB_CID: &str =
+    "bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4";
+
+/// The empty files that bring content-sample's root block to 262144 bytes
+/// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
+/// digits. An empty file's link is 46 bytes and its name (its 36-byte CID, the
+/// name and Tsize 0, each with its tag and length, all inside field 2);
+/// content-sample's two links and the UnixFS data `0a 02 08 01` are 119
+/// bytes. So 1064 x 246 + (46 + 235) + 119 = 262144.
+pub fn directory_at_limit_files(longer: usize) -> Vec<BundleEntry> {
+    let empty = |path: String| BundleEntry {
+        path,
+        content: Vec::new(),
+    };
+    let mut files: Vec<BundleEntry> = (0..1064)
+        .map(|number| empty(format!("{number:0>200}")))
+        .collect();
+    files.push(empty(format!("{:0>width$}", 1064, width = 235 + longer)));
+    files
+}
+
 /// The photo lane's PH6 stand-in photo set, a consumer copy and not a
 /// fixture: its five files, copied byte for byte from
 /// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at

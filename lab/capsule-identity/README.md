@@ -99,7 +99,9 @@ To recompute a lab CID by hand:
    bytes. A block over 262144 bytes is refused with the directory's path (`.`
    is the root) and the limit: there is no HAMT shard. Kubo shards later, by
    an estimate of its links' size, so this refusal comes first and fails
-   closed.
+   closed. The largest root block the lab names (262144 bytes) got the same
+   CID from Kubo with the provider's HAMT config, unsharded (task 053,
+   `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
 6. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
@@ -237,6 +239,7 @@ rules and not from the Rust code, in
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
 | A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
+| A root block of exactly 262144 bytes is named, and one of 262145 bytes is refused with its length (task 053) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | F-CI53a (`>=`), F-CI53b (the limit becomes 262145) |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
 | A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
@@ -276,7 +279,15 @@ and the hand-run Kubo printed it too. The same test names the first 45613056
 of those bytes (174 leaves, one file node) and checks that its CID differs;
 that value is not pinned.
 The directory-block test builds 1100 empty files with 200-byte names in a temp
-dir.
+dir. Task 053 adds one more pin, built in a temp dir and in memory and never
+committed: `content-sample` with 1065 added empty files, 1064 named by 200
+digits (`0` to `1063`, padded with zeros) and one by 235 digits (`1064`), so
+the root block is exactly 262144 bytes, is
+`bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4`
+(`DIRECTORY_AT_LIMIT_LAB_CID`, the entries made once by
+`directory_at_limit_files`). README's Python block gives it, and the hand-run
+Kubo printed it with the provider's HAMT config. With the last name one digit
+longer the root block is 262145 bytes and is refused.
 
 ### The cross-implementation check
 
@@ -301,23 +312,24 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 15 pins, the Python answer, the pin constant and the
+5. For each of the 16 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 15 bundles. The 15 are the seven
+   test asserts that it checked exactly 16 bundles. The 16 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
    entries in memory, the photo stand-in consumer copy (task 047, see
    [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
-   and three-leaf file bundles (task 048) and the two-level file bundle (task
-   051), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   and three-leaf file bundles (task 048), the two-level file bundle (task
+   051) and the directory-at-limit bundle (task 053), also built in memory.
+   `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 15 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 16 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -333,9 +345,13 @@ script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
 `KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
 `init --empty-repo`, with the provider's two HAMT config values set. No daemon
 runs and nothing is written outside the temp folders.
-`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 15 pinned
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 16 pinned
 bundles above into a temp folder (since task 051 with the two-level file
-bundle), and Kubo's root, the pin and `encode_entries` must be one value.
+bundle, since task 053 with the directory-at-limit bundle), and Kubo's root,
+the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
+task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
+`1KiB` by hand it failed on the directory-at-limit row alone, so the HAMT
+config reaches Kubo and that row would catch a shard (LOG.md).
 `kubo_profile_reproduces_the_admitted_model_package_cid`
 is the control that the flags are the Runtime's: Kubo must print
 `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky`, the package CID
@@ -1896,7 +1912,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 279 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 281 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1943,7 +1959,8 @@ and task 047's F-CI47a to F-CI47c (see
 F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
 F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
-051's F-CI51a to F-CI51c (see [the encoding](#the-encoding)).
+051's F-CI51a to F-CI51c, and task 053's F-CI53a and F-CI53b (both: see
+[the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its

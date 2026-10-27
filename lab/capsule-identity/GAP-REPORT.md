@@ -715,9 +715,14 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   recomputation of README's byte rules (the Python block that `readme_python_recomputes_every_lab_cid_pin`,
   cited above, runs), and the committed check is still that Python block:
   `lab/capsule-identity/README.md:1222` `README's Python block, written from the byte rules: the committed test`
-  Only the single-block, non-sharded subset of the profile is pinned:
-  `lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`
+  Only the non-sharded subset of the profile is pinned, with files at any tree depth:
+  `lab/capsule-identity/README.md:46` `The tests pin only the non-sharded subset of that profile, with files at any`
+  (corrected by task 053, on 2026-10-28; until then it said single-block)
   The pins are reproduced on one Mac only, so no construction rule is frozen.
+  Added by task 053, on 2026-10-28: the hand-run Kubo, with the provider's two HAMT config values, also printed
+  `bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4` (`DIRECTORY_AT_LIMIT_LAB_CID`), the pin of a bundle
+  whose root block is exactly 262144 bytes, the largest the lab names, so Kubo did not shard it
+  (`test result: ok. 1 passed`); with the threshold set to `1KiB` by hand, that row alone differed.
 - Runtime issue: none of 463, 464, 465 or 470 names a CID form (13.4, a2). 274, 285 and 213 were not read for
   this point.
 
@@ -940,8 +945,9 @@ Its schema check is still the Runtime's own manifest type
 Its value is a lab package CID: the 59-character CIDv1 `bafybei...` UnixFS directory root of the bundle
 (`lab/capsule-identity/README.md:19` `- Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS`
 and `lab/capsule-identity/tests/common/mod.rs:80` `assert_eq!((pin.len(), &pin[..7]), (59, "bafybei"), "{pin}");`),
-under the single-block, non-sharded subset of the model package profile
-(`lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`).
+under the non-sharded subset of the model package profile, with files at any tree depth
+(`lab/capsule-identity/src/lib.rs:25` `//! and pins only the non-sharded subset of that profile, with files at any`)
+(corrected by task 053, on 2026-10-28; until then it said single-block).
 A file or a directory block over 262144 bytes is refused, not named another way
 (`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
 and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).

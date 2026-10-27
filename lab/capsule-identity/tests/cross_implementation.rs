@@ -33,8 +33,9 @@ use tempfile::TempDir;
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the two bundles with a file over one leaf
-/// (task 048) and the bundle with a file of two tree levels (task 051).
-const PINNED_BUNDLES: usize = 15;
+/// (task 048), the bundle with a file of two tree levels (task 051) and the
+/// bundle whose root block is exactly 262144 bytes (task 053): 16.
+const PINNED_BUNDLES: usize = 16;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -166,6 +167,11 @@ fn pinned_bundles() -> Vec<Pinned> {
                 .expect("content-sample holds sample.example");
             sample.content = two_level_bytes();
         }),
+    });
+    bundles.push(Pinned {
+        what: "directory-at-limit bundle".to_owned(),
+        pin: DIRECTORY_AT_LIMIT_LAB_CID,
+        entries: content_sample_with(|entries| entries.extend(directory_at_limit_files(0))),
     });
     bundles
 }
