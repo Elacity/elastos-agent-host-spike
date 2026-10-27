@@ -1374,6 +1374,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | state "refused": status 400 and the reason | `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
 | grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list_all_sessions_live`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
 | grant seed `seed_grant` | lab test seam, not a route; #309 and this lab model no shell approval |
+| asks read `asks_of` | lab test seam, not a route; #309 has no asks field on any route (RA-1 to RA-7) |
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -1403,6 +1404,45 @@ Not shown:
 
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
 memory.
+
+### Asks come only from the signed bytes (M1 check B2, no-schema part)
+
+A launched instance is handed its asks only as the `asks.json` bytes of the
+checked bundle that passed every check above. `checked_launch` takes the
+manifest's `name` and the content of the `asks.json` entry from the same
+`CheckedBundle` (`CheckedBundle::entries()`, the one walk, P10), and the
+launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
+the bundle has no `asks.json`. Nothing reads the folder again.
+`asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
+any route), answers that instance's bytes, and `None` for an unknown session.
+The launch answer, the `get_capsules` entry and the grant view keep exactly
+the keys above, with no asks key, and the launch body stays `{"cid"}`.
+
+`standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
+`agent-host` bundle as in the journey above: its session answers the
+committed `fixtures/agent-host/asks.json` bytes. Then one byte of the stored
+`asks.json` changes. The session still answers the signed bytes, and a second
+launch of the same CID is refused by (e), the name compare's own refusal, with
+no new instance and an empty grant view.
+`standin_gives_each_session_its_own_asks` launches `agent-host` and `web-app`
+(which has no `asks.json`), each signed by a fresh test key, in both orders:
+the `agent-host` session answers its bytes, the `web-app` session answers
+`None`, and so does an unknown session.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
+| Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
+| A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
+
+Not shown:
+
+- No ask schema, provisional or not, and no parse or field read of
+  `asks.json`: to the stand-in it is bytes.
+- No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
+  this lane writes no B2 encoding.
+- No grant from an ask: a launch still adds none (the grant view above).
+- The Runtime hands no asks to anything here; `asks_of` is the stand-in's.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -1548,7 +1588,8 @@ tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
 tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
-                         a valid signature alone yields no grant
+                         a valid signature alone yields no grant; an instance
+                         is handed only its signed asks.json bytes
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1556,7 +1597,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 254 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 257 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1589,8 +1630,9 @@ F-CI24a to F-CI24e (see
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
 and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
 task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)),
-and task 032's F-CI32a to F-CI32g and task 033's F-CI33a to F-CI33c (both:
-see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
+035's F-CI35a to F-CI35c (all three: see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1658,6 +1700,15 @@ F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, is
 part of F-CI32f's anchor and found exactly once), and F-CI33b and F-CI33c in
 `get_capability_list_all_sessions_live`, each anchor a line task 033 added,
 found exactly once. Task 033 changed no older edit's text.
+Task 035's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI35a and F-CI35b in `asks_of`, and F-CI35c in `signed_asks`, each anchor a
+line task 035 added, found exactly once. Task 035 made `checked_launch` answer
+the name and the asks together, so `post_capsules` now reads
+`let (name, asks) = ...` and `Ok(self.launch(name, asks))`. The anchors and
+replacements of F-CI32a, F-CI32f and F-CI33a changed only by that: F-CI32a's
+stub is now `(String::from("stub"), None)`, and F-CI32f's and F-CI33a's
+`launch` calls take `asks` (F-CI32f's early call takes `None`). Their titles
+and tests are unchanged, and each anchor is still found exactly once.
 
 ### The inventory check
 
