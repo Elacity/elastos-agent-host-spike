@@ -1256,17 +1256,29 @@ fn redirect_journal_materializes_outside_when_unconfined() {
 }
 
 /// After `init`, the storage tree is the same after `status`, `offers_list`
-/// and `shutdown`.
+/// and `shutdown`, under the committed oracle and under the stand-in file.
+///
+/// The oracle case calls `Launch::Confined` with
+/// `Storage::prepare("status-offers-shutdown")`. The generated case reads the
+/// declared fixture, calls `standin_profile`, writes that text with
+/// `write_standin_profile` under a fresh
+/// `Storage::prepare("status-offers-shutdown-standin")` base, and starts with
+/// `Launch::Profile` and `canonical_bindings`. The file passed to
+/// `Launch::Profile` has no line that starts with `;;`, and
+/// `collect_allow_lines` on that file, sorted, equals the oracle's allow
+/// lines, sorted. One local function holds the journey, and both cases call
+/// it. The two local compare functions stay in this test; the journey calls
+/// them for both cases. Each case answers `init`, then `status` data equals
+/// that `init` data, `offers_list` returns the hosted offer id, and the
+/// storage-root snapshot after `status`, after `offers_list`, and after
+/// `provider.shutdown()` returns equals the snapshot taken after `init`. A
+/// failure names the case. The compare uses `tree_snapshot`. The test starts
+/// no run and sets no `runtime_hosted_socket`. This is lab stand-in evidence.
 ///
 /// `tree_snapshot` records each relative path, its mode and its file bytes
-/// under `storage.root`. The first snapshot is taken once `init` has answered
-/// and `runs/` exists. The snapshot after `status`, the snapshot after
-/// `offers_list`, and the snapshot taken after `Provider::shutdown` returns
-/// each equal that first snapshot. `status` data equals the `init` data.
-/// `offers_list` returns the hosted offer id. The test starts no run and sets
-/// no `runtime_hosted_socket`. A difference names the call and the relative
-/// paths whose mode or bytes differ. On a host where `sandbox_available`
-/// fails, the test returns.
+/// under `storage.root`. A difference names the case, the call, and the
+/// relative paths whose mode or bytes differ. On a host where
+/// `sandbox_available` fails, the test returns.
 #[test]
 fn model_status_offers_and_shutdown_leave_storage_unchanged() {
     fn storage_tree_changes(
@@ -1308,6 +1320,7 @@ fn model_status_offers_and_shutdown_leave_storage_unchanged() {
     }
 
     fn same_storage_tree(
+        case: &str,
         call: &str,
         before: &[(PathBuf, u32, Vec<u8>)],
         after: &[(PathBuf, u32, Vec<u8>)],
@@ -1315,43 +1328,92 @@ fn model_status_offers_and_shutdown_leave_storage_unchanged() {
         let paths = storage_tree_changes(before, after).join(", ");
         assert_eq!(
             after, before,
-            "{call} changed the storage tree; relative paths whose mode or bytes differ: {paths}"
+            "{case}: {call} changed the storage tree; relative paths whose mode or bytes differ: {paths}"
         );
+    }
+
+    /// `init`, then `status`, `offers_list` and `shutdown`. Each snapshot
+    /// after those calls equals the snapshot taken after `init`.
+    fn status_offers_and_shutdown(case: &str, storage: &Storage, mut provider: Provider) {
+        let init = provider.ok(&init_request(storage, None));
+        assert!(
+            storage.root.join("runs").is_dir(),
+            "{case}: init must create runs/ under STORAGE_ROOT"
+        );
+        let after_init = tree_snapshot(&storage.root);
+
+        let status = provider.ok(&json!({ "op": "status" }));
+        assert_eq!(status, init, "{case}: status data must equal the init data");
+        same_storage_tree(case, "status", &after_init, &tree_snapshot(&storage.root));
+
+        let listed = provider.ok(&json!({ "op": "offers_list" }));
+        let ids: Vec<&Value> = listed["offers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case}: offers_list must return an offer array"))
+            .iter()
+            .map(|offer| &offer["id"])
+            .collect();
+        assert_eq!(
+            ids,
+            [HOSTED_OFFER],
+            "{case}: offers_list must return the configured offer: {listed}"
+        );
+        same_storage_tree(
+            case,
+            "offers_list",
+            &after_init,
+            &tree_snapshot(&storage.root),
+        );
+
+        provider.shutdown();
+        same_storage_tree(case, "shutdown", &after_init, &tree_snapshot(&storage.root));
     }
 
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
+
     let storage = Storage::prepare("status-offers-shutdown");
-    let mut provider = Provider::start(Launch::Confined(&storage));
+    let provider = Provider::start(Launch::Confined(&storage));
+    status_offers_and_shutdown("oracle", &storage, provider);
 
-    let init = provider.ok(&init_request(&storage, None));
+    let storage = Storage::prepare("status-offers-shutdown-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
+        panic!("generated: the file passed to Launch::Profile must be readable: {err}")
+    });
     assert!(
-        storage.root.join("runs").is_dir(),
-        "init must create runs/ under STORAGE_ROOT"
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "generated: the file passed to Launch::Profile has no line that starts with ;;"
     );
-    let after_init = tree_snapshot(&storage.root);
-
-    let status = provider.ok(&json!({ "op": "status" }));
-    assert_eq!(status, init, "status data must equal the init data");
-    same_storage_tree("status", &after_init, &tree_snapshot(&storage.root));
-
-    let listed = provider.ok(&json!({ "op": "offers_list" }));
-    let ids: Vec<&Value> = listed["offers"]
-        .as_array()
-        .expect("offers_list must return an offer array")
-        .iter()
-        .map(|offer| &offer["id"])
-        .collect();
+    let mut launched_lines = collect_allow_lines(&launched);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("generated: the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    launched_lines.sort();
+    oracle_lines.sort();
     assert_eq!(
-        ids,
-        [HOSTED_OFFER],
-        "offers_list must return the configured offer: {listed}"
+        launched_lines, oracle_lines,
+        "generated: sorted allow lines must equal the oracle's"
     );
-    same_storage_tree("offers_list", &after_init, &tree_snapshot(&storage.root));
-
-    provider.shutdown();
-    same_storage_tree("shutdown", &after_init, &tree_snapshot(&storage.root));
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    status_offers_and_shutdown("generated", &storage, provider);
 }
 
 /// The outside-read fixture's one rule: metadata, never content, of the run
