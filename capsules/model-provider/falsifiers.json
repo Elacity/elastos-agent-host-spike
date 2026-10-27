@@ -2242,7 +2242,7 @@
     },
     {
       "id": "MP23",
-      "title": "a retry of an open run is dispatched again",
+      "title": "a retry of an open run skips the stored-run return and is refused",
       "command": "provider",
       "expect": "caught",
       "edits": [
@@ -2352,6 +2352,27 @@
       ],
       "tests": [
         "hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage"
+      ]
+    },
+    {
+      "id": "MP26",
+      "title": "a retry of an open hosted run sends a second effect",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "            if !existing.status.is_terminal() {\n                let current_offer = self.current_execution_offer_for_run(&existing)?;\n                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;\n            }",
+          "new": "            if !existing.status.is_terminal() {\n                let current_offer = self.current_execution_offer_for_run(&existing)?;\n                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;\n                if let Some(offer) = self.offers.get(&request.offer_id).cloned() {\n                    let _ = self.adapters.dispatch(\n                        &offer.adapter,\n                        &offer,\n                        &request.runtime_binding,\n                        &request.input,\n                        existing.deadline_ms,\n                    );\n                }\n            }"
+        },
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        if workers.contains_key(&run_id) {\n            return Err(AdapterFault::context(\n                \"model run could not start\",\n                \"local text worker already exists for run_id\",\n            ));\n        }",
+          "new": "        if false && workers.contains_key(&run_id) {\n            return Err(AdapterFault::context(\n                \"model run could not start\",\n                \"local text worker already exists for run_id\",\n            ));\n        }"
+        }
+      ],
+      "tests": [
+        "hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect"
       ]
     }
   ]
