@@ -50,9 +50,11 @@
 //! # One naming path
 //!
 //! [`checked_bundle`] walks a bundle, checks its root manifest, and hands its
-//! entries to [`encode_entries`], the encoder. Together the walk and the
-//! encoder are the only code that names a bundle; tests and tools call them
-//! and re-implement neither. [`lab_cid`] is the same walk and returns only
+//! entries to [`encode_entries`]. That takes each entry's SHA-256 and length
+//! and calls [`encode_listed_files`], the encoder, which a caller with its
+//! own walk calls directly with a closure listing ([`ListedFile`]: path,
+//! size, SHA-256). Together the walk and the encoder are the only code that
+//! names a bundle; tests and tools call them and re-implement neither. [`lab_cid`] is the same walk and returns only
 //! its lab CID. [`check_name`] checks a claimed name, such as one a URL or a
 //! Store row gives, by recomputing the name with [`lab_cid`]: it computes no
 //! name of its own. [`CheckedBundle::check_name`] is its checked form: the
@@ -794,40 +796,72 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// The encoder: the lab CID of `entries`, given in any order. It is the one
-/// naming hash; every leaf and every directory block is hashed by the one
-/// SHA-256 it holds.
+/// One file of a closure listing: its bundle path, its length in bytes and
+/// the SHA-256 of its bytes. A raw leaf needs nothing else, so a listing of
+/// these is enough to name a bundle of single-block files.
 ///
-/// Each entry is a raw leaf: a file over [`CHUNK_SIZE`] bytes is refused,
-/// and its CID is CIDv1, raw codec, sha2-256 of its bytes, with its length as
-/// Tsize. The entry paths make the directories: a path with an empty, `.` or
-/// `..` part, two entries with one path, and one path that is both a file and
-/// a directory are refused. Then each directory, deepest first, becomes one
-/// dag-pb block whose links are sorted by name bytes, a block over
+/// A listed file names bytes only if its `sha256` and `size` are those of
+/// the bytes: the caller's walk owns that. The encoder reads no file and
+/// checks no manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
+/// The lab CID of `entries`, given in any order: each entry's SHA-256 and
+/// length, then [`encode_listed_files`], the one encoder. A leaf's SHA-256
+/// is the one naming hash, [`naming_hash`], which the directory blocks share.
+pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: naming_hash(&entry.content),
+        })
+        .collect();
+    encode_listed_files(&listed)
+}
+
+/// The encoder: the lab CID of a closure listing, given in any order. It
+/// reads no file and checks no manifest. The lab CID names the bytes only if
+/// each file's `sha256` and `size` are those of its bytes; the caller's walk
+/// owns that, as [`checked_bundle`]'s walk does for [`encode_entries`].
+///
+/// Each file is a raw leaf: a `size` over [`CHUNK_SIZE`] bytes is refused,
+/// and its CID is CIDv1, raw codec, its `sha256`, with its `size` as Tsize.
+/// The paths make the directories: a path with an empty, `.` or `..` part,
+/// two files with one path, and one path that is both a file and a directory
+/// are refused. Then each directory, deepest first, becomes one dag-pb block
+/// whose links are sorted by name bytes, a block over
 /// [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's SHA-256
 /// is the lab CID.
-pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
-    let sha256 = |block: &[u8]| -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(block);
-        hasher.finalize().into()
-    };
+pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
     let mut root = Directory::default();
-    for entry in entries {
-        if entry.content.len() > CHUNK_SIZE {
+    for file in files {
+        if file.size > CHUNK_SIZE as u64 {
             return Err(Refusal::FileOverChunkLimit {
-                path: entry.path.clone(),
-                length: entry.content.len(),
+                path: file.path.clone(),
+                length: usize::try_from(file.size).unwrap_or(usize::MAX),
             });
         }
         let leaf = Child::File {
-            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),
-            tsize: entry.content.len() as u64,
+            cid: cid_bytes(RAW_CODEC, &file.sha256),
+            tsize: file.size,
         };
-        root.insert(&entry.path, leaf)?;
+        root.insert(&file.path, leaf)?;
     }
-    let (digest, _) = encode_directory(&root, "", &sha256)?;
+    let (digest, _) = encode_directory(&root, "", &naming_hash)?;
     Ok(LabCid(digest))
+}
+
+/// The one naming hash: the SHA-256 of a leaf or of a directory block.
+fn naming_hash(block: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(block);
+    hasher.finalize().into()
 }
 
 /// A directory as the encoder builds it: each child with its name, in the
@@ -908,7 +942,7 @@ struct Link<'a> {
 /// path `path` (empty for the root). Each child directory is encoded first,
 /// and its link's Tsize is its block's length plus its links' Tsizes. The
 /// links are sorted by name bytes. A block over [`DIRECTORY_BLOCK_LIMIT`]
-/// bytes is refused with its path. `sha256` is the encoder's one hash.
+/// bytes is refused with its path. `sha256` is the one naming hash.
 fn encode_directory(
     directory: &Directory,
     path: &str,
@@ -1210,7 +1244,8 @@ fn unreadable(path: &str, reason: impl Into<io::Error>) -> Refusal {
 /// Runtime server, which this lab does not link, so the lab keeps this one
 /// marked copy and calls it a lab proposal. It is the one message hash: the
 /// name signature and the package record both call it, each with its own
-/// domain. [`encode_entries`] remains the one naming hash.
+/// domain. [`naming_hash`], which the encoder calls, remains the one naming
+/// hash.
 pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());
@@ -1481,9 +1516,9 @@ fn variant_binding_message(payload: &[u8]) -> [u8; 32] {
     domain_separated_digest(VARIANT_BINDING_DOMAIN, payload)
 }
 
-/// The lab CID of a variant recipe: [`encode_entries`], the one encoder, of
-/// one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`. Nothing here reads
-/// the recipe from disk; the caller gives its bytes.
+/// The lab CID of a variant recipe: [`encode_entries`], which calls the one
+/// encoder, of one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`.
+/// Nothing here reads the recipe from disk; the caller gives its bytes.
 fn recipe_cid(recipe: &[u8]) -> Result<LabCid, Refusal> {
     encode_entries(&[BundleEntry {
         path: VARIANT_RECIPE_ENTRY.to_owned(),
