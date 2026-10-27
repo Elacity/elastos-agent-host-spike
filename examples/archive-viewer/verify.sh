@@ -62,6 +62,8 @@ cargo clippy --locked --manifest-path "${VIEWER_DIR}/Cargo.toml" \
 cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
 
 # Every rule: break it, see its test fail, restore it.
+python3 -I "${VIEWER_DIR}/falsify_groups_test.py"
+python3 -I "${VIEWER_DIR}/falsify_groups_test.py" --falsify
 python3 -I "${VIEWER_DIR}/falsify.py"
 
 # Surface: the render-only page against a fake fetch, then its page
