@@ -12,7 +12,9 @@
 //! Kubo itself checks the pins in two ignored tests, run by hand (README,
 //! "Kubo cross-check"): an offline, hash-only import with the Runtime's
 //! profile flags must print every pin, and the same flags must print the
-//! model package CID the Runtime admitted on this Mac.
+//! model package CID the Runtime admitted on this Mac. A third (task 052)
+//! asks whether the same flags leave hidden names and empty folders out of
+//! the CID; on this Mac it fails for a folder holding only an empty folder.
 mod common;
 
 use std::ffi::OsString;
@@ -22,7 +24,7 @@ use std::process::Command;
 
 use capsule_identity::{
     domain_separated_digest, encode_entries, lab_cid, name_signature_message, sign_package_record,
-    BundleEntry, PackageRecord, PACKAGE_RECORD_DOMAIN,
+    BundleEntry, PackageRecord, Refusal, PACKAGE_RECORD_DOMAIN,
 };
 use common::*;
 use ed25519_dalek::{Signature, Verifier};
@@ -605,6 +607,56 @@ fn kubo_hash_only_import_prints_every_lab_cid_pin() {
         "(bundle, Kubo, pin, encode_entries) are not one value: {differ:#?}"
     );
     assert_eq!(rows.len(), PINNED_BUNDLES, "checked {} bundles", rows.len());
+}
+
+#[test]
+#[ignore = "run by hand: needs LAB_KUBO, the path of a Kubo v0.40.1"]
+fn kubo_leaves_out_hidden_names_and_empty_folders() {
+    // web-app with (a) a root `.DS_Store`, (b) a hidden folder holding a
+    // file, (c) an empty folder and a folder holding only an empty folder.
+    // Kubo with the Runtime's flags (no `--hidden`, `--empty-dirs=false`)
+    // must print web-app's pin for each. The lab refuses (a) and (b), since
+    // it never leaves bytes out of a name, and names (c) with the pin.
+    let kubo = HashOnlyKubo::start();
+    let cases: [(&str, &dyn Fn(&Path), Option<&str>); 3] = [
+        (
+            "(a) root .DS_Store",
+            &|root| write_file(root, ".DS_Store", b"Bud1"),
+            Some(".DS_Store"),
+        ),
+        (
+            "(b) .well-known/a.txt",
+            &|root| write_file(root, ".well-known/a.txt", b"a\n"),
+            Some(".well-known/a.txt"),
+        ),
+        (
+            "(c) empty folders e and f/g",
+            &|root| {
+                fs::create_dir(root.join("e")).expect("make e");
+                fs::create_dir_all(root.join("f/g")).expect("make f/g");
+            },
+            None,
+        ),
+    ];
+    let mut differ = Vec::new();
+    for (what, add, hidden) in cases {
+        let bundle = assemble(&WEB_APP);
+        add(bundle.path());
+        let root = kubo.root(bundle.path());
+        let walked = lab_cid(bundle.path()).map(|cid| cid.to_string());
+        println!("{what}: kubo {root}, pin {WEB_APP_LAB_CID}, lab_cid {walked:?}");
+        let expected = match hidden {
+            Some(path) => Err(Refusal::HiddenName { path: path.into() }),
+            None => Ok(WEB_APP_LAB_CID.to_owned()),
+        };
+        if root != WEB_APP_LAB_CID || walked != expected {
+            differ.push((what, root, WEB_APP_LAB_CID, walked));
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "(case, Kubo, pin, lab_cid) do not agree: {differ:#?}"
+    );
 }
 
 #[test]

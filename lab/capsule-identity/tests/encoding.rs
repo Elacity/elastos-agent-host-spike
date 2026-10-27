@@ -3,7 +3,9 @@
 //! with its own test.
 mod common;
 
-use capsule_identity::{encode_entries, lab_cid, BundleEntry, Refusal};
+use capsule_identity::{
+    encode_entries, encode_listed_files, lab_cid, BundleEntry, ListedFile, Refusal,
+};
 use common::*;
 use tempfile::TempDir;
 
@@ -316,6 +318,62 @@ fn encoder_refuses_a_path_with_an_empty_or_dot_part() {
             )
         );
     }
+}
+
+/// The exact text of a [`Refusal::HiddenName`] for `path`.
+fn hidden_name_text(path: &str) -> String {
+    format!(
+        "the path {path:?} has a part that starts with .: Kubo's import with the Runtime's flags (no --hidden) leaves a name starting with . out of the CID, and the lab names every byte or refuses"
+    )
+}
+
+#[test]
+fn a_hidden_name_is_refused_with_its_reason() {
+    // Kubo's `add` without `--hidden` leaves a name starting with `.` out of
+    // the CID, and the lab never leaves bytes out of a name, so it refuses:
+    // a hidden file at the root, a hidden folder, a hidden file one folder
+    // down, a listed hidden file, and a walked bundle with a `.DS_Store`.
+    let refused = |path: &str, refusal: Refusal| {
+        assert_eq!(
+            refusal,
+            Refusal::HiddenName { path: path.into() },
+            "{path:?}"
+        );
+        assert_eq!(refusal.to_string(), hidden_name_text(path), "{path:?}");
+    };
+    for path in [".DS_Store", ".well-known/a.txt", "browser/.hidden"] {
+        let refusal = encode_entries(&[entry("capsule.json", b"{}"), entry(path, b"x")])
+            .expect_err("a hidden name must be refused");
+        refused(path, refusal);
+    }
+    let listed = ListedFile {
+        path: ".x".into(),
+        size: 1,
+        sha256: [0; 32],
+    };
+    refused(
+        ".x",
+        encode_listed_files(&[listed]).expect_err("a listed hidden name must be refused"),
+    );
+    let bundle = assemble(&WEB_APP);
+    write_file(bundle.path(), ".DS_Store", b"Bud1");
+    refused(
+        ".DS_Store",
+        lab_cid(bundle.path()).expect_err("a walked .DS_Store must be refused"),
+    );
+
+    // A dot inside or at the end of a name is a plain name.
+    for path in ["a.b", "x."] {
+        encode_entries(&[entry(path, b"x")])
+            .unwrap_or_else(|refusal| panic!("{path:?} must be named: {refusal}"));
+    }
+
+    // P10: the rule is in the one path check, once.
+    assert_eq!(
+        library_code().matches("part.starts_with('.')").count(),
+        1,
+        "the hidden-name rule is not in one place"
+    );
 }
 
 #[test]

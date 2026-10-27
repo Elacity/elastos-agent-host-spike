@@ -54,6 +54,15 @@
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
+//! A path with a part that starts with `.` (a hidden name, such as the
+//! `.DS_Store` macOS Finder writes, or the folder in `.well-known/a.txt`) is
+//! refused with [`Refusal::HiddenName`]: Kubo's `add` without `--hidden`,
+//! and neither Runtime flag list gives it, leaves such a name out of the
+//! CID, so skipping it would leave bytes out of the name, and keeping it
+//! would print a name Kubo does not give. The lab names every byte or
+//! refuses. A dot inside or at the end of a name (`a.b`, `x.`) is a plain
+//! name.
+//!
 //! No empty directory is emitted. Nothing else enters a block: no folder
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
 //! and the base32 text are one marked lab copy in this crate, so the lab adds
@@ -434,6 +443,11 @@ pub enum Refusal {
     /// An entry given to the encoder has a path with an empty, `.` or `..`
     /// part, so it names no UnixFS link. The walk never makes one.
     BadPathPart { path: String },
+    /// An entry given to the encoder has a path with a part that starts with
+    /// `.` (and is not `.` or `..`), such as `.DS_Store` or `.well-known/a`.
+    /// Kubo's import with the Runtime's flags has no `--hidden`, so it leaves
+    /// such a name out of the CID; the lab names every byte or refuses.
+    HiddenName { path: String },
     /// One path given to the encoder is both a file and a directory, as
     /// `a` and `a/b` would be. The walk never makes one.
     FileAndDirectory { path: String },
@@ -538,6 +552,10 @@ impl fmt::Display for Refusal {
             Refusal::BadPathPart { path } => write!(
                 f,
                 "the path {path:?} has an empty, . or .. part: each part names one UnixFS link"
+            ),
+            Refusal::HiddenName { path } => write!(
+                f,
+                "the path {path:?} has a part that starts with .: Kubo's import with the Runtime's flags (no --hidden) leaves a name starting with . out of the CID, and the lab names every byte or refuses"
             ),
             Refusal::FileAndDirectory { path } => write!(
                 f,
@@ -864,8 +882,9 @@ pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
 /// a single raw leaf and a file root needs each leaf's; its CID is CIDv1,
 /// raw codec, its `sha256`, with its `size` as Tsize. Then `encode_tree`, the
 /// one tree builder: the paths make the directories, and a path with an
-/// empty, `.` or `..` part, two files with one path, and one path that is
-/// both a file and a directory are refused. Each directory, deepest first,
+/// empty, `.` or `..` part, a path with a part that starts with `.`, two
+/// files with one path, and one path that is both a file and a directory
+/// are refused. Each directory, deepest first,
 /// becomes one dag-pb block whose links are sorted by name bytes, a block
 /// over [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's
 /// SHA-256 is the lab CID.
@@ -1001,13 +1020,20 @@ enum Child {
 
 impl Directory {
     /// Put the file node `file` at the bundle path `path`, making each directory
-    /// on the way. A path with an empty, `.` or `..` part is refused; so is
-    /// a path already given, and a path that is a file and a directory, in
-    /// either order.
+    /// on the way. A path with an empty, `.` or `..` part is refused; then a
+    /// path with any other part that starts with `.`, which Kubo without
+    /// `--hidden` leaves out of the CID; so is a path already given, and a
+    /// path that is a file and a directory, in either order. Every naming
+    /// call reaches this one path check.
     fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
             return Err(Refusal::BadPathPart {
+                path: path.to_owned(),
+            });
+        }
+        if parts.iter().any(|part| part.starts_with('.')) {
+            return Err(Refusal::HiddenName {
                 path: path.to_owned(),
             });
         }
