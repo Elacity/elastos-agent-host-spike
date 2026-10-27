@@ -38,6 +38,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use wasm_capsule_audit::{audit, memories, MemoryLimits, Refusal as AuditRefusal};
 use wasm_capsule_tools::bundle::{
@@ -47,8 +48,8 @@ use wasm_capsule_tools::receipt::{
     render, render_refused, write_receipt, write_refused_receipt, RECEIPT_SCHEMA,
 };
 use wasm_capsule_tools::run::{
-    module_refusal, run, run_engine, work_root_folder, Engine, EngineRun, Reason, Refusal,
-    RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
+    module_refusal, run, run_engine, work_root_folder, CancelHandle, Engine, EngineRun, Reason,
+    Refusal, RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
     WASMER_VERSION, WASMTIME_VERSION,
 };
 use wasm_capsule_tools::verify::{read_grants, verify_bundle, VerifiedBundle, VerifyRefusal};
@@ -68,8 +69,9 @@ const ENGINES: [Engine; 2] = [Engine::Wasmtime, Engine::Wasmer];
 const TEST_BUDGET: Duration = Duration::from_secs(30);
 
 /// The one run control those runs pass: `TEST_BUDGET`, explicit at each call
-/// (the runner has no default).
-static TEST_CONTROL: RunControl = RunControl::new(TEST_BUDGET);
+/// (the runner has no default). Task 045: made on first use, since a control
+/// holds its cancel flag; no test cancels it.
+static TEST_CONTROL: LazyLock<RunControl> = LazyLock::new(|| RunControl::new(TEST_BUDGET));
 
 /// The shell line that sets `module` to a stand-in's second-to-last
 /// argument: the module path, which comes just before the fixed argument
@@ -4117,7 +4119,8 @@ fn stop_run_engines<T>(work_root: &Path, runner: &std::thread::JoinHandle<T>) ->
 }
 
 /// Task 043: the killed-run test's run control: 120 s, far above its 10 s wait.
-static KILLED_RUN_CONTROL: RunControl = RunControl::new(Duration::from_secs(120));
+static KILLED_RUN_CONTROL: LazyLock<RunControl> =
+    LazyLock::new(|| RunControl::new(Duration::from_secs(120)));
 
 /// Task 040, killed run: on each real engine, `run_engine` runs on a thread on
 /// a module whose `digest` loops forever. The test waits (at most 10 s,
@@ -4603,11 +4606,12 @@ fn reason_variant(reason: &Reason) -> usize {
         Reason::MemoryCountAboveOne { .. } => 25,
         Reason::MemoryMaximumMissing { .. } => 26,
         Reason::MemoryMaximumAboveDeclared { .. } => 27,
+        Reason::Cancelled { .. } => 28,
     }
 }
 
 /// The number of `Reason` variants [`reason_variant`] numbers.
-const REASON_VARIANTS: usize = 28;
+const REASON_VARIANTS: usize = 29;
 
 /// Whether `id` is lowercase snake_case: lowercase ASCII words joined by
 /// single underscores.
@@ -4625,7 +4629,9 @@ fn is_snake_case(id: &str) -> bool {
 /// with its own `reason:` id, lowercase snake_case and distinct from every
 /// other; `engine:` is the engine its reason names (`wasmer` in every example
 /// that names one), else `none`, so a verifier refusal and `OutputsDiffer`
-/// both say `none`; `detail:` is its Display through `escape_ascii`.
+/// both say `none`; `detail:` is its Display through `escape_ascii`. Task 045:
+/// `outcome:` is `cancelled` for the `Cancelled` example and `refused` for
+/// every other one.
 #[test]
 fn refusal_receipt_ids_are_distinct_and_named() {
     use std::os::unix::process::ExitStatusExt;
@@ -4704,6 +4710,7 @@ fn refusal_receipt_ids_are_distinct_and_named() {
             maximum: 33,
             memory_mb: 2,
         },
+        Reason::Cancelled { engine },
     ];
     let mut covered: Vec<usize> = reasons.iter().map(reason_variant).collect();
     covered.sort_unstable();
@@ -4713,12 +4720,18 @@ fn refusal_receipt_ids_are_distinct_and_named() {
         "one example per Reason variant"
     );
 
-    let mut examples: Vec<(TwoEngineRefusal, &str)> = Vec::new();
+    let mut examples: Vec<(TwoEngineRefusal, &str, &str)> = Vec::new();
     for reason in reasons {
         let named = if refusal_names_engine(&reason) {
             "wasmer"
         } else {
             "none"
+        };
+        // Task 045: only a cancel reads `outcome: cancelled`.
+        let outcome = if matches!(reason, Reason::Cancelled { .. }) {
+            "cancelled"
+        } else {
+            "refused"
         };
         let version = matches!(
             reason,
@@ -4738,24 +4751,29 @@ fn refusal_receipt_ids_are_distinct_and_named() {
         } else {
             TwoEngineRefusal::Engine(refusal)
         };
-        examples.push((refusal, named));
+        examples.push((refusal, named, outcome));
     }
-    examples.push((TwoEngineRefusal::Verify(VerifyRefusal::Unsigned), "none"));
+    examples.push((
+        TwoEngineRefusal::Verify(VerifyRefusal::Unsigned),
+        "none",
+        "refused",
+    ));
     examples.push((
         TwoEngineRefusal::OutputsDiffer {
             wasmtime: b"1\n".to_vec(),
             wasmer: b"2\n".to_vec(),
         },
         "none",
+        "refused",
     ));
 
     let mut ids = std::collections::BTreeSet::new();
-    for (refusal, named) in &examples {
+    for (refusal, named, outcome) in &examples {
         let receipt = render_refused(refusal);
         let lines = receipt_lines(&receipt);
         assert_eq!(lines.len(), 5, "{refusal}: {receipt:?}");
         assert_eq!(lines[0], "schema: wc-005.run-refusal/v1", "{refusal}");
-        assert_eq!(lines[1], "outcome: refused", "{refusal}");
+        assert_eq!(lines[1], format!("outcome: {outcome}"), "{refusal}");
         let id = lines[2]
             .strip_prefix("reason: ")
             .unwrap_or_else(|| panic!("{refusal}: no reason line: {receipt:?}"));
@@ -4839,6 +4857,7 @@ fn refusal_names_engine(reason: &Reason) -> bool {
             | Reason::EngineNotStopped { .. }
             | Reason::EngineNotWaited { .. }
             | Reason::OutputNotRead { .. }
+            | Reason::Cancelled { .. }
     )
 }
 
@@ -4945,6 +4964,338 @@ fn refusal_receipt_write_refuses_an_existing_path() {
             "target.txt"
         ]
     );
+}
+
+/// Task 045: the budget of a cancel test's module run: far above its waits, so
+/// the cancel, never the budget, is what stops the engine.
+const CANCEL_TEST_BUDGET: Duration = Duration::from_secs(120);
+
+/// Task 045: how long a cancel test waits for an engine process of its run.
+const LIVE_WAIT: Duration = Duration::from_secs(10);
+
+/// Task 045: the most a cancelled run may take to answer after `cancel()`.
+const CANCEL_ANSWER: Duration = Duration::from_secs(5);
+
+/// Task 045: run `call` on a thread, wait (at most [`LIVE_WAIT`], polling
+/// `live_processes(work_root)`) for a live process of its run, then fire
+/// `handle` and wait at most [`CANCEL_ANSWER`] for the answer. It returns the
+/// answer and how long after `cancel()` it came. Task 042's discipline: if the
+/// wait fails (a `pgrep` error, no process within 10 s, or the run ending
+/// first) or no answer comes within 5 s of the cancel, [`stop_run_engines`]
+/// stops every engine of the run, the thread is joined, and only then does the
+/// test fail.
+fn cancel_once_live<T: Send + 'static>(
+    work_root: &Path,
+    handle: &CancelHandle,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> (T, Duration) {
+    let runner = std::thread::spawn(move || {
+        let answer = call();
+        (answer, Instant::now())
+    });
+    let deadline = Instant::now() + LIVE_WAIT;
+    let live = loop {
+        match live_processes(work_root) {
+            Ok(pids) if !pids.is_empty() => break Ok(()),
+            Ok(_) if Instant::now() < deadline && !runner.is_finished() => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Ok(_) => {
+                break Err(
+                    "no engine process showed up within 10 s, or the run ended first".to_owned(),
+                )
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    if let Err(error) = live {
+        let stopped = stop_run_engines(work_root, &runner);
+        let joined = runner.join();
+        panic!(
+            "{error}; then stopped the run's engines (problems: {stopped:?}) and joined the \
+             runner (it panicked: {})",
+            joined.is_err()
+        );
+    }
+    handle.cancel();
+    let cancelled = Instant::now();
+    while !runner.is_finished() && cancelled.elapsed() < CANCEL_ANSWER {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !runner.is_finished() {
+        let stopped = stop_run_engines(work_root, &runner);
+        let joined = runner.join();
+        panic!(
+            "no answer within {CANCEL_ANSWER:?} of cancel(); then stopped the run's engines \
+             (problems: {stopped:?}) and joined the runner (it panicked: {})",
+            joined.is_err()
+        );
+    }
+    let (answer, answered) = runner.join().expect("the runner thread panicked");
+    (answer, answered.saturating_duration_since(cancelled))
+}
+
+/// Task 045: `refusal` is `Cancelled` for `engine_kind` at `program`, with its
+/// exact text.
+fn assert_cancelled(refusal: &Refusal, engine_kind: Engine, program: &Path) {
+    match &refusal.reason {
+        Reason::Cancelled { engine } => assert_eq!(*engine, engine_kind, "{refusal}"),
+        _ => panic!("{engine_kind}: not Cancelled: {refusal}"),
+    }
+    assert_eq!(refusal.path, program, "{engine_kind}");
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: the run on {engine_kind} was cancelled by its caller: no engine starts after a \
+             cancel, and a running one is stopped with SIGKILL",
+            program.display()
+        )
+    );
+}
+
+/// Task 045: the `outcome`, `reason` and `engine` lines of `refusal`'s
+/// refusal receipt.
+fn receipt_outcome_lines(refusal: &TwoEngineRefusal) -> Vec<String> {
+    let receipt = render_refused(refusal);
+    receipt_lines(&receipt)[1..4]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect()
+}
+
+/// Task 045 (M1 A10 and A12 lab half): on each real engine, `run_engine` runs
+/// on a thread, with a 120 s budget, on a module whose `digest` loops forever.
+/// Once its engine process is live (at most 10 s, `live_processes`), the test
+/// calls `cancel()` on the control's handle ([`cancel_once_live`]). The run is
+/// refused as `Cancelled` for that engine, within 5 s of the cancel; its
+/// refusal receipt says `outcome: cancelled` and `reason: cancelled`; then the
+/// census finds no engine process, entry or open file under its work root.
+/// SKIPPED, no result, when either engine is missing.
+#[test]
+fn cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines() {
+    let Some(programs) = real_engines("the cancelled-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run45-cancel");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &digest_module(LOOP_BODY));
+
+    for (engine_kind, program) in ENGINES.into_iter().zip(programs) {
+        let work = work_root(&root, &format!("work-{engine_kind}"));
+        let control = RunControl::new(CANCEL_TEST_BUDGET);
+        let handle = control.cancel_handle();
+        let (result, after_cancel) = cancel_once_live(&work, &handle, {
+            let (value, program, work) = (value.clone(), program.clone(), work.clone());
+            move || run_engine(&value, engine_kind, &program, &work, &control)
+        });
+        let refusal = refused(result);
+        assert_cancelled(&refusal, engine_kind, &program);
+        assert!(
+            after_cancel < CANCEL_ANSWER,
+            "{engine_kind}: answered {after_cancel:?} after cancel()"
+        );
+        eprintln!("PASS: {engine_kind} answered {after_cancel:?} after cancel(): {refusal}");
+        assert_eq!(
+            receipt_outcome_lines(&TwoEngineRefusal::Engine(refusal)),
+            [
+                "outcome: cancelled".to_owned(),
+                "reason: cancelled".to_owned(),
+                format!("engine: {engine_kind}"),
+            ],
+            "{engine_kind}"
+        );
+        assert_census_empty(&work, &format!("cancelled run on {engine_kind}"));
+    }
+}
+
+/// Task 045: a control cancelled before the call. Per engine, `run_engine`
+/// with a [`counting`] stand-in, and then `run` with two, are each refused as
+/// `Cancelled` (exact text; `run`'s before its first `--version` query, as
+/// `TwoEngineRefusal::Version` for `wasmtime`); no module run and no
+/// `--version` query is counted, and each work root is empty.
+#[test]
+fn cancel_before_start_starts_no_engine() {
+    let (_bundle, value) = fixture();
+    let tmp = TempDir::new("run45-before");
+    let root = canonical(&tmp);
+    let control = RunControl::new(TEST_BUDGET);
+    control.cancel_handle().cancel();
+
+    for engine_kind in ENGINES {
+        let engines = work_root(&root, &format!("{engine_kind}-engines"));
+        let program = counting(&engines, engine_kind.name());
+        let work = work_root(&root, &format!("{engine_kind}-work"));
+        let refusal = refused(run_engine(&value, engine_kind, &program, &work, &control));
+        assert_cancelled(&refusal, engine_kind, &program);
+        assert_eq!(starts(&program, "module"), 0, "{engine_kind}: a module run");
+        assert_eq!(
+            starts(&program, "version"),
+            0,
+            "{engine_kind}: a version query"
+        );
+        assert!(names(&work).is_empty(), "{engine_kind}: {:?}", names(&work));
+    }
+
+    let signed = signed_fixture();
+    let engines = work_root(&root, "two-engines");
+    let wasmtime = counting(&engines, "wasmtime");
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "two-work");
+    let refusal = two_refused(run(&RunInput {
+        control: &control,
+        ..input(&signed, &wasmtime, &wasmer, &work)
+    }));
+    assert_eq!(
+        receipt_outcome_lines(&refusal),
+        [
+            "outcome: cancelled",
+            "reason: cancelled",
+            "engine: wasmtime"
+        ]
+    );
+    let refusal = match refusal {
+        TwoEngineRefusal::Version(refusal) => refusal,
+        other => panic!("not refused before the version query: {other}"),
+    };
+    assert_cancelled(&refusal, Engine::Wasmtime, &wasmtime);
+    for program in [&wasmtime, &wasmer] {
+        assert_eq!(starts(program, "module"), 0, "{}", program.display());
+        assert_eq!(starts(program, "version"), 0, "{}", program.display());
+    }
+    assert!(names(&work).is_empty(), "{:?}", names(&work));
+}
+
+/// Task 045: `run` with a pinned stand-in `wasmtime` whose module run `exec`s
+/// `/bin/sleep 600` (under the module path as its `argv[0]`, so `pgrep -f
+/// <work root>` finds it) and a [`counting`] `wasmer`. The test cancels once
+/// the `wasmtime` process is live ([`cancel_once_live`]): the answer is
+/// `TwoEngineRefusal::Engine` with `Cancelled` for `wasmtime`, within 5 s;
+/// `wasmer` was asked `--version` once but never started for a module run;
+/// the census finds nothing under the work root.
+#[test]
+fn run_cancelled_during_wasmtime_never_starts_wasmer() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run45-two");
+    let root = canonical(&tmp);
+    let engines = work_root(&root, "engines");
+    let wasmtime = marked(
+        &engines,
+        "wasmtime",
+        &format!("{MODULE_ARGUMENT}exec -a \"$module\" /bin/sleep 600\n"),
+    );
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "work");
+    let control = RunControl::new(CANCEL_TEST_BUDGET);
+    let handle = control.cancel_handle();
+
+    let (result, after_cancel) = cancel_once_live(&work, &handle, {
+        let (wasmtime, wasmer, work) = (wasmtime.clone(), wasmer.clone(), work.clone());
+        move || {
+            run(&RunInput {
+                control: &control,
+                ..input(&signed, &wasmtime, &wasmer, &work)
+            })
+        }
+    });
+    let refusal = match two_refused(result) {
+        TwoEngineRefusal::Engine(refusal) => refusal,
+        other => panic!("not an engine refusal: {other}"),
+    };
+    assert_cancelled(&refusal, Engine::Wasmtime, &wasmtime);
+    assert!(
+        after_cancel < CANCEL_ANSWER,
+        "answered {after_cancel:?} after cancel()"
+    );
+    assert!(started(&engines, "wasmtime"), "wasmtime ran no module");
+    assert_eq!(starts(&wasmer, "module"), 0, "wasmer ran a module");
+    assert_eq!(starts(&wasmer, "version"), 1, "wasmer --version queries");
+    assert_census_empty(&work, "run cancelled during wasmtime");
+}
+
+/// Task 045 (M1 A12 lab half): through `run`, each refusal is its own
+/// expected reason and the census finds nothing under its work root
+/// afterwards: a verifier refusal (an import that is not granted), an unpinned
+/// `wasmtime --version` (stand-in), a `wasmtime` that fails ([`FAILING_BODY`]
+/// stand-in) and task 043's budget stop (a stand-in sleeper, 200 ms, under
+/// the watchdog).
+#[test]
+fn refused_and_failed_runs_leave_nothing_under_the_scratch_root() {
+    const BUDGET: Duration = Duration::from_millis(200);
+    let tmp = TempDir::new("run45-refused");
+    let root = canonical(&tmp);
+
+    let (result, ran) = run_with_grants(&root, "not-granted", IMPORTING_MODULE, &[]);
+    match two_refused(result) {
+        TwoEngineRefusal::Verify(VerifyRefusal::Audit(AuditRefusal::Undeclared {
+            module,
+            name,
+        })) => {
+            assert_eq!((module.as_str(), name.as_str()), ("env", "f"))
+        }
+        other => panic!("not the verifier's undeclared import: {other}"),
+    }
+    assert_census_empty(&ran.work, "verifier refusal");
+
+    let signed = signed_fixture();
+    let engines = work_root(&root, "engines-unpinned");
+    let wasmtime = engine(
+        &engines,
+        "wasmtime",
+        "printf '%s\\n' 'wasmtime 9.9.9'\n",
+        "printf 'same\\n'\n",
+    );
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "work-unpinned");
+    match two_refused(run(&input(&signed, &wasmtime, &wasmer, &work))) {
+        TwoEngineRefusal::Version(Refusal {
+            reason: Reason::VersionNotPinned { engine, .. },
+            ..
+        }) => assert_eq!(engine, Engine::Wasmtime),
+        other => panic!("not an unpinned version: {other}"),
+    }
+    assert_census_empty(&work, "unpinned --version");
+
+    let engines = work_root(&root, "engines-failed");
+    let wasmtime = marked(&engines, "wasmtime", FAILING_BODY);
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "work-failed");
+    match two_refused(run(&input(&signed, &wasmtime, &wasmer, &work))) {
+        TwoEngineRefusal::Engine(Refusal {
+            reason: Reason::EngineFailed { engine, status, .. },
+            ..
+        }) => {
+            assert_eq!(engine, Engine::Wasmtime);
+            assert_eq!(status.code(), Some(3));
+        }
+        other => panic!("not a failed engine: {other}"),
+    }
+    assert_census_empty(&work, "failed engine");
+
+    let engines = work_root(&root, "engines-budget");
+    let wasmtime = marked(
+        &engines,
+        "wasmtime",
+        &format!("{MODULE_ARGUMENT}exec -a \"$module\" /bin/sleep 600\n"),
+    );
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "work-budget");
+    let (result, _) = answer_within_watchdog(&work, BUDGET, {
+        let (wasmtime, wasmer, work) = (wasmtime.clone(), wasmer.clone(), work.clone());
+        move || {
+            run(&RunInput {
+                control: &RunControl::new(BUDGET),
+                ..input(&signed, &wasmtime, &wasmer, &work)
+            })
+        }
+    });
+    match two_refused(result) {
+        TwoEngineRefusal::Engine(Refusal {
+            reason: Reason::BudgetExceeded { engine, budget },
+            ..
+        }) => assert_eq!((engine, budget), (Engine::Wasmtime, BUDGET)),
+        other => panic!("not a budget stop: {other}"),
+    }
+    assert_census_empty(&work, "budget stop");
 }
 
 /// Task 041 (M1 A8 lab half): the variable naming the case folder the outer
