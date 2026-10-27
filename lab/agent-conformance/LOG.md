@@ -7188,3 +7188,11 @@ Gates after the fix, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFF
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 281.08 seconds. The effects target passed 58 tests, 0 failed, 12 ignored in 215.18 seconds; `grants::tests::client_session_credentials_are_guarded` and `standin_stopped_run_leaves_no_live_grant` passed. The runtime target passed 10 tests, 0 failed, 2 ignored in 14.53 seconds. The process-isolation target passed 9 tests. The report target passed 23 tests. The artifact target passed 7 tests. The build target passed 1 test. The lib target passed 31 tests. The probe unit target passed 3 tests.
 
 No `Cargo.toml` or `Cargo.lock` change.
+
+### Review repair: the `http` change is reverted
+
+The review failed the section above. Acceptance 1 lets `tests/common/grants.rs` change only `fn live_grant_state` to `pub(super) fn live_grant_state`. `grants::tests::client_session_credentials_are_guarded` is not on acceptance 6's rerun list, so that failure was a stop, not a reason to edit the shared fixture. The new code also broke the 2-second bound: it set the read timeout once, so a server that sent one byte just before the deadline let the next `read` wait about 2 seconds more, and the overrun then read as `fixture response read failed` instead of `fixture HTTP response exceeded its bound` (P11).
+
+The `http` read loop is restored byte for byte to the "Old" block above: each `read` gets only the time left, and `could not bound fixture read` comes from the per-read `set_read_timeout`. `fn live_grant_state` stays `pub(super)` and its body is unchanged. So `git diff -U0 -- lab/agent-conformance/tests/common/grants.rs` against 048's merge shows one hunk again.
+
+The `client_session_credentials_are_guarded` failure (`Err("could not bound fixture read")` where `Err("invalid fixture authorization header")` was expected, `tests/common/grants.rs:2641`) is left for its own task. That task needs a test that fails without its fix, a loopback server that drips one byte every 1.5 s and must get `fixture HTTP response exceeded its bound` within about 2.1 s, and a falsifier id. It is not 049's.
