@@ -2,7 +2,8 @@
 
 use std::fmt;
 use wasmparser::{
-    Encoding, Import, ImportSectionReader, MemoryType, Parser, Payload, TypeRef, Validator,
+    ComponentExternalKind, Encoding, Import, ImportSectionReader, MemoryType, Parser, Payload,
+    TypeRef, Validator,
 };
 
 pub const AUDIT_API: u32 = 1;
@@ -133,29 +134,51 @@ fn memory_limits(ty: MemoryType) -> MemoryLimits {
 fn inspect(
     wasm: &[u8],
     encoding: Encoding,
+    read_imports: impl FnMut(Payload<'_>) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    let mut validator = Validator::new();
+    inspect_with_validator(wasm, encoding, &mut validator, read_imports)
+}
+
+// The crate's one parse. A `component-type` section reuses it on its own data.
+fn payloads(
+    wasm: &[u8],
+) -> impl Iterator<Item = Result<Payload<'_>, wasmparser::BinaryReaderError>> + '_ {
+    Parser::new(0).parse_all(wasm)
+}
+
+fn inspect_with_validator(
+    wasm: &[u8],
+    encoding: Encoding,
+    validator: &mut Validator,
     mut read_imports: impl FnMut(Payload<'_>) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     let (right_encoding, invalid) = match encoding {
         Encoding::Module => (wasm.starts_with(b"\0asm\x01\0\0\0"), Refusal::Malformed),
         Encoding::Component => (Parser::is_component(wasm), Refusal::NotAComponent),
     };
-    if !right_encoding || Validator::new().validate_all(wasm).is_err() {
+    validator.reset();
+    if !right_encoding || validator.validate_all(wasm).is_err() {
         return Err(invalid);
     }
 
     let mut depth = 0;
-    for payload in Parser::new(0).parse_all(wasm) {
+    for payload in payloads(wasm) {
         match payload.map_err(|_| invalid.clone())? {
             Payload::Version { .. } => depth += 1,
             Payload::End(_) => depth -= 1,
             Payload::CustomSection(section) => {
-                let range = section.range();
-                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;
-                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;
-                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;
-                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;
-                if content.windows(4).any(|bytes| bytes == b"\0asm") {
-                    return Err(Refusal::CodeInCustomSection);
+                if section.name().starts_with("component-type") {
+                    type_only_component(section.data(), validator)?;
+                } else {
+                    let range = section.range();
+                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;
+                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;
+                    let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;
+                    let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;
+                    if content.windows(4).any(|bytes| bytes == b"\0asm") {
+                        return Err(Refusal::CodeInCustomSection);
+                    }
                 }
             }
             payload if depth == 1 => read_imports(payload)?,
@@ -163,4 +186,27 @@ fn inspect(
         }
     }
     Ok(())
+}
+
+// wit-bindgen names its encoded world `component-type:...`. That data is a
+// component of type definitions and type exports, never code.
+fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {
+    inspect_with_validator(data, Encoding::Component, validator, type_only_payload)
+        .map_err(|_| Refusal::CodeInCustomSection)
+}
+
+fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {
+    match payload {
+        Payload::ComponentTypeSection(_) => Ok(()),
+        Payload::ComponentExportSection(section) => {
+            for export in section {
+                let export = export.map_err(|_| Refusal::CodeInCustomSection)?;
+                if export.kind != ComponentExternalKind::Type {
+                    return Err(Refusal::CodeInCustomSection);
+                }
+            }
+            Ok(())
+        }
+        _ => Err(Refusal::CodeInCustomSection),
+    }
 }

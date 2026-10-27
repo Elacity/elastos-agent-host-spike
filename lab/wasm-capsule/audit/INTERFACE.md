@@ -62,6 +62,16 @@ Callers match the variant's fields; they never parse the Display string.
   or more and cannot be part of the magic. A section without such a run passes
   this check; padding alone is not refused. This is a byte heuristic;
   compressed or encoded content is not decoded.
+  One exception: a custom section whose name starts with `component-type`
+  (the name wit-bindgen writes for its encoded world) skips this byte rule.
+  Its data must parse and validate as a Component of type definitions and type
+  exports: every payload is a version, an end, a Component type section, a
+  Component export section whose every export kind is `Type`, or a custom
+  section that passes this same rule. Inner custom sections are checked with
+  the same rule. Any other payload, a parse error, a validation error or a
+  non-Component encoding returns `CodeInCustomSection` with the string
+  `code in custom section`. Every other custom section, at every depth, keeps
+  the byte rule above.
 - After validation and custom-section checks, the first undeclared import
   in section order returns `Undeclared` with its module and name.
 

@@ -30,6 +30,34 @@ fn read_source(relative: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)).unwrap()
 }
 
+const COMPONENT_TYPE_NAME: &[u8] =
+    b"component-type:wit-bindgen:0.57.1:elastos:bus@1.0.0:product-capsule-v1:encoded world";
+
+fn leb_u32(mut value: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            bytes.push(byte);
+            return bytes;
+        }
+        bytes.push(byte | 0x80);
+    }
+}
+
+// A core module whose last section is a custom section with a multi-byte size.
+fn with_custom_section(name: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut wasm = wat::parse_str("(module)").unwrap();
+    let mut payload = leb_u32(name.len());
+    payload.extend_from_slice(name);
+    payload.extend_from_slice(data);
+    wasm.push(0);
+    wasm.extend_from_slice(&leb_u32(payload.len()));
+    wasm.extend_from_slice(&payload);
+    wasm
+}
+
 #[test]
 fn zero_import_module_passes() {
     let wasm = wat::parse_str(
@@ -365,6 +393,49 @@ fn custom_section_carrying_code_is_refused() {
         if let Err(refusal) = result {
             assert_eq!(refusal.to_string(), "code in custom section");
         }
+    }
+}
+
+#[test]
+fn wit_bindgen_component_type_section_is_accepted() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wit-bindgen-0.57.1-component-type.bin");
+    let data = fs::read(fixture).unwrap();
+    assert_eq!(data.len(), 1382);
+    assert_eq!(&data[..8], b"\0asm\x0d\0\x01\0");
+    assert_eq!(COMPONENT_TYPE_NAME.len(), 84);
+
+    let wasm = with_custom_section(COMPONENT_TYPE_NAME, &data);
+    Validator::new().validate_all(&wasm).unwrap();
+    assert_eq!(audit(&wasm, &[]), Ok(vec![]));
+}
+
+#[test]
+fn component_type_section_that_does_not_parse_is_refused() {
+    let wasm = with_custom_section(COMPONENT_TYPE_NAME, b"not-wasm");
+    Validator::new().validate_all(&wasm).unwrap();
+    let refusal = audit(&wasm, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::CodeInCustomSection);
+    assert_eq!(refusal.to_string(), "code in custom section");
+}
+
+#[test]
+fn component_type_section_with_a_core_module_is_refused() {
+    for (label, component) in [
+        (
+            "core module",
+            wat::parse_str("(component (core module))").unwrap(),
+        ),
+        (
+            "instance export",
+            wat::parse_str(r#"(component (instance $i) (export "i" (instance $i)))"#).unwrap(),
+        ),
+    ] {
+        Validator::new().validate_all(&component).unwrap();
+        let wasm = with_custom_section(COMPONENT_TYPE_NAME, &component);
+        let refusal = audit(&wasm, &[]).expect_err(label);
+        assert_eq!(refusal, Refusal::CodeInCustomSection, "{label}");
+        assert_eq!(refusal.to_string(), "code in custom section", "{label}");
     }
 }
 

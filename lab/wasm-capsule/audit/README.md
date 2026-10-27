@@ -124,6 +124,9 @@ apply and verify each entry by hand in this workspace.
 | F-CWA18a | Match an interface name that ends with a declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA20a | Drop every memory maximum | `defined_memory_reports_its_page_limits`, `imported_memory_reports_its_page_limits`, `memory64_is_reported`, `shared_memory_is_reported`, `memories_follow_import_then_definition_order` |
 | F-CWA21a | Match an interface when the declared name ends with the import | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA23a | Never run the `component-type` branch, so the magic window decides | `wit_bindgen_component_type_section_is_accepted`, `component_type_section_that_does_not_parse_is_refused` |
+| F-CWA23b | Accept any data under a `component-type` name | `component_type_section_that_does_not_parse_is_refused`, `component_type_section_with_a_core_module_is_refused` |
+| F-CWA23c | Accept any component that parses, whatever its payloads | `component_type_section_with_a_core_module_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
