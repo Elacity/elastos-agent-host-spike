@@ -29,6 +29,24 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
     bound == presented
 }
 
+fn held_for_identity(
+    open: &HashMap<u64, OpenHold>,
+    grants: &HashMap<Handle, crate::GrantRecord>,
+    identity: &str,
+) -> u64 {
+    let mut sum: u64 = 0;
+    for open_hold in open.values() {
+        let Some(grant) = grants.get(&open_hold.handle) else {
+            continue;
+        };
+        if grant.identity != identity {
+            continue;
+        }
+        sum = sum.saturating_add(open_hold.amount);
+    }
+    sum
+}
+
 /// The one ledger the verifier owns.
 #[derive(Debug)]
 pub(crate) struct Ledger {
@@ -68,6 +86,7 @@ pub struct Reservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReserveRefuse {
     OverCeiling { ceiling: u64, held: u64, asked: u64 },
+    SumOverflow { held: u64, asked: u64 },
     Binding(Refuse),
 }
 
@@ -76,6 +95,9 @@ impl std::fmt::Display for ReserveRefuse {
         match self {
             ReserveRefuse::OverCeiling { .. } => {
                 formatter.write_str("reservation exceeds the ceiling")
+            }
+            ReserveRefuse::SumOverflow { .. } => {
+                formatter.write_str("reservation sum does not fit in u64")
             }
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
@@ -193,10 +215,11 @@ impl Verifier {
         self.ledger.lock().expect("ledger lock").ceiling = ceiling;
     }
 
-    /// Holds `amount` on the ledger when the outstanding total plus `amount`
-    /// stays at or under the ceiling. A binding refusal records nothing, a sum
-    /// that does not fit in `u64` is over the ceiling, and the request's
-    /// reported usage does not lower the hold.
+    /// Holds `amount` on the ledger when the total this identity compares plus
+    /// `amount` stays at or under the ceiling. A binding refusal records nothing,
+    /// a total that does not fit in `u64` is over the ceiling, a stored sum of
+    /// every open hold plus `amount` that does not fit in `u64` is a sum
+    /// overflow, and the request's reported usage does not lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
@@ -213,6 +236,13 @@ impl Verifier {
             .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
+        let shared = held;
+        let own = held_for_identity(&ledger.open, &self.grants, &identity);
+        let held = if ledger.ceilings.contains_key(&identity) {
+            own
+        } else {
+            shared
+        };
         ledger.ceiling = ledger.admitted;
         if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
             ledger.ceiling = agent_ceiling;
@@ -228,7 +258,23 @@ impl Verifier {
                 })
             }
         };
+        let put_back = if ledger.ceilings.contains_key(&identity) {
+            match shared.checked_add(amount) {
+                Some(shared_total) => Some(shared_total),
+                None => {
+                    return Err(ReserveRefuse::SumOverflow {
+                        held: shared,
+                        asked: amount,
+                    })
+                }
+            }
+        } else {
+            None
+        };
         ledger.held = total;
+        if let Some(shared_total) = put_back {
+            ledger.held = shared_total;
+        }
         ledger.next_reservation += 1;
         ledger.open.insert(
             ledger.next_reservation,
@@ -1685,4 +1731,114 @@ fn model_unasked_agent_reads_the_last_admit() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 1);
+}
+
+#[test]
+fn model_other_agent_hold_does_not_fill_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("first ask");
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("second ask");
+    verifier
+        .reserve(&first_call, &first_request, 4)
+        .expect("first agent uses its own ceiling");
+    assert_eq!(books(&verifier).held, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("first hold does not fill the second ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 54);
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("second agent is at its own ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    assert_eq!(books(&verifier).held, 54);
+}
+
+#[test]
+fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: u64::MAX },
+            u64::MAX,
+        )
+        .expect("first ask");
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 1 },
+            1,
+        )
+        .expect("second ask");
+    verifier
+        .reserve(&first_call, &first_request, u64::MAX)
+        .expect("first agent fills its own ceiling");
+    assert_eq!(books(&verifier).held, u64::MAX);
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("the stored sum does not fit in u64");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::SumOverflow {
+            held: u64::MAX,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation sum does not fit in u64");
+    let after = books(&verifier);
+    assert_eq!(after.held, u64::MAX);
+    assert_eq!(after.open.len(), 1);
+    assert_eq!(after.charged, 0);
 }
