@@ -858,10 +858,13 @@ impl LiveWatch {
             )
         };
         if wd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(-1);
+            }
             return Err(format!(
-                "inotify_add_watch {} failed: {}",
-                path.display(),
-                std::io::Error::last_os_error()
+                "inotify_add_watch {} failed: {err}",
+                path.display()
             ));
         }
         self.wds.insert(wd, path.to_path_buf());
@@ -918,8 +921,9 @@ impl LiveWatch {
             }
         }
         for dir in pending_dirs {
-            self.add(&dir)?;
-            add_dir_watches_recursive(self, &dir, 0)?;
+            if self.add(&dir)? >= 0 {
+                add_dir_watches_recursive(self, &dir, 0)?;
+            }
         }
         Ok(seen.into_iter().collect())
     }
@@ -943,8 +947,9 @@ fn add_dir_watches_recursive(watch: &mut LiveWatch, root: &Path, depth: u32) -> 
                 .symlink_metadata()
                 .is_ok_and(|m| m.file_type().is_symlink())
         {
-            watch.add(&path)?;
-            add_dir_watches_recursive(watch, &path, depth + 1)?;
+            if watch.add(&path)? >= 0 {
+                add_dir_watches_recursive(watch, &path, depth + 1)?;
+            }
         }
     }
     Ok(())
@@ -1570,5 +1575,7 @@ pub fn remove_isolated(dir: &Path) {
 }
 
 pub fn lock_real_root() -> MutexGuard<'static, ()> {
-    REAL_ROOT.lock().expect("Runtime storage plant lock")
+    REAL_ROOT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
