@@ -1423,7 +1423,15 @@
   change. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
   --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
 - 27 Oct, Task 055 (the engine label plant restores the base bytes and README names its list; Rong's second review of
-  PR #245, P12). Base `73f5fc35f141b9f9a28a07d0d090edda57bdb365`. Task 052's review found two statements not true.
+  PR #245, P12). The runs and byte checks below were made on tree `73f5fc35f141b9f9a28a07d0d090edda57bdb365` (built
+  ahead), not on this task's base. Its commit `cee074ded` was then merged onto parent
+  `705e4fbbdfaef640a51f5c707069a4a5e7564c5b` (`705e4fbbd`, the merge of PR #692): `git rev-parse cee074ded^` prints
+  that full hash. The only lane file that differs between the two is `SECOND-REVIEW.md`: `git diff --stat 73f5fc35f
+  705e4fbbd -- lab/wasm-capsule` prints `lab/wasm-capsule/SECOND-REVIEW.md | 75 +++++++++++++++++++++++++++++++--------`
+  and `1 file changed, 61 insertions(+), 14 deletions(-)`. The runner's named test
+  (`engines_are_labelled_test_only_not_endorsed`, `tests/docs.rs`, which reads README, ADOPTION and `tools/src/run.rs`)
+  and the byte checks (`tools/src/run.rs` and `falsifiers.json`) do not read that file. Task 052's review found two
+  statements not true.
   (1) README: the sentence on task 026's two `tools/src/run.rs` bugs ended in a colon right before the three ADOPTION
   bullets. It now comes first, ends with a full stop and says they are listed under "Task 052's three, runner-caught";
   the ADOPTION sentence follows and ends in the colon that introduces its three bullets. No bullet, id or count changes.
