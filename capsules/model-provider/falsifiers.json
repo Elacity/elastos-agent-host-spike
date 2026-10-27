@@ -2390,6 +2390,22 @@
       "tests": [
         "hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more"
       ]
+    },
+    {
+      "id": "MP28",
+      "title": "a second open hosted run passes the offer ceiling",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "if active_runs > offer.policy.concurrency_limit as usize {",
+          "new": "if active_runs > offer.policy.concurrency_limit as usize + 1 {"
+        }
+      ],
+      "tests": [
+        "hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect"
+      ]
     }
   ]
 }

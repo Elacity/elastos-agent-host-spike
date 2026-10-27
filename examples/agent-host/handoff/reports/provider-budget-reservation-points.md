@@ -105,6 +105,7 @@ streams the response bytes and keeps no usage record
 | `concurrency_limit_is_enforced` | `capsules/model-provider/src/state.rs:4464` | Offer limit is 1 (`:4477`); the first run is running; the second is failed with `rate_limited`/`model_busy` (`:4501-4507`); dispatch ran once (`:4509`); the replay keeps the same run and result (`:4512-4520`); the terminal event keeps the refusal (`:4536-4540`). | The offer from `offer("local-text")` is a hosted `OpenAiCompatibleText` (`state.rs:1861`, `:1877`), so the rate-limited terminal stores `BackendReport::unknown()` (`state.rs:1354`, `contract.rs:212-218`). The test does not assert that field. |
 | `private_and_remote_principals_share_one_hosted_concurrency_limit` | `capsules/model-provider/src/state.rs:4544` | A hosted offer gives one dispatch to the private principal and refuses the remote principal with `model_busy` (`:4588-4591`); after settlement the remote run may start (`:4599-4604`). | For the first run the terminal event records a hosted report with no usage facts, which becomes `unknown` (`state.rs:1354`). The test does not assert that field. |
 | `local_llama_streams_concurrent_runs_reuses_child_and_guards_refresh` | `capsules/model-provider/src/execution.rs:3955` | Two runs return their own text (`:3973-3980`); one engine start and both requests (`:3984-3992`); the local terminal has no backend report (`:3981-3983`). | None. The test asserts the report field is absent. |
+| `hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect` | `capsules/model-provider/tests/process.rs:1859` | On macOS, the stand-in holds the answer. Run A returns the contract run id and an open status with one connection. Run B, with its own `request_id`, returns its own run id and `failed`/`model_busy` with no output, and the stand-in still has one connection. After A settles `failed`/`hosted_effect_refused`, run C is admitted, reaches the socket and settles `hosted_effect_refused`; the stand-in has two connections and two requests, each `POST /v1/hosted-effect HTTP/1.1` with no `authorization` header. Off macOS it prints one `SKIP` line and returns. Result: `test hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect ... ok`, `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.89s`. | `usage` is `unknown`: the refused run is hosted and stores `BackendReport::unknown()` (`state.rs:1352-1354`), so `resolved_model`, `usage` and `cost` are all `unknown` (`contract.rs:212-219`), the same value a sent run with no report records. The test asserts that field. |
 
 ```
 test state::tests::concurrency_limit_is_enforced ... ok
@@ -122,7 +123,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 | `conflicting_retry_reuses_run_id_and_fails_by_stable_request_fingerprint` | `capsules/model-provider/src/state.rs:4898` | Three retries with changed input, operation or offer hit the same run id and fail `invalid_request` (`:4973`). No dispatch happens. | None. No run terminal is produced. |
 | `create_retry_after_session_and_grant_rotation_returns_same_run_without_redispatch` | `capsules/model-provider/src/state.rs:4978` | The rotated retry returns the same run id (`:5025`), dispatch ran once (`:5026`), and the stored binding keeps the original session and grant (`:5031-5032`). | The offer from `offer("local-text")` is hosted (`state.rs:1861`, `:1877`), so the completed terminal stores `BackendReport::unknown()` (`state.rs:1354`, `contract.rs:212-218`). The test does not assert that field. |
 | `responses_terminal_failures_are_generic_and_not_retried` | `capsules/model-provider/src/execution.rs:4731` | Each of three terminal stream failures gives `backend_failed` with a generic message (`:4763-4770`), records an unknown backend report (`:4772-4775`), and makes exactly one request per run (`:4777`). | Hosted report with `usage` = unknown (`contract.rs:204-209`; `state.rs:1354`), asserted at `execution.rs:4772-4775`. |
-| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1391` | On macOS, the first `runs_create` returns the contract run id and stays open with status `prepared` or `running`; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. The connection count is now proven by `MP26`, which removes both stops for one run: the open-run return (`src/state.rs:518-531`, return at `:530`) and the local text worker refusal (`src/adapters.rs:768-774`). | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
+| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1391` | On macOS, the first `runs_create` returns the contract run id and stays open with status `prepared` or `running`; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. The connection count is proven by `MP26`, which removes both stops for one run: the open-run return (`src/state.rs:518-531`, return at `:530`) and the local text worker refusal (`src/adapters.rs:768-774`). `MP26` is caught by the final `observe()` connection count (`tests/process.rs:1522`, `left: 2, right: 1`), not by the count check right after the retry (`:1483-1486`), because the second send connects asynchronously. | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
 
 A same-fingerprint retry of a still-open run is pinned by
 `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect`
@@ -195,9 +196,9 @@ before the flush arm (`:2021-2023`) runs again, and the delta stays in
 `stream_state.delta_buffer` (`:2004`) until it goes out of scope. The test
 asserts nothing about `text_delta` events for this reason.
 
-Cases 1, 3 and 4 are pinned for today's behaviour. In case 2 the conflicting
-retries, the completed-run retry and the same-fingerprint retry of a still-open
-hosted run are pinned.
+Cases 1, 3 and 4 are pinned for today's behaviour, and case 1 is now pinned on
+the hosted path too. In case 2 the conflicting retries, the completed-run retry
+and the same-fingerprint retry of a still-open hosted run are pinned.
 
 ## Gaps for a Runtime reservation
 
@@ -256,6 +257,13 @@ proposes a Runtime design; each names what is missing.
    record no binding and keep no pending account.
    The provider side already joins a retry to the original run
    (`capsules/model-provider/src/state.rs:518-531`, `:5025-5026`).
+   A run the provider refuses at its own ceiling sends nothing to the Runtime,
+   yet records `usage` as `unknown`
+   (`capsules/model-provider/tests/process.rs:1859`,
+   `capsules/model-provider/src/state.rs:1352-1354`), the same value a sent run
+   with no report records, so a Runtime account cannot tell "not sent" from
+   "sent, not reported" by the usage field alone; that is Anders-owned, with no
+   design.
 
 ## Tests still missing
 
