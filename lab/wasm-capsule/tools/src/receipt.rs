@@ -58,11 +58,15 @@
 //!
 //! ```text
 //! schema: wc-005.run-refusal/v1
-//! outcome: refused
+//! outcome: <refused|cancelled>
 //! reason: <the refusal's id, from refusal_reason>
 //! engine: <wasmtime|wasmer|none>
 //! detail: "<the refusal's Display>"
 //! ```
+//!
+//! Task 045: `outcome` is `cancelled` for a run the caller cancelled (reason
+//! id `cancelled`, [`Reason::Cancelled`]) and `refused` for every other
+//! refusal; it is read from the reason id alone.
 //!
 //! [`refusal_reason`] gives one stable lowercase snake_case id per refusal
 //! kind, from one exhaustive `match` over every [`TwoEngineRefusal`] variant
@@ -187,6 +191,21 @@ pub fn refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engin
         Reason::MemoryCountAboveOne { .. } => ("memory_count_above_one", None),
         Reason::MemoryMaximumMissing { .. } => ("memory_maximum_missing", None),
         Reason::MemoryMaximumAboveDeclared { .. } => ("memory_maximum_above_declared", None),
+        Reason::Cancelled { engine } => (CANCELLED, Some(*engine)),
+    }
+}
+
+/// Task 045: the reason id of a cancelled run, and its `outcome` value.
+const CANCELLED: &str = "cancelled";
+
+/// Task 045: the `outcome` of a refusal with the id `reason`: `cancelled` for
+/// the cancel id, else `refused`. It reads only the id [`refusal_reason`] gave,
+/// so there is no second rule for which refusal is a cancel.
+fn refusal_outcome(reason: &str) -> &'static str {
+    if reason == CANCELLED {
+        CANCELLED
+    } else {
+        "refused"
     }
 }
 
@@ -195,7 +214,8 @@ pub fn refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engin
 pub fn render_refused(refusal: &TwoEngineRefusal) -> String {
     let (reason, engine) = refusal_reason(refusal);
     format!(
-        "schema: {REFUSAL_SCHEMA}\noutcome: refused\nreason: {reason}\nengine: {}\ndetail: \"{}\"\n",
+        "schema: {REFUSAL_SCHEMA}\noutcome: {}\nreason: {reason}\nengine: {}\ndetail: \"{}\"\n",
+        refusal_outcome(reason),
         engine.map_or("none", Engine::name),
         refusal.to_string().as_bytes().escape_ascii()
     )

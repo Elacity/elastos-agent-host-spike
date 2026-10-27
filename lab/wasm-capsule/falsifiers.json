@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 181 planted bugs",
-          "new": "`falsifiers.json` holds 180 planted bugs"
+          "old": "`falsifiers.json` holds 182 planted bugs",
+          "new": "`falsifiers.json` holds 181 planted bugs"
         }
       ],
       "tests": [
@@ -2977,6 +2977,22 @@
       ],
       "tests": [
         "receipt_records_a_lower_module_maximum_as_it_is"
+      ]
+    },
+    {
+      "id": "F-WC-A10-CANCEL-CLEANUP-SKIPPED",
+      "title": "on a cancel while the engine runs, run_engine returns Cancelled before finish_run, so the run folder and its module file are left",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let outcome = write_and_start(bundle, engine, program, &run_dir, control);\n",
+          "new": "    let outcome = write_and_start(bundle, engine, program, &run_dir, control);\n    if matches!(outcome, Err(Refusal { reason: Reason::Cancelled { .. }, .. })) {\n        return outcome;\n    }\n"
+        }
+      ],
+      "tests": [
+        "cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines"
       ]
     }
   ]
