@@ -13,6 +13,10 @@ struct GapRow {
     runtime_change: String,
 }
 
+/// Two `elastos run` clients. A3 is resident instances inside one Runtime.
+pub const INSTANCE_GRANTS_SCOPE: &str =
+    "process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9";
+
 fn blocker_ids(reason: &str) -> BTreeSet<&str> {
     reason.split(';').map(str::trim).collect()
 }
@@ -231,7 +235,8 @@ impl Evidence {
                 "two_instances_overlap_with_separate_grants"
                     | "instance_grant_does_not_authorise_sibling"
             ) {
-                text.push_str(" | process-isolation lab half of A3, A6 and A9");
+                text.push_str(" | ");
+                text.push_str(INSTANCE_GRANTS_SCOPE);
             }
             if name == "cancelled_instance_settles_with_reason_sibling_completes" {
                 text.push_str(
@@ -542,7 +547,7 @@ pub fn render_run(
         "suite_outcome": outcome,
         "command_success": suite_ok && complete,
         "scope": "process isolation; diagnostic results; capsule isolation remains blocked",
-        "instance_grants_scope": "process-isolation lab half of A3, A6 and A9",
+        "instance_grants_scope": INSTANCE_GRANTS_SCOPE,
         "report": { "table": table, "sha256": sha256(table.as_bytes()) },
     });
     let receipt_bytes = serde_json::to_vec_pretty(&document)
