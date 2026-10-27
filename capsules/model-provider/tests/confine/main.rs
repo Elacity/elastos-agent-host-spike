@@ -857,6 +857,16 @@ fn wait_for_terminal(
 /// `missing test: model_provider_ops_under_profile`. A span `not_a_test` is
 /// not cited. This test starts no process and needs no sandbox.
 ///
+/// `operations_table_cells_stay_lab_claims` runs on that same section after
+/// the real-file missing-test check and returns ok. A data row starts with
+/// `| ` and its first non-empty cell is not `Operation` and not `---`. The
+/// Right cell is the fourth non-empty cell: `storage` or
+/// `no named test shows this`. The Linux cell is the seventh non-empty cell:
+/// `designed, not enforced`. An in-memory row whose Right cell is `network`
+/// panics, and the panic contains `network` and `right`. An in-memory row
+/// whose Linux cell is `enforced` panics, and the panic contains `enforced`
+/// and `Linux`.
+///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
 /// acceptance, so the in-memory stand-in citation fails.
@@ -940,6 +950,52 @@ fn operations_section_cites_existing_tests() {
             .unwrap_or(doc.len());
         &doc[start..line_end]
     }
+    // Right is the fourth non-empty cell. Linux is the seventh. Header and
+    // separator rows are not data rows, so their cells are not claims.
+    fn operations_table_cells_stay_lab_claims(section: &str) -> Result<(), String> {
+        const RIGHT_PLACE: usize = 4;
+        const LINUX_PLACE: usize = 7;
+        const APPROVED_RIGHT: &str = "storage";
+        const UNSHOWN_RIGHT: &str = "no named test shows this";
+        const LINUX_CLAIM: &str = "designed, not enforced";
+        for line in section.lines() {
+            if !line.starts_with("| ") {
+                continue;
+            }
+            let cells: Vec<&str> = line
+                .split('|')
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect();
+            let Some(first) = cells.first().copied() else {
+                continue;
+            };
+            if first == "Operation" || first == "---" {
+                continue;
+            }
+            let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
+            if right != APPROVED_RIGHT && right != UNSHOWN_RIGHT {
+                return Err(format!("right cell `{right}` is not an approved right id"));
+            }
+            let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
+            if linux != LINUX_CLAIM {
+                return Err(format!(
+                    "Linux cell `{linux}` is not designed, not enforced"
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn caught_lab_claim_panic(section: &str) -> String {
+        match catch_unwind(AssertUnwindSafe(|| {
+            if let Err(reason) = operations_table_cells_stay_lab_claims(section) {
+                panic!("{reason}");
+            }
+        })) {
+            Err(payload) => panic_text(payload),
+            Ok(()) => String::new(),
+        }
+    }
 
     let source_without_the_function = "";
     let stand_in_failure = caught_citation_failure(
@@ -980,6 +1036,19 @@ fn operations_section_cites_existing_tests() {
     require_cited_tests("`model_`", source_without_the_function);
     require_cited_tests("`generated_`", source_without_the_function);
 
+    let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
+    let network_panic = caught_lab_claim_panic(network_row);
+    assert!(
+        network_panic.contains("network") && network_panic.contains("right"),
+        "{network_panic}"
+    );
+    let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
+    let enforced_panic = caught_lab_claim_panic(enforced_row);
+    assert!(
+        enforced_panic.contains("enforced") && enforced_panic.contains("Linux"),
+        "{enforced_panic}"
+    );
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -1005,6 +1074,8 @@ fn operations_section_cites_existing_tests() {
         "the trace citation must be a required test name"
     );
     require_cited_tests(section, &source);
+    operations_table_cells_stay_lab_claims(section)
+        .expect("the real operations section keeps its Right and Linux lab claims");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
