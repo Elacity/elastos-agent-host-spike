@@ -731,3 +731,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_cancel_survivor_reaches_running` and `standin_failed_survivor_reaches_running` are this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for the survivor.
 
 `standin_unanswered_request_expires` is this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for expiry.
+
+`standin_once_grant_is_spent_by_one_use` is this stand-in, and a PASS there gives the Runtime no A6 credit for a once grant.
