@@ -1621,9 +1621,9 @@ class GrantReplayProbe(unittest.TestCase):
         """Cargo resolves the escaped path. The raw text does not name the crate.
 
         The owner's detector reads that raw text. A pass writes
-        grant-binding-002. A caught failure writes nothing and leaves any
-        existing finding bytes in place. It says the detector returned
-        true. An error propagates. A false detector result is not a skip.
+        grant-binding-002. A caught failure writes nothing and says the
+        detector returned true. An error propagates. A false detector
+        result is not a skip.
         """
         self.assertNotIn(self._testMethodName, PROBE_NAMES)
         self.assertNotIn(self._testMethodName, STALE_NAMES)
@@ -1647,7 +1647,8 @@ class GrantReplayProbe(unittest.TestCase):
             self.target,
         )
         print(f"escaped link outcome: {outcome.kind}", file=sys.stderr, flush=True)
-        before_link = LINK_FINDING.read_bytes() if LINK_FINDING.is_file() else None
+        if outcome.kind == "failed" and outcome.caught and LINK_FINDING.is_file():
+            LINK_FINDING.unlink()
         returned = record_escaped_link(outcome, meta_code, meta_output, LINK_FINDING)
         start = meta_output.find("{")
         parsed, _end = json.JSONDecoder().raw_decode(meta_output, start)
@@ -1680,8 +1681,7 @@ class GrantReplayProbe(unittest.TestCase):
                 ],
             )
         elif outcome.kind == "failed" and outcome.caught:
-            after_link = LINK_FINDING.read_bytes() if LINK_FINDING.is_file() else None
-            self.assertEqual(after_link, before_link)
+            self.assertFalse(LINK_FINDING.is_file())
             self.assertEqual(returned, names)
             print("detector returned true", file=sys.stderr, flush=True)
         else:

@@ -768,19 +768,63 @@ class ShmOpenClassifier(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         line = source.splitlines()[calls[0].lineno - 1]
         self.assertIn("skip_reason", line)
-        self.assertIsNone(skip_reason())
+        with patch.object(os.path, "isfile", return_value=True):
+            self.assertIsNone(skip_reason())
         self.launch_guard.assert_not_called()
+
+    def test_missing_tools_skip_only_probe_class(self):
+        """Each missing tool skips every probe while the classifier checks run."""
+        classifier_names = (
+            "test_skip_is_only_a_missing_toolchain",
+            "test_recorded_allow_does_not_skip",
+        )
+        probe_names = unittest.defaultTestLoader.getTestCaseNames(ShmOpenProbe)
+        for missing in ((sbx.SANDBOX_EXEC,), (CC,), (sbx.SANDBOX_EXEC, CC)):
+            with self.subTest(missing=missing), patch.object(
+                os.path, "isfile", side_effect=lambda path: path not in missing
+            ), patch(
+                __name__ + ".compile_shm",
+                side_effect=AssertionError("missing-tool probe compiled a helper"),
+            ) as compiled, patch.object(
+                sbx, "run",
+                side_effect=AssertionError("missing-tool probe launched a helper"),
+            ) as launched:
+                class MissingTools(ShmOpenProbe):
+                    pass
+
+                probes = unittest.TestResult()
+                unittest.defaultTestLoader.loadTestsFromTestCase(MissingTools).run(probes)
+                self.assertEqual(probes.testsRun, len(probe_names))
+                self.assertEqual(probes.errors, [])
+                self.assertEqual(probes.failures, [])
+                self.assertEqual(
+                    [(case._testMethodName, reason) for case, reason in probes.skipped],
+                    [(name, "missing " + " and ".join(missing)) for name in probe_names],
+                )
+                classifiers = unittest.TestResult()
+                for name in classifier_names:
+                    type(self)(name).run(classifiers)
+                self.assertEqual(classifiers.testsRun, len(classifier_names))
+                self.assertEqual(classifiers.errors, [])
+                self.assertEqual(classifiers.failures, [])
+                self.assertEqual(classifiers.skipped, [])
+                self.assertEqual(classifiers.expectedFailures, [])
+                self.assertEqual(classifiers.unexpectedSuccesses, [])
+                compiled.assert_not_called()
+                launched.assert_not_called()
+                self.launch_guard.assert_not_called()
 
     def test_recorded_allow_does_not_skip(self):
         """A recorded allow is a finding-linked expected failure, not a skip.
 
-        Both tools are present. The plant source is still produced. A recorded
+        Both tools are injected as present. The plant source is still produced. A recorded
         allow without that mark, a docstring that omits the finding, and a
         second plant line are each their own harness error.
         """
-        self.assertIsNone(skip_reason())
-        self.assertTrue(os.path.isfile(CC))
-        self.assertTrue(os.path.isfile(sbx.SANDBOX_EXEC))
+        with patch.object(os.path, "isfile", return_value=True):
+            self.assertIsNone(skip_reason())
+            self.assertTrue(os.path.isfile(CC))
+            self.assertTrue(os.path.isfile(sbx.SANDBOX_EXEC))
         text = "(version 1)\n(deny default)\n(allow ipc-posix-shm)\n"
         clean = "(version 1)\n(deny default)\n"
 
