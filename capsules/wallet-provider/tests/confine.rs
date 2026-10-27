@@ -1539,6 +1539,243 @@ fn bitcoin_proofs_persist_under_storage_root() {
     provider.shutdown();
 }
 
+/// The `request_approval` operation of
+/// `src/tests/approvals/managed.rs::managed_account_signs_only_after_runtime_approval`
+/// for a Browser `personal_sign` request on a managed `eip155:20` account.
+///
+/// The integration test writes the payload value itself because
+/// `src/tests/support.rs::browser_personal_sign_payload` is crate-private; it is
+/// request data, not provider logic. `expires_at` is ten minutes ahead, inside
+/// `src/main.rs`'s `MAX_APPROVAL_REQUEST_TTL_SECS` of thirty minutes, as the
+/// unit test's `APPROVAL_REQUEST_TTL_SECS` does.
+fn personal_sign_approval(
+    account_id: &str,
+    address: &str,
+    message: &str,
+) -> WalletProviderOperationV2 {
+    WalletProviderOperationV2::RequestApproval {
+        account_id: account_id.to_string(),
+        chain_namespace: "eip155:20".to_string(),
+        intent: "browser_personal_sign".to_string(),
+        resource: "elastos://wallet/eip155:20/sign/browser_personal_sign".to_string(),
+        reason: "Browser page requests personal_sign".to_string(),
+        payload: json!({
+            "schema": "elastos.browser.wallet-signature-request/v1",
+            "method": "personal_sign",
+            "params": [message, address],
+            "message": message,
+            "address": address,
+            "account_id": account_id,
+            "chain_namespace": "eip155:20",
+            "page_url": "https://dapp.example/sign",
+            "origin": "https://dapp.example",
+            "requires_wallet_approval": true
+        }),
+        expires_at: now_ts().saturating_add(10 * 60),
+    }
+}
+
+/// The managed approval calls answer under the profile and persist under
+/// `STORAGE_ROOT`.
+///
+/// One provider `init`s a root, creates one managed account on `eip155:20` and
+/// sends two `request_approval` calls whose answers pass through `ok_data`.
+/// Every request carries principal `person:local:alice`, session
+/// `session:confine` and actor `wallet`, the same across restarts. A fresh
+/// confined start on the same root `init`s it and `status` shows
+/// `pending_approval_count` 2, so both requests reloaded from the store, and
+/// `list_approvals` without `include_resolved` lists both request ids. Then
+/// `approve_and_sign_managed` on the first answers `completed` with a
+/// signature, and `reject_approval` on the second answers `rejected`. A second
+/// restart `init`s the same root and `status` shows `pending_approval_count` 0;
+/// `list_approvals` without `include_resolved` is empty and with it shows the
+/// first `completed` and the second `rejected`; a replayed
+/// `approve_and_sign_managed` on the first answers `invalid_request` with
+/// "not pending"; and `read_store` shows both requests with those statuses
+/// under the root's wallet directory. The payloads and the signature stay test
+/// data in the temporary root, and no assertion formats them.
+///
+/// Falsifier: WP18 removes the `STORAGE_ROOT` subpath grant. One grant covers
+/// every `storage` call, so no profile edit can fail one of these calls and
+/// leave `init` working; no narrower profile falsifier exists, and this test
+/// fails on its first `init`.
+#[test]
+fn managed_approvals_persist_under_storage_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    let mut provider = ConfinedProvider::start(&root);
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Approvals".to_string()),
+            create_new: false,
+        }),
+    );
+    let account_id = data["account"]["account_id"]
+        .as_str()
+        .expect("managed account must name its id")
+        .to_string();
+    let address = data["account"]["address"]
+        .as_str()
+        .expect("managed account must name its address")
+        .to_string();
+
+    let mut request_ids = Vec::new();
+    for message in ["First managed approval", "Second managed approval"] {
+        let data = ok_data(provider.wallet(personal_sign_approval(&account_id, &address, message)));
+        let approval = &data["approval_request"];
+        assert_eq!(
+            approval["status"], "pending",
+            "request_approval must answer a pending request"
+        );
+        request_ids.push(
+            approval["request_id"]
+                .as_str()
+                .expect("an approval request must name its id")
+                .to_string(),
+        );
+    }
+    let first_id = request_ids[0].clone();
+    let second_id = request_ids[1].clone();
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined re-Init must succeed: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"]["pending_approval_count"], 2,
+        "both approval requests must reload from the store: {status}"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListApprovals {
+        include_resolved: false,
+    }));
+    let pending = data["approval_requests"]
+        .as_array()
+        .expect("list_approvals must answer its requests");
+    assert_eq!(
+        pending.len(),
+        2,
+        "the reloaded listing must hold both pending approvals"
+    );
+    for request_id in [&first_id, &second_id] {
+        assert!(
+            pending
+                .iter()
+                .any(|request| request["request_id"].as_str() == Some(request_id.as_str())),
+            "the reloaded listing must hold the pending approval"
+        );
+    }
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::ApproveAndSignManaged {
+            request_id: first_id.clone(),
+            reason: "approved".to_string(),
+        }),
+    );
+    assert_eq!(
+        data["approval_request"]["status"], "completed",
+        "approve_and_sign_managed must answer the completed request"
+    );
+    assert!(
+        data["signature"]
+            .as_str()
+            .is_some_and(|signature| !signature.is_empty()),
+        "approve_and_sign_managed must answer a signature"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::RejectApproval {
+        request_id: second_id.clone(),
+        reason: "rejected".to_string(),
+    }));
+    assert_eq!(
+        data["approval_request"]["status"], "rejected",
+        "reject_approval must answer the rejected request"
+    );
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined second re-Init must succeed: {init}"
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"]["pending_approval_count"], 0,
+        "both resolved approvals must reload from the store: {status}"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListApprovals {
+        include_resolved: false,
+    }));
+    assert!(
+        data["approval_requests"]
+            .as_array()
+            .is_some_and(|requests| requests.is_empty()),
+        "resolved approvals must stay out of the pending listing"
+    );
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::ListApprovals {
+        include_resolved: true,
+    }));
+    let resolved = data["approval_requests"]
+        .as_array()
+        .expect("list_approvals must answer its requests");
+    for (request_id, expected) in [(&first_id, "completed"), (&second_id, "rejected")] {
+        let request = resolved
+            .iter()
+            .find(|request| request["request_id"].as_str() == Some(request_id.as_str()))
+            .expect("the resolved listing must hold the request");
+        assert_eq!(
+            request["status"], expected,
+            "the resolved listing must hold the stored status"
+        );
+    }
+
+    let (code, refusal) = result_error(provider.wallet(
+        WalletProviderOperationV2::ApproveAndSignManaged {
+            request_id: first_id.clone(),
+            reason: "approved again".to_string(),
+        },
+    ));
+    assert_eq!(
+        code, "invalid_request",
+        "a replayed approve must be refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("not pending"),
+        "a replay must name the resolved request: {refusal}"
+    );
+
+    let store = read_store(&root);
+    let stored = store["approval_requests"]
+        .as_array()
+        .expect("the store under the wallet directory must hold its approvals");
+    for (request_id, expected) in [(&first_id, "completed"), (&second_id, "rejected")] {
+        let request = stored
+            .iter()
+            .find(|request| request["request_id"].as_str() == Some(request_id.as_str()))
+            .expect("the store under the wallet directory must hold the request");
+        assert_eq!(
+            request["status"], expected,
+            "the store under the wallet directory must hold the status"
+        );
+    }
+    provider.shutdown();
+}
+
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
@@ -1767,8 +2004,10 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// `export_managed_recovery_set` and `import_managed_recovery_set` calls, then
 /// the `challenge`, `verify_proof`, `verify_contract_proof` and
 /// `link_verified_account` calls of task 082, the `bitcoin_challenge` and
-/// `verify_bip322_proof` calls of task 083, and the `create_managed_account`
-/// and `list_accounts` calls that 072 named come last. The array runs before
+/// `verify_bip322_proof` calls of task 083, the `request_approval`,
+/// `approve_and_sign_managed`, `reject_approval` and `list_approvals` calls of
+/// task 084, and the `create_managed_account` and `list_accounts` calls that
+/// 072 named come last. The array runs before
 /// the `storage_error` check, so a grant on the parent fails this test on one
 /// of those calls rather than only on `init`. `list_accounts` is sent only to
 /// show that the refused `create_managed_account` created nothing. After
@@ -1799,9 +2038,10 @@ fn account_operations_beneath_storage_parent_are_refused() {
     let denied = provider.init(&sibling);
 
     // The four account edits of task 080, the four managed-recovery calls of
-    // task 081, the four EVM proof and link calls of task 082 and the two
-    // Bitcoin proof calls of task 083 come first, so a grant on
-    // `STORAGE_PARENT` fails the first call of the loop.
+    // task 081, the four EVM proof and link calls of task 082, the two
+    // Bitcoin proof calls of task 083 and the four managed approval calls of
+    // task 084 come first, so a grant on `STORAGE_PARENT` fails the first
+    // call of the loop.
     let operations = [
         WalletProviderOperationV2::RenameAccount {
             account_id: "wallet:eip155:20:0xabc".to_string(),
@@ -1876,6 +2116,22 @@ fn account_operations_beneath_storage_parent_are_refused() {
             public_key: Some(
                 "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
             ),
+        },
+        personal_sign_approval(
+            "wallet:eip155:20:0xabc",
+            "0x00000000000000000000000000000000000000ab",
+            "Outside approval",
+        ),
+        WalletProviderOperationV2::ApproveAndSignManaged {
+            request_id: "wallet-request:outside".to_string(),
+            reason: "Outside approval".to_string(),
+        },
+        WalletProviderOperationV2::RejectApproval {
+            request_id: "wallet-request:outside".to_string(),
+            reason: "Outside rejection".to_string(),
+        },
+        WalletProviderOperationV2::ListApprovals {
+            include_resolved: false,
         },
         WalletProviderOperationV2::CreateManagedAccount {
             chain_namespace: "eip155:20".to_string(),
