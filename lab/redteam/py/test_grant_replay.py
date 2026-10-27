@@ -36,6 +36,7 @@ is the only writer for that file.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -1126,6 +1127,7 @@ class GrantReplayProbe(unittest.TestCase):
     def test_clean_full_ceiling_reserve_succeeds(self):
         """A full-ceiling reserve passes. A double charge that fails it is not a stale-call catch."""
         self.check_real(CLEAN_NAME)
+        self.require_one_anchor("lab/grant-binding/src/ledger.rs", RESERVE_OLD, "reserve")
         suite = self.plant("double-charge", "src/ledger.rs", RESERVE_OLD, DOUBLE_NEW)
         session = suite.by_name[SESSION_NAME]
         sibling = suite.by_name[SIBLING_NAME]
@@ -1146,6 +1148,34 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertTrue(naive, evidence(suite.output) or tail(suite.output))
         self.assertFalse(accounting_plant_caught(session, sibling, clean))
         self.assertFalse(self._expecting("test_clean_full_ceiling_reserve_succeeds"))
+
+    def test_clean_plant_skips_a_missing_anchor(self):
+        """The clean plant skips a missing reserve anchor. It does not plant or start cargo.
+
+        Count one is covered. A clean method that plants first, or a
+        ``require_one_anchor`` that does not skip, fails this test.
+        """
+        ledger = "lab/grant-binding/src/ledger.rs"
+        reason = anchor_reason(ledger, 0, "reserve", self.head)
+        self.assertIn("does not cover that plant", reason)
+        self.assertIsNone(anchor_reason(ledger, 1, "reserve", self.head))
+        source = inspect.getsource(GrantReplayProbe.test_clean_full_ceiling_reserve_succeeds)
+        live_at = source.find("self.check_real(CLEAN_NAME)")
+        anchor_at = source.find("require_one_anchor")
+        plant_at = source.find("self.plant(")
+        self.assertGreaterEqual(live_at, 0)
+        self.assertGreaterEqual(anchor_at, 0)
+        self.assertGreaterEqual(plant_at, 0)
+        self.assertLess(live_at, anchor_at)
+        self.assertLess(anchor_at, plant_at)
+        self.assertIn("RESERVE_OLD", source)
+        self.assertIn('"reserve"', source)
+        self.assertIn(
+            'require_one_anchor("lab/grant-binding/src/ledger.rs", RESERVE_OLD, "reserve")',
+            source,
+        )
+        guard = inspect.getsource(GrantReplayProbe.require_one_anchor)
+        self.assertIn("self.skipTest(reason)", guard)
 
     def require_one_anchor(self, relative, old, name):
         """Skip this plant when the live file does not hold that anchor once."""
