@@ -1,0 +1,7 @@
+id: F-A7-default
+file: src/ledger.rs
+test: ledger::model_unasked_agent_keeps_the_admitted_ceiling
+--- old
+        ledger.ceiling = ledger.default_ceiling;
+--- new
+--- end

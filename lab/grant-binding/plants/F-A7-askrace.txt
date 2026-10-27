@@ -1,0 +1,21 @@
+id: F-A7-askrace
+file: src/ask.rs
+test: ledger::model_concurrent_asks_keep_each_agent_ceiling
+--- old
+        let _admission = crate::ledger::hold_admission();
+        self.stage_admitted_identity(&identity);
+--- new
+        static LOW_STAGED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static HIGH_STAGED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if ask.amount == 4 {
+            self.stage_admitted_identity(&identity);
+            LOW_STAGED.store(true, std::sync::atomic::Ordering::SeqCst);
+            while !HIGH_STAGED.load(std::sync::atomic::Ordering::SeqCst) {}
+        } else {
+            while !LOW_STAGED.load(std::sync::atomic::Ordering::SeqCst) {}
+            self.stage_admitted_identity(&identity);
+            HIGH_STAGED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+--- end
