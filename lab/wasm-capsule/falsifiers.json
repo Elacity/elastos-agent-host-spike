@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 179 planted bugs",
-          "new": "`falsifiers.json` holds 178 planted bugs"
+          "old": "`falsifiers.json` holds 181 planted bugs",
+          "new": "`falsifiers.json` holds 180 planted bugs"
         }
       ],
       "tests": [
@@ -2742,7 +2742,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
           "old": "            Some(argument) if cap_rejected(status, &stderr) => Reason::CapRejected {\n                engine,\n                argument,\n                status,\n                stderr,\n            },\n",
-          "new": "            Some(_) if cap_rejected(status, &stderr) => {\n                let retry = engine_command(program)\n                    .args([\"run\", \"--invoke\", DIGEST_EXPORT])\n                    .arg(module)\n                    .arg(DIGEST_ARGUMENT)\n                    .output()\n                    .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;\n                return Ok(EngineRun {\n                    status: retry.status,\n                    stdout: retry.stdout,\n                    memory_mb,\n                    memory_cap: None,\n                });\n            }\n"
+          "new": "            Some(_) if cap_rejected(status, &stderr) => {\n                let retry = engine_command(program)\n                    .args([\"run\", \"--invoke\", DIGEST_EXPORT])\n                    .arg(module)\n                    .arg(DIGEST_ARGUMENT)\n                    .output()\n                    .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;\n                return Ok(EngineRun {\n                    status: retry.status,\n                    stdout: retry.stdout,\n                    memory_mb,\n                    memory_cap: None,\n                    memory_maximum: None,\n                });\n            }\n"
         }
       ],
       "tests": [
@@ -2945,6 +2945,38 @@
         "run_refuses_a_module_memory_with_no_maximum_on_both_engines",
         "run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines",
         "run_refuses_a_second_memory_before_any_engine_start"
+      ]
+    },
+    {
+      "id": "F-WC10F-WASMER-MAX-MISSING",
+      "title": "the receipt writes the module memory maximum line for wasmtime only, so wasmer's run has no recorded maximum",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "        receipt.push_str(&memory_maximum_line(\n            engine,\n            run.memory_maximum_bytes(engine),\n        ));\n",
+          "new": "        if engine == Engine::Wasmtime {\n            receipt.push_str(&memory_maximum_line(\n                engine,\n                run.memory_maximum_bytes(engine),\n            ));\n        }\n"
+        }
+      ],
+      "tests": [
+        "receipt_memory_maximum_matches_the_bundle_manifest"
+      ]
+    },
+    {
+      "id": "F-WC10F-MAX-FROM-MANIFEST",
+      "title": "the receipt prints the declared size (memory_cap_bytes) as every engine's module memory maximum, not the maximum the run was checked against",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "            run.memory_maximum_bytes(engine),\n",
+          "new": "            Some(run.memory_cap_bytes()),\n"
+        }
+      ],
+      "tests": [
+        "receipt_records_a_lower_module_maximum_as_it_is"
       ]
     }
   ]

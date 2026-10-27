@@ -881,6 +881,116 @@ fn operations_section_cites_existing_tests() {
     assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
 }
 
+/// The Id cells in `section` are the same set as `ids`.
+///
+/// An Id cell is the trimmed first cell of a line that starts with `| F-cc`.
+/// `Ok` means those cells and `ids` name the same ids. Otherwise one error
+/// names each id that is only in the table with `falsifier id is not in the
+/// list`, and each id that is only in the list with `falsifier id is not in
+/// the table`.
+fn falsifier_section_ids_match(section: &str, ids: &[String]) -> Result<(), String> {
+    let table: std::collections::BTreeSet<String> = section
+        .lines()
+        .filter(|line| line.starts_with("| F-cc"))
+        .map(|line| line.split('|').nth(1).unwrap_or("").trim().to_string())
+        .collect();
+    let registered: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut problems = Vec::new();
+    for id in &table {
+        if !registered.contains(id.as_str()) {
+            problems.push(format!("{id} falsifier id is not in the list"));
+        }
+    }
+    for id in &registered {
+        if !table.contains(*id) {
+            problems.push(format!("{id} falsifier id is not in the table"));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// The `## Falsifiers` Id column names each id in `confine-falsifiers.json`.
+///
+/// The section runs from the heading `## Falsifiers` to the next heading line
+/// that starts with `## `, or to the end of the file. The file's Id cells must
+/// match the list. A copy of that section that replaces `| F-cc39a |` with
+/// `| F-cc-missing |` must report both ids. This test starts no process and
+/// needs no sandbox.
+///
+/// Falsifier: F-cc40a makes `falsifier_section_ids_match` return `Ok` before
+/// it compares, so a table that drops `F-cc39a` is accepted.
+#[test]
+fn falsifier_section_names_every_list_id() {
+    fn falsifiers_section(doc: &str) -> String {
+        let lines: Vec<&str> = doc.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "## Falsifiers")
+            .expect("CONFINEMENT.md must hold the heading ## Falsifiers");
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(lines.len());
+        lines[start..end].join("\n")
+    }
+
+    let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
+    let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
+        panic!(
+            "CONFINEMENT.md must be readable ({}): {err}",
+            doc_path.display()
+        )
+    });
+    let list_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine-falsifiers.json");
+    let list_text = fs::read_to_string(&list_path).unwrap_or_else(|err| {
+        panic!(
+            "confine-falsifiers.json must be readable ({}): {err}",
+            list_path.display()
+        )
+    });
+    let list: Value = serde_json::from_str(&list_text)
+        .unwrap_or_else(|err| panic!("confine-falsifiers.json must parse: {err}"));
+    let entries = list["falsifiers"]
+        .as_array()
+        .expect("confine-falsifiers.json must hold a falsifiers array");
+    let ids: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .expect("each falsifier must name an id")
+                .to_string()
+        })
+        .collect();
+    let section = falsifiers_section(&doc);
+    falsifier_section_ids_match(&section, &ids).expect("the Id column must match the list");
+    assert_eq!(
+        section.matches("| F-cc39a |").count(),
+        1,
+        "the section must hold one | F-cc39a | cell"
+    );
+    let dropped = section.replacen("| F-cc39a |", "| F-cc-missing |", 1);
+    let reason = falsifier_section_ids_match(&dropped, &ids)
+        .expect_err("a table that drops F-cc39a must be refused");
+    assert!(reason.contains("F-cc39a"), "{reason}");
+    assert!(reason.contains("F-cc-missing"), "{reason}");
+    assert!(
+        reason.contains("falsifier id is not in the list"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("falsifier id is not in the table"),
+        "{reason}"
+    );
+    assert!(doc.contains("| F-cc39a |"), "{doc_path:?}");
+    assert!(!doc.contains("F-cc-missing"), "{doc_path:?}");
+}
+
 /// The confined provider serves `init`, `status` and `offers_list`, and
 /// `init` creates the journal root with `runs/` under `STORAGE_ROOT`.
 ///

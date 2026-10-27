@@ -7,7 +7,9 @@
 //! hold ends, and both take that same binding decision first. The guest's
 //! `reported_usage` claim is not read: a known settle charges the figure the
 //! verifier passes in when it stays at or under the stored hold, refuses a
-//! larger one, and an unknown outcome keeps the hold. The ledger value
+//! larger one, and an unknown outcome marks that hold uncertain when its bound
+//! handle is presented and keeps it, and release of an uncertain hold is
+//! refused. The ledger value
 //! sits behind one mutex, and admit, reserve, settle, and release lock it for
 //! the check and the write.
 
@@ -19,6 +21,7 @@ use crate::{Call, GuestRequest, Handle, Refuse, Verifier};
 struct OpenHold {
     handle: Handle,
     amount: u64,
+    uncertain: bool,
 }
 
 fn handles_match(bound: Handle, presented: Handle) -> bool {
@@ -115,6 +118,7 @@ impl std::fmt::Display for SettleRefuse {
 pub enum ReleaseRefuse {
     NotOutstanding,
     OtherHandle,
+    Uncertain,
     Binding(Refuse),
 }
 
@@ -125,6 +129,7 @@ impl std::fmt::Display for ReleaseRefuse {
             ReleaseRefuse::OtherHandle => {
                 formatter.write_str("reservation is bound to another handle")
             }
+            ReleaseRefuse::Uncertain => formatter.write_str("uncertain hold is not released"),
             ReleaseRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -168,6 +173,7 @@ impl Verifier {
             OpenHold {
                 handle: request.handle,
                 amount,
+                uncertain: false,
             },
         );
         Ok(Reservation {
@@ -176,12 +182,12 @@ impl Verifier {
     }
 
     /// Ends one hold with the figure the host measured. A binding refusal
-    /// records nothing, an unknown outcome keeps the hold as it is, and a
-    /// reservation that is not outstanding is refused. A known outcome
-    /// charges the measured figure when it stays at or under the stored hold,
-    /// gives back the stored hold and returns the charge; a larger figure is
-    /// refused and records nothing. The request's reported usage does not
-    /// lower it.
+    /// records nothing, an unknown outcome marks that hold uncertain when the
+    /// presented handle is the one bound to it and keeps it, and a reservation
+    /// that is not outstanding is refused. A known outcome charges the
+    /// measured figure when it stays at or under the stored hold, gives back
+    /// the stored hold and returns the charge; a larger figure is refused and
+    /// records nothing. The request's reported usage does not lower it.
     pub fn settle(
         &self,
         call: &Call,
@@ -194,6 +200,14 @@ impl Verifier {
         let measured = match outcome {
             SettleOutcome::Known(measured) => measured,
             SettleOutcome::Unknown => {
+                {
+                    let mut ledger = self.ledger.lock().expect("ledger lock");
+                    if let Some(open) = ledger.open.get_mut(&reservation.id) {
+                        if handles_match(open.handle, request.handle) {
+                            open.uncertain = true;
+                        }
+                    }
+                }
                 return Err(SettleRefuse::UnknownOutcome);
             }
         };
@@ -221,7 +235,9 @@ impl Verifier {
     }
 
     /// Ends one hold without charging anything. A binding refusal records
-    /// nothing and a reservation that is not outstanding is refused.
+    /// nothing and a reservation that is not outstanding is refused. Only the
+    /// bound handle's unknown settle makes a hold uncertain; an uncertain hold
+    /// is refused and stays open with its amount still held.
     pub fn release(
         &self,
         call: &Call,
@@ -231,12 +247,15 @@ impl Verifier {
         self.resolve(*call, request.handle)
             .map_err(ReleaseRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
-        let (bound, amount) = match ledger.open.get(&reservation.id) {
-            Some(open) => (open.handle, open.amount),
+        let (bound, amount, uncertain) = match ledger.open.get(&reservation.id) {
+            Some(open) => (open.handle, open.amount, open.uncertain),
             None => return Err(ReleaseRefuse::NotOutstanding),
         };
         if !handles_match(bound, request.handle) {
             return Err(ReleaseRefuse::OtherHandle);
+        }
+        if uncertain {
+            return Err(ReleaseRefuse::Uncertain);
         }
         ledger.open.remove(&reservation.id);
         ledger.held -= amount;
@@ -1109,4 +1128,73 @@ fn model_forged_ceiling_does_not_replace_the_settled_charge() {
     assert_eq!(after.charged, 4);
     assert_eq!(after.held, 0);
     assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_release_after_unknown_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let refusal = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(refusal, SettleRefuse::UnknownOutcome);
+    assert_eq!(refusal.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("uncertain hold is not released");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("measured settle ends the uncertain hold");
+    assert_eq!(charge, 4);
+    let settled = books(&verifier);
+    assert_eq!(settled.charged, 4);
+    assert_eq!(settled.held, 0);
+    assert!(!settled.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_unknown_from_another_handle_does_not_mark_the_hold() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let request = guest(holder);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let refusal = verifier
+        .settle(
+            &verifier.open_call(second),
+            &guest(other),
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(refusal, SettleRefuse::UnknownOutcome);
+    assert_eq!(refusal.to_string(), "unknown outcome keeps the hold");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 4);
+    assert_eq!(after_refusal.charged, 0);
+    assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &request, reservation), Ok(()));
+    let after_release = books(&verifier);
+    assert_eq!(after_release.charged, 0);
+    assert_eq!(after_release.held, 0);
+    assert!(!after_release.open.contains_key(&reservation.id));
 }

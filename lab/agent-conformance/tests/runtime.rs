@@ -148,6 +148,14 @@ fn capsule_named_by_hash() {
 }
 
 #[test]
+#[ignore = "blocked: AC-040-RECORD-LAUNCH"]
+fn launch_refuses_bytes_unlike_signed_record() {
+    // `elastos run` finds an installed release capsule by name. It does not
+    // compare the launched directory's bytes with the signed record sha256 or cid.
+    panic!("blocked: AC-040-RECORD-LAUNCH — record-to-launch must compare the launched bytes with the signed record sha256 or cid and refuse a difference (https://github.com/Elacity/elastos-runtime/issues/274)");
+}
+
+#[test]
 fn runtime_data_dir_is_under_throwaway_home() {
     let home = ThrowawayHome::new().unwrap();
     // The guard and decoy use the one data-dir rule. Runtime resolves its own
