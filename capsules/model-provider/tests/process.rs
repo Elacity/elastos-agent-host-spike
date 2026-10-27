@@ -3,6 +3,16 @@
 #[path = "../src/test_support.rs"]
 mod test_support;
 
+/// The shared live-grant stand-in (`lab/agent-conformance/standin-runtime/`),
+/// read here rather than copied: one RA-1 path (P10). The agent-conformance
+/// crate takes the same file in with its own `#[path]` line
+/// (`lab/agent-conformance/src/lib.rs:9-10`). Its `#[cfg(test)] mod tests`
+/// compiles into this binary too, so the shared stand-in's own tests run here.
+#[allow(dead_code)]
+#[path = "../../../lab/agent-conformance/standin-runtime/mod.rs"]
+mod standin_runtime;
+
+use standin_runtime::{Caller, Life, StandIn};
 use test_support::FIXTURE_EVENT_TIMEOUT;
 
 use elastos_model_contract::{
@@ -733,32 +743,17 @@ const RUNTIME_HOSTED_REFUSAL: &[u8] =
     b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
       Content-Length: 0\r\nConnection: close\r\n\r\n";
 
-/// RA-1's answer marker. A shell session calls `GET /api/capability/list` and
-/// the answer carries `"scope": "all_sessions_live"` with only the grants that
-/// are still live (`lab/runtime-asks/01-live-grant-view.md`, draft PR #309,
-/// branch `spike/cursor/runtime-asks-ad52`, commit `513988ebd`, "Smallest
-/// change", point 2; the lab reads the marker at
-/// `lab/agent-conformance/tests/common/grants.rs:1220`). The stand-in serves
-/// this answer body from `HostedEffectStandIn::ra1_view`, not over its socket:
-/// this test needs the live-grant record, not the route.
-const RA1_SCOPE: &str = "all_sessions_live";
+/// The shared stand-in's shell scope marker. The shared file names it once
+/// (`LIVE_SCOPE`, `lab/agent-conformance/standin-runtime/mod.rs:16`), and its
+/// shell route call takes it as the one scope argument
+/// (`get_capability_list(Caller::Shell, Some(...))`, `:128-139`). This test
+/// passes the same text to that one call; it keeps no entry fields and no
+/// grant states of its own.
+const SHELL_LIVE_GRANT_SCOPE: &str = "all_sessions_live";
 
-/// The fixture's values for the RA-1 entry fields. RA-1 fixes which fields an
-/// entry carries, not these values: today's `CapabilityOutput`
-/// (`elastos/crates/elastos-server/src/api/handlers/capability.rs:412-418`:
-/// `request_id`, `resource`, `action`, `duration`, `granted_at`) plus
-/// `session_id`, which RA-1 adds. An entry holds no token. The session id is
-/// the one every fixture hosted run carries in its runtime binding.
-const RA1_GRANT_SESSION_ID: &str = "session:test";
-const RA1_GRANT_RESOURCE: &str = "model:fixture/text";
-const RA1_GRANT_ACTION: &str = "text.generate";
-const RA1_GRANT_GRANTED_AT: &str = "2026-10-27T18:07:00Z";
-
-/// A `once` grant is a token with `max_uses` 1
-/// (`elastos/crates/elastos-server/src/api/handlers/capability.rs:335`), so one
-/// use spends it and it leaves the RA-1 view.
-const RA1_ONCE_DURATION: &str = "once";
-const RA1_ONCE_MAX_USES: u32 = 1;
+/// The session id every fixture hosted run carries in its runtime binding.
+/// It is the session of the one grant the test seeds.
+const HOSTED_FIXTURE_SESSION_ID: &str = "session:test";
 
 /// The two backend stream events the source test sends
 /// (`capsules/model-provider/src/execution.rs:4514-4535`), and the marker end.
@@ -845,11 +840,11 @@ enum HostedEffectAnswer {
     Relay {
         backend_url: String,
     },
-    /// Checks `grants` for the effect's request id before it relays: no live
-    /// grant answers with the Runtime's refusal (`RUNTIME_HOSTED_REFUSAL`) and
-    /// reaches no backend, and a live grant is spent before the relay starts.
+    /// Checks the shared stand-in's shell live-grant view for the effect's
+    /// request id before it relays: no live entry answers with the Runtime's
+    /// refusal (`RUNTIME_HOSTED_REFUSAL`) and reaches no backend.
     Granted {
-        grants: Arc<Mutex<Ra1GrantStore>>,
+        grants: Arc<Mutex<StandIn>>,
         backend_url: String,
     },
 }
@@ -890,97 +885,28 @@ impl RecordedRequest {
     }
 }
 
-/// One RA-1 grant record: the entry fields and the use count that decides
-/// whether the grant is still live.
-#[derive(Clone)]
-struct Ra1Grant {
-    request_id: String,
-    session_id: String,
-    resource: String,
-    action: String,
-    duration: String,
-    granted_at: String,
-    max_uses: u32,
-    uses: u32,
+/// The shared stand-in's shell live-grant view: `GET /api/capability/list`
+/// with `?scope=all_sessions_live`
+/// (`lab/agent-conformance/standin-runtime/README.md`). It is a method call,
+/// not a socket route, because this test needs the live-grant record only.
+fn shell_live_grant_view(grants: &Mutex<StandIn>) -> Value {
+    grants
+        .lock()
+        .unwrap()
+        .get_capability_list(Caller::Shell, Some(SHELL_LIVE_GRANT_SCOPE))
+        .expect("the shared stand-in answers the shell live-grant view")
 }
 
-impl Ra1Grant {
-    /// A live grant is listed; a used-up one is left out. Revoked and expired
-    /// grants are outside this test's scope.
-    fn is_live(&self) -> bool {
-        self.uses < self.max_uses
-    }
-
-    /// This grant's RA-1 entry. It carries the recorded request and session,
-    /// and no token.
-    fn entry(&self) -> Value {
-        json!({
-            "request_id": self.request_id,
-            "session_id": self.session_id,
-            "resource": self.resource,
-            "action": self.action,
-            "duration": self.duration,
-            "granted_at": self.granted_at,
-        })
-    }
-}
-
-/// The RA-1 live grant store that the grant-checking stand-in answers from and
-/// the test reads. It keeps the grants and the named reason for every refusal,
-/// so the one stand-in decides and records in one place (P10).
-#[derive(Default)]
-struct Ra1GrantStore {
-    grants: Vec<Ra1Grant>,
-    refusals: Vec<String>,
-}
-
-impl Ra1GrantStore {
-    fn shared() -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self::default()))
-    }
-
-    /// Issues one `once` grant for the run whose binding carries `request_id`.
-    /// The grant is the shell's approval; it executes nothing by itself.
-    fn issue_once(&mut self, request_id: &str) {
-        self.grants.push(Ra1Grant {
-            request_id: request_id.to_string(),
-            session_id: RA1_GRANT_SESSION_ID.to_string(),
-            resource: RA1_GRANT_RESOURCE.to_string(),
-            action: RA1_GRANT_ACTION.to_string(),
-            duration: RA1_ONCE_DURATION.to_string(),
-            granted_at: RA1_GRANT_GRANTED_AT.to_string(),
-            max_uses: RA1_ONCE_MAX_USES,
-            uses: 0,
-        });
-    }
-
-    /// The RA-1 answer body: the marker and the entry of every live grant.
-    fn view(&self) -> Value {
-        let capabilities: Vec<Value> = self
-            .grants
-            .iter()
-            .filter(|grant| grant.is_live())
-            .map(Ra1Grant::entry)
-            .collect();
-        json!({"scope": RA1_SCOPE, "capabilities": capabilities})
-    }
-
-    /// Spends one use of the live grant for `request_id`, or records the named
-    /// reason there is none. An effect carries no grant id, so the request id
-    /// the provider sends is the one tie between an effect and its grant.
-    fn admit(&mut self, request_id: &str) -> std::result::Result<(), String> {
-        let grant = self
-            .grants
-            .iter_mut()
-            .find(|grant| grant.is_live() && grant.request_id == request_id);
-        let Some(grant) = grant else {
-            let reason = format!("no live grant for request {request_id}");
-            self.refusals.push(reason.clone());
-            return Err(reason);
-        };
-        grant.uses += 1;
-        Ok(())
-    }
+/// True when that view lists one entry whose `request_id` equals `request_id`.
+/// The shared stand-in keeps only `Live` grants
+/// (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), so an exhausted,
+/// revoked or expired grant never admits an effect.
+fn shell_view_lists_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> bool {
+    shell_live_grant_view(grants)["capabilities"]
+        .as_array()
+        .expect("the shared stand-in shell view lists capabilities")
+        .iter()
+        .any(|entry| entry["request_id"] == request_id)
 }
 
 /// Stand-in for the Runtime-owned hosted effect socket that `init` names in
@@ -993,8 +919,8 @@ impl Ra1GrantStore {
 /// the Runtime's accepted head and the backend stream. `hold_answer` keeps that
 /// answer back, so the run stays open for as long as the test needs it. A
 /// stand-in bound with `bind_granting` answers only an effect whose request id
-/// holds a live RA-1 grant, and reads its refusal reasons and the RA-1 view
-/// from the one grant store it shares with the test.
+/// holds a live entry in the shared stand-in's shell view, and records the
+/// named reason for every refusal in this stand-in.
 struct HostedEffectStandIn {
     path: PathBuf,
     listener: Arc<UnixListener>,
@@ -1004,9 +930,11 @@ struct HostedEffectStandIn {
     answer_released: Arc<(Mutex<bool>, Condvar)>,
     /// What the backend answered, when the answer relays.
     relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
-    /// The RA-1 grant store when the answer checks grants before it relays,
-    /// and `None` for the answer modes that do not.
-    grants: Option<Arc<Mutex<Ra1GrantStore>>>,
+    /// The shared stand-in's live-grant view when the answer checks grants
+    /// before it relays, and `None` for the answer modes that do not.
+    grants: Option<Arc<Mutex<StandIn>>>,
+    /// The named reason this stand-in recorded for every effect it refused.
+    refusals: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     accept_loop: Option<thread::JoinHandle<()>>,
 }
@@ -1043,9 +971,9 @@ impl HostedEffectStandIn {
     }
 
     /// Binds the stand-in that relays a hosted effect to the real backend at
-    /// `backend_url` only when `grants` holds a live RA-1 grant for the effect's
+    /// `backend_url` only when `grants` lists a live entry for the effect's
     /// request id, and answers with the Runtime's refusal otherwise.
-    fn bind_granting(label: &str, backend_url: &str, grants: Arc<Mutex<Ra1GrantStore>>) -> Self {
+    fn bind_granting(label: &str, backend_url: &str, grants: Arc<Mutex<StandIn>>) -> Self {
         Self::bind_answering(
             label,
             HostedEffectAnswer::Granted {
@@ -1059,7 +987,7 @@ impl HostedEffectStandIn {
     fn bind_answering(
         label: &str,
         answer: HostedEffectAnswer,
-        grants: Option<Arc<Mutex<Ra1GrantStore>>>,
+        grants: Option<Arc<Mutex<StandIn>>>,
     ) -> Self {
         // The provider refuses a socket path of 104 bytes or more
         // (`src/config.rs:163`), so bind under `/tmp` rather than under the
@@ -1077,12 +1005,14 @@ impl HostedEffectStandIn {
         let (request_tx, requests) = mpsc::channel();
         let answer_released = Arc::new((Mutex::new(true), Condvar::new()));
         let relay_outcome = Arc::new(Mutex::new(None));
+        let refusals = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let accept_loop = {
             let listener = Arc::clone(&listener);
             let connections = Arc::clone(&connections);
             let answer_released = Arc::clone(&answer_released);
             let relay_outcome = Arc::clone(&relay_outcome);
+            let refusals = Arc::clone(&refusals);
             let stopping = Arc::clone(&stop);
             thread::spawn(move || {
                 while !stopping.load(Ordering::Relaxed) {
@@ -1092,6 +1022,7 @@ impl HostedEffectStandIn {
                             let request_tx = request_tx.clone();
                             let answer_released = Arc::clone(&answer_released);
                             let relay_outcome = Arc::clone(&relay_outcome);
+                            let refusals = Arc::clone(&refusals);
                             let answer = answer.clone();
                             thread::spawn(move || {
                                 serve_hosted_effect(
@@ -1100,6 +1031,7 @@ impl HostedEffectStandIn {
                                     answer_released,
                                     answer,
                                     relay_outcome,
+                                    refusals,
                                 )
                             });
                         }
@@ -1116,6 +1048,7 @@ impl HostedEffectStandIn {
             answer_released,
             relay_outcome,
             grants,
+            refusals,
             stop,
             accept_loop: Some(accept_loop),
         }
@@ -1146,23 +1079,24 @@ impl HostedEffectStandIn {
         self.relay_outcome.lock().unwrap().clone()
     }
 
-    /// The RA-1 answer body this stand-in serves. It is a method, not a socket
-    /// route: RA-1 defines `GET /api/capability/list` for a shell session, and
-    /// this test needs the live-grant record only.
+    /// The shared stand-in's shell live-grant view, read through the one
+    /// `get_capability_list` call. It is a method, not a socket route: RA-1
+    /// defines `GET /api/capability/list` for a shell session, and this test
+    /// needs the live-grant record only.
     fn ra1_view(&self) -> Value {
-        self.grant_store().lock().unwrap().view()
+        shell_live_grant_view(self.grant_view())
     }
 
     /// The named reason this stand-in recorded for every effect it refused.
     fn refusal_reasons(&self) -> Vec<String> {
-        self.grant_store().lock().unwrap().refusals.clone()
+        self.refusals.lock().unwrap().clone()
     }
 
-    /// The grant store a granting stand-in answers from.
-    fn grant_store(&self) -> &Arc<Mutex<Ra1GrantStore>> {
+    /// The shared stand-in's live-grant view a granting stand-in answers from.
+    fn grant_view(&self) -> &Mutex<StandIn> {
         self.grants
             .as_ref()
-            .expect("only a grant-checking stand-in keeps a grant store")
+            .expect("only a grant-checking stand-in keeps a live-grant view")
     }
 
     /// Waits for the accept loop to return `expected` connections, failing
@@ -1228,6 +1162,7 @@ fn serve_hosted_effect(
     answer_released: Arc<(Mutex<bool>, Condvar)>,
     answer: HostedEffectAnswer,
     relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
+    refusals: Arc<Mutex<Vec<String>>>,
 ) {
     let recorded = read_hosted_effect_request(&stream);
     // The runtime binding's request id is the one tie between an effect and
@@ -1263,10 +1198,14 @@ fn serve_hosted_effect(
             grants,
             backend_url,
         } => {
-            if grants.lock().unwrap().admit(&request_id).is_err() {
+            if !shell_view_lists_live_grant(&grants, &request_id) {
                 // The refusal reaches the run as `hosted_effect_refused` with
                 // class `access_refused` (`src/adapters.rs:2799-2829`), and no
                 // backend sees the effect.
+                refusals
+                    .lock()
+                    .unwrap()
+                    .push(format!("no live grant for request {request_id}"));
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
                 return;
             }
@@ -2773,7 +2712,7 @@ fn run_hosted_text_turn(
         "runtime_binding": {
             "schema": RUNTIME_CREATE_BINDING_SCHEMA,
             "principal_id": "person:local:test",
-            "session_id": RA1_GRANT_SESSION_ID,
+            "session_id": HOSTED_FIXTURE_SESSION_ID,
             "capsule_id": "assistant",
             "grant_id": grant_id,
             "request_id": request_id,
@@ -3000,19 +2939,23 @@ fn hosted_relay_forwards_the_provider_body_unchanged_and_no_key() {
     provider.shutdown();
 }
 
-/// A hosted model turn is reached only through an RA-1 grant. The stand-in
-/// serves RA-1's live grant view from `HostedEffectStandIn::ra1_view` and
-/// answers only an effect whose request id holds a live grant, so no route
-/// runs over a socket here (`MP35`). Run A carries a non-empty `grant_id` but
-/// no grant was issued for its request id, so the stand-in refuses it with the
+/// A hosted model turn is reached only through a live grant in the shared
+/// stand-in's RA-1 shell view. `HostedEffectStandIn::ra1_view` reads that view
+/// through the shared stand-in's own `get_capability_list` call
+/// (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), and a granting
+/// stand-in answers only an effect whose request id matches a live entry, so no
+/// route runs over a socket here (`MP35`). Run A carries a non-empty
+/// `grant_id` but has no seeded grant, so the stand-in refuses it with the
 /// Runtime's `403` and `X-Elastos-Hosted-Access: refused` before any backend
 /// call, and the run settles `failed` with `hosted_effect_refused` and class
-/// `access_refused`. One `once` grant for run B's request id is then listed
-/// with every RA-1 field, run B completes with `ready` and reported usage, and
-/// that one use takes the grant out of the view (`MP37`). The loopback backend
-/// counts exactly one request, so only B reached the model (`MP36`).
+/// `access_refused`. One `Live` grant for run B's request id is then listed
+/// with every entry field, and run B completes with `ready` and reported
+/// usage. The loopback backend counts exactly one request, so only B reached
+/// the model (`MP36`). The shared stand-in has no seam that spends a grant
+/// (`lab/agent-conformance/standin-runtime/README.md`), so this lane models no
+/// spending and the entry stays listed.
 ///
-/// This is stand-in lab evidence for M1's A4 only: the stand-in is not the
+/// This is stand-in lab evidence for M1's A4 only: the stand-ins are not the
 /// Runtime, the loopback backend is not a hosted connection, and it books no
 /// M1 check and no grade point. The Runtime's own grant, its budget
 /// reservation and an approved hosted connection stay with Anders.
@@ -3029,7 +2972,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         return;
     }
     let backend = LocalRelayBackend::bind();
-    let grants = Ra1GrantStore::shared();
+    let grants = Arc::new(Mutex::new(StandIn::new()));
     let root = test_support::temp_root_path("model-provider-process", "ra1-granted-turn");
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
@@ -3049,15 +2992,17 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "unexpected init response: {started}"
     );
 
-    // RA-1 lists only live grants, so the view starts empty.
+    // The shared stand-in's shell view keeps only live grants
+    // (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), so it starts
+    // empty.
     assert_eq!(
         stand_in.ra1_view(),
-        json!({"scope": RA1_SCOPE, "capabilities": []}),
-        "the RA-1 view must list no grant before one is issued"
+        json!({"scope": SHELL_LIVE_GRANT_SCOPE, "capabilities": []}),
+        "the shared stand-in shell view must list no grant before one is seeded"
     );
 
-    // Run A names a grant id, but no grant was issued for its request id, so
-    // the effect has no live grant to be reached through.
+    // Run A names a grant id, but no grant was seeded for its request id, so
+    // the effect has no live entry to be reached through.
     let request_a = test_support::fixture_model_request_id("request:ra1-denied");
     let prompt = "a turn reached only through a live grant";
     let settled_a = run_hosted_text_turn(
@@ -3091,23 +3036,40 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "the stand-in must record why it refused run A"
     );
 
-    // The shell issues one `once` grant for run B's request id.
+    // The shell seeds one `Live` grant for run B's request id. The shared
+    // stand-in's `seed_grant` is its lab seam
+    // (`lab/agent-conformance/standin-runtime/mod.rs:104-124`); the values are
+    // this test's fixture, and the shared stand-in decides liveness.
     let request_b = test_support::fixture_model_request_id("request:ra1-granted");
-    grants.lock().unwrap().issue_once(&request_b);
+    let resource = "model:fixture/text";
+    let action = "text.generate";
+    let duration = "once";
+    let granted_at: u64 = 1_790_000_000;
+    grants.lock().unwrap().seed_grant(
+        &request_b,
+        HOSTED_FIXTURE_SESSION_ID,
+        resource,
+        action,
+        duration,
+        granted_at,
+        Life::Live,
+        false,
+    );
+    let expected_entry = json!({
+        "request_id": request_b,
+        "session_id": HOSTED_FIXTURE_SESSION_ID,
+        "resource": resource,
+        "action": action,
+        "duration": duration,
+        "granted_at": granted_at,
+    });
     assert_eq!(
         stand_in.ra1_view(),
         json!({
-            "scope": RA1_SCOPE,
-            "capabilities": [{
-                "request_id": request_b,
-                "session_id": RA1_GRANT_SESSION_ID,
-                "resource": RA1_GRANT_RESOURCE,
-                "action": RA1_GRANT_ACTION,
-                "duration": RA1_ONCE_DURATION,
-                "granted_at": RA1_GRANT_GRANTED_AT,
-            }],
+            "scope": SHELL_LIVE_GRANT_SCOPE,
+            "capabilities": [expected_entry.clone()],
         }),
-        "the RA-1 view must list the one live grant with every field"
+        "the shared stand-in shell view must list the one live grant with every field"
     );
 
     // Run B carries the same input with a new request id, and the one live
@@ -3154,11 +3116,15 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         }
     }
 
-    // One use spends the `once` grant, so it leaves the RA-1 view.
+    // The shared stand-in has no seam that spends a grant and this lane adds
+    // none, so the entry stays listed after run B.
     assert_eq!(
         stand_in.ra1_view(),
-        json!({"scope": RA1_SCOPE, "capabilities": []}),
-        "the used `once` grant must leave the RA-1 view"
+        json!({
+            "scope": SHELL_LIVE_GRANT_SCOPE,
+            "capabilities": [expected_entry],
+        }),
+        "the shared stand-in shell view must keep the live grant because this lane models no spending"
     );
 
     // Only run B reached the model: the backend counted exactly one request.
