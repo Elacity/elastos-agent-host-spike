@@ -4,3 +4,5 @@
 - 2026-10-27 task 018: the docs page owns `surface/browser/page-client.js` for its launch token and one-request client until task 020 moves it into the kit; blank server reasons show the status.
 - 2026-10-27 task 023: the lane gate does not repeat the kit guest checks.
 - 2026-10-27 task 026: PATTERNS names bus2 `conflict` and the `bus2` directory cd.
+- 2026-10-27 task 027: the kit owns the launch client and the docs page ships the copy.
+- 2026-10-27 task 027 round 2: the kit owns the launch client and the docs page ships the copy; refreshed the archive renderer copy from its kit owner so the existing byte check passes.
