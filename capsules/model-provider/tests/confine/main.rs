@@ -2299,14 +2299,60 @@ fn allow_rules_trace_to_declared_rights() {
             })
             .collect()
     }
+    fn collect_allow_lines(profile: &str) -> Vec<&str> {
+        let mut allow_lines: Vec<&str> = profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .map(str::trim)
+            .filter(|line| line.starts_with("(allow "))
+            .collect();
+        // An allow after another form on the same line is one more allow line.
+        // A suffix stays even when it equals a line already collected. A line
+        // that starts with `(allow ` is taken once, by the walk above.
+        for line in profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .map(str::trim)
+        {
+            if line.starts_with("(allow ") {
+                continue;
+            }
+            let Some(start) = line.find("(allow ") else {
+                continue;
+            };
+            let suffix = &line[start..];
+            allow_lines.push(suffix);
+        }
+        allow_lines
+    }
+    fn declared_rule_match(allow_lines: &[&str], rule: &str) -> Result<(), String> {
+        match allow_lines.iter().filter(|line| **line == rule).count() {
+            0 => Err(format!("declared rule is not an allow line: {rule}")),
+            1 => Ok(()),
+            _ => Err(format!(
+                "declared rule matches more than one allow line: {rule}"
+            )),
+        }
+    }
+
+    // Same-line copies are in memory. Neither profile reads the fixture.
+    let storage_rule = "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))";
+    assert_eq!(
+        declared_rule_match(&collect_allow_lines(storage_rule), storage_rule),
+        Ok(())
+    );
+    let same_line_copy = format!("{storage_rule}\n(deny network*) {storage_rule}");
+    let message = declared_rule_match(&collect_allow_lines(&same_line_copy), storage_rule)
+        .expect_err("a same-line copy of the storage rule must fail check 3");
+    assert!(
+        message.contains("declared rule matches more than one allow line")
+            && message.contains(storage_rule)
+            && !message.contains("allow rule has no declared right"),
+        "{message}"
+    );
 
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
-    let allow_lines: Vec<&str> = profile
-        .lines()
-        .filter(|line| !line.starts_with(";;"))
-        .map(str::trim)
-        .filter(|line| line.starts_with("(allow "))
-        .collect();
+    let allow_lines = collect_allow_lines(&profile);
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
     let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
         panic!(
@@ -2358,11 +2404,8 @@ fn allow_rules_trace_to_declared_rights() {
 
     for entry in rights.iter().chain(baseline.iter()) {
         for rule in rule_strings(entry) {
-            let matches = allow_lines.iter().filter(|line| **line == rule).count();
-            match matches {
-                0 => panic!("declared rule is not an allow line: {rule}"),
-                1 => {}
-                _ => panic!("declared rule matches more than one allow line: {rule}"),
+            if let Err(reason) = declared_rule_match(&allow_lines, rule) {
+                panic!("{reason}");
             }
         }
     }
@@ -2389,8 +2432,8 @@ fn allow_rules_trace_to_declared_rights() {
     let baseline_ids: Vec<&str> = baseline.iter().map(entry_id).collect();
     assert_eq!(baseline_ids, ["startup-root-directory", "startup-sysctl"]);
     let justifications = [
-        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: file-read-data of literal / is the startup root-directory read.",
-        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: sysctl-read is the startup page-size read, with no write and no added sysctl name.",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before main runs",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: At startup the Rust runtime reads the page size to place its stack guard page.",
     ];
     assert_eq!(baseline.len(), justifications.len());
     for (entry, expected) in baseline.iter().zip(justifications) {
@@ -2417,9 +2460,8 @@ fn allow_rules_trace_to_declared_rights() {
 /// after the sysctl pin. F-cc35c, F-cc35d and F-cc35e append literal reads
 /// whose filenames contain STORAGE_ROOT, STORAGE_PARENT or PROVIDER_EXECUTABLE.
 /// F-cc35f keeps both pins and appends
-/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile and
-/// to `startup-root-directory` in the declared-rights fixture.
-/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to both files
+/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile only.
+/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to the profile only
 /// while keeping both pins.
 #[test]
 fn platform_baseline_rules_stay_narrow() {
@@ -2654,6 +2696,54 @@ fn platform_baseline_rules_stay_narrow() {
         "startup-sysctl widened: pin occurs 2 times",
     );
 
+    // A trimmed line that contains `(allow` must close on that line. The
+    // scan below keeps only a line that starts with `(allow `, so an unclosed
+    // form would otherwise leave both pins in place.
+    fn allow_form_closes(profile: &str) -> Result<(), String> {
+        for line in profile.lines() {
+            if line.starts_with(";;") {
+                continue;
+            }
+            let line = line.trim();
+            if !line.contains("(allow") {
+                continue;
+            }
+            let mut open = 0usize;
+            let mut close = 0usize;
+            for ch in line.chars() {
+                if ch == '(' {
+                    open += 1;
+                } else if ch == ')' {
+                    close += 1;
+                }
+            }
+            if open != close {
+                return Err(format!("allow form does not close: {line}"));
+            }
+        }
+        Ok(())
+    }
+
+    let unclosed = [
+        "(allow file-read-data (literal \"/\"))",
+        "(allow",
+        "file-read* (literal \"/tmp/cc-unclosed\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let unclosed_message = allow_form_closes(&unclosed).unwrap_err();
+    assert!(
+        unclosed_message.contains("allow form does not close"),
+        "{unclosed_message}"
+    );
+    assert!(unclosed_message.contains("(allow"), "{unclosed_message}");
+    assert!(
+        !unclosed_message.contains("startup-root-directory widened"),
+        "{unclosed_message}"
+    );
+    let committed_allows = [exec, root, sysctl, parent, storage].join("\n");
+    assert_eq!(allow_form_closes(&committed_allows), Ok(()));
+
     let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
     let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
         panic!(
@@ -2661,6 +2751,9 @@ fn platform_baseline_rules_stay_narrow() {
             profile_path.display()
         )
     });
+    if let Err(reason) = allow_form_closes(&profile) {
+        panic!("{reason}");
+    }
     // Whole lines that start with `;;` are comments. Allow lines are the
     // trimmed lines that start with `(allow `.
     let allow_lines: Vec<&str> = profile
