@@ -664,6 +664,43 @@ fn model_forged_identity_does_not_move_the_child_path() {
 }
 
 #[test]
+fn model_forged_instance_does_not_move_the_child_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(parent)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let child = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect("forged instance does not move the child grant");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(child_decision.instance, instance);
+    assert_eq!(child_decision.identity, "agent-1");
+    assert_eq!(child_decision.session, "session-a");
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+    let refusal = verifier
+        .use_grant(verifier.open_call(sibling), &guest(child))
+        .expect_err("child grant stays on the parent instance");
+    assert_eq!(refusal, Refuse::Instance);
+    assert_eq!(refusal.to_string(), "instance does not match the grant");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
