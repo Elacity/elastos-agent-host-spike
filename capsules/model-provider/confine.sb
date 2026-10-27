@@ -3,6 +3,8 @@
 ;; resolved paths as parameters, the same names every file profile uses, and
 ;; the tests pass them with /usr/bin/sandbox-exec -f confine.sb -D. That
 ;; Runtime half is not built.
+;; A lab generator in capsules/wallet-provider/tests/confine.rs is test code, and its equality test does not read this file.
+;; The Runtime's generator is not built.
 ;;   PROVIDER_EXECUTABLE  - the canonical provider binary
 ;;   STORAGE_ROOT         - the model journal root: Init.base_path/providers/model-provider,
 ;;                          or the configured absolute journal_dir
