@@ -264,6 +264,12 @@ copy is refused with exit 71 and `Operation not permitted`. The launcher
 records the profile path it applies, and the test requires that path to be
 the stand-in file. This evidence is for the lab launcher.
 
+`generated_profile_bound_copy_serves` starts the copy bound as
+`PROVIDER_EXECUTABLE` under the file the stand-in writes. The copy answers
+`init`, creates `runs/`, and shuts down cleanly. The launched file has no
+`;;` line, and the recorded path is that file. This evidence is for the lab
+launcher.
+
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
 exec rule word for word. Under each, the copy starts and answers `init`, and
@@ -471,8 +477,8 @@ cited `model_` test name in this section is a function in `tests/confine/main.rs
 | offers_list | `op` | ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 | runs_create | `op`, `offer_id`, `operation`, `input`, `runtime_binding`, `expected_execution_binding_hash` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | writes one run under `STORAGE_ROOT`. | `model_outside_read_denied` stores one run with this op before `runs_get` reads it back. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. `generated_profile_denies_the_hosted_connect` launches this denial under the stand-in text, the stand-in counts zero connections, and `terminal.error.code` is `transport_interrupted`. `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` for the `STORAGE_ROOT` write. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. | designed, not enforced |
 | runs_get | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads inside `STORAGE_ROOT`. refuses that read once the record is outside it. The hosted test settles by reading this op until the run is terminal. | `model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. The outside read is refused under the fixture profile `READ_FIXTURE_RULE`. That refusal is a denial, not a grant. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. The test does not show which call connects. | designed, not enforced |
-| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. | designed, not enforced |
-| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. | designed, not enforced |
+| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
+| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 
 ## Host-OS status
 
@@ -596,6 +602,11 @@ profile does not grant".
 - `generated_profile_refuses_an_unbound_copy`: the stand-in file starts the
   unbound copy. The copy is refused with exit 71 and `Operation not permitted`.
   The launched file has no `;;` line. This evidence is for the lab launcher.
+  See "Starting other programs".
+- `generated_profile_bound_copy_serves`: the stand-in file starts the copy
+  bound as `PROVIDER_EXECUTABLE`. The copy answers `init`, creates `runs/`,
+  and shuts down cleanly. The launched file has no `;;` line, and the
+  recorded path is that file. This evidence is for the lab launcher.
   See "Starting other programs".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
