@@ -1,6 +1,6 @@
 Slice:        A15 r3 fix (PR #284)
 Branch / PR:  cursor/intent-planner-a15-10c1  https://github.com/Elacity/elastos-agent-host-spike/pull/284
-Commit:       pending   parent c2e7936e13f6be5dcfda372c0d2de9d1596337cd
+Commit:       c2e7936e13f6be5dcfda372c0d2de9d1596337cd   parent d169f90d5f5dae2de52d40c8fb4f4ab908481124
 Develop:      not merged this turn (review fix on #284 only)
 Machine:      Linux x86_64, rustc 1.91.0 (f8297e351 2025-10-28)
 Changed:      lab/intent-planner/src/lib.rs - grammar before compare, ordered canonical, empty/NUL host_id, R3-1..R3-10 tests
