@@ -400,9 +400,11 @@ after this operator recipe is accepted. Open blockers retain their BLOCKED grade
 
 Task 019 uses the production shell-authenticated approval routes through the
 one controller in `tests/common/grants.rs`. The root is
-`localhost://Public/agent-conformance-grants`, and the one manifest bound is
-`localhost://Public/agent-conformance-grants/*`. Task 003's resources stay
-outside this bound. The bound permits a request; the operator supplies the grant.
+`localhost://Public/agent-conformance-grants`. The manifest declares
+`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
+The ungranted read stays outside the Public pattern. The fixture denies the
+pending `elastos://net/stream` request, and provider execution stays outside
+that row. The Public pattern permits a request; the operator supplies the grant.
 
 The controller reads only the fixture's `attach_secret` field into memory and
 attaches once with scope `shell` at the port owned by `Operator`. The secret,
@@ -515,12 +517,15 @@ remain refused.
 
 The deny-only probe requests `read` on the synthetic resource in
 `fixtures/ungranted-read.txt`, or `execute` on `elastos://net/stream` from
-`fixtures/ungranted-network.txt`. These resources are outside the probe's fixture-directory
-manifest bound and outside future granted fixture directories. The Runtime
-owns resource authority. Its manifest refusal returns through the guest's Bus
+`fixtures/ungranted-network.txt`. The ungranted read stays outside the Public
+pattern. The manifest declares `elastos://net/stream`. The fixture denies that
+pending request, and provider execution stays outside that row. The Runtime
+owns resource authority. The read's manifest refusal returns through the guest's Bus
 call and lifecycle to `elastos run`. The live wrapper uses
-`Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`;
-the default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
+`Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`
+for that read. The network row uses
+`Component capsule denied: BusError::Denied("fixture denies unlisted read")`.
+The default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
 The probe returns immediately after the
 request, including unexpected success, so this check performs no provider
 invoke, storage read or network effect. A successful request makes its refusal
