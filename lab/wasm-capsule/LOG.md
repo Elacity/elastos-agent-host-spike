@@ -1210,3 +1210,30 @@
   exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/`, `tools/build`, `audit/`, lab CID
   or pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
   `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 037 (M1 C0 lab half: the capsule maximum test reads memory through the one audit reader). Base
+  `aa90e9534`. Precondition held: `audit/src/lib.rs:93` has `pub fn memories(`, `tools/src/run.rs:583` calls it, and
+  `git log --oneline -- tests/common/wasm_shape.rs tests/wasm_shape.rs` shows only `95141b3e6`, `ec9521990` and
+  `b719134ac`. `built_capsule_declares_the_manifest_memory_as_its_maximum` (`tests/run.rs`) now reads the entrypoint
+  bytes only through `wasm_capsule_audit`: `audit(content, &[])` returns no imports, `memories` returns one memory,
+  `maximum.expect("the capsule declares no memory maximum")`, maximum × 65536 equals `memory_mb() << 20`, and the
+  memory equals `MemoryLimits { minimum: 16, maximum: Some(1024), memory64: false, shared: false }`. `tests/run.rs` no
+  longer imports `common::wasm_shape`. Both shape-reader files were restored with `git show 95141b3e6^:<file>`;
+  `git diff 95141b3e6^ -- tests/common/wasm_shape.rs tests/wasm_shape.rs` prints nothing, so 032's memory parse and its
+  three crafted tests are gone (P10: one reader of a module's memory limits). Grep from the repo root, `grep -rn
+  --include='*.rs' -e 'MemoryLimits' -e 'memory section' lab/wasm-capsule/tests lab/wasm-capsule/tools/src`, gave two
+  hits, `tests/run.rs:42` (the `use wasm_capsule_audit::{...MemoryLimits...}` line: use) and `tests/run.rs:3183` (the
+  expected `MemoryLimits { ... }` value: use). Canonical runner, from the repo root, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC10D-NO-MODULE-MAX F-WC10D-MAX-WRONG` gave "baseline: 3 named tests pass without an edit, 0 do not", each
+  "CAUGHT", "summary: 2 CAUGHT of 2", exit 0. By hand (the runner prints no panic), each edit planted in `tools/build`,
+  the test run, then the file copied back (`git diff --exit-code tools/build` clean): F-WC10D-NO-MODULE-MAX panicked at
+  `tests/run.rs:3174` with "the capsule declares no memory maximum"; F-WC10D-MAX-WRONG at `tests/run.rs:3175` with "the
+  maximum (2048 pages) is not the declared memory_mb (64 MB)" (`left: 134217728`, `right: 67108864`). F-WC1-IMPORT and
+  F-WC1-SIG (the entries naming `built_capsule_has_the_required_wasm_shape`) each find their `old` text once.
+  `falsifiers.json` is unchanged. README: the three crafted memory tests left the test list, and the test's line says it
+  reads through `wasm_capsule_audit::memories` and the shape reader reads no memory. Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (123 passed, 3 ignored, 0 failed; 034 had 126),
+  `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`,
+  `Cargo.lock`, `tools/`, `capsule/`, `tools/build`, `audit/`, lab CID or pin changed. Retired-label greps from the repo
+  root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
+  lab/wasm-capsule/`): both empty, exit 1.

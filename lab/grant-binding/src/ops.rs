@@ -778,6 +778,54 @@ fn model_forged_ceiling_does_not_widen_the_child_root() {
 }
 
 #[test]
+fn model_forged_child_journal_does_not_widen_the_child_root() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(parent)
+    };
+    assert!(request.forged_child_journal);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("forged child journal does not widen the child root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
+fn model_forged_append_does_not_widen_the_child_root() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(parent)
+    };
+    assert!(request.forged_append);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("forged append does not widen the child root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");

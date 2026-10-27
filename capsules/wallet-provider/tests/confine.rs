@@ -322,14 +322,17 @@ fn wallet_dir(root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
-/// The three parameter bindings the tests make for one storage root.
-fn canonical_bindings(base: &Path) -> [(&'static str, PathBuf); 3] {
+/// The three parameter bindings the tests make for one storage root and the
+/// program a launch binds. Every caller passes the program it names, so a
+/// launch for another binary binds that binary and never a second copy of this
+/// derivation.
+fn canonical_bindings(base: &Path, program: &Path) -> [(&'static str, PathBuf); 3] {
     let wallet_root = wallet_dir(base);
     let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
     [
         ("STORAGE_ROOT", wallet_root),
         ("STORAGE_PARENT", parent),
-        ("PROVIDER_EXECUTABLE", resolved(Path::new(PROVIDER_BINARY))),
+        ("PROVIDER_EXECUTABLE", resolved(program)),
     ]
 }
 
@@ -483,7 +486,7 @@ impl ConfinedProvider {
                  canonical bindings come only from canonical_bindings"
             );
         }
-        let canonical = canonical_bindings(base);
+        let canonical = canonical_bindings(base, Path::new(PROVIDER_BINARY));
         create_shared_ancestors(&canonical);
         let mut bindings: Vec<(&str, &Path)> = canonical
             .iter()
@@ -632,6 +635,74 @@ impl Drop for ConfinedProvider {
         if let Some(reader) = self.stderr_reader.take() {
             let _ = reader.join();
         }
+    }
+}
+
+/// Lab stand-in for the Runtime's provider launch, not the Runtime.
+///
+/// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
+/// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
+/// name, the host `os`, the confinement tool and the declared rights the lab
+/// generator profiles from. `Ok(ConfinedProvider)` is Started: the provider
+/// answered `init` `ok` under the generated profile. `Err(String)` is Refused:
+/// nothing started, and the reason says why.
+///
+/// It refuses, in this order and starting nothing:
+///
+/// 1. an `os` outside `DECLARED_CONFINED_OS`, with one reason for every such
+///    OS that names that OS and the list where the stand-in applies
+///    confinement;
+/// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
+/// 3. a refusal of `write_generated_profile`, returned unchanged;
+/// 4. a start that `sandbox-exec` refuses, or an `init` that does not answer
+///    `ok`, with the `try_send` failure or the answer.
+///
+/// Otherwise it writes the profile the one lab writer generates from the
+/// declared rights into `profile_dir`, creates the shared ancestors, starts
+/// `binary_path` under that profile through `start_under` with the canonical
+/// bindings for `base_path` and `binary_path`, and sends `init` with
+/// `base_path`. It never starts `binary_path` outside `sandbox-exec`.
+/// `name` and `binary_path` are inputs rather than this provider's constants,
+/// so another provider's binary can start through this same function.
+fn standin_spawn_confined_provider(
+    os: &str,
+    sandbox_exec: &Path,
+    name: &str,
+    binary_path: &Path,
+    base_path: &Path,
+    declared: &Value,
+    profile_dir: &Path,
+) -> Result<ConfinedProvider, String> {
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    if !DECLARED_CONFINED_OS.contains(&os) {
+        return Err(format!(
+            "{name} start on {os} is refused: the lab stand-in applies confinement only on \
+             {confined_os}"
+        ));
+    }
+    if !sandbox_exec.is_file() {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is absent",
+            sandbox_exec.display()
+        ));
+    }
+    let profile = profile_dir.join(format!("{name}-standin.sb"));
+    write_generated_profile(name, declared, &profile)?;
+    let canonical = canonical_bindings(base_path, binary_path);
+    create_shared_ancestors(&canonical);
+    let bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(binding, path)| (*binding, path.as_path()))
+        .collect();
+    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);
+    let init = json!({
+        "op": "init",
+        "config": { "base_path": base_path.display().to_string() }
+    });
+    match provider.try_send(&init) {
+        Ok(answer) if answer["status"] == "ok" => Ok(provider),
+        Ok(answer) => Err(format!("{name} start is refused: init answered {answer}")),
+        Err(failure) => Err(format!("{name} start is refused: {failure}")),
     }
 }
 
@@ -2866,7 +2937,7 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     fs::write(&unclosed_profile, unclosed).expect("unclosed profile must be writable");
 
     let wallet_root = wallet_dir(&base);
-    let canonical = canonical_bindings(&base);
+    let canonical = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&canonical);
     let unbound_root: Vec<(&str, PathBuf)> = canonical
         .iter()
@@ -2979,7 +3050,7 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
     let rule = r#"(allow file-read* (literal "/private/var/cc-confine-unnamed"))"#;
     let profile_root = tempfile::tempdir().expect("temporary profile root");
     let profile_root = resolved(profile_root.path());
-    let canonical = canonical_bindings(&base);
+    let canonical = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&canonical);
     let wallet_root = wallet_dir(&base);
     let request = json!({
@@ -3093,6 +3164,273 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
     }
 }
 
+/// The lab stand-in launcher refuses a start it cannot confine.
+///
+/// Cases (a) `plan9`, a forced unsupported OS, and (b) `linux`, with a present
+/// tool path, each refuse with one reason that names that OS and the list
+/// where the stand-in applies confinement. Case (c) `macos` with the absent
+/// `tests/absent-sandbox-exec` refuses with a reason that names the OS and the
+/// path. Those three run on every host and start no process; each creates no
+/// wallet directory under its base and no profile file.
+///
+/// Cases (d) an added `unnamed-right` rights entry and (e) a declared
+/// `storage` rule that names a parameter the launch does not bind run only
+/// through `sandbox_available`. Case (d) returns the exact unnamed-id reason
+/// and writes no profile. Case (e) writes the profile, and `sandbox-exec`
+/// exits before the provider, so the reason carries the exit status and
+/// `sandbox-exec`'s line. Both create no wallet directory.
+///
+/// Falsifier: WP112 starts the binary bare in the OS refusal, so (a) and (b)
+/// return Started; WP113 starts it bare after a failed `init`, so (e) returns
+/// Started; WP115 ignores the writer's refusal and starts under the committed
+/// `confine.sb`, so (d) returns Started instead of its reason.
+#[test]
+fn standin_launcher_refuses_a_start_it_cannot_confine() {
+    let declared_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
+    let declared = read_declared_rights("wallet-provider", &declared_path)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let provider = Path::new(PROVIDER_BINARY);
+    let present = std::env::current_exe().expect("the test executable path must be available");
+    let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
+    assert!(
+        !absent.exists(),
+        "the fixture path must be absent: {}",
+        absent.display()
+    );
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    let absent_text = absent.display().to_string();
+    let cases: [(&str, &str, &Path, Vec<&str>); 3] = [
+        (
+            "(a) a forced unsupported OS",
+            "plan9",
+            present.as_path(),
+            vec!["plan9", confined_os.as_str()],
+        ),
+        (
+            "(b) linux",
+            "linux",
+            present.as_path(),
+            vec!["linux", confined_os.as_str()],
+        ),
+        (
+            "(c) macos without the tool",
+            "macos",
+            absent.as_path(),
+            vec!["macos", absent_text.as_str()],
+        ),
+    ];
+    for (case, os, sandbox_exec, named) in cases {
+        let fixture = tempfile::tempdir().expect("temporary wallet base");
+        let base = resolved(fixture.path());
+        let profile_root = tempfile::tempdir().expect("temporary profile root");
+        let profile_dir = resolved(profile_root.path());
+        let refusal = standin_spawn_confined_provider(
+            os,
+            sandbox_exec,
+            "wallet-provider",
+            provider,
+            &base,
+            &declared,
+            &profile_dir,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{case}: a start on {os} must be refused"));
+        for name in named {
+            assert!(
+                refusal.contains(name),
+                "{case}: the refusal must name {name}: {refusal}"
+            );
+        }
+        eprintln!("{case} stand-in refusal: {refusal}");
+        assert!(
+            !wallet_dir(&base).exists(),
+            "{case}: a refused start must create no wallet directory: {}",
+            wallet_dir(&base).display()
+        );
+        assert!(
+            fs::read_dir(&profile_dir)
+                .expect("the profile directory must be readable")
+                .next()
+                .is_none(),
+            "{case}: a refused start must write no profile: {}",
+            profile_dir.display()
+        );
+    }
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    // (d) A right the shared contract does not name is refused unchanged.
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let mut unnamed = declared.clone();
+    unnamed["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .push(json!({
+            "id": "unnamed-right",
+            "rules": [r#"(allow file-read* (literal "/private/var/cc-confine-standin"))"#],
+        }));
+    let refusal = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        "wallet-provider",
+        provider,
+        &base,
+        &unnamed,
+        &profile_dir,
+    )
+    .err()
+    .expect("(d) an unnamed right must be refused");
+    assert_eq!(
+        refusal, "wallet-provider declares unnamed-right, which the shared contract does not name",
+        "(d) the refusal must be the one unnamed-id reason"
+    );
+    eprintln!("(d) stand-in refusal: {refusal}");
+    assert!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .next()
+            .is_none(),
+        "(d) a refused profile must create no file: {}",
+        profile_dir.display()
+    );
+    assert!(
+        !wallet_dir(&base).exists(),
+        "(d) a refused start must create no wallet directory: {}",
+        wallet_dir(&base).display()
+    );
+
+    // (e) A parameter the launch does not bind makes sandbox-exec exit before
+    // the provider starts.
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let mut unbound = declared.clone();
+    let storage = unbound["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .iter_mut()
+        .find(|entry| entry["id"] == "storage")
+        .expect("the declared rights must hold the storage right");
+    storage["rules"]
+        .as_array_mut()
+        .expect("the storage right must hold a rules list")
+        .push(json!(
+            r#"(allow file-read* (literal (param "STORAGE_UNBOUND")))"#
+        ));
+    let refusal = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        "wallet-provider",
+        provider,
+        &base,
+        &unbound,
+        &profile_dir,
+    )
+    .err()
+    .expect("(e) a profile the launch cannot apply must be refused");
+    assert!(
+        refusal.contains("exit status:"),
+        "(e) the refusal must name the exit status: {refusal}"
+    );
+    assert!(
+        refusal.contains("invalid data type of path filter"),
+        "(e) the refusal must carry sandbox-exec's line: {refusal}"
+    );
+    assert!(
+        !refusal.contains("execvp"),
+        "(e) sandbox-exec must refuse the profile before any exec: {refusal}"
+    );
+    eprintln!("(e) stand-in refusal: {refusal}");
+    assert!(
+        !wallet_dir(&base).exists(),
+        "(e) a refused start must create no wallet directory: {}",
+        wallet_dir(&base).display()
+    );
+}
+
+/// The lab stand-in launcher starts the wallet provider confined.
+///
+/// The launcher is Started from wallet's committed declared-rights file: it
+/// wrote one profile into the given directory, the provider answered `init`
+/// `ok` inside the launcher and created its wallet directory, and `status`
+/// answers `ok`. One `init` for an unrelated temporary base, whose shared
+/// parent exists first, is refused by `assert_storage_error` and creates
+/// nothing, as the first case of `confined_outside_write_is_denied` holds. The
+/// root still answers `ok`, and `shutdown` answers `ok` and exits 0.
+///
+/// Falsifier: WP114 replaces the generated-profile start with a bare start
+/// that skips the generator and `sandbox-exec`; the launcher is then Started,
+/// and this test fails at the outside `init`, which succeeds instead of being
+/// refused.
+#[test]
+fn standin_launcher_starts_wallet_confined_under_the_generated_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let declared_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
+    let declared = read_declared_rights("wallet-provider", &declared_path)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let mut provider = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        "wallet-provider",
+        Path::new(PROVIDER_BINARY),
+        &base,
+        &declared,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        wallet_dir(&base).is_dir(),
+        "init must have created the wallet directory inside the profile: {}",
+        wallet_dir(&base).display()
+    );
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["status"], "ok",
+        "the started provider must answer status: {status}"
+    );
+
+    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = resolved(outside.path());
+    let outside_wallet = wallet_dir(&outside);
+    fs::create_dir_all(outside_wallet.parent().expect("outside wallet parent"))
+        .expect("outside parent fixture");
+    let denied = provider.init(&outside);
+    assert_storage_error(&denied);
+    assert!(
+        !outside_wallet.exists(),
+        "a denied write must create nothing outside the wallet root: {}",
+        outside_wallet.display()
+    );
+
+    let root = provider.init(&base);
+    assert_eq!(root["status"], "ok", "the root still answers: {root}");
+
+    assert_eq!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .count(),
+        1,
+        "the launcher must write one profile into the directory it is given: {}",
+        profile_dir.display()
+    );
+
+    provider.shutdown();
+}
+
 /// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
 /// and its control. It keeps the temporary base alive, resolves it, creates
 /// `STORAGE_ROOT` first, and copies the provider binary there byte for byte,
@@ -3109,7 +3447,7 @@ impl StoredCopy {
         let fixture = tempfile::tempdir().expect("temporary wallet base");
         let base = resolved(fixture.path());
         let binary = resolved(Path::new(PROVIDER_BINARY));
-        let bindings = canonical_bindings(&base);
+        let bindings = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
         create_shared_ancestors(&bindings);
         let storage = wallet_dir(&base);
         fs::create_dir(&storage).expect("STORAGE_ROOT must be created first");
@@ -3157,7 +3495,7 @@ fn unbound_copy_is_refused_under_profile() {
         "op": "init",
         "config": { "base_path": stored.base.display().to_string() }
     });
-    let canonical = canonical_bindings(&stored.base);
+    let canonical = canonical_bindings(&stored.base, Path::new(PROVIDER_BINARY));
     let bindings: Vec<(&str, &Path)> = canonical
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
@@ -3221,7 +3559,7 @@ fn bound_copy_serves_under_profile() {
         return;
     }
     let stored = StoredCopy::prepare();
-    let bound: Vec<(&str, PathBuf)> = canonical_bindings(&stored.base)
+    let bound: Vec<(&str, PathBuf)> = canonical_bindings(&stored.base, Path::new(PROVIDER_BINARY))
         .into_iter()
         .map(|(name, path)| match name {
             "PROVIDER_EXECUTABLE" => (name, stored.copy.clone()),
@@ -3276,7 +3614,7 @@ fn startup_denial_reports_its_reason() {
 
     // The denied provider exits before it reads the request, so the harness
     // cannot write it. It reports the exit status and the sandbox denial.
-    let canonical = canonical_bindings(&base);
+    let canonical = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&canonical);
     let bindings: Vec<(&str, &Path)> = canonical
         .iter()

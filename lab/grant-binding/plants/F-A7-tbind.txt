@@ -1,0 +1,9 @@
+id: F-A7-tbind
+file: src/ledger.rs
+test: ledger::model_timeout_on_a_sibling_instance_is_refused
+--- old
+        self.resolve(*call, request.handle)
+            .map_err(TimeoutRefuse::Binding)?;
+--- new
+        let _ = self.resolve(*call, request.handle);
+--- end

@@ -1,0 +1,15 @@
+id: F-A7-settleinst
+file: src/ledger.rs
+test: ledger::model_forged_instance_does_not_move_the_settle
+--- old
+        self.resolve(*call, request.handle)
+            .map_err(SettleRefuse::Binding)?;
+--- new
+        self.resolve(
+            Call {
+                instance: request.forged_instance.unwrap_or(call.instance),
+            },
+            request.handle,
+        )
+        .map_err(SettleRefuse::Binding)?;
+--- end

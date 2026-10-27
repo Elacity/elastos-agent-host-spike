@@ -690,3 +690,7 @@ These rows use lab client sessions on the run client's attach and provider route
 - `grant_refused_from_a_new_session`: after A's read, a new client session from the same attach secret presents A's token and receives that refusal, with A expected and the new session got, then A reads again.
 - `grant_record_names_agent_identity`: BLOCKED (AC-038-GRANT-PRINCIPAL). The journey reads the Runtime `capability_grant` record and compares its principal and capsule with separate verified caller evidence for the requesting session. Runtime must supply that evidence before the row can pass. GAPS.md records Anders's change (https://github.com/Elacity/elastos-runtime/issues/464).
 - `instance_writes_only_under_own_storage_root`: BLOCKED (AC-039-OWNED-ROOT), with the Runtime change in GAPS.md. Sessions A and B write under their own areas; a sibling write under the other area must be a Runtime refusal with a reason and no shell decision.
+
+Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there gives the Runtime no credit.
+
+The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.

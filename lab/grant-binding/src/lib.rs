@@ -11,6 +11,9 @@
 pub mod ledger;
 pub mod link;
 mod ops;
+// Placed here as this slice requires; rustfmt would sort it before `ledger`.
+#[rustfmt::skip]
+mod ask;
 
 #[cfg(test)]
 mod plant;
@@ -801,6 +804,46 @@ fn model_forged_instance_does_not_move_the_use_path() {
     assert_eq!(decision.identity, "agent-1");
     assert_eq!(decision.session, "session-a");
     assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_reported_usage_does_not_widen_the_use_path() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let refusal = verifier
+        .use_path(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("reported usage does not widen the use path");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
+fn model_forged_ceiling_does_not_widen_the_use_path() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let refusal = verifier
+        .use_path(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("forged ceiling does not widen the use path");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
 }
 
 #[test]

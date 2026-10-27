@@ -7,7 +7,9 @@ passes while the probed property holds.
 
 The owner's session and instance tests open the call after the registry
 change. This probe opens it first. The same call must then be refused, and
-the refused reserve must not spend the ceiling. ``ledger.held`` stays inside
+the refused reserve must not spend the ceiling. The same call's child path
+is refused after the session change. A grant succeeds, the identity changes,
+and the same call is refused. ``ledger.held`` stays inside
 the crate. The probe watches the ceiling: a refused reserve of 5, then a
 reserve of 5 that must succeed, then a reserve of 1 that must be over the
 ceiling.
@@ -15,6 +17,11 @@ ceiling.
 One driver. A temp package outside this repo path-depends on the crate and
 runs ``cargo test --offline --locked``. Plants edit a temp copy that omits
 ``target/`` and ``src/plant.rs``. The probe does not run the owner's tests.
+
+The link guard is ``grant_binding::link::cargo_toml_path_depends_on_grant_binding``.
+This driver does not decide a link. ``tearDownModule`` used ``exists`` and
+``test_toolchain_present_or_skip`` used ``is_file`` on ``lab/redteam/Cargo.toml``.
+Both checks are removed. No existence check replaces either one.
 
 A replay the real crate accepts, or a binding refusal followed by
 ``OverCeiling``, is ``findings/grant-binding-001.md``. Only a probe named
@@ -48,15 +55,28 @@ FINDING_ID = "grant-binding-001"
 SESSION_NAME = "test_stale_call_session_replay_is_refused"
 SIBLING_NAME = "test_stale_call_sibling_instance_replay_is_refused"
 CLEAN_NAME = "test_clean_full_ceiling_reserve_succeeds"
-PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME)
+PATH_NAME = "test_stale_call_use_path_is_refused"
+IDENTITY_NAME = "test_stale_call_identity_replay_is_refused"
+LINK_NAME = "redteam_manifest_is_not_a_grant_link"
+PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
+REPO_MARKER = "@@REDTEAM_REPO@@"
+# Manifest texts the link plant hands to the owner's detector.
+NAME_ONLY_MANIFEST = 'name = "grant-binding"'
+AUDIT_SHAPED_MANIFEST = 'audit = { path = "../wasm-capsule/audit" }'
+PATH_MANIFEST = 'grant-binding = { path = "lab/grant-binding" }'
 
 TIMEOUT_S = 240
-CLEAN = "these two stale calls were refused and did not spend the ceiling, on {commit}"
+CLEAN = "these two stale calls were refused and did not spend the ceiling, and the same call's child path was refused, and the same call was refused after the identity change, on {commit}"
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _COMPILE = re.compile(r"could not compile|error\[E\d+\]")
 
+IDENTITY_OLD = (
+    "        if live.identity != grant.identity {\n"
+    "            return Err(Refuse::Identity);\n"
+    "        }\n"
+)
 SESSION_OLD = (
     "        if live.session != grant.session {\n"
     "            return Err(Refuse::Session);\n"
@@ -266,6 +286,72 @@ fn test_clean_full_ceiling_reserve_succeeds() {
     );
     assert_eq!(over.to_string(), "reservation exceeds the ceiling");
 }
+
+#[test]
+fn test_stale_call_use_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("child path before the session change");
+    verifier
+        .host_set_session(instance, "session-b")
+        .expect("set session");
+    match verifier.use_path(&call, &request, "UsersAI/agent-1/notes/page.md") {
+        Err(refusal) => {
+            assert_eq!(refusal, Refuse::Session);
+            assert_eq!(refusal.to_string(), "session does not match the grant");
+        }
+        Ok(()) => panic!("accepted replay: use_path returned Ok"),
+    }
+}
+
+#[test]
+fn test_stale_call_identity_replay_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("grant before the identity change");
+    assert_eq!(decision.identity, "agent-1");
+    verifier
+        .host_set_identity(instance, "agent-2")
+        .expect("set identity");
+    match verifier.use_grant(call, &request) {
+        Err(refusal) => {
+            assert_eq!(refusal, Refuse::Identity);
+            assert_eq!(refusal.to_string(), "identity does not match the grant");
+        }
+        Ok(decision) => panic!("accepted replay: use_grant returned Ok({decision:?})"),
+    }
+}
+
+#[test]
+fn redteam_manifest_is_not_a_grant_link() {
+    let repo = "@@REDTEAM_REPO@@";
+    let baked = format!("{repo}/lab/redteam/Cargo.toml");
+    let chosen = std::env::var("REDTEAM_MANIFEST").unwrap_or(baked);
+    let path = std::path::Path::new(&chosen);
+    if !path.is_file() {
+        return;
+    }
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    assert!(
+        !grant_binding::link::cargo_toml_path_depends_on_grant_binding(&text),
+        "lab/redteam/Cargo.toml has a path dependency on grant-binding"
+    );
+}
 """
 
 
@@ -293,10 +379,11 @@ class Outcome:
 class Suite:
     """One cargo test of the probe package."""
 
-    def __init__(self, code, output, by_name):
+    def __init__(self, code, output, by_name, link=None):
         self.code = code
         self.output = output
         self.by_name = by_name
+        self.link = link
 
 
 def sha256_file(path):
@@ -426,7 +513,11 @@ def anchor_reason(relative, count, name, head):
 
 
 def recorded_from(text):
-    """Probe names in a finding. The first line is the live pin. The body records Ok or OverCeiling."""
+    """Probe names in a finding. The first line is the live pin. The body records Ok or OverCeiling.
+
+    A finding may name a stale probe, the use_path probe, or the identity
+    probe. The clean reserve and a compile-error name stay unknown.
+    """
     lines = text.splitlines()
     if not lines:
         raise ProbeError("finding is empty")
@@ -437,7 +528,7 @@ def recorded_from(text):
     for line in lines[1:]:
         if line.startswith("probe: "):
             name = line[len("probe: "):].strip()
-            if name not in STALE_NAMES:
+            if name not in STALE_NAMES and name != PATH_NAME and name != IDENTITY_NAME:
                 raise ProbeError(f"finding names an unknown probe {name}")
             names.add(name)
         if line.startswith("observed: Ok") or line.startswith("observed: OverCeiling"):
@@ -516,6 +607,7 @@ def evidence(output, limit=40):
         "running 0 tests",
         "test result:",
         "panicked at",
+        "has a path dependency on grant-binding",
     )
     lines = [line for line in strip_ansi(output).splitlines() if any(key in line for key in keys)]
     if len(lines) > limit:
@@ -569,13 +661,66 @@ def apply_once(root, relative, old, new):
     path.write_text(text.replace(old, new, 1))
 
 
+def render_replay(source, repo):
+    """Substitute the one repo marker into the replay source.
+
+    Any other marker count is a probe error. A quote or a backslash in the
+    repo path is a probe error: that character would sit inside the Rust string.
+    """
+    repo = str(repo)
+    count = source.count(REPO_MARKER)
+    if count != 1:
+        raise ProbeError(
+            f"replay.rs holds {count} copies of {REPO_MARKER}, not one"
+        )
+    if '"' in repo or "\\" in repo:
+        raise ProbeError("repo path contains a quote or a backslash")
+    return source.replace(REPO_MARKER, repo, 1)
+
+
+def set_manifest(value):
+    """Set ``REDTEAM_MANIFEST``, or remove it when ``value`` is None.
+
+    Returns the previous value so the caller can restore it in ``finally``.
+    """
+    previous = os.environ.get("REDTEAM_MANIFEST")
+    if value is None:
+        os.environ.pop("REDTEAM_MANIFEST", None)
+    else:
+        os.environ["REDTEAM_MANIFEST"] = str(value)
+    return previous
+
+
+def require_suite_manifest_unset():
+    """A full suite reads the baked manifest path. The link plant sets the variable."""
+    if os.environ.get("REDTEAM_MANIFEST") is not None:
+        raise ProbeError("REDTEAM_MANIFEST is set for the suite")
+
+
+def write_link_manifest(work, package, text):
+    """Write a temp manifest for the link plant.
+
+    The file is neither ``lab/redteam/Cargo.toml`` nor the package manifest.
+    """
+    fd, name = tempfile.mkstemp(prefix="link-manifest-", suffix=".toml", dir=work)
+    os.close(fd)
+    path = Path(name).resolve()
+    assert_outside(path)
+    package_manifest = (Path(package) / "Cargo.toml").resolve()
+    redteam_manifest = (REPO / "lab" / "redteam" / "Cargo.toml").resolve()
+    if path == package_manifest or path == redteam_manifest:
+        raise ProbeError("link plant manifest is not a temp file")
+    path.write_text(text)
+    return path
+
+
 def write_probe(pkg, crate):
     pkg = Path(pkg)
     assert_outside(pkg)
     (pkg / "src").mkdir(parents=True)
     (pkg / "tests").mkdir()
     (pkg / "src" / "lib.rs").write_text("//! External probe package. The tests call grant-binding.\n")
-    (pkg / "tests" / "replay.rs").write_text(REPLAY_RS)
+    (pkg / "tests" / "replay.rs").write_text(render_replay(REPLAY_RS, REPO))
     manifest = (
         "[package]\n"
         "name = \"grant-replay-probe\"\n"
@@ -589,8 +734,6 @@ def write_probe(pkg, crate):
         f"grant-binding = {{ path = {json.dumps(str(Path(crate).resolve()))} }}\n"
     )
     (pkg / "Cargo.toml").write_text(manifest)
-    if (REPO / "lab" / "redteam" / "Cargo.toml").exists():
-        raise ProbeError("lab/redteam/Cargo.toml appeared")
     return pkg
 
 
@@ -656,6 +799,7 @@ def outcome_for(name, code, output):
 
 
 def run_suite(pkg, crate, target, harness_args):
+    require_suite_manifest_unset()
     write_probe(pkg, crate)
     code, output = cargo(
         pkg,
@@ -676,7 +820,8 @@ def run_suite(pkg, crate, target, harness_args):
         target,
     )
     by_name = {name: outcome_for(name, code, output) for name in PROBE_NAMES}
-    return Suite(code, output, by_name)
+    link = outcome_for(LINK_NAME, code, output)
+    return Suite(code, output, by_name, link)
 
 
 def raise_if_cargo_error(name, real, real_error):
@@ -715,6 +860,8 @@ class GrantReplayProbe(unittest.TestCase):
     pin_line = ""
     lib_sha = None
     ledger_sha = None
+    _saved_manifest = None
+    _manifest_saved = False
 
     @classmethod
     def setUpClass(cls):
@@ -729,6 +876,8 @@ class GrantReplayProbe(unittest.TestCase):
         cls.target = cls.work / "target"
         cls.target.mkdir()
         cls.real_pkg = cls.work / "probe-real"
+        cls._saved_manifest = set_manifest(None)
+        cls._manifest_saved = True
         try:
             cls.real = run_suite(cls.real_pkg, CRATE, cls.target, [])
             cls.real_error = None
@@ -751,7 +900,6 @@ class GrantReplayProbe(unittest.TestCase):
             self.skipTest(reason)
         self.assertIsNotNone(shutil.which("cargo"))
         self.assertIsNotNone(shutil.which("rustc"))
-        self.assertFalse((REPO / "lab" / "redteam" / "Cargo.toml").is_file())
         self.assertTrue(self.target.resolve().is_relative_to(self.work.resolve()))
         self.assertFalse(self.work.resolve().is_relative_to(REPO.resolve()))
 
@@ -819,6 +967,73 @@ class GrantReplayProbe(unittest.TestCase):
         """The owner's call is opened first. The sibling call is refused and spends nothing."""
         self.check_real(SIBLING_NAME)
 
+    def test_stale_call_use_path_is_refused(self):
+        """A child path on the call opened before the session change is refused after it."""
+        self.check_real(PATH_NAME)
+
+    def test_stale_call_identity_replay_is_refused(self):
+        """A grant on the call opened before the identity change is refused after it."""
+        self.check_real(IDENTITY_NAME)
+
+    def test_renamed_identity_method_turns_compile_error_into_failure(self):
+        """The identity method name is ``IDENTITY_NAME``. ``setUp`` and ``expect_recorded`` look up that name.
+
+        A compile error on that method is an error, including when a finding
+        records it. Renaming the method leaves it outside ``PROBE_NAMES``, so
+        ``setUp`` does not raise. The body fails, and the result is a failure.
+        The finding's name does not mark the renamed method as an expected failure.
+        """
+        compile = Suite(
+            101,
+            "could not compile `grant-binding`\n",
+            {
+                name: Outcome("error", "compile error", "could not compile `grant-binding`")
+                for name in PROBE_NAMES
+            },
+        )
+        self.assertTrue(callable(getattr(GrantReplayProbe, IDENTITY_NAME)))
+
+        class Named(unittest.TestCase):
+            skip_reason = None
+            real = compile
+            real_error = None
+
+            def setUp(self):
+                GrantReplayProbe.setUp(self)
+
+            def test_stale_call_identity_replay_is_refused(self):
+                self.fail("body ran after a compile error")
+
+        expect_recorded(Named, {IDENTITY_NAME})
+        self.assertTrue(getattr(Named, IDENTITY_NAME).__unittest_expecting_failure__)
+        named = run_case(Named)
+        self.assertEqual(named.expectedFailures, [])
+        self.assertEqual(named.failures, [])
+        self.assertEqual(len(named.errors), 1)
+        self.assertIn("compile error", named.errors[0][1])
+
+        class Renamed(unittest.TestCase):
+            skip_reason = None
+            real = compile
+            real_error = None
+
+            def setUp(self):
+                GrantReplayProbe.setUp(self)
+
+            def test_identity_replay_under_another_name(self):
+                outcome = self.real.by_name[IDENTITY_NAME]
+                kind = gate_kind(outcome, IDENTITY_NAME, {IDENTITY_NAME})
+                self.assertEqual(kind, "pass")
+
+        expect_recorded(Renamed, {IDENTITY_NAME})
+        renamed_method = Renamed.test_identity_replay_under_another_name
+        self.assertFalse(getattr(renamed_method, "__unittest_expecting_failure__", False))
+        renamed = run_case(Renamed)
+        self.assertEqual(renamed.errors, [])
+        self.assertEqual(renamed.expectedFailures, [])
+        self.assertEqual(len(renamed.failures), 1)
+        self.assertIn("'error' != 'pass'", renamed.failures[0][1])
+
     def plant(self, name, relative, old, new):
         dest = copy_crate(self.work / f"crate-{name}")
         self.assertFalse((dest / "target").exists())
@@ -837,6 +1052,10 @@ class GrantReplayProbe(unittest.TestCase):
         session = suite.by_name[SESSION_NAME]
         sibling = suite.by_name[SIBLING_NAME]
         clean = suite.by_name[CLEAN_NAME]
+        path = suite.by_name[PATH_NAME]
+        identity = suite.by_name[IDENTITY_NAME]
+        self.assertEqual(path.kind, "passed", evidence(suite.output) or tail(suite.output))
+        self.assertEqual(identity.kind, "passed", evidence(suite.output) or tail(suite.output))
         self.assertEqual(clean.kind, "failed", evidence(suite.output) or tail(suite.output))
         self.assertIn("without a refused replay", clean.output)
         self.assertNotEqual(clean.kind, "error")
@@ -858,14 +1077,19 @@ class GrantReplayProbe(unittest.TestCase):
             self.skipTest(reason)
 
     def test_deleted_session_comparison_is_caught(self):
-        """Deleting the live session comparison makes the session replay test fail."""
+        """Deleting the live session comparison makes the session replay and the stale use_path fail."""
         self.require_one_anchor("lab/grant-binding/src/lib.rs", SESSION_OLD, "session")
         suite = self.plant("drop-session", "src/lib.rs", SESSION_OLD, "")
         session = suite.by_name[SESSION_NAME]
+        path = suite.by_name[PATH_NAME]
         self.assertTrue(session.caught, evidence(suite.output) or tail(suite.output))
         self.assertIn("accepted replay:", session.output)
         self.assertNotIn("lost accounting:", session.output)
+        self.assertTrue(path.caught, evidence(suite.output) or tail(suite.output))
+        self.assertIn("accepted replay: use_path returned Ok", path.output)
+        self.assertNotIn("lost accounting:", path.output)
         self.assertEqual(suite.by_name[SIBLING_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[IDENTITY_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
 
     def test_deleted_instance_comparison_is_caught(self):
@@ -877,6 +1101,21 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertIn("accepted replay:", sibling.output)
         self.assertNotIn("lost accounting:", sibling.output)
         self.assertEqual(suite.by_name[SESSION_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[IDENTITY_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
+
+    def test_deleted_identity_comparison_is_caught(self):
+        """Deleting the live identity comparison accepts the same call after the identity change."""
+        self.require_one_anchor("lab/grant-binding/src/lib.rs", IDENTITY_OLD, "identity")
+        suite = self.plant("drop-identity", "src/lib.rs", IDENTITY_OLD, "")
+        identity = suite.by_name[IDENTITY_NAME]
+        self.assertTrue(identity.caught, evidence(suite.output) or tail(suite.output))
+        self.assertIn("accepted replay: use_grant returned Ok", identity.output)
+        self.assertNotIn("lost accounting:", identity.output)
+        self.assertEqual(suite.by_name[SESSION_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[SIBLING_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
 
     def test_early_reserve_charge_is_caught(self):
@@ -888,6 +1127,8 @@ class GrantReplayProbe(unittest.TestCase):
         clean = suite.by_name[CLEAN_NAME]
         self.assertTrue(accounting_plant_caught(session, sibling, clean), evidence(suite.output) or tail(suite.output))
         self.assertEqual(clean.kind, "passed", evidence(suite.output) or tail(suite.output))
+        self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output) or tail(suite.output))
+        self.assertEqual(suite.by_name[IDENTITY_NAME].kind, "passed", evidence(suite.output) or tail(suite.output))
 
     def test_compile_error_is_error(self):
         """Invalid Rust is an error. It is not a caught plant and not an expected failure."""
@@ -937,6 +1178,18 @@ class GrantReplayProbe(unittest.TestCase):
             "observed: Ok\n"
         )
         self.assertEqual(recorded_from(text), {SESSION_NAME})
+        path_only = pin_line() + (
+            "\nprobe: " + PATH_NAME + "\n"
+            "call: open_call, use_path, host_set_session, use_path\n"
+            "observed: Ok\n"
+        )
+        self.assertEqual(recorded_from(path_only), {PATH_NAME})
+        identity_only = pin_line() + (
+            "\nprobe: " + IDENTITY_NAME + "\n"
+            "call: open_call, use_grant, host_set_identity, use_grant\n"
+            "observed: Ok\n"
+        )
+        self.assertEqual(recorded_from(identity_only), {IDENTITY_NAME})
         both = pin_line() + (
             "\nprobe: " + SESSION_NAME + "\n"
             "probe: " + SIBLING_NAME + "\n"
@@ -946,6 +1199,8 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertEqual(recorded_from(both), set(STALE_NAMES))
         with self.assertRaises(ProbeError):
             recorded_from(FINDING_ID + "\nprobe: " + SESSION_NAME + "\nobserved: Ok\n")
+        with self.assertRaises(ProbeError):
+            recorded_from(pin_line() + "\nprobe: " + CLEAN_NAME + "\nobserved: Ok\n")
         with self.assertRaises(ProbeError):
             recorded_from(pin_line() + "\nprobe: test_compile_error_is_error\nobserved: Ok\n")
         with self.assertRaises(ProbeError):
@@ -1017,6 +1272,250 @@ class GrantReplayProbe(unittest.TestCase):
         }
         self.assertEqual(marked, recorded_probes())
 
+    def test_replay_marker_count_is_refused(self):
+        """The replay source holds the repo marker once. Zero or two is a probe error.
+
+        Dropping the count check accepts a source that does not bind this repo.
+        """
+        self.assertEqual(REPLAY_RS.count(REPO_MARKER), 1)
+        samples = (
+            (0, "fn unused() {}\n"),
+            (2, REPO_MARKER + "\n" + REPO_MARKER + "\n"),
+        )
+        for count, source in samples:
+            with self.assertRaises(ProbeError) as caught:
+                render_replay(source, "/tmp/redteam-repo")
+            self.assertEqual(
+                str(caught.exception),
+                f"replay.rs holds {count} copies of {REPO_MARKER}, not one",
+            )
+        rendered = render_replay(REPLAY_RS, "/tmp/redteam-repo")
+        self.assertNotIn(REPO_MARKER, rendered)
+        self.assertIn('let repo = "/tmp/redteam-repo";', rendered)
+
+    def test_replay_repo_quote_or_backslash_is_refused(self):
+        """A quote or a backslash in the repo path is a probe error.
+
+        Dropping the check writes that character into the Rust string.
+        """
+        for repo in ('/tmp/a"b', "/tmp/a\\b"):
+            with self.assertRaises(ProbeError) as caught:
+                render_replay(REPLAY_RS, repo)
+            self.assertEqual(
+                str(caught.exception),
+                "repo path contains a quote or a backslash",
+            )
+        rendered = render_replay(REPLAY_RS, "/tmp/redteam-repo")
+        self.assertNotIn(REPO_MARKER, rendered)
+        self.assertIn('let repo = "/tmp/redteam-repo";', rendered)
+
+    def test_suite_refuses_a_set_manifest_variable(self):
+        """A full suite with REDTEAM_MANIFEST set is a probe error, before cargo runs.
+
+        Dropping the check in ``run_suite`` launches cargo against that path.
+        """
+        previous = set_manifest(self.work / "not-used.toml")
+        calls = []
+        real_cargo = cargo
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            raise ProbeError("cargo ran")
+
+        try:
+            globals()["cargo"] = wrapped
+            with self.assertRaises(ProbeError) as caught:
+                run_suite(self.work / "probe-env-refuse", CRATE, self.target, [])
+            self.assertEqual(
+                str(caught.exception),
+                "REDTEAM_MANIFEST is set for the suite",
+            )
+            self.assertEqual(calls, [])
+        finally:
+            globals()["cargo"] = real_cargo
+            set_manifest(previous)
+
+    def test_link_outcome_other_than_passed_blocks_the_clean_line(self):
+        """A failed or error link raises, so the clean line is not printed.
+
+        A toolchain skip stays a skip. Treating every link outcome as passed
+        prints the clean line after a grant link: that is the break.
+        """
+        by_name = {
+            name: Outcome("passed", f"test {name} ... ok", "")
+            for name in PROBE_NAMES
+        }
+        for kind in ("failed", "error"):
+            suite = Suite(
+                1, "", by_name, Outcome(kind, kind, "has a path dependency on grant-binding"),
+            )
+            with self.assertRaises(ProbeError) as caught:
+                probe_report(suite, None, False, self.head, self.pin_line)
+            self.assertEqual(str(caught.exception), f"link outcome was {kind}")
+            self.assertNotIn("were refused", str(caught.exception))
+            with self.assertRaises(ProbeError) as recorded:
+                probe_report(suite, None, True, self.head, self.pin_line)
+            self.assertEqual(str(recorded.exception), f"link outcome was {kind}")
+        missing = Suite(1, "", by_name, None)
+        with self.assertRaises(ProbeError) as bare:
+            probe_report(missing, None, False, self.head, self.pin_line)
+        self.assertEqual(str(bare.exception), "link outcome was missing")
+        ok = Suite(
+            0, "", by_name,
+            Outcome("passed", f"test {LINK_NAME} ... ok", ""),
+        )
+        lines = probe_report(ok, None, False, self.head, self.pin_line)
+        self.assertEqual(lines[0], CLEAN.format(commit=self.head))
+        self.assertEqual(
+            lines[0],
+            "these two stale calls were refused and did not spend the ceiling, "
+            "and the same call's child path was refused, "
+            "and the same call was refused after the identity change, on " + self.head,
+        )
+        self.assertEqual(lines[1], self.pin_line)
+        self.assertEqual(probe_report(ok, None, True, self.head, self.pin_line), [])
+        self.assertEqual(probe_report(None, None, False, self.head, self.pin_line), [])
+        skipped = probe_report(
+            Suite(1, "", by_name, Outcome("failed", "failed", "")),
+            "cargo is missing",
+            False,
+            self.head,
+            self.pin_line,
+        )
+        self.assertEqual(skipped, ["SKIPPED: cargo is missing"])
+        self.assertNotIn("appeared", skipped[0])
+
+    def test_link_plant_raises_the_real_suite_error(self):
+        """``LINK_NAME`` is outside ``PROBE_NAMES``, so ``setUp`` does not raise. The plant does.
+
+        Dropping the raise runs cargo after the real suite failed.
+        """
+        self.assertNotIn(LINK_NAME, PROBE_NAMES)
+        self.assertNotIn(LINK_NAME, STALE_NAMES)
+        self.assertIn(PATH_NAME, PROBE_NAMES)
+        self.assertNotIn(PATH_NAME, STALE_NAMES)
+        self.assertIn(IDENTITY_NAME, PROBE_NAMES)
+        self.assertNotIn(IDENTITY_NAME, STALE_NAMES)
+        boom = ProbeError("real suite failed")
+        saved_error = self.real_error
+        calls = []
+        real_cargo = cargo
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            raise ProbeError("cargo ran")
+
+        self.real_error = boom
+        try:
+            globals()["cargo"] = wrapped
+            with self.assertRaises(ProbeError) as caught:
+                self.run_link_manifest("unused")
+            self.assertIs(caught.exception, boom)
+            self.assertEqual(calls, [])
+        finally:
+            globals()["cargo"] = real_cargo
+            self.real_error = saved_error
+
+    def test_generated_replay_replaces_the_one_marker(self):
+        """The generated replay binds this repo. The marker is replaced."""
+        if self.real_error is not None:
+            raise self.real_error
+        text = (self.real_pkg / "tests" / "replay.rs").read_text()
+        self.assertEqual(text, render_replay(REPLAY_RS, REPO))
+        self.assertNotIn(REPO_MARKER, text)
+        self.assertIn(str(REPO), text)
+        self.assertIn(
+            "grant_binding::link::cargo_toml_path_depends_on_grant_binding",
+            text,
+        )
+        self.assertIn(LINK_NAME, text)
+
+    def test_real_suite_link_passes_with_manifest_unset(self):
+        """The real suite's link test passes with ``REDTEAM_MANIFEST`` unset."""
+        if self.real_error is not None:
+            raise self.real_error
+        self.assertIsNone(os.environ.get("REDTEAM_MANIFEST"))
+        self.assertEqual(self.real.link.kind, "passed", evidence(self.real.output) or tail(self.real.output))
+        self.assertNotEqual(self.real.link.kind, "error")
+        self.assertTrue(self.real.link.detail.endswith(" ok"))
+
+    def _link_outcome(self, text):
+        code, output, manifest = self.run_link_manifest(text)
+        self.assertEqual(manifest.read_text(), text)
+        self.assertNotEqual(manifest, (self.real_pkg / "Cargo.toml").resolve())
+        self.assertNotEqual(
+            manifest,
+            (REPO / "lab" / "redteam" / "Cargo.toml").resolve(),
+        )
+        self.assertIsNone(os.environ.get("REDTEAM_MANIFEST"))
+        return code, output, outcome_for(LINK_NAME, code, output)
+
+    def test_name_only_manifest_is_not_a_grant_link(self):
+        """A manifest that only names the crate is not a path dependency.
+
+        The owner's detector decides. A guard that panics because the file
+        exists fails this test.
+        """
+        code, output, outcome = self._link_outcome(NAME_ONLY_MANIFEST)
+        shown = evidence(output) or tail(output)
+        self.assertEqual(code, 0, shown)
+        self.assertEqual(outcome.kind, "passed", shown)
+        self.assertNotEqual(outcome.kind, "error")
+
+    def test_audit_shaped_manifest_is_not_a_grant_link(self):
+        """A path dependency on the audit crate is not a grant-binding link.
+
+        The owner's detector decides. A guard that panics because the file
+        exists fails this test.
+        """
+        code, output, outcome = self._link_outcome(AUDIT_SHAPED_MANIFEST)
+        shown = evidence(output) or tail(output)
+        self.assertEqual(code, 0, shown)
+        self.assertEqual(outcome.kind, "passed", shown)
+        self.assertNotEqual(outcome.kind, "error")
+
+    def test_path_manifest_is_caught(self):
+        """A path dependency on grant-binding fails the link test.
+
+        Exit 0 is not a catch. Dropping the negation in the assertion lets
+        this manifest pass, and the name-only and audit-shaped tests fail.
+        """
+        code, output, outcome = self._link_outcome(PATH_MANIFEST)
+        shown = evidence(output) or tail(output)
+        self.assertNotEqual(code, 0, shown)
+        self.assertEqual(outcome.kind, "failed", shown)
+        self.assertTrue(outcome.caught)
+        self.assertNotEqual(outcome.kind, "error")
+        self.assertIn("has a path dependency on grant-binding", outcome.output)
+
+    def run_link_manifest(self, text):
+        """Run the one link test in the real package against a temp manifest.
+
+        ``setUp`` raises ``real_error`` only for ``PROBE_NAMES``. ``LINK_NAME``
+        stays out of that tuple, so this plant raises ``real_error`` itself.
+        ``--exact`` filters that package. The variable is set only around
+        ``cargo`` and removed in ``finally``.
+        """
+        if self.real_error is not None:
+            raise self.real_error
+        if self.real is None or self.real_pkg is None:
+            raise ProbeError("link plant did not run")
+        manifest = write_link_manifest(self.work, self.real_pkg, text)
+        previous = set_manifest(manifest)
+        try:
+            code, output = cargo(
+                self.real_pkg,
+                [
+                    "test", "--offline", "--locked",
+                    "--manifest-path", str(self.real_pkg / "Cargo.toml"),
+                    "--", "--exact", LINK_NAME,
+                ],
+                self.target,
+            )
+        finally:
+            set_manifest(previous)
+        return code, output, manifest
+
     def _expecting(self, name):
         return getattr(getattr(GrantReplayProbe, name), "__unittest_expecting_failure__", False)
 
@@ -1024,30 +1523,50 @@ class GrantReplayProbe(unittest.TestCase):
 expect_recorded(GrantReplayProbe, recorded_probes())
 
 
-def tearDownModule():
-    work = GrantReplayProbe.work
-    real = GrantReplayProbe.real
-    skip = GrantReplayProbe.skip_reason
-    head = GrantReplayProbe.head
-    pins = GrantReplayProbe.pin_line
-    lib_sha = GrantReplayProbe.lib_sha
-    ledger_sha = GrantReplayProbe.ledger_sha
-    if work is not None:
-        shutil.rmtree(work, ignore_errors=True)
-        GrantReplayProbe.work = None
-    if lib_sha is not None:
-        changed_target("lab/grant-binding/src/lib.rs", lib_sha, sha256_file(LIB))
-    if ledger_sha is not None:
-        changed_target("lab/grant-binding/src/ledger.rs", ledger_sha, sha256_file(LEDGER))
-    if (REPO / "lab" / "redteam" / "Cargo.toml").exists():
-        raise ProbeError("lab/redteam/Cargo.toml appeared")
+def probe_report(real, skip, finding_present, head, pins):
+    """Lines for stderr after the suite.
+
+    A toolchain skip is ``SKIPPED`` and does not treat a manifest as a failure.
+    When the suite ran, a link outcome other than ``passed`` raises, so the
+    caller does not print the clean line. Dropping that refusal prints the
+    clean line after a grant link.
+    """
     if skip:
-        print(f"SKIPPED: {skip}", file=sys.stderr)
-        return
-    if real is None or FINDING.is_file():
-        return
+        return [f"SKIPPED: {skip}"]
+    if real is not None:
+        kind = real.link.kind if real.link is not None else "missing"
+        if kind != "passed":
+            raise ProbeError(f"link outcome was {kind}")
+    if real is None or finding_present:
+        return []
     if all(real.by_name[name].kind == "passed" for name in PROBE_NAMES):
-        print(CLEAN.format(commit=head), file=sys.stderr)
-        print(pins, file=sys.stderr)
-        for name in PROBE_NAMES:
-            print(real.by_name[name].detail, file=sys.stderr)
+        lines = [CLEAN.format(commit=head), pins]
+        lines.extend(real.by_name[name].detail for name in PROBE_NAMES)
+        return lines
+    return []
+
+
+def tearDownModule():
+    saved = GrantReplayProbe._saved_manifest
+    restore = GrantReplayProbe._manifest_saved
+    try:
+        work = GrantReplayProbe.work
+        real = GrantReplayProbe.real
+        skip = GrantReplayProbe.skip_reason
+        head = GrantReplayProbe.head
+        pins = GrantReplayProbe.pin_line
+        lib_sha = GrantReplayProbe.lib_sha
+        ledger_sha = GrantReplayProbe.ledger_sha
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+            GrantReplayProbe.work = None
+        if lib_sha is not None:
+            changed_target("lab/grant-binding/src/lib.rs", lib_sha, sha256_file(LIB))
+        if ledger_sha is not None:
+            changed_target("lab/grant-binding/src/ledger.rs", ledger_sha, sha256_file(LEDGER))
+        for line in probe_report(real, skip, FINDING.is_file(), head, pins):
+            print(line, file=sys.stderr)
+    finally:
+        if restore:
+            set_manifest(saved)
+            GrantReplayProbe._manifest_saved = False

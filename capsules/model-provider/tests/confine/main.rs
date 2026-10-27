@@ -1177,6 +1177,105 @@ fn redirect_journal_materializes_outside_when_unconfined() {
     provider.shutdown();
 }
 
+/// After `init`, the storage tree is the same after `status`, `offers_list`
+/// and `shutdown`.
+///
+/// `tree_snapshot` records each relative path, its mode and its file bytes
+/// under `storage.root`. The first snapshot is taken once `init` has answered
+/// and `runs/` exists. The snapshot after `status`, the snapshot after
+/// `offers_list`, and the snapshot taken after `Provider::shutdown` returns
+/// each equal that first snapshot. `status` data equals the `init` data.
+/// `offers_list` returns the hosted offer id. The test starts no run and sets
+/// no `runtime_hosted_socket`. A difference names the call and the relative
+/// paths whose mode or bytes differ. On a host where `sandbox_available`
+/// fails, the test returns.
+#[test]
+fn model_status_offers_and_shutdown_leave_storage_unchanged() {
+    fn storage_tree_changes(
+        before: &[(PathBuf, u32, Vec<u8>)],
+        after: &[(PathBuf, u32, Vec<u8>)],
+    ) -> Vec<String> {
+        let mut changes = Vec::new();
+        let mut left = 0;
+        let mut right = 0;
+        while left < before.len() || right < after.len() {
+            match (before.get(left), after.get(right)) {
+                (Some(earlier), Some(later)) if earlier.0 == later.0 => {
+                    if earlier.1 != later.1 || earlier.2 != later.2 {
+                        changes.push(earlier.0.display().to_string());
+                    }
+                    left += 1;
+                    right += 1;
+                }
+                (Some(earlier), Some(later)) if earlier.0 < later.0 => {
+                    changes.push(earlier.0.display().to_string());
+                    left += 1;
+                }
+                (Some(_), Some(later)) => {
+                    changes.push(later.0.display().to_string());
+                    right += 1;
+                }
+                (Some(earlier), None) => {
+                    changes.push(earlier.0.display().to_string());
+                    left += 1;
+                }
+                (None, Some(later)) => {
+                    changes.push(later.0.display().to_string());
+                    right += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        changes
+    }
+
+    fn same_storage_tree(
+        call: &str,
+        before: &[(PathBuf, u32, Vec<u8>)],
+        after: &[(PathBuf, u32, Vec<u8>)],
+    ) {
+        let paths = storage_tree_changes(before, after).join(", ");
+        assert_eq!(
+            after, before,
+            "{call} changed the storage tree; relative paths whose mode or bytes differ: {paths}"
+        );
+    }
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let storage = Storage::prepare("status-offers-shutdown");
+    let mut provider = Provider::start(Launch::Confined(&storage));
+
+    let init = provider.ok(&init_request(&storage, None));
+    assert!(
+        storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT"
+    );
+    let after_init = tree_snapshot(&storage.root);
+
+    let status = provider.ok(&json!({ "op": "status" }));
+    assert_eq!(status, init, "status data must equal the init data");
+    same_storage_tree("status", &after_init, &tree_snapshot(&storage.root));
+
+    let listed = provider.ok(&json!({ "op": "offers_list" }));
+    let ids: Vec<&Value> = listed["offers"]
+        .as_array()
+        .expect("offers_list must return an offer array")
+        .iter()
+        .map(|offer| &offer["id"])
+        .collect();
+    assert_eq!(
+        ids,
+        [HOSTED_OFFER],
+        "offers_list must return the configured offer: {listed}"
+    );
+    same_storage_tree("offers_list", &after_init, &tree_snapshot(&storage.root));
+
+    provider.shutdown();
+    same_storage_tree("shutdown", &after_init, &tree_snapshot(&storage.root));
+}
+
 /// The outside-read fixture's one rule: metadata, never content, of the run
 /// record at its outside path. `runs_get` checks that the record exists and
 /// is a private regular file before it opens it; this rule lets those checks
@@ -1296,6 +1395,80 @@ fn model_outside_read_denied() {
         stored,
         "the record must read back from STORAGE_ROOT"
     );
+    provider.shutdown();
+}
+
+/// Under the profile, `runs_events` and a terminal `runs_cancel` load the
+/// stored failed run and leave the storage tree unchanged.
+///
+/// `runs_create` without `runtime_hosted_socket` stores the run as failed
+/// before any socket. The create data's `terminal.error.message` is
+/// `Hosted external HTTPS is paused.` `runs_events` with `after_sequence` 0
+/// returns schema `elastos.model.run-events/v1`, that run's `run_id`,
+/// `has_more` false, and a last event whose `kind` is `failed`.
+/// `runs_cancel` returns the create data. The storage tree after both calls
+/// equals the tree after create. A live cancel is not shown: the run is
+/// already terminal, so the call does not reach the adapter.
+#[test]
+fn model_terminal_run_page_and_cancel_read_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let storage = Storage::prepare("terminal-read");
+    let run = HostedRun::new("request:terminal-read");
+
+    let mut provider = Provider::start(Launch::Confined(&storage));
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    let created = provider.ok(&run.create);
+    assert_eq!(
+        created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
+        "the binary must refuse hosted dispatch before any socket: {created}"
+    );
+    let after_create = tree_snapshot(&storage.root);
+
+    let events = provider.ok(&json!({
+        "op": "runs_events",
+        "run_id": run.get["run_id"].clone(),
+        "after_sequence": 0,
+        "runtime_binding": run.get["runtime_binding"].clone()
+    }));
+    assert_eq!(
+        events["schema"], "elastos.model.run-events/v1",
+        "runs_events must use the run-events schema: {events}"
+    );
+    assert_eq!(
+        events["run_id"], created["run_id"],
+        "runs_events must name the stored run: {events}"
+    );
+    assert_eq!(
+        events["has_more"], false,
+        "the terminal page must not continue: {events}"
+    );
+    let last = events["events"]
+        .as_array()
+        .and_then(|page| page.last())
+        .expect("the stored run must keep a last event");
+    assert_eq!(
+        last["kind"], "failed",
+        "the last event kind must be failed: {events}"
+    );
+
+    let cancelled = provider.ok(&json!({
+        "op": "runs_cancel",
+        "run_id": run.get["run_id"].clone(),
+        "runtime_binding": run.get["runtime_binding"].clone()
+    }));
+    assert_eq!(
+        cancelled, created,
+        "a terminal runs_cancel must return the stored run"
+    );
+    assert_eq!(
+        tree_snapshot(&storage.root),
+        after_create,
+        "runs_events and a terminal runs_cancel must not write"
+    );
+
+    provider.ok(&json!({ "op": "offers_list" }));
     provider.shutdown();
 }
 
@@ -2305,6 +2478,42 @@ fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, 
     );
 }
 
+/// Joins this provider's profile text from the approved declared rights.
+///
+/// The text is `(version 1)`, then `(deny default)`, then `(deny network*)`,
+/// then each rule of each rights entry, then each rule of each
+/// platform-baseline entry. It reads no file and checks no right id.
+fn standin_profile(declared: &Value) -> Result<String, String> {
+    let Some(rights) = declared.get("rights").and_then(Value::as_array) else {
+        return Err("model-provider declared rights must hold a rights list".to_string());
+    };
+    let Some(baseline) = declared
+        .get("platform_baseline")
+        .and_then(|baseline| baseline.get("rules"))
+        .and_then(Value::as_array)
+    else {
+        return Err("model-provider platform baseline must hold a rules list".to_string());
+    };
+    let mut profile = String::from("(version 1)\n(deny default)\n(deny network*)\n");
+    for entry in rights.iter().chain(baseline) {
+        let Some(rules) = entry.get("rules").and_then(Value::as_array) else {
+            return Err("model-provider declares an entry without a rules list".to_string());
+        };
+        for rule in rules {
+            let Some(rule) = rule.as_str() else {
+                return Err("model-provider declares a rule that is not a string".to_string());
+            };
+            profile.push_str(rule);
+            profile.push('\n');
+        }
+    }
+    Ok(profile)
+}
+
+fn write_standin_profile(path: &Path, generated: &str) {
+    fs::write(path, generated).expect("write the generated profile");
+}
+
 /// A launch whose profile cannot be applied never starts the provider.
 ///
 /// The one launcher starts the real binary three ways: a profile path under
@@ -2376,6 +2585,325 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
         &storage,
         "invalid data type of path filter",
     );
+}
+
+/// The lab stand-in builds this provider's profile from the approved declared
+/// rights, and that text's head and allow lines match the oracle.
+///
+/// The first three non-comment lines are `(version 1)`, `(deny default)` and
+/// `(deny network*)`. The sorted allow lines equal the oracle. A changed
+/// `bound-executable` rule is reflected. A declared value with no rights
+/// list, a platform baseline with no rules list, an entry with no rules list,
+/// and a rule that is not a string are each refused with their reason. The
+/// test starts no process and needs no sandbox.
+///
+/// Falsifier: F-cc41a makes `standin_profile` return the oracle file and
+/// ignore the declared value, so a changed declared rule still matches the
+/// oracle.
+#[test]
+fn generated_model_profile_matches_the_oracle() {
+    fn non_comment_head(profile: &str) -> Vec<&str> {
+        profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .take(3)
+            .collect()
+    }
+
+    let head = vec!["(version 1)", "(deny default)", "(deny network*)"];
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    assert_eq!(non_comment_head(&generated), head);
+    assert_eq!(non_comment_head(&oracle), head);
+    let mut generated_lines = collect_allow_lines(&generated);
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    generated_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(generated_lines, oracle_lines);
+    assert!(
+        generated.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in profile emits no comment line"
+    );
+
+    let original_exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    let stub_exec = "(allow process-exec (literal \"/tmp/cc-standin-stub\"))";
+    let mut changed = fixture.clone();
+    let rights = changed
+        .get_mut("rights")
+        .and_then(Value::as_array_mut)
+        .expect("declared rights must hold a rights list");
+    let mut replaced = false;
+    for entry in rights {
+        if entry.get("id").and_then(Value::as_str) != Some("bound-executable") {
+            continue;
+        }
+        let rules = entry
+            .get_mut("rules")
+            .and_then(Value::as_array_mut)
+            .expect("bound-executable holds a rules list");
+        for rule in rules {
+            if rule.as_str() == Some(original_exec) {
+                *rule = json!(stub_exec);
+                replaced = true;
+            }
+        }
+    }
+    assert!(replaced, "the bound-executable rule is replaced in memory");
+    let changed_profile =
+        standin_profile(&changed).expect("the changed declared value builds a profile");
+    let changed_lines = collect_allow_lines(&changed_profile);
+    assert_eq!(
+        changed_lines
+            .iter()
+            .filter(|line| **line == stub_exec)
+            .count(),
+        1,
+        "the stub exec rule is present once"
+    );
+    assert!(
+        changed_lines.iter().all(|line| *line != original_exec),
+        "the original exec rule is absent"
+    );
+
+    let mut rights_not_a_list = fixture.clone();
+    rights_not_a_list["rights"] = json!("not-a-list");
+    assert_eq!(
+        standin_profile(&rights_not_a_list).expect_err("rights that are not a list are refused"),
+        "model-provider declared rights must hold a rights list"
+    );
+    let mut baseline_not_a_list = fixture.clone();
+    baseline_not_a_list["platform_baseline"]["rules"] = json!("not-a-list");
+    assert_eq!(
+        standin_profile(&baseline_not_a_list)
+            .expect_err("a platform baseline that is not a rules list is refused"),
+        "model-provider platform baseline must hold a rules list"
+    );
+    let mut entry_without_rules = fixture.clone();
+    entry_without_rules["rights"][0]
+        .as_object_mut()
+        .expect("a rights entry is an object")
+        .remove("rules");
+    assert_eq!(
+        standin_profile(&entry_without_rules)
+            .expect_err("an entry without a rules list is refused"),
+        "model-provider declares an entry without a rules list"
+    );
+    let mut rule_not_a_string = fixture.clone();
+    rule_not_a_string["rights"][0]["rules"][0] = json!(1);
+    assert_eq!(
+        standin_profile(&rule_not_a_string).expect_err("a rule that is not a string is refused"),
+        "model-provider declares a rule that is not a string"
+    );
+}
+
+/// The profile the stand-in builds is the file `Launch::Profile` applies.
+///
+/// A hosted `init` answers through `assert_serving` and creates `runs/`
+/// under `STORAGE_ROOT`. A local-offer `init` answers `internal_error`
+/// with message `model provider failed`, the log contains
+/// `base_path is unavailable`, and `STORAGE_ROOT` does not exist. The
+/// same provider then accepts a hosted `init`, `offers_list` answers, and
+/// `shutdown` exits cleanly.
+///
+/// Falsifier: F-cc42a makes `write_standin_profile` write an allow-default
+/// profile and ignore the generated text, so the local offer's `init`
+/// answers ok.
+#[test]
+fn generated_profile_permits_init_and_denies_the_local_offer() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+
+    let storage = Storage::prepare("standin-permit");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    assert!(
+        storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT"
+    );
+    provider.shutdown();
+
+    let local = LocalEngine::prepare("standin-local-offer");
+    let profile = local.storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&local.storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    let refused = provider.request(&local.request);
+    assert_eq!(
+        refused,
+        json!({
+            "status": "error",
+            "code": "internal_error",
+            "message": "model provider failed"
+        }),
+        "the local offer's init must fail closed"
+    );
+    let logged = provider
+        .logged_fault("internal_error")
+        .expect("the provider must log the internal_error detail");
+    assert!(
+        logged.contains("invalid model provider init config: base_path is unavailable"),
+        "init must stop where it resolves base_path: {logged}"
+    );
+    assert!(
+        !local.storage.root.exists(),
+        "the refused init must create no STORAGE_ROOT"
+    );
+    assert_serving(&provider.ok(&init_request(&local.storage, None)));
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
+}
+
+/// A declared value with no rights list is refused, and a generated profile
+/// that does not parse never starts the provider.
+///
+/// `standin_profile` on `json!({})` returns an error that contains
+/// `model-provider` and `rights`. That call starts no provider. `{}` has no
+/// `rights` key. `generated_model_profile_matches_the_oracle` already refuses
+/// a present `rights` value that is not a list, on this same line. When the
+/// sandbox is present, the real fixture's generated text loses its last `)`,
+/// `write_standin_profile` writes that text, and `assert_startup_is_refused`
+/// reads exit 65 with marker `expecting ')'`.
+///
+/// Falsifier: F-cc43a makes `standin_profile` return an empty profile when
+/// the rights list is missing, so this test fails before any launch, and
+/// `generated_model_profile_matches_the_oracle` fails on the same line.
+/// F-cc42a makes `write_standin_profile` write an allow-default profile and
+/// ignore the generated text, so this launch does not exit 65.
+#[test]
+fn standin_refuses_a_start_it_cannot_apply() {
+    let refused =
+        standin_profile(&json!({})).expect_err("a declared value with no rights list is refused");
+    assert!(
+        refused.contains("model-provider") && refused.contains("rights"),
+        "the refusal must name the provider and the rights list: {refused}"
+    );
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let trimmed = generated.trim_end();
+    assert!(
+        trimmed.ends_with(')'),
+        "the generated profile does not parse: the generated text must end with ')'"
+    );
+    let broken = &trimmed[..trimmed.len() - 1];
+    let storage = Storage::prepare("standin-cannot-apply");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, broken);
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    assert_startup_is_refused(
+        "the generated profile does not parse",
+        Launch::Profile {
+            profile: &profile,
+            bindings: &bindings,
+        },
+        &storage,
+        "expecting ')'",
+    );
+}
+
+/// The stand-in text denies the hosted connect.
+///
+/// `Launch::Profile` applies the text `standin_profile` builds. The one
+/// Runtime socket stand-in counts zero connections. The run settles
+/// `transport_interrupted`: `status` `failed`, and `terminal.error` is
+/// `class` `transport_interrupted`, `code` `transport_interrupted`,
+/// `message` `model backend transport was interrupted`. `offers_list`
+/// answers and `shutdown` exits cleanly. This is the stand-in's count,
+/// and this is not the Runtime's refusal.
+///
+/// Falsifier: F-cc44a makes `standin_profile` emit `(allow network*)`
+/// instead of `(deny network*)`. The stand-in then counts a connection,
+/// and the generated head's third line is `(allow network*)`.
+#[test]
+fn generated_profile_denies_the_hosted_connect() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let declared: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&declared).expect("declared rights build a profile");
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let fixture = HostedTransport::prepare("standin-hosted-connect");
+    let profile = fixture.storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&fixture.storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&fixture.request));
+
+    provider.ok(&fixture.run.create);
+    let settled = fixture.run.settle(&mut provider);
+    assert_eq!(
+        fixture.socket.observe().connections,
+        0,
+        "the profile must refuse the connect, so no connection reaches the Runtime socket"
+    );
+    assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "transport_interrupted",
+            "code": "transport_interrupted",
+            "message": "model backend transport was interrupted"
+        }),
+        "the refused connect must fail the run closed"
+    );
+
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
 }
 
 fn collect_allow_lines(profile: &str) -> Vec<&str> {

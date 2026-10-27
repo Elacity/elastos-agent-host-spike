@@ -1,0 +1,10 @@
+id: F-A7-tother
+file: src/ledger.rs
+test: ledger::model_timeout_on_another_handle_is_refused
+--- old
+        if !handles_match(bound, request.handle) {
+            return Err(TimeoutRefuse::OtherHandle);
+        }
+--- new
+        let _same = handles_match(bound, request.handle);
+--- end

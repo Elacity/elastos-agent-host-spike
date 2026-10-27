@@ -23,7 +23,9 @@ section), and a summary must say that test ran and failed. Every mode uses
 this one proof, `survives` included: one named test that still passes means the
 falsifier SURVIVED, and a survivor counts
 only when at least one of its named tests ran and none reported failed. A
-survivor whose named test did not run is NOT RUN.
+survivor whose named test did not run is NOT RUN. A named test that passes but
+prints a line starting `SKIP ` did not run its check, so it is NOT RUN, never
+a pass or a catch.
 
 Before the first edit, every chosen named test runs once on the unmutated
 tree. A test that fails or cannot run there proves nothing: its entry is NOT
@@ -135,6 +137,11 @@ TEST_FAILED = re.compile(r"^[ \t]*error: test failed, to rerun pass", re.MULTILI
 # removal, so their markers count inside a section too.
 OWN_FAILURE_TEXT = re.compile(
     r"^---- .+ stdout ----\n(?:.*\n)*?^failures:$\n?", re.MULTILINE)
+# A passing test that printed a line starting `SKIP ` did not run its check:
+# it reported a host or fixture the check cannot use. libtest prints that line
+# only with --show-output, and the line counts anywhere in the test's own
+# output, so a skip is never a pass and never a catch.
+SKIPPED_TEST = re.compile(r"^SKIP ", re.MULTILINE)
 # A named self-test case runs in its own process. A non-zero exit alone does
 # not say the case ran: a loading error also exits non-zero. The child prints
 # one marker line only after the case returns, and the runner requires both.
@@ -702,13 +709,15 @@ def evaluate(entry, how):
         if [line for line in listed.splitlines() if line == f"{name}: test"] != [f"{name}: test"]:
             outcomes[name] = "not run"
             continue
-        code, output = run(argv + extra + ["--exact", name], cwd)
+        code, output = run(argv + extra + ["--exact", name, "--show-output"], cwd)
         if code == 0:
             ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))
             outcomes[name] = "passed" if ran else "not run"
         elif ran_and_failed(output):
             outcomes[name] = "failed"
         else:
+            outcomes[name] = "not run"
+        if outcomes[name] == "passed" and SKIPPED_TEST.search(output):
             outcomes[name] = "not run"
     return False, outcomes
 
@@ -1223,6 +1232,32 @@ print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtere
 raise SystemExit(101)
 """
 
+# A passing test that printed a `SKIP ` line did not run its check. libtest
+# prints the test's own output only with --show-output, so the stub prints its
+# success block only when that flag is present. skip.txt holds the line the
+# test printed there, and an empty file is the same run with no skip line.
+STUB_PASSING_SKIP = """import pathlib
+import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... ok")
+print()
+if "--show-output" in sys.argv:
+    print("successes:")
+    print("---- tests::planted_check stdout ----")
+    skip = pathlib.Path(__file__).with_name("skip.txt")
+    line = skip.read_text(encoding="utf-8").strip()
+    if line:
+        print(line)
+    print()
+    print("successes:")
+    print("    tests::planted_check")
+print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(0)
+"""
+
 STUB_SPLIT_STREAMS = """import sys
 sys.stdout.write("partial output: ")
 sys.stderr.write("error: could not load the test harness")
@@ -1331,6 +1366,44 @@ def a_named_test_that_does_not_run_is_not_a_catch():
             print(f"self-test: {title}: {got[1]} ({got[2]})")
             if got[:2] != (False, "NOT RUN"):
                 ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_passing_test_that_prints_a_skip_line_is_not_run():
+    """A test that exits 0 with a passing summary but printed a `SKIP ` line
+    did not run its check, so it is NOT RUN: never a pass and never a catch,
+    and a `survives` entry cannot read as a survivor (task 050). The control
+    is the same stub with no skip line, which still reads as passed."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        stub = SELF_TEST_DIR / "stub.py"
+        stub.write_text(STUB_PASSING_SKIP, encoding="utf-8")
+        how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+        for title, skip_line, want in (
+                ("a passing test with a skip line", "SKIP planted: off this host",
+                 (False, "NOT RUN")),
+                ("a passing test with no skip line", "", (False, "SURVIVED"))):
+            (SELF_TEST_DIR / "skip.txt").write_text(skip_line, encoding="utf-8")
+            entry = {"id": "ST", "command": "host", "expect": "caught",
+                     "tests": ["tests::planted_check"]}
+            build_failed, outcomes = evaluate(entry, how)
+            got = verdict(entry, build_failed, outcomes)
+            outcome = outcomes["tests::planted_check"]
+            print(f"self-test: {title}: {outcome}, {got[1]} ({got[2]})")
+            if outcome != ("not run" if skip_line else "passed") or got[:2] != want:
+                ok = False
+        (SELF_TEST_DIR / "skip.txt").write_text("SKIP planted: off this host",
+                                                encoding="utf-8")
+        entry = {"id": "ST", "command": "host", "expect": "survives",
+                 "tests": ["tests::planted_check"]}
+        got = verdict(entry, *evaluate(entry, how))
+        print(f"self-test: a survivor over a skip line: {got[1]} ({got[2]})")
+        if got[:2] != (False, "NOT RUN"):
+            ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
@@ -3324,6 +3397,8 @@ def a_backup_refusal_removes_this_runs_temporary_file():
 SELF_TEST_CASES = {
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
+    "a passing test that prints a skip line is not run":
+        a_passing_test_that_prints_a_skip_line_is_not_run,
     "an interrupted edit is restored": interruption_restores,
     "another lane's backup is not recovered": another_lanes_backup_is_not_recovered,
     "a killed provider edit is recovered": a_killed_provider_edit_is_recovered,
