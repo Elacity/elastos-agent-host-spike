@@ -2518,6 +2518,54 @@
       "tests": [
         "hosted_run_with_no_grant_is_refused_before_any_send"
       ]
+    },
+    {
+      "id": "MP30",
+      "title": "the relay forwards a body with one byte added",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "        .body(body.to_vec())",
+          "new": "        .body({\n            let mut changed = body.to_vec();\n            changed.push(b' ');\n            changed\n        })"
+        }
+      ],
+      "tests": [
+        "hosted_relay_forwards_the_provider_body_unchanged_and_no_key"
+      ]
+    },
+    {
+      "id": "MP31",
+      "title": "the relay adds an authorization header to the provider body",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "        .header(\"content-type\", \"application/json\")",
+          "new": "        .header(\"content-type\", \"application/json\")\n        .header(\"authorization\", \"Bearer planted-key\")"
+        }
+      ],
+      "tests": [
+        "hosted_relay_forwards_the_provider_body_unchanged_and_no_key"
+      ]
+    },
+    {
+      "id": "MP32",
+      "title": "a closed provider socket is recorded as an answer",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "        if let Err(err) = (&*stream).write_all(&frame) {\n            // The provider closed its end of the Runtime socket, so the answer\n            // stops here: the record says which socket failed, not that the\n            // backend answered (P11).\n            return RelayOutcome::Unreachable {\n                reason: format!(\n                    \"the provider closed its Runtime socket before the stream ended: {err}\"\n                ),\n            };\n        }",
+          "new": "        if (&*stream).write_all(&frame).is_err() {\n            return RelayOutcome::Answered {\n                status: status.as_u16(),\n                first_bytes: Vec::new(),\n            };\n        }"
+        }
+      ],
+      "tests": [
+        "relay_reports_a_closed_provider_socket_as_unreachable"
+      ]
     }
   ]
 }
