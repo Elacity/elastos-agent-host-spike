@@ -20,10 +20,12 @@ contains CRITICAL and names the commit from ``git log -1 --format=%H HEAD
 is appended to ``CRITICAL.md``. With no allow, this module writes neither
 file.
 
-A recorded allow keeps the gate green. The deny test expects only
-``NotDenied`` and its docstring names that finding file (README guard b).
-A later harness error still fails the gate. The plant requires a denying
-baseline; an already-allowing profile skips that plant with its finding link.
+A recorded allow keeps the gate green. The deny test is an expected
+failure and its docstring names that finding file (README guard b).
+Each confirmed allow is written before the next profile is classified.
+A later harness error still fails the gate. The plant still runs.
+A recorded allow is not a skip. This module skips only when
+``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing.
 A profile error, a failed compile, a failed
 unsandboxed control, nonempty stderr, and an exit other than 0 are harness
 errors. They are not a deny and they are not a skip.
@@ -33,6 +35,7 @@ errors. They are not a deny and they are not a skip.
 names that path. ``ShmOpenClassifier`` does not compile and does not launch.
 """
 
+import ast
 import os
 import re
 import shutil
@@ -258,6 +261,7 @@ def compile_shm(parent, root, source_text):
         capture_output=True,
         text=True,
         timeout=60,
+        cwd=parent,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "no compiler output"
@@ -438,18 +442,21 @@ def mark_expected(case_cls, method_name, finding_rel):
 
 
 def observe(case_cls):
-    """Classify each live profile once, so an allow is marked before its test."""
+    """Classify each live profile. Record each allow before the next profile.
+
+    A later harness error still propagates. Allows already confirmed stay
+    written and marked. A refusal before any allow writes nothing.
+    """
     case_cls.recorded_allows = {}
-    items = []
+    confirmed = []
     for profile in PROFILES:
         result = open_under(profile["path"])
         outcome = classify(result)
-        if outcome == "allow":
-            items.append((profile, result))
-    if not items:
-        return
-    write_findings(ROOT, items)
-    for profile, _result in items:
+        if outcome != "allow":
+            continue
+        confirmed.append((profile, result))
+        # Snapshot: a later append must not change the list this call recorded.
+        write_findings(ROOT, list(confirmed))
         case_cls.recorded_allows[profile["name"]] = FINDINGS[profile["name"]]
         mark_expected(
             case_cls,
@@ -611,19 +618,22 @@ class ShmOpenProbe(unittest.TestCase):
         try:
             for profile in PROFILES:
                 with self.subTest(profile=profile["name"]):
-                    self._require_denying_baseline(profile["name"])
                     text = profile["path"].read_text(encoding="utf-8")
-                    self.assertEqual(text.count("(allow ipc-posix-shm)"), 0)
-                    self.assertEqual(text.count(DENY_DEFAULT), 1)
-                    self.assertTrue(text.endswith("\n"))
-                    planted = with_shm_allow(text)
-                    self.assertEqual(planted, text + "(allow ipc-posix-shm)\n")
+                    baseline = self._source_for_plant(profile["name"], text)
+                    if profile["name"] not in type(self).recorded_allows:
+                        self.assertEqual(text.count("(allow ipc-posix-shm)"), 0)
+                        self.assertEqual(baseline, text)
+                    self.assertEqual(baseline.count(ALLOW_IPC), 0)
+                    self.assertEqual(baseline.count(DENY_DEFAULT), 1)
+                    self.assertTrue(baseline.endswith("\n"))
+                    planted = with_shm_allow(baseline)
+                    self.assertEqual(planted, baseline + "(allow ipc-posix-shm)\n")
                     self.assertEqual(planted.count("(allow ipc-posix-shm)"), 1)
                     self.assertEqual(planted.count(DENY_DEFAULT), 1)
                     self.assertNotIn("(allow ipc-posix-shm (", planted)
                     self.assertEqual(
                         planted.count("(allow default)"),
-                        text.count("(allow default)"),
+                        baseline.count("(allow default)"),
                     )
                     copy = write_copy(directory, profile["name"] + "-allow", planted)
                     self.assertEqual(Path(copy).read_text(encoding="utf-8"), planted)
@@ -642,28 +652,62 @@ class ShmOpenProbe(unittest.TestCase):
                     self.assertNotIn(os.fspath(profile["path"]), result.argv)
 
             with self.subTest(profile="wallet-deleted"):
-                self._require_denying_baseline("wallet")
                 wallet = PROFILES[0]
                 self.assertEqual(wallet["name"], "wallet")
-                wallet_text = wallet["path"].read_text(encoding="utf-8")
-                deleted = without_deny_default(wallet_text)
+                baseline = self._source_for_plant(
+                    "wallet", wallet["path"].read_text(encoding="utf-8")
+                )
+                deleted = without_deny_default(baseline)
                 self.assertNotIn("(deny default)", deleted)
                 self.assertEqual(deleted.count("(allow ipc-posix-shm)"), 0)
                 self.assertNotIn("(allow default)", deleted)
                 removed = write_copy(directory, "wallet-deleted", deleted)
-                denied = require_denied(removed)
-                self.assertEqual(denied.stdout, DENY_STDOUT)
-                self.assertEqual(denied.stderr, "")
-                self.assertEqual(denied.exit_code, 0)
+                finding = type(self).recorded_allows.get("wallet")
+                try:
+                    denied = require_denied(removed)
+                except NotDenied as caught:
+                    if not finding:
+                        raise
+                    method = getattr(type(self), "test_wallet_shm_open_is_denied")
+                    self.assertTrue(
+                        getattr(method, "__unittest_expecting_failure__", False)
+                    )
+                    self.assertIn(finding, method.__doc__ or "")
+                    self.assertIn("ALLOW", str(caught))
+                else:
+                    self.assertEqual(denied.stdout, DENY_STDOUT)
+                    self.assertEqual(denied.stderr, "")
+                    self.assertEqual(denied.exit_code, 0)
         finally:
             for profile in PROFILES:
                 if profile["path"].read_bytes() != originals[profile["path"]]:
                     raise AssertionError(f"the probe changed {profile['rel']}")
 
-    def _require_denying_baseline(self, name):
+    def _source_for_plant(self, name, text):
+        """The text the temp plant edits. A recorded allow does not skip this.
+
+        The deny test carries the finding-linked expected failure. The live
+        file is not edited. One exact plant line is removed from the copy
+        so the append is still that one line.
+        """
         finding = type(self).recorded_allows.get(name)
-        if finding:
-            self.skipTest(f"{name} baseline allows shm_open; finding: {finding}")
+        if finding is None:
+            if "(allow ipc-posix-shm)" in text:
+                raise AssertionError(f"{name} source contains (allow ipc-posix-shm)")
+            return text
+        method = getattr(type(self), f"test_{name}_shm_open_is_denied")
+        if not getattr(method, "__unittest_expecting_failure__", False):
+            raise HarnessError(f"{name} allow has no finding-linked expected failure")
+        if finding not in (method.__doc__ or ""):
+            raise HarnessError(f"{name} allow docstring does not name {finding}")
+        occurrences = text.count(ALLOW_IPC)
+        if occurrences > 1:
+            raise HarnessError(
+                f"(allow ipc-posix-shm) occurs {occurrences} times, not zero or one"
+            )
+        if occurrences == 1:
+            text = text.replace(ALLOW_IPC, "", 1)
+        return text
 
 
 class ShmOpenClassifier(unittest.TestCase):
@@ -711,6 +755,105 @@ class ShmOpenClassifier(unittest.TestCase):
         self.assertEqual(missing_sandbox, f"missing {absent_sandbox}")
         self.assertEqual(missing_both, f"missing {absent_sandbox} and {absent_cc}")
         self.assertIsNone(present)
+
+    def test_skip_is_only_a_missing_toolchain(self):
+        """``skipTest`` is only the missing compiler or ``sandbox-exec`` path."""
+        source = Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "skipTest":
+                    calls.append(node)
+        self.assertEqual(len(calls), 1)
+        line = source.splitlines()[calls[0].lineno - 1]
+        self.assertIn("skip_reason", line)
+        self.assertIsNone(skip_reason())
+        self.launch_guard.assert_not_called()
+
+    def test_recorded_allow_does_not_skip(self):
+        """A recorded allow is a finding-linked expected failure, not a skip.
+
+        Both tools are present. The plant source is still produced. A recorded
+        allow without that mark, a docstring that omits the finding, and a
+        second plant line are each their own harness error.
+        """
+        self.assertIsNone(skip_reason())
+        self.assertTrue(os.path.isfile(CC))
+        self.assertTrue(os.path.isfile(sbx.SANDBOX_EXEC))
+        text = "(version 1)\n(deny default)\n(allow ipc-posix-shm)\n"
+        clean = "(version 1)\n(deny default)\n"
+
+        class Recorded(ShmOpenProbe):
+            recorded_allows = {"wallet": FINDINGS["wallet"]}
+
+        mark_expected(Recorded, "test_wallet_shm_open_is_denied", FINDINGS["wallet"])
+        try:
+            case = Recorded("test_falsifier_allow_ipc_posix_shm_is_caught")
+            baseline = case._source_for_plant("wallet", text)
+            self.assertEqual(baseline, clean)
+            self.assertEqual(case._source_for_plant("did", clean), clean)
+        finally:
+            Recorded.doClassCleanups()
+
+        class Bare(ShmOpenProbe):
+            recorded_allows = {"wallet": FINDINGS["wallet"]}
+
+        bare = Bare("test_falsifier_allow_ipc_posix_shm_is_caught")
+        with self.assertRaises(HarnessError) as unmarked:
+            bare._source_for_plant("wallet", text)
+        self.assertEqual(
+            str(unmarked.exception),
+            "wallet allow has no finding-linked expected failure",
+        )
+        self.assertNotIsInstance(unmarked.exception, unittest.SkipTest)
+
+        class WrongDoc(ShmOpenProbe):
+            recorded_allows = {"wallet": FINDINGS["wallet"]}
+
+        def body(self):
+            raise NotDenied(
+                sbx.Result(exit_code=0, stdout="fd=3 errno=0\n", stderr="", argv=[])
+            )
+
+        body.__doc__ = "plain"
+        body.__unittest_expecting_failure__ = True
+        WrongDoc.test_wallet_shm_open_is_denied = body
+        wrong = WrongDoc("test_falsifier_allow_ipc_posix_shm_is_caught")
+        with self.assertRaises(HarnessError) as unnamed:
+            wrong._source_for_plant("wallet", text)
+        self.assertEqual(
+            str(unnamed.exception),
+            f"wallet allow docstring does not name {FINDINGS['wallet']}",
+        )
+
+        class Twice(ShmOpenProbe):
+            recorded_allows = {"wallet": FINDINGS["wallet"]}
+
+        mark_expected(Twice, "test_wallet_shm_open_is_denied", FINDINGS["wallet"])
+        try:
+            twice = Twice("test_falsifier_allow_ipc_posix_shm_is_caught")
+            with self.assertRaises(HarnessError) as extra:
+                twice._source_for_plant("wallet", text + ALLOW_IPC)
+            self.assertEqual(
+                str(extra.exception),
+                "(allow ipc-posix-shm) occurs 2 times, not zero or one",
+            )
+        finally:
+            Twice.doClassCleanups()
+
+        class Clean(ShmOpenProbe):
+            recorded_allows = {}
+
+        plain = Clean("test_falsifier_allow_ipc_posix_shm_is_caught")
+        with self.assertRaises(AssertionError) as present:
+            plain._source_for_plant("wallet", text)
+        self.assertEqual(
+            str(present.exception),
+            "wallet source contains (allow ipc-posix-shm)",
+        )
+        self.assertEqual(plain._source_for_plant("wallet", clean), clean)
+        self.launch_guard.assert_not_called()
 
     def test_profile_bytes_match_the_start(self):
         """Each end digest equals the start digest through ``changed``.
@@ -889,6 +1032,103 @@ class ShmOpenClassifier(unittest.TestCase):
         self.assertEqual(str(caught.exception), expected)
         self.assertEqual(opened.call_count, 1)
 
+    def test_observe_records_allow_before_later_error(self):
+        """A confirmed allow is written before the next profile is classified.
+
+        Wallet allow, then a did profile error: the writer records the wallet
+        allow, the wallet deny test is marked, and the error still propagates.
+        Model is not opened. A did allow before a model error is recorded too.
+        """
+        allow = sbx.Result(
+            exit_code=0,
+            stdout="fd=3 errno=0\n",
+            stderr="",
+            argv=[sbx.SANDBOX_EXEC, "-f", "confine.sb", "/private/shm", "/ccrt042"],
+        )
+        refused = sbx.Result(
+            exit_code=sbx.PROFILE_ERROR_EXIT,
+            stdout="",
+            stderr="Operation not permitted\n",
+            argv=[sbx.SANDBOX_EXEC, "-f", "confine.sb"],
+        )
+        self.assertEqual(classify(allow), "allow")
+        with self.assertRaises(HarnessError) as sample:
+            classify(refused)
+        expected = str(sample.exception)
+        self.assertIn("profile error", expected)
+        self.assertIn("Operation not permitted", expected)
+
+        def run_case(results):
+            class Observed(ShmOpenProbe):
+                pass
+
+            pending = list(results)
+            order = []
+
+            def opened(path):
+                order.append(("open", path))
+                return pending.pop(0)
+
+            def written(_repo, items):
+                order.append(("write", [item[0]["name"] for item in items]))
+
+            with patch(__name__ + ".open_under", side_effect=opened), patch(
+                __name__ + ".write_findings", side_effect=written
+            ), patch(__name__ + ".mark_expected", wraps=mark_expected) as marker:
+                with self.assertRaises(HarnessError) as caught:
+                    observe(Observed)
+            self.assertEqual(str(caught.exception), expected)
+            return Observed, marker, order
+
+        wallet, did, model = PROFILES
+        observed = None
+        try:
+            observed, marker, order = run_case([allow, refused])
+            self.assertEqual(
+                order,
+                [
+                    ("open", wallet["path"]),
+                    ("write", ["wallet"]),
+                    ("open", did["path"]),
+                ],
+            )
+            self.assertEqual(observed.recorded_allows, {"wallet": FINDINGS["wallet"]})
+            self.assertEqual(marker.call_count, 1)
+            method = observed.test_wallet_shm_open_is_denied
+            self.assertTrue(getattr(method, "__unittest_expecting_failure__", False))
+            self.assertIn(FINDINGS["wallet"], method.__doc__ or "")
+            self.assertNotIn("model", observed.recorded_allows)
+        finally:
+            if observed is not None:
+                observed.doClassCleanups()
+
+        observed = None
+        try:
+            observed, marker, order = run_case([allow, allow, refused])
+            self.assertEqual(
+                order,
+                [
+                    ("open", wallet["path"]),
+                    ("write", ["wallet"]),
+                    ("open", did["path"]),
+                    ("write", ["wallet", "did"]),
+                    ("open", model["path"]),
+                ],
+            )
+            self.assertEqual(
+                observed.recorded_allows,
+                {"wallet": FINDINGS["wallet"], "did": FINDINGS["did"]},
+            )
+            self.assertNotIn("model", observed.recorded_allows)
+            self.assertEqual(marker.call_count, 2)
+            did_method = observed.test_did_shm_open_is_denied
+            self.assertTrue(getattr(did_method, "__unittest_expecting_failure__", False))
+            self.assertIn(FINDINGS["did"], did_method.__doc__ or "")
+        finally:
+            if observed is not None:
+                observed.doClassCleanups()
+        self.launch_guard.assert_not_called()
+
     def test_recorded_allow_is_expected_failure(self):
         """A recorded allow is an expected failure whose docstring names the finding.
 
@@ -998,8 +1238,8 @@ class ShmOpenClassifier(unittest.TestCase):
         """Run every real probe method against injected tools and profile text.
 
         Each provider and all providers together can already grant shm_open.
-        Only their deny tests expect failure; their plants name the finding
-        for the unavailable denying baseline. All remaining checks still run.
+        Only their deny tests expect failure. The plant still runs, including
+        the wallet deletion, and nothing skips.
         """
         method_names = unittest.defaultTestLoader.getTestCaseNames(ShmOpenProbe)
         scenarios = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
@@ -1031,7 +1271,10 @@ class ShmOpenClassifier(unittest.TestCase):
                         argv=[binary, next_shm_name()],
                     )
 
+                launched = []
+
                 def injected_sandbox(**kwargs):
+                    launched.append(os.fspath(kwargs["profile"]))
                     self.assertEqual(kwargs["pinned_exe"], kwargs["launch_exe"])
                     self.assertEqual(kwargs["timeout"], 5)
                     self.assertEqual(len(kwargs["args"]), 1)
@@ -1068,19 +1311,24 @@ class ShmOpenClassifier(unittest.TestCase):
                     self.assertEqual(result.errors, [])
                     self.assertEqual(result.failures, [])
                     self.assertEqual(result.unexpectedSuccesses, [])
+                    self.assertEqual(result.skipped, [])
+                    self.assertIsNone(skip_reason())
                     self.assertEqual(len(result.expectedFailures), len(allowed))
                     self.assertEqual(
                         {case._testMethodName for case, _error in result.expectedFailures},
                         {f"test_{name}_shm_open_is_denied" for name in allowed},
                     )
-                    reasons = [reason for _case, reason in result.skipped]
-                    expected_reasons = [
-                        f"{name} baseline allows shm_open; finding: {FINDINGS[name]}"
-                        for name in allowed
-                    ]
-                    if "wallet" in allowed:
-                        expected_reasons.append(expected_reasons[0])
-                    self.assertCountEqual(reasons, expected_reasons)
+                    self.assertEqual(
+                        sorted(
+                            os.path.basename(path)
+                            for path in launched
+                            if path.endswith("-allow.sb")
+                        ),
+                        ["did-allow.sb", "model-allow.sb", "wallet-allow.sb"],
+                    )
+                    self.assertTrue(
+                        any(path.endswith(os.sep + "wallet-deleted.sb") for path in launched)
+                    )
                     self.assertTrue(result.wasSuccessful())
                     self.assertEqual(
                         ShmOpenProbe.recorded_allows,
