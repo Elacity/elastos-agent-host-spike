@@ -24,4 +24,6 @@ The status strings are `starting`, `running`, `stopping`, `stopped` and `failed`
 
 `StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. The body's only key is `reason`. The Ok value is null. `cause` is `stopped: ` joined with that reason. A `stopped` entry stays while the test-supplied instant is less than 60 seconds after the stop, and the list omits it at 60 seconds. Each `Live` grant whose session is that instance becomes `Revoked` and drops out through the one life filter. The sibling instance stays. Pending-request settlement is a later slice.
 
+`authorise` is a lab test seam, not a route. A sibling is refused with `wrong capsule`. A stop removes that session's live grant through the one filter. This value is the lab stand-in and the real route can replace it later because the refusal matches (M1-R). `instance_grant_does_not_authorise_sibling` stays the process-isolation row.
+
 This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. `run_leaves_no_live_grant` stays blocked on the real Runtime.

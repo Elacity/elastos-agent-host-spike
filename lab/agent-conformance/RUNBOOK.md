@@ -700,3 +700,5 @@ These rows use lab client sessions on the run client's attach and provider route
 Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there gives the Runtime no credit.
 
 The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.
+
+These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.
