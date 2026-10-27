@@ -249,6 +249,30 @@ fn model_forged_identity_does_not_grant_append() {
 }
 
 #[test]
+fn model_forged_session_does_not_grant_append() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let refusal = verifier
+        .operate(&call, &request, Operation::Append)
+        .expect_err("guest session does not grant append");
+    assert_eq!(refusal, OperateRefuse::AppendNotGranted);
+    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+}
+
+#[test]
 fn model_operate_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
