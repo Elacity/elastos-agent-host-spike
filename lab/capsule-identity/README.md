@@ -1336,7 +1336,24 @@ files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 and the module doc of `src/lib.rs` say the claim word for word, this section
 states the gate, and no `*.md` file of the lane outside `tests/` and no file
 under `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
-`tests/common/mod.rs`), in any case and across line breaks.
+`tests/common/mod.rs`), in any case and across line breaks. The scan reads
+every such file that git tracks or would track: an untracked file that git
+does not ignore counts, so a new doc is read before it is committed, and an
+ignored one such as `target/` does not. Quote and comment markers and word
+emphasis do not hide a claim: a line loses its leading `//!`, `///` or `//`
+and then any run of leading `>` (so `> > text` reads as `text`), and each word
+loses every `` ` ``, `*` and `_` at its ends (`*the*` reads as `the`; a mark
+inside a word, such as the hyphen of a hyphenated word, stays). A word that was only marks,
+such as the `*` that starts a block-comment line, is dropped, so it never
+splits a phrase. Other Markdown forms (links, HTML, tables, headings, escapes)
+are not read through.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| A run of leading `>` is removed, so a claim over two blockquote lines is found | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28a (`>` kept) |
+| A word that was only marks is dropped, so a claim over two ` * ` block-comment lines is found | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28b (the empty word kept) |
+| `*` is trimmed from a word's ends, so emphasis inside a claim (`*the*`) does not hide it | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28c (`*` not trimmed) |
+| `` ` `` is trimmed from a word's ends, so a word in code marks inside a claim (`` `Runtime's` ``) does not hide it | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28d (`` ` `` not trimmed) |
 
 ## Run
 
@@ -1408,7 +1425,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 231 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 235 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1436,7 +1453,8 @@ F-CI16i, and task 017's F-CI17a (all three: see
 F-CI24a to F-CI24e (see
 [the cross-implementation check](#the-cross-implementation-check)), and task
 027's F-CI27a to F-CI27d (see
-[for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)).
+[for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
+028's F-CI28a to F-CI28d (see [claim scope](#claim-scope)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1483,6 +1501,11 @@ F-CI27a to F-CI27c each turn one refusal into `Ok(false)`, and each anchor
 holds that refusal's own message text, so it is found exactly once. F-CI27d
 shares F-CI25g's anchor, the name-match line, and drops `dev` where F-CI25g
 drops `build`. Task 027 changed no code and no older edit's text.
+Task 028's entries all edit `tests/common/mod.rs`, in the claim scan: F-CI28a
+in `comment_body`, F-CI28b in `equality_claims_in`, and F-CI28c and F-CI28d in
+`WORD_MARKS`, which `claim_word` trims. Each anchor is a line task 028 added,
+found exactly once. Task 028 kept the anchor lines of F-CI23e to F-CI23h byte
+for byte and changed no older edit's text.
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1565,8 +1588,11 @@ without an edit, 0 do not`; with the id prefix `F-CI23`: 12 of 12). At task
 024 it reported `summary: 227 CAUGHT of 227` (`baseline: 124 named tests pass
 without an edit, 0 do not`; F-CI24a to F-CI24e each CAUGHT). At task
 027 it reported `summary: 231 CAUGHT of 231` (`baseline: 124 named tests pass
-without an edit, 0 do not`; F-CI27a to F-CI27d each CAUGHT).
+without an edit, 0 do not`; F-CI27a to F-CI27d each CAUGHT). At task
+028 it reported `summary: 235 CAUGHT of 235` (`baseline: 124 named tests pass
+without an edit, 0 do not`; F-CI28a to F-CI28d and F-CI23e to F-CI23h each
+CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024 and 027 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027 and 028 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

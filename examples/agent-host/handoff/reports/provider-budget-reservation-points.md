@@ -2,11 +2,10 @@
 
 Task 034, re-landed as task 038 after the merge-gate flake. Discovery only:
 this report changes no code and books no M1 check.
-Base commit: `3818e38ca91d2a3123ae25382a9643f195235baf` from
-`git rev-parse HEAD`, which includes task 037's fix of
-`execution::tests::local_llama_deadline_holds_capacity_until_worker_stops`.
-Every line below was re-read at this base. Of the files cited by line,
-`execution.rs` and `provider-a4-deepseek-turn-gaps.md` moved between the
+Base commit: `093d1f798df2a14c5aa2b0da2a973c3d5e1b166d` from
+`git rev-parse HEAD`, which includes tasks 037-043. Every line below was
+re-read at this base. Of the files cited by line, `execution.rs`,
+`tests/process.rs` and `provider-a4-deepseek-turn-gaps.md` moved between the
 reviewed report base `2c664d3a8` and this one; their line numbers below are the
 ones at this base. The planner's grep base
 `04f1e93b4` is an ancestor of this commit. Some planner line numbers moved
@@ -151,6 +150,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 | `cancel_reservation_is_stored_before_io` | `capsules/model-provider/src/state.rs:5249` | The cancel returns `reconciling` (`:5290`), the stored backend state has `cancel_requested` true (`:5293`) and `cancel_sent` true (`:5297`), and the adapter is called with `allow_send` true (`:5300`). | None. The cancel path records state, not usage. |
 | `reserved_cancel_retry_does_not_send_again_or_extend_deadline` | `capsules/model-provider/src/state.rs:5304` | The first cancel stores deadline 1234 (`:5345`); the retry is reconciling (`:5373`), is called with `allow_send` false (`:5374-5377`), and keeps deadline 1234 (`:5382`). | None. No second send and no usage record. |
 | `local_llama_cancel_with_active_backend_settles_cancelled_without_redispatch` | `capsules/model-provider/src/execution.rs:4065` | The cancel is reconciling (`:4077`), the terminal is `cancelled` (`:4080`), one terminal event exists (`:4084-4093`), and the engine saw one stalled request (`:4113-4119`). | None. A local run has no backend report. |
+| `hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more` | `capsules/model-provider/tests/process.rs:1694` | On macOS, the stand-in holds the Runtime's answer. `runs_create` returns the contract run id and an open status (`prepared` or `running`); `runs_cancel` returns the same run id and `reconciling`; with the answer still held the terminal is `settlement_unknown` with code `settlement_unknown` and no output. The stand-in saw one connection and one request, `POST /v1/hosted-effect HTTP/1.1`, with no cancel request and no `authorization` header. Result: `test hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more ... ok`, `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.80s`. Off macOS it prints one `SKIP` line and returns. | All three facts are `unknown` (`state.rs:1352-1355`, `contract.rs:212-219`). No usage is recorded and no cancel effect is sent; the Runtime sees only the connection close. |
 
 ```
 test state::tests::cancel_reservation_is_stored_before_io ... ok
@@ -159,6 +159,8 @@ test state::tests::reserved_cancel_retry_does_not_send_again_or_extend_deadline 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 0.06s
 test execution::tests::local_llama_cancel_with_active_backend_settles_cancelled_without_redispatch ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 0.55s
+test hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.80s
 ```
 
 ### Case 4: a `settlement_unknown` outcome
@@ -170,6 +172,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 | `responses_and_chat_cancel_with_active_backend_settle_unknown` | `capsules/model-provider/src/execution.rs:4937` | Both hosted adapters cancel to `reconciling` (`:4961`), then settle `settlement_unknown` (`:4967`), keep one terminal event (`:4971-4980`), keep the request active (`:4965`, `:5002`) and make one request (`:4966`, `:5004`). | Hosted report with `usage` = unknown (`state.rs:1354`). The test does not assert that field. |
 | `local_llama_cancel_with_active_backend_settles_unknown_without_redispatch` | `capsules/model-provider/src/execution.rs:3708` | The retained unknown run returns the same run id and `settlement_unknown` (`:3838-3842`), and the journal bytes and engine events stay unchanged (`:3844`, `:3845-3849`), so no new inference starts. | None. A local run has no backend report. |
 | `hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage` | `capsules/model-provider/tests/process.rs:1573` | On macOS, the stand-in writes the Runtime's accepted head and one chunk that holds `ready`, then closes with no `0\r\n\r\n` and no usage event. The run settles `failed`/`transport_interrupted`, not `settlement_unknown`, with no output; the stand-in saw one connection and one request, `POST /v1/hosted-effect HTTP/1.1`, with no `authorization` header. Result: `test hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage ... ok`. Off macOS it prints one `SKIP` line and returns. | All three facts are `unknown` (`state.rs:1352-1354`, `contract.rs:212-219`), although the cut stream named `resolved-model` and the backend did work. |
+| `hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more` | `capsules/model-provider/tests/process.rs:1694` | On macOS, the Runtime socket holds the answer while one hosted text run is cancelled. The run settles `settlement_unknown` with code `settlement_unknown`; `terminal.output` is absent; `resolved_model`, `usage` and `cost` are all `unknown`; and the stand-in saw one connection and one request with no cancel effect. Result: `test hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more ... ok`, `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.80s`. Off macOS it prints one `SKIP` line and returns. | All three facts are `unknown` (`state.rs:1352-1355`, `contract.rs:212-219`) even though the Runtime still held the answer. No usage is reported. |
 
 ```
 test state::tests::prepared_run_becomes_settlement_unknown_after_restart ... ok
@@ -182,6 +185,8 @@ test execution::tests::local_llama_cancel_with_active_backend_settles_unknown_wi
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 1.16s
 test hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 1.43s
+test hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.80s
 ```
 
 Note: the unflushed `ready` delta is dropped on the fault. The chunk error
@@ -222,12 +227,23 @@ proposes a Runtime design; each names what is missing.
 3. **Release on cancel.** Runtime-side (Anders). A cancel is one more effect
    through the same forward (`egress.rs:1513-1583`); the binding is removed
    when a terminal response arrives (`bridge.rs:1034-1059`). No amount is
-   released.
+   released. For a hosted text run this test shows no cancel effect is sent
+   at all: the provider signals only its worker (`adapters.rs:1469-1473`) and
+   settles `settlement_unknown`, so the Runtime sees the provider socket close
+   with no terminal (`tests/process.rs:1694`). A Runtime hold for this case is
+   Anders-owned, with no design here.
 4. **Hold on `settlement_unknown`.** Runtime-side (Anders). The binding is
    removed on any terminal status, `settlement_unknown` included
    (`bridge.rs:1034-1059`). The provider keeps the unknown run truthful
    (`capsules/model-provider/src/state.rs:846-879`), and the Runtime keeps no
-   corresponding hold.
+   corresponding hold. A dropped provider connection does not reach that
+   removal by itself: the copy loop's write to the closed socket fails and the
+   caller shuts the socket
+   (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1644-1648`,
+   `:531-533`), while `retire_terminal_model_run` runs only on a later
+   provider response with a terminal status
+   (`elastos/crates/elastos-runtime/src/provider/bridge.rs:1437`, function at
+   `:1034-1060`); whether the Runtime then polls `runs_get` is not checked.
 5. **One account across concurrent and retried calls.** Runtime-side
    (Anders). Retries join one binding by the run id, and concurrent runs each
    add to `pending` (`bridge.rs:995`, `:1009`); the binding cap is 4096

@@ -87,12 +87,14 @@ fn the_claim_wording_check_names_each_gap() {
 }
 
 /// The scan reads a claim however it is written: in any case, over a line
-/// break, over two comment lines, with a typographic apostrophe. It names the
-/// file, the line where the claim starts and the phrase, and a negation is
-/// not a claim. A file it cannot read or decode is refused with its cause.
+/// break, over two comment, blockquote or block-comment lines, with a
+/// typographic apostrophe, with emphasis or code marks around a word. It names
+/// the file, the line where the claim starts and the phrase, and a negation is
+/// not a claim, quoted or not. A file it cannot read or decode is refused with
+/// its cause.
 #[test]
 fn the_claim_scan_finds_a_claim_however_it_is_written() {
-    let cases: [(&str, &str, &[&str]); 6] = [
+    let cases: [(&str, &str, &[&str]); 11] = [
         (
             "case.md",
             "One line.\nThe lab CID EQUALS THE RUNTIME'S CID.\n",
@@ -125,6 +127,31 @@ fn the_claim_scan_finds_a_claim_however_it_is_written() {
                 "two.md:1: \"kubo-compatible\"",
                 "two.md:3: \"same cid as kubo\"",
             ],
+        ),
+        (
+            "quote.md",
+            "> The lab CID matches\n> Kubo.\n",
+            &["quote.md:1: \"matches kubo\""],
+        ),
+        (
+            "emphasis.md",
+            "It equals *the* Runtime's CID.\n",
+            &["emphasis.md:1: \"equals the runtime's cid\""],
+        ),
+        (
+            "code.md",
+            "It is the same as the `Runtime's` CID.\n",
+            &["code.md:1: \"same as the runtime's cid\""],
+        ),
+        (
+            "src/block.rs",
+            "/* The lab CID is the\n * Runtime's CID. */\nconst X: u8 = 0;\n",
+            &["src/block.rs:1: \"is the runtime's cid\""],
+        ),
+        (
+            "quoted-negation.md",
+            "> It is not the Runtime's CID.\n",
+            &[],
         ),
     ];
     for (path, text, expected) in cases {

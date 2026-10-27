@@ -3844,6 +3844,70 @@
         "the_consumer_scan_uses_cargos_reader",
         "every_lab_cid_consumer_is_in_the_adoption_note"
       ]
+    },
+    {
+      "id": "F-CI28a",
+      "title": "the claim scan keeps Markdown quote markers, so a claim over two blockquote lines is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    body.trim_start_matches(|c: char| c == '>' || c.is_whitespace())\n",
+          "new": "    body\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI28b",
+      "title": "the claim scan keeps a word that was only marks, so a block comment's lone * splits a claim over two lines",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            if !word.is_empty() {\n",
+          "new": "            if true {\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI28c",
+      "title": "the claim scan does not trim * from a word, so emphasis inside a claim hides it",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    '*', // emphasis, and a block comment's ` * ` line start\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI28d",
+      "title": "the claim scan does not trim ` from a word, so a word in code marks inside a claim hides it",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    '`', // inline code\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
     }
   ]
 }
