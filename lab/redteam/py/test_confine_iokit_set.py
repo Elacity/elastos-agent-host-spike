@@ -740,7 +740,8 @@ class PropProbe(unittest.TestCase):
         The zero-count reads the plant baseline from ``_source_for_plant``.
         It counts the exact line. Each baseline contains that line zero times
         and ``(deny default)`` once. A recorded allow strips one exact copy
-        before that count. A temp copy appends that one line. The copy's
+        and any property-filtered grant before that count. A temp copy appends
+        that one line. The copy's
         stdout is ``kr=0``, and the helper pointed at the copy fails the deny
         check. Deleting ``(deny default)``, appending ``(allow iokit-open)``,
         appending ``(allow iokit-open-user-client)``, appending
@@ -862,9 +863,9 @@ class PropProbe(unittest.TestCase):
 
         The deny test carries the finding-linked expected failure. The live
         file is not edited. One exact plant line is removed from the copy
-        so the append is still that one line. A property-filtered grant is
-        left in place. A plant phrase with no trailing newline is its own
-        harness error.
+        so the append is still that one line. The property-filtered grant
+        is also removed from this baseline so each control still tests a deny.
+        A plant phrase with no trailing newline is its own harness error.
         """
         finding = type(self).recorded_allows.get(name)
         if finding is None:
@@ -885,7 +886,7 @@ class PropProbe(unittest.TestCase):
             text = text.replace(ALLOW_SET, "", 1)
         if PLANT_PHRASE in without_filtered_grant(text):
             raise HarnessError(f"{name} plant line has no trailing newline")
-        return text
+        return without_filtered_grant(text)
 
 
 class PropRules(unittest.TestCase):
@@ -998,8 +999,8 @@ class PropRules(unittest.TestCase):
 
         Both tools are injected as present. The plant source is still produced. A recorded
         allow without that mark, a docstring that omits the finding, and a
-        second plant line are each their own harness error. The property-filtered
-        grant stays in the baseline.
+        second plant line are each their own harness error. The temporary
+        baseline removes the property-filtered grant as well.
         """
         with patch.object(os.path, "isfile", return_value=True):
             self.assertIsNone(skip_reason())
@@ -1019,11 +1020,11 @@ class PropRules(unittest.TestCase):
             self.assertEqual(case._source_for_plant("did", clean), clean)
             self.assertEqual(
                 case._source_for_plant("wallet", clean + FILTERED_ALLOW),
-                clean + FILTERED_ALLOW,
+                clean,
             )
             self.assertEqual(
                 case._source_for_plant("wallet", text + FILTERED_ALLOW),
-                clean + FILTERED_ALLOW,
+                clean,
             )
             self.assertNotIsInstance(baseline, type(unittest.SkipTest("x")))
         finally:
@@ -1959,9 +1960,10 @@ class PropRules(unittest.TestCase):
         The still-deny copies are not excused by a live allow. The failure is
         ordinary, not expected.
         """
-        for recorded in (False, True):
+        for grant in (None, ALLOW_SET, FILTERED_ALLOW, ALLOW_SET + FILTERED_ALLOW):
+            recorded = grant is not None
             for control in STILL_DENY_COPIES:
-                with self.subTest(recorded=recorded, control=control), tempfile.TemporaryDirectory(
+                with self.subTest(recorded=recorded, grant=grant, control=control), tempfile.TemporaryDirectory(
                     prefix="ccrt-setprop-control-"
                 ) as tmp:
                     profiles = []
@@ -1970,7 +1972,7 @@ class PropRules(unittest.TestCase):
                         profile["path"] = Path(tmp) / f"{profile['name']}.sb"
                         text = "(version 1)\n(deny default)\n(deny network*)\n"
                         if recorded and profile["name"] == "wallet":
-                            text = with_set_allow(text)
+                            text += grant
                         profile["path"].write_text(text, encoding="utf-8")
                         profiles.append(profile)
 
@@ -1996,7 +1998,11 @@ class PropRules(unittest.TestCase):
                         path = Path(profile)
                         opened.append(path.name)
                         text = path.read_text(encoding="utf-8")
-                        allow = path.stem == control or ALLOW_SET in text
+                        allow = (
+                            path.stem == control
+                            or ALLOW_SET in text
+                            or FILTERED_ALLOW in text
+                        )
                         return sbx.Result(
                             exit_code=0,
                             stdout=ALLOW_STDOUT if allow else DENY_STDOUT,
@@ -2036,15 +2042,21 @@ class PropRules(unittest.TestCase):
     def test_recorded_allow_keeps_complete_probe_suite_green(self):
         """Run every real probe method against injected tools and profile text.
 
-        No allow, and the plant on each profile, keep the suite green. Only
-        the deny test of the profile that contains the plant line is an
-        expected failure. The plant still runs, including each wallet control
-        that still denies, and nothing skips.
+        No allow, either grant form, and both forms together on each profile
+        keep the suite green. Only the deny test of a profile that contains
+        a grant is an expected failure. The plant still runs, including each
+        wallet control that still denies, and nothing skips.
         """
         method_names = unittest.defaultTestLoader.getTestCaseNames(PropProbe)
-        scenarios = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
-        for allowed in scenarios:
-            with self.subTest(allowed=allowed), tempfile.TemporaryDirectory(
+        allowed_sets = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
+        scenarios = [
+            (allowed, grant)
+            for allowed in allowed_sets
+            for grant in (ALLOW_SET, FILTERED_ALLOW, ALLOW_SET + FILTERED_ALLOW)
+            if allowed or grant == ALLOW_SET
+        ]
+        for allowed, grant in scenarios:
+            with self.subTest(allowed=allowed, grant=grant), tempfile.TemporaryDirectory(
                 prefix="ccrt-setprop-suite-"
             ) as tmp:
                 repo = Path(tmp).resolve()
@@ -2055,7 +2067,7 @@ class PropRules(unittest.TestCase):
                     profile["path"].parent.mkdir(parents=True, exist_ok=True)
                     text = "(version 1)\n(deny default)\n(deny network*)\n"
                     if profile["name"] in allowed:
-                        text = with_set_allow(text)
+                        text += grant
                     profile["path"].write_text(text, encoding="utf-8")
                     profiles.append(profile)
 
@@ -2090,9 +2102,10 @@ class PropRules(unittest.TestCase):
                     self.assertEqual(kwargs["timeout"], 5)
                     self.assertEqual(tuple(kwargs["args"]), ())
                     text = Path(kwargs["profile"]).read_text(encoding="utf-8")
+                    allow = ALLOW_SET in text or FILTERED_ALLOW in text
                     return sbx.Result(
                         exit_code=0,
-                        stdout=ALLOW_STDOUT if ALLOW_SET in text else DENY_STDOUT,
+                        stdout=ALLOW_STDOUT if allow else DENY_STDOUT,
                         stderr="",
                         argv=[
                             sbx.SANDBOX_EXEC, "-D",
