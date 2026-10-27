@@ -1993,8 +1993,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 185 planted bugs",
-          "new": "`falsifiers.json` holds 184 planted bugs"
+          "old": "`falsifiers.json` holds 188 planted bugs",
+          "new": "`falsifiers.json` holds 187 planted bugs"
         }
       ],
       "tests": [
@@ -3043,6 +3043,54 @@
       "tests": [
         "receipt_write_refuses_an_existing_path",
         "refusal_receipt_write_refuses_an_existing_path"
+      ]
+    },
+    {
+      "id": "F-WC-ENGINE-RUN-MODULE-DOC",
+      "title": "the run.rs module doc goes back to the base's wording, so no module doc line says test-only, not endorsed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "//! machine, not the Component ABI. Both engines are test-only, not endorsed.",
+          "new": "//! machine, not the Component ABI. Both engines are test-only; neither is\n//! endorsed."
+        }
+      ],
+      "tests": [
+        "engines_are_labelled_test_only_not_endorsed"
+      ]
+    },
+    {
+      "id": "F-WC-ENGINE-RUN-ENUM-DOC",
+      "title": "the doc on pub enum Engine goes back to the base's wording, so it no longer says test-only, not endorsed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "/// A host engine: test-only, not endorsed.",
+          "new": "/// A test-only host engine. Neither is endorsed."
+        }
+      ],
+      "tests": [
+        "engines_are_labelled_test_only_not_endorsed"
+      ]
+    },
+    {
+      "id": "F-WC-README-OUTSIDE-COUNT",
+      "title": "the README places its proofs with no entry outside one less than falsifiers.json holds",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "outside the 188",
+          "new": "outside the 187"
+        }
+      ],
+      "tests": [
+        "readme_falsifier_total_matches_falsifiers_json"
       ]
     }
   ]

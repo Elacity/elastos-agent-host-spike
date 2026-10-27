@@ -1351,3 +1351,36 @@
   passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0.
   Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
   --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 052 (runner entries for the two `tools/src/run.rs` engine label falsifiers; second review of PR #245,
+  P10, P12). Base `21535ff0200c23f3298fe8be227958bf5c0b397f`. Task 026's F-WC-ENGINE-RUN-MODULE-DOC and
+  F-WC-ENGINE-RUN-ENUM-DOC get `falsifiers.json` entries, each editing only `tools/src/run.rs` (a recovery target
+  since provider 026, PR #242, which merged before PR #245) with one exact replace back to the wording of
+  `bf752df1a^1`: the module doc line "Both engines are test-only, not endorsed." becomes the base's two lines ("...
+  test-only; neither is" / "endorsed."), and `/// A host engine: test-only, not endorsed.` becomes the base's
+  `/// A test-only host engine. Neither is endorsed.`; each anchor holds its whole line, so it is found once. 050's
+  FOLLOWUP: README's "outside the 184" is now "outside the 188", and `readme_falsifier_total_matches_falsifiers_json`
+  also finds the one "outside the N" in README's "## Falsifiers" and fails, naming the figure and the held count, when
+  it is missing, stated twice or not the total; new entry F-WC-README-OUTSIDE-COUNT plants "outside the 187".
+  Canonical runner, from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC-ENGINE-RUN-MODULE-DOC
+  F-WC-ENGINE-RUN-ENUM-DOC F-WC-README-OUTSIDE-COUNT F-WC-README-COUNT` (F-WC-README-COUNT re-anchored to 188):
+  "baseline: 2 named tests pass without an edit, 0 do not", "F-WC-README-COUNT CAUGHT", "F-WC-ENGINE-RUN-MODULE-DOC
+  CAUGHT", "F-WC-ENGINE-RUN-ENUM-DOC CAUGHT", "F-WC-README-OUTSIDE-COUNT CAUGHT", "summary: 4 CAUGHT of 4", exit 0;
+  `git status --short` then listed only this task's files, with no `*.falsify-original` left. Each assertion, quoted by
+  running the named test inside the runner's own `falsify.Mutation` (exit 101 each): MODULE-DOC `tests/docs.rs:281:5`
+  "tools/src/run.rs's module doc has no line saying "test-only, not endorsed""; ENUM-DOC `:286:5` "tools/src/run.rs's
+  doc comment on `pub enum Engine` does not say "test-only, not endorsed""; README-OUTSIDE-COUNT `:404:5` "README's "##
+  Falsifiers" places its proofs with no entry outside the 187, but falsifiers.json holds 188"; README-COUNT `:386:5`
+  "README says falsifiers.json holds 187 planted bugs, but it holds 188". By hand, the same way, "outside the 188" ->
+  "outside every count" fails at `:397:5` "README's "## Falsifiers" says "outside the N" 0 times, not once
+  (falsifiers.json holds 188): []"; README and run.rs sha256 equal before and after. README: the two leave task 026's
+  hand-proven paragraph (now the three ADOPTION entries; only `ADOPTION.md` is not a recovery target) for a new "Task
+  052's three" runner-caught paragraph; total 185 -> 188, runner-caught 121 -> 124, hand-proven stays 68 (task 026's
+  five were outside every count). All 188 entries' 197 anchors found exactly once. SECOND-REVIEW.md's #241 promise-3
+  cite now gives `PROVIDER_TARGETS` per commit, each checked with `git show <commit>:examples/agent-host/falsify.py`:
+  `falsify.py:291-325` at `33cbed8c5`, `:323-383` at `43b4af944`, neither naming `falsifiers.json`; #241's verdict is
+  unchanged. No change to `tools/src/run.rs`, ADOPTION, `Cargo.toml` or `Cargo.lock`. Gates in `lab/wasm-capsule/`,
+  with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
+  -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
