@@ -1,0 +1,202 @@
+{
+  "head": "1344792715fc21fef94dca5e973e14231ce604a6",
+  "launcher": "/workspace/lab/fail-closed-linux/target/debug/fcl-launch",
+  "hunts": [
+    {
+      "id": "granted-twice",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "hunter mode=granted-twice pid=2",
+        "reexec1 errno=1 path=/tmp/review-c0-307-r6/lab/review-c0-307-r6/standins/bin/hunter",
+        "reexec2 errno=1 path=/tmp/review-c0-307-r6/lab/review-c0-307-r6/standins/bin/hunter",
+        "started did-provider pid=12122"
+      ],
+      "err": "",
+      "note": "two pathname execve of the granted binary after start"
+    },
+    {
+      "id": "symlink-swap",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "hunter mode=exec-path pid=2",
+        "exec_path errno=1 path=/tmp/fcl-r6-8k08r_ye/symlink-swap/granted-link",
+        "started did-provider pid=12127"
+      ],
+      "err": "",
+      "note": "execve of a symlink under storage that names the granted binary"
+    },
+    {
+      "id": "bind-mount-swap",
+      "started": true,
+      "verdict": "NOT RUN",
+      "lines": [
+        "started did-provider pid=12134",
+        "hunter mode=exec-path pid=2",
+        "exec_path errno=1 path=/tmp/fcl-r6-8k08r_ye/bind-granted"
+      ],
+      "err": "",
+      "note": "host bind-mount errno/exit=32 (this uid)",
+      "mounted": false
+    },
+    {
+      "id": "proc-self-exe",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "started did-provider pid=12144",
+        "hunter mode=proc-exe pid=2",
+        "proc_exe errno=1 path=/proc/self/exe",
+        "proc_exe_execveat errno=1"
+      ],
+      "err": "",
+      "note": "execve(/proc/self/exe) after start"
+    },
+    {
+      "id": "shebang-after-start",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "hunter mode=shebang pid=2",
+        "shebang errno=1 path=/tmp/fcl-r6-8k08r_ye/shebang-after/run.sh",
+        "started did-provider pid=12149"
+      ],
+      "err": "",
+      "note": "execve of a #! script whose interpreter is ungranted"
+    },
+    {
+      "id": "shebang-as-granted",
+      "started": false,
+      "verdict": "CAUGHT",
+      "lines": [],
+      "err": "fail-closed-linux refused to start did-provider: layer exec, step execve: Permission denied (os error 13); the provider was not started\n",
+      "note": "granted path is a #! script; interpreter is the payload"
+    },
+    {
+      "id": "fd3-socket-dup2",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "hunter mode=dup2-sock pid=2",
+        "inherit_fd_3 gone errno=9",
+        "fd 0 kind=pipe",
+        "fd 1 kind=pipe",
+        "fd 2 kind=pipe",
+        "started did-provider pid=12169"
+      ],
+      "err": "",
+      "note": "socket inherited on fd 3, then dup2 onto 0 after sanitize"
+    },
+    {
+      "id": "pipe-then-scm",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "started did-provider pid=12184",
+        "hunter mode=pipe-scm pid=2",
+        "stdin_kind=pipe",
+        "stdin_recvmsg errno=88"
+      ],
+      "err": "",
+      "note": "stdin is a pipe; host sendmsg SCM_RIGHTS send_ok=False errno=88",
+      "send_ok": false,
+      "send_errno": 88
+    },
+    {
+      "id": "tiocsti-fd-above-2",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "started did-provider pid=12200",
+        "hunter mode=tiocsti-high pid=2",
+        "tiocsti_fd_3 errno=9",
+        "fd 0 kind=pipe",
+        "fd 1 kind=pipe",
+        "fd 2 kind=pipe"
+      ],
+      "err": "",
+      "note": "TIOCSTI on an inherited pty kept on fd 3+"
+    },
+    {
+      "id": "wrong-arch-execve",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "hunter mode=wrong-arch pid=2",
+        "started did-provider pid=12214",
+        "wrong_arch_child signal=31"
+      ],
+      "err": "",
+      "note": "execve via int 0x80 and __X32_SYSCALL_BIT after start"
+    },
+    {
+      "id": "clone3-into-cgroup",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "started did-provider pid=12226",
+        "hunter mode=clone3 pid=2",
+        "clone3_cgroup errno=38 ret=-1"
+      ],
+      "err": "",
+      "note": "clone3(CLONE_INTO_CGROUP); 38=ENOSYS 1=EPERM"
+    },
+    {
+      "id": "io-uring-setup",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "started did-provider pid=12245",
+        "hunter mode=io-uring pid=2",
+        "io_uring_setup errno=1 ret=-1",
+        "io_uring_enter errno=95 ret=-1",
+        "io_uring_register errno=95 ret=-1"
+      ],
+      "err": "",
+      "note": "io_uring_setup / enter / register after start"
+    },
+    {
+      "id": "ptrace-sibling",
+      "started": true,
+      "verdict": "CAUGHT",
+      "lines": [
+        "started did-provider pid=12250",
+        "hunter mode=ptrace pid=2",
+        "ptrace_sibling errno=1 ret=-1 child=4",
+        "ptrace_traceme errno=1 ret=-1"
+      ],
+      "err": "",
+      "note": "ptrace(PTRACE_ATTACH) of a forked sibling"
+    },
+    {
+      "id": "prctl-dumpable",
+      "started": true,
+      "verdict": "SURVIVED",
+      "lines": [
+        "started did-provider pid=12256",
+        "hunter mode=dumpable pid=2",
+        "dumpable_get errno=0 val=1",
+        "dumpable_set1 errno=0 ret=0",
+        "dumpable_set0 errno=0 ret=0",
+        "dumpable_reset1 errno=0 ret=0",
+        "set_ptracer_any errno=22 ret=-1",
+        "ptrace_sibling errno=1 ret=-1 child=4",
+        "ptrace_traceme errno=1 ret=-1"
+      ],
+      "err": "",
+      "host_ptrace": "0 0 ",
+      "note": "PR_SET_DUMPABLE / PR_SET_PTRACER_ANY; sibling ptrace; host attach='0 0 '; set1=dumpable_set1 errno=0 ret=0 ptracer=set_ptracer_any errno=22 ret=-1"
+    },
+    {
+      "id": "r5-memfd-procfd",
+      "started": true,
+      "verdict": "UNKNOWN",
+      "lines": [
+        "started did-provider pid=12268"
+      ],
+      "err": "",
+      "note": "r5 leftover replant: memfd no MFD_EXEC, execve(/proc/self/fd/N)"
+    }
+  ]
+}
