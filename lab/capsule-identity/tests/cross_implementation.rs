@@ -21,8 +21,8 @@ use std::path::Path;
 use std::process::Command;
 
 use capsule_identity::{
-    domain_separated_digest, encode_entries, name_signature_message, sign_package_record,
-    BundleEntry, PackageRecord, Refusal, PACKAGE_RECORD_DOMAIN,
+    domain_separated_digest, encode_entries, lab_cid, name_signature_message, sign_package_record,
+    BundleEntry, PackageRecord, PACKAGE_RECORD_DOMAIN,
 };
 use common::*;
 use ed25519_dalek::{Signature, Verifier};
@@ -30,9 +30,9 @@ use tempfile::TempDir;
 
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
-/// consumer copy (task 047) and the two bundles with a file over one leaf
-/// (task 048).
-const PINNED_BUNDLES: usize = 14;
+/// consumer copy (task 047), the two bundles with a file over one leaf
+/// (task 048) and the bundle with a file of two tree levels (task 051).
+const PINNED_BUNDLES: usize = 15;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -153,6 +153,17 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "three-leaf nested file bundle".to_owned(),
         pin: THREE_LEAF_NESTED_LAB_CID,
         entries: content_sample_with(|entries| entries.push(entry(BIG_BIN, &big_bin_bytes()))),
+    });
+    bundles.push(Pinned {
+        what: "two-level file bundle".to_owned(),
+        pin: TWO_LEVEL_FILE_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = two_level_bytes();
+        }),
     });
     bundles
 }
@@ -482,8 +493,12 @@ const ADMITTED_MODEL_FILES: [(&str, Option<u64>); 6] = [
     ("weights.gguf", Some(144_811_072)),
 ];
 
-/// The weights file the lab refuses: 553 raw leaves, over one file root.
+/// The weights file: 553 raw leaves, so a root over four file nodes of 174,
+/// 174, 174 and 31 leaves (two tree levels).
 const ADMITTED_WEIGHTS: &str = "weights.gguf";
+
+/// How many raw leaves [`ADMITTED_WEIGHTS`] has.
+const ADMITTED_WEIGHTS_LEAVES: u64 = 553;
 
 /// The value of the variable `name`, or a panic that names it: a Kubo test
 /// never skips.
@@ -628,8 +643,19 @@ fn kubo_profile_reproduces_the_admitted_model_package_cid() {
         "Kubo with these flags did not print the package CID the Runtime admitted"
     );
 
-    // The lab's known limit, recorded and not fixed: it names no file over
-    // 174 leaves, so it refuses this package.
+    // Task 051: the lab encoder, given the six files' bytes, gives the CID
+    // Kubo and the Runtime made, so it names a file of two tree levels as
+    // they do.
+    let weights = found
+        .iter()
+        .find(|(name, _)| name == ADMITTED_WEIGHTS)
+        .map(|(_, size)| *size)
+        .expect("the admitted folder holds the weights");
+    assert_eq!(
+        weights.div_ceil(262_144),
+        ADMITTED_WEIGHTS_LEAVES,
+        "{ADMITTED_WEIGHTS}'s leaves"
+    );
     let entries: Vec<BundleEntry> = names
         .iter()
         .map(|name| {
@@ -639,10 +665,22 @@ fn kubo_profile_reproduces_the_admitted_model_package_cid() {
             entry(name, &content)
         })
         .collect();
-    let refusal = encode_entries(&entries).expect_err("the lab names no file over 174 leaves");
-    assert!(
-        matches!(&refusal, Refusal::FileOverLeafLimit { path, length }
-            if path == ADMITTED_WEIGHTS && *length == 144_811_072),
-        "{refusal}"
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("encode_entries refused the admitted files: {refusal}"))
+        .to_string();
+    println!("admitted model package: encode_entries {encoded}");
+    assert_eq!(
+        encoded, ADMITTED_MODEL_PACKAGE_CID,
+        "encode_entries over the admitted files did not give the package CID the Runtime admitted"
+    );
+
+    // lab_cid is the walk, the Runtime's manifest check and the same
+    // encoder; it only reads the folder.
+    let walked = lab_cid(admitted);
+    println!("admitted model package: lab_cid {walked:?}");
+    assert_eq!(
+        walked.map(|cid| cid.to_string()),
+        Ok(ADMITTED_MODEL_PACKAGE_CID.to_owned()),
+        "lab_cid on the admitted folder"
     );
 }

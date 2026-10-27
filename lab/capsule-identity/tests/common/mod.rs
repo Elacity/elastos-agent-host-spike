@@ -83,6 +83,19 @@ pub fn big_bin_bytes() -> Vec<u8> {
     (0..600_000u32).map(|i| (i % 251) as u8).collect()
 }
 
+/// content-sample with `sample.example` as [`two_level_bytes`]: 175 raw
+/// leaves, one more than one file node links, so a root over a node of 174
+/// leaves and a node of one leaf. Built in memory and never committed.
+pub const TWO_LEVEL_FILE_LAB_CID: &str =
+    "bafybeia6jmw5u4ns4zxsglupvm25hkmxy6tr5m2a6irt5kapton6vgduee";
+
+/// The 45613057 bytes of the two-level file, 174 leaves of 262144 bytes and
+/// one byte more: byte `i` is `i % 251`, so no two leaves hold the same
+/// bytes.
+pub fn two_level_bytes() -> Vec<u8> {
+    (0..45_613_057u32).map(|i| (i % 251) as u8).collect()
+}
+
 /// The photo lane's PH6 stand-in photo set, a consumer copy and not a
 /// fixture: its five files, copied byte for byte from
 /// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at

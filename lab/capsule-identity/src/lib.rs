@@ -22,22 +22,26 @@
 //! hash-only cross-check with the Runtime's profile flags was run by hand on
 //! this Mac (task 050) and printed every committed pin, and the claim stays
 //! these words until Rong or Flint changes them. This crate runs no Kubo
-//! and pins only the non-sharded subset of that profile, with files of up to
-//! one tree level:
+//! and pins only the non-sharded subset of that profile, with files at any
+//! tree depth:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
 //!    leaf: its block is the file's bytes (an empty file is an empty block),
 //!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
 //!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
 //!    Tsize is its length. A larger file is split into 262144-byte raw
-//!    leaves, the last one shorter, under one balanced dag-pb file root
-//!    (trickle off): for each leaf in order a link with the leaf's CID, an
-//!    empty name and the leaf's length as Tsize; then the UnixFS data `08 02`
-//!    (type file), the file's length (field 3) and each leaf's length (field
-//!    4, one tag per value). Its CID is `01 70 12 20` and the SHA-256 of that
-//!    block, and its Tsize is the block's length plus its leaves' lengths. A
-//!    file of more than 174 leaves (`max-file-links`), over 45613056 bytes,
-//!    would need a second tree level and is refused.
+//!    leaves, the last one shorter, under Kubo's balanced dag-pb file tree
+//!    (trickle off) at any depth: the depth is the smallest `d >= 1` with
+//!    `174^d >= leaves` (`max-file-links` 174). A node at depth 1 links up to
+//!    174 leaves; a node at depth `k > 1` links up to 174 nodes of depth
+//!    `k - 1`. Nodes are filled left to right, each full before the next, so
+//!    only a level's last node can be short, and a last node that holds one
+//!    leaf is still a node of one link. Each node's block has, for each child
+//!    in order, a link with the child's CID, an empty name and the child's
+//!    Tsize; then the UnixFS data `08 02` (type file), the bytes under it
+//!    (filesize, field 3) and each child's filesize (blocksizes, field 4, one
+//!    tag per value). Its CID is `01 70 12 20` and the SHA-256 of that block,
+//!    and its Tsize is the block's length plus its children's Tsizes.
 //! 2. A bundle path such as `browser/app.js` is a directory `browser` that
 //!    links `app.js`. Each directory's block is dag-pb: one link per child,
 //!    sorted by name bytes, each as protobuf field 2 holding the child's CID
@@ -228,7 +232,7 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// files of up to one tree level and no HAMT shard, computed by the lab (no
+// files at any tree depth and no HAMT shard, computed by the lab (no
 // Kubo runs here). Each
 // one changes the CID or the refusal, and each has a falsifier. There is no
 // inline setting: no CID here uses the identity multihash, whatever the size of the block.
@@ -246,8 +250,8 @@ const DAG_PB_CODEC: u8 = 0x70;
 /// The largest file one raw leaf holds (`chunker: size-262144`). A larger
 /// file is split into leaves of this size under one file root.
 const CHUNK_SIZE: usize = 262_144;
-/// The most leaves one file root links (`max-file-links: 174`). A file of
-/// more leaves would need a second tree level, which the lab refuses.
+/// The most children one node of a file's tree links, at every level
+/// (`max-file-links: 174`). A file of more leaves gets a deeper tree.
 const MAX_FILE_LINKS: usize = 174;
 /// The UnixFS data type of a directory, written in its block as `08 01`.
 const DIRECTORY_TYPE: u8 = 1;
@@ -438,10 +442,6 @@ pub enum Refusal {
     /// larger file is named from its bytes, by [`encode_entries`] or
     /// [`lab_cid`]. `length` is the listed size.
     FileOverChunkLimit { path: String, length: usize },
-    /// A file needs more leaves than one file root links, 174 of 262144
-    /// bytes. The lab names no deeper file tree. `length` is the file's
-    /// length.
-    FileOverLeafLimit { path: String, length: usize },
     /// A directory's encoded block is longer than 262144 bytes; `.` is the
     /// bundle root. The lab names no HAMT-sharded directory. `length` is the
     /// block's length.
@@ -546,11 +546,6 @@ impl fmt::Display for Refusal {
             Refusal::FileOverChunkLimit { path, length } => write!(
                 f,
                 "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: a listed file's one SHA-256 names a single raw leaf, so a larger file is named from its bytes (encode_entries or lab_cid)"
-            ),
-            Refusal::FileOverLeafLimit { path, length } => write!(
-                f,
-                "{path} is {length} bytes, over the {MAX_FILE_LINKS}-leaf limit of one file root ({} bytes): the lab names no deeper file tree",
-                MAX_FILE_LINKS * CHUNK_SIZE
             ),
             Refusal::DirectoryOverBlockLimit { path, length } => write!(
                 f,
@@ -847,15 +842,15 @@ pub struct ListedFile {
 }
 
 /// The lab CID of `entries`, given in any order: each entry's node made from
-/// its bytes by `file_node` (one raw leaf, or a balanced file root over its
-/// leaves; a file over 174 leaves is refused), then `encode_tree`, the one
+/// its bytes by `file_node` (one raw leaf, or the balanced file tree over its
+/// leaves, at any depth), then `encode_tree`, the one
 /// tree builder, which [`encode_listed_files`] shares. Leaves, file roots and
 /// directory blocks all hash with the one naming hash, `naming_hash`.
 pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
-    let mut files = Vec::new();
-    for entry in entries {
-        files.push((entry.path.as_str(), file_node(entry)?));
-    }
+    let files = entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), file_node(entry)))
+        .collect();
     encode_tree(files)
 }
 
@@ -904,14 +899,14 @@ fn encode_tree(files: Vec<(&str, Child)>) -> Result<LabCid, Refusal> {
 /// The node a directory links for `entry`, made from its bytes: one raw leaf
 /// for at most [`CHUNK_SIZE`] bytes (an empty file is an empty leaf), else
 /// the balanced file root over its leaves.
-fn file_node(entry: &BundleEntry) -> Result<Child, Refusal> {
+fn file_node(entry: &BundleEntry) -> Child {
     let content = &entry.content;
     let (cid, tsize) = if content.len() <= CHUNK_SIZE {
         raw_leaf(&naming_hash(content), content.len() as u64)
     } else {
-        file_root(&entry.path, content)?
+        file_root(content)
     };
-    Ok(Child::File { cid, tsize })
+    Child::File { cid, tsize }
 }
 
 /// A raw leaf's CID bytes and Tsize: CIDv1, raw codec and `sha256`, the
@@ -921,34 +916,64 @@ fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {
     (cid_bytes(RAW_CODEC, sha256), size)
 }
 
-/// The CID bytes and Tsize of the balanced file root of `content`, the bytes
-/// of the file at `path`, which is over one leaf. The bytes are split into
-/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter, all linked from one
-/// dag-pb block, so the tree has one level. A file of more than
-/// [`MAX_FILE_LINKS`] leaves would need a second level and is refused with
-/// its path and length. The root's Tsize is its block's length plus its
-/// leaves' lengths.
-fn file_root(path: &str, content: &[u8]) -> Result<(Vec<u8>, u64), Refusal> {
-    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {
-        return Err(Refusal::FileOverLeafLimit {
-            path: path.to_owned(),
-            length: content.len(),
-        });
-    }
-    let leaves: Vec<Link<'_>> = content
+/// One node of a file's tree, as its parent links it: its CID bytes, its
+/// Tsize (its block and everything under it) and its filesize (the file's
+/// bytes under it). A raw leaf's Tsize and filesize are both its length.
+struct FileTreeNode {
+    cid: Vec<u8>,
+    tsize: u64,
+    filesize: u64,
+}
+
+/// The CID bytes and Tsize of the balanced file root of `content`, a file
+/// over one leaf (trickle off), at any depth. The bytes are split into
+/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter. Then each pass makes
+/// the next level up: the nodes, left to right, in groups of
+/// [`MAX_FILE_LINKS`], each group one dag-pb node, so only a level's last
+/// node can be short, and a last group of one node is still a node of one
+/// link. The pass that makes one node made the root. A node's links have
+/// empty names, each child's CID and Tsize; its data has the bytes under it
+/// as filesize and each child's filesize as one blocksize; its Tsize is its
+/// block's length plus its children's Tsizes.
+fn file_root(content: &[u8]) -> (Vec<u8>, u64) {
+    let mut level: Vec<FileTreeNode> = content
         .chunks(CHUNK_SIZE)
         .map(|chunk| {
             let (cid, tsize) = raw_leaf(&naming_hash(chunk), chunk.len() as u64);
-            Link {
-                name: "",
+            FileTreeNode {
                 cid,
                 tsize,
+                filesize: tsize,
             }
         })
         .collect();
-    let block = file_root_block(&leaves, content.len() as u64);
-    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();
-    Ok((cid_bytes(DAG_PB_CODEC, &naming_hash(&block)), tsize))
+    while level.len() > 1 {
+        level = level
+            .chunks(MAX_FILE_LINKS)
+            .map(|children| {
+                let links: Vec<Link<'_>> = children
+                    .iter()
+                    .map(|child| Link {
+                        name: "",
+                        cid: child.cid.clone(),
+                        tsize: child.tsize,
+                    })
+                    .collect();
+                let blocksizes: Vec<u64> = children.iter().map(|child| child.filesize).collect();
+                let filesize = children.iter().map(|child| child.filesize).sum();
+                let block = file_root_block(&links, &blocksizes, filesize);
+                let tsize =
+                    block.len() as u64 + children.iter().map(|child| child.tsize).sum::<u64>();
+                FileTreeNode {
+                    cid: cid_bytes(DAG_PB_CODEC, &naming_hash(&block)),
+                    tsize,
+                    filesize,
+                }
+            })
+            .collect();
+    }
+    let root = level.pop().expect("a file over one leaf has a root");
+    (root.cid, root.tsize)
 }
 
 /// The one naming hash: the SHA-256 of a leaf, of a file root block or of a
@@ -1082,20 +1107,22 @@ fn directory_block(links: &[Link<'_>]) -> Vec<u8> {
     block
 }
 
-/// A file root's dag-pb block: its leaves as links (`put_links`, each name
-/// empty), then the UnixFS data as field 1: its type `08 02`, a file, the
-/// file's `length` as filesize (field 3, `0x18`), and each leaf's length as
-/// one blocksize (field 4, `0x20`, one tag per value, not packed). The data
-/// has no Data field (field 2): the bytes are in the leaves.
-fn file_root_block(leaves: &[Link<'_>], length: u64) -> Vec<u8> {
+/// The dag-pb block of one node of a file's tree, the root or one below it:
+/// its children as links (`put_links`, each name empty), then the UnixFS
+/// data as field 1: its type `08 02`, a file, the `length` of the bytes under
+/// it as filesize (field 3, `0x18`), and each child's filesize, from
+/// `blocksizes`, as one blocksize (field 4, `0x20`, one tag per value, not
+/// packed). A blocksize is never a child's Tsize. The data has no Data field
+/// (field 2): the bytes are in the leaves.
+fn file_root_block(children: &[Link<'_>], blocksizes: &[u64], length: u64) -> Vec<u8> {
     let mut block = Vec::new();
-    put_links(&mut block, leaves);
+    put_links(&mut block, children);
     let mut data = vec![1 << 3, FILE_TYPE];
     data.push(3 << 3);
     put_varint(&mut data, length);
-    for leaf in leaves {
+    for blocksize in blocksizes {
         data.push(4 << 3);
-        put_varint(&mut data, leaf.tsize);
+        put_varint(&mut data, *blocksize);
     }
     put_length_delimited(&mut block, 1, &data);
     block
