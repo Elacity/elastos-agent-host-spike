@@ -16,6 +16,9 @@
 //! profile's exec rule alone decides whether that program runs. Before
 //! `spawn`, a launch that binds `PROVIDER_EXECUTABLE` records that file's
 //! sha256 and refuses to start when the file no longer has that digest.
+//! The profile binds PROVIDER_EXECUTABLE by path. That refusal is a lab
+//! stand-in for the Runtime's launch-by-hash check, not the Runtime's check.
+//! This stand-in counts toward no M1 check.
 //! `Unconfined` and `Idle` do not bind the parameter. Its profile launch
 //! starts the real provider binary under a given profile path with exactly
 //! the bindings it is given. Its idle launch starts `/bin/sleep` on
@@ -876,6 +879,116 @@ fn operations_section_cites_existing_tests() {
         .filter(|name| !source.contains(&format!("fn {name}(")))
         .collect();
     assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
+}
+
+/// The Id cells in `section` are the same set as `ids`.
+///
+/// An Id cell is the trimmed first cell of a line that starts with `| F-cc`.
+/// `Ok` means those cells and `ids` name the same ids. Otherwise one error
+/// names each id that is only in the table with `falsifier id is not in the
+/// list`, and each id that is only in the list with `falsifier id is not in
+/// the table`.
+fn falsifier_section_ids_match(section: &str, ids: &[String]) -> Result<(), String> {
+    let table: std::collections::BTreeSet<String> = section
+        .lines()
+        .filter(|line| line.starts_with("| F-cc"))
+        .map(|line| line.split('|').nth(1).unwrap_or("").trim().to_string())
+        .collect();
+    let registered: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut problems = Vec::new();
+    for id in &table {
+        if !registered.contains(id.as_str()) {
+            problems.push(format!("{id} falsifier id is not in the list"));
+        }
+    }
+    for id in &registered {
+        if !table.contains(*id) {
+            problems.push(format!("{id} falsifier id is not in the table"));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// The `## Falsifiers` Id column names each id in `confine-falsifiers.json`.
+///
+/// The section runs from the heading `## Falsifiers` to the next heading line
+/// that starts with `## `, or to the end of the file. The file's Id cells must
+/// match the list. A copy of that section that replaces `| F-cc39a |` with
+/// `| F-cc-missing |` must report both ids. This test starts no process and
+/// needs no sandbox.
+///
+/// Falsifier: F-cc40a makes `falsifier_section_ids_match` return `Ok` before
+/// it compares, so a table that drops `F-cc39a` is accepted.
+#[test]
+fn falsifier_section_names_every_list_id() {
+    fn falsifiers_section(doc: &str) -> String {
+        let lines: Vec<&str> = doc.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "## Falsifiers")
+            .expect("CONFINEMENT.md must hold the heading ## Falsifiers");
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(lines.len());
+        lines[start..end].join("\n")
+    }
+
+    let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
+    let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
+        panic!(
+            "CONFINEMENT.md must be readable ({}): {err}",
+            doc_path.display()
+        )
+    });
+    let list_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine-falsifiers.json");
+    let list_text = fs::read_to_string(&list_path).unwrap_or_else(|err| {
+        panic!(
+            "confine-falsifiers.json must be readable ({}): {err}",
+            list_path.display()
+        )
+    });
+    let list: Value = serde_json::from_str(&list_text)
+        .unwrap_or_else(|err| panic!("confine-falsifiers.json must parse: {err}"));
+    let entries = list["falsifiers"]
+        .as_array()
+        .expect("confine-falsifiers.json must hold a falsifiers array");
+    let ids: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .expect("each falsifier must name an id")
+                .to_string()
+        })
+        .collect();
+    let section = falsifiers_section(&doc);
+    falsifier_section_ids_match(&section, &ids).expect("the Id column must match the list");
+    assert_eq!(
+        section.matches("| F-cc39a |").count(),
+        1,
+        "the section must hold one | F-cc39a | cell"
+    );
+    let dropped = section.replacen("| F-cc39a |", "| F-cc-missing |", 1);
+    let reason = falsifier_section_ids_match(&dropped, &ids)
+        .expect_err("a table that drops F-cc39a must be refused");
+    assert!(reason.contains("F-cc39a"), "{reason}");
+    assert!(reason.contains("F-cc-missing"), "{reason}");
+    assert!(
+        reason.contains("falsifier id is not in the list"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("falsifier id is not in the table"),
+        "{reason}"
+    );
+    assert!(doc.contains("| F-cc39a |"), "{doc_path:?}");
+    assert!(!doc.contains("F-cc-missing"), "{doc_path:?}");
 }
 
 /// The confined provider serves `init`, `status` and `offers_list`, and
@@ -1982,7 +2095,7 @@ fn model_bound_copy_serves_under_profile() {
 }
 
 /// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
-/// the profile's exec refusal.
+/// the profile's exec refusal. The profile binds PROVIDER_EXECUTABLE by path.
 ///
 /// The copy is made in a temporary directory, never at the real provider
 /// binary's path and never in the directory that holds that binary. Its last
@@ -2100,7 +2213,9 @@ fn byte_different_file_at_bound_path_starts() {
 /// sha256, and appends one byte. `Launch::Program` passes that recorded
 /// digest and the changed path as both executable and program. The helper
 /// panics before `spawn`. The panic names `PROVIDER_EXECUTABLE digest
-/// mismatch`, the path, and both digests. If `start` returns, the test kills
+/// mismatch`, the path, and both digests. That refusal is a lab stand-in
+/// for the Runtime's launch-by-hash check, not the Runtime's check. This
+/// stand-in counts toward no M1 check. If `start` returns, the test kills
 /// and waits, then fails because the helper started the changed file. The
 /// test does not call `sandbox_available` and does not need `sandbox-exec`.
 ///
