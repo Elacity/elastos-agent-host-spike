@@ -3,6 +3,7 @@
 //! usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR
 //!        [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE]
 //!        [--daemonize] [--orphan-exit] [--memfd-exec] [--memfd-child]
+//!        [--memfd-procfd] [--reexec] [--reexec-child] [--scm-recv]
 //!        [--stdio-check]
 //!
 //! It writes STORAGE_ROOT/probe-ran first, prints one line per check, prints
@@ -29,18 +30,63 @@ extern "C" {
     fn getpid() -> i32;
     fn waitpid(pid: i32, wstatus: *mut i32, options: i32) -> i32;
     fn _exit(status: i32) -> !;
-    fn truncate(path: *const i8, length: i64) -> i32;
+    fn truncate(path: *const std::ffi::c_char, length: i64) -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
-    fn open(path: *const i8, flags: i32, ...) -> i32;
+    fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     fn close(fd: i32) -> i32;
     fn isatty(fd: i32) -> i32;
     fn fcntl(fd: i32, cmd: i32) -> i32;
+    fn fstat(fd: i32, buf: *mut Stat) -> i32;
+    fn fchmod(fd: i32, mode: u32) -> i32;
+    fn execve(
+        path: *const std::ffi::c_char,
+        argv: *const *const std::ffi::c_char,
+        envp: *const *const std::ffi::c_char,
+    ) -> i32;
+    fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize;
     fn syscall(nr: i64, ...) -> i64;
     #[link_name = "write"]
     fn c_write(fd: i32, buf: *const u8, count: usize) -> isize;
 }
 
+#[repr(C)]
+struct Stat {
+    st_dev: u64,
+    st_ino: u64,
+    st_nlink: u64,
+    st_mode: u32,
+    _rest: [u8; 128],
+}
+
+#[repr(C)]
+struct Iovec {
+    iov_base: *mut u8,
+    iov_len: usize,
+}
+
+#[repr(C)]
+struct Msghdr {
+    msg_name: *mut u8,
+    msg_namelen: u32,
+    msg_iov: *mut Iovec,
+    msg_iovlen: usize,
+    msg_control: *mut u8,
+    msg_controllen: usize,
+    msg_flags: i32,
+}
+
+#[repr(C)]
+struct Cmsghdr {
+    cmsg_len: usize,
+    cmsg_level: i32,
+    cmsg_type: i32,
+}
+
 const SIGKILL: i32 = 9;
+const S_IFMT: u32 = 0o170000;
+const S_IFSOCK: u32 = 0o140000;
+const SOL_SOCKET: i32 = 1;
+const SCM_RIGHTS: i32 = 1;
 const TIOCGWINSZ: u64 = 0x5413;
 const TIOCSTI: u64 = 0x5412;
 const O_RDONLY: i32 = 0;
@@ -74,15 +120,31 @@ fn main() {
         let _ = out.flush();
         std::process::exit(0);
     }
+    if extra.reexec_child {
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "after_reexec");
+        let _ = out.flush();
+        std::process::exit(0);
+    }
 
     let marker = fs::write(storage.join("probe-ran"), provider);
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "fds={}", list_fds());
     let _ = writeln!(out, "stdin_tty={}", i32::from(unsafe { isatty(0) } != 0));
+    let _ = writeln!(out, "stdin_sock={}", i32::from(fd_is_sock(0)));
     report(&mut out, "stdin_ioctl", ioctl_on_fd(0));
     report(&mut out, "stdin_tiocsti", ioctl_tiocsti(0));
     if extra.memfd_exec {
         try_memfd_exec(&mut out, &args[0]);
+    }
+    if extra.memfd_procfd {
+        try_memfd_procfd(&mut out, &args[0]);
+    }
+    if extra.reexec {
+        try_reexec(&mut out, &args[0]);
+    }
+    if extra.scm_recv {
+        try_scm_recv(&mut out);
     }
     let _ = writeln!(out, "probe-ran provider={provider}");
     report(&mut out, "marker", marker);
@@ -173,6 +235,10 @@ struct Extra {
     orphan_exit: bool,
     memfd_exec: bool,
     memfd_child: bool,
+    memfd_procfd: bool,
+    reexec: bool,
+    reexec_child: bool,
+    scm_recv: bool,
 }
 
 fn parse_extra(args: &[String]) -> Extra {
@@ -185,6 +251,10 @@ fn parse_extra(args: &[String]) -> Extra {
         orphan_exit: false,
         memfd_exec: false,
         memfd_child: false,
+        memfd_procfd: false,
+        reexec: false,
+        reexec_child: false,
+        scm_recv: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -221,6 +291,22 @@ fn parse_extra(args: &[String]) -> Extra {
                 extra.memfd_child = true;
                 i += 1;
             }
+            "--memfd-procfd" => {
+                extra.memfd_procfd = true;
+                i += 1;
+            }
+            "--reexec" => {
+                extra.reexec = true;
+                i += 1;
+            }
+            "--reexec-child" => {
+                extra.reexec_child = true;
+                i += 1;
+            }
+            "--scm-recv" => {
+                extra.scm_recv = true;
+                i += 1;
+            }
             _ => usage(),
         }
     }
@@ -236,7 +322,7 @@ fn parse_i32(arg: Option<&String>) -> i32 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit] [--memfd-exec] [--memfd-child]"
+        "usage: fcl-probe PROVIDER STORAGE_ROOT OUTSIDE_FILE OUTSIDE_DIR [--tty-path PATH] [--inherited-fd N] [--kill-host PID] [--exit CODE] [--daemonize] [--orphan-exit] [--memfd-exec] [--memfd-child] [--memfd-procfd] [--reexec] [--reexec-child] [--scm-recv]"
     );
     std::process::exit(2);
 }
@@ -452,4 +538,134 @@ fn try_memfd_exec(out: &mut impl Write, self_path: &str) {
         }
     );
     unsafe { close(fd) };
+}
+
+fn fd_is_sock(fd: i32) -> bool {
+    let mut st = Stat {
+        st_dev: 0,
+        st_ino: 0,
+        st_nlink: 0,
+        st_mode: 0,
+        _rest: [0; 128],
+    };
+    unsafe { fstat(fd, &mut st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK }
+}
+
+fn try_memfd_procfd(out: &mut impl Write, self_path: &str) {
+    let src = match fs::read(self_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = writeln!(
+                out,
+                "memfd_procfd_open errno={}",
+                err.raw_os_error().unwrap_or(-1)
+            );
+            return;
+        }
+    };
+    let mem = unsafe { syscall(SYS_MEMFD_CREATE, b"fcl\0".as_ptr(), MFD_CLOEXEC) };
+    if mem < 0 {
+        let _ = writeln!(
+            out,
+            "memfd_procfd_create errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        return;
+    }
+    let fd = mem as i32;
+    let wrote = unsafe { c_write(fd, src.as_ptr(), src.len()) };
+    if wrote < 0 || wrote as usize != src.len() {
+        let _ = writeln!(
+            out,
+            "memfd_procfd_write errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        unsafe { close(fd) };
+        return;
+    }
+    if unsafe { fchmod(fd, 0o755) } != 0 {
+        let _ = writeln!(
+            out,
+            "memfd_procfd_fchmod errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        unsafe { close(fd) };
+        return;
+    }
+    let path = format!("/proc/self/fd/{fd}");
+    let c_path = std::ffi::CString::new(path).unwrap();
+    let arg1 = std::ffi::CString::new("--memfd-child").unwrap();
+    let argv = [c_path.as_ptr(), arg1.as_ptr(), std::ptr::null()];
+    let envp = [std::ptr::null::<std::ffi::c_char>()];
+    let ret = unsafe { execve(c_path.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+    let _ = writeln!(
+        out,
+        "memfd_procfd errno={}",
+        if ret == 0 {
+            0
+        } else {
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        }
+    );
+    unsafe { close(fd) };
+}
+
+fn try_reexec(out: &mut impl Write, self_path: &str) {
+    let c_path = match std::ffi::CString::new(self_path) {
+        Ok(path) => path,
+        Err(_) => {
+            let _ = writeln!(out, "reexec errno=-1");
+            return;
+        }
+    };
+    let arg1 = std::ffi::CString::new("--reexec-child").unwrap();
+    let argv = [c_path.as_ptr(), arg1.as_ptr(), std::ptr::null()];
+    let envp = [std::ptr::null::<std::ffi::c_char>()];
+    let ret = unsafe { execve(c_path.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+    let _ = writeln!(
+        out,
+        "reexec errno={}",
+        if ret == 0 {
+            0
+        } else {
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        }
+    );
+}
+
+fn try_scm_recv(out: &mut impl Write) {
+    let mut data = [0u8; 8];
+    let mut iov = Iovec {
+        iov_base: data.as_mut_ptr(),
+        iov_len: data.len(),
+    };
+    let mut control = [0u8; 256];
+    let mut msg = Msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iov,
+        msg_iovlen: 1,
+        msg_control: control.as_mut_ptr(),
+        msg_controllen: control.len(),
+        msg_flags: 0,
+    };
+    let n = unsafe { recvmsg(0, &mut msg, 0) };
+    if n < 0 {
+        let _ = writeln!(
+            out,
+            "scm_recv errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+        return;
+    }
+    if msg.msg_controllen < std::mem::size_of::<Cmsghdr>() {
+        let _ = writeln!(out, "scm_recv empty");
+        return;
+    }
+    let hdr = unsafe { &*control.as_ptr().cast::<Cmsghdr>() };
+    if hdr.cmsg_level == SOL_SOCKET && hdr.cmsg_type == SCM_RIGHTS {
+        let _ = writeln!(out, "scm_rights ok");
+        return;
+    }
+    let _ = writeln!(out, "scm_recv other");
 }

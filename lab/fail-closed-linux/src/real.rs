@@ -98,6 +98,25 @@ fn errno() -> Errno {
         .unwrap_or(libc::EIO)
 }
 
+/// True when fd 0, 1 or 2 is a terminal or a socket. A missing fd is left
+/// alone. Any other `fstat` error refuses the launch.
+fn stdio_is_terminal_or_socket(fd: RawFd) -> Result<bool, Errno> {
+    // SAFETY: isatty and fstat only inspect the fd.
+    if unsafe { libc::isatty(fd) } != 0 {
+        return Ok(true);
+    }
+    let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        let err = errno();
+        return if err == libc::EBADF {
+            Ok(false)
+        } else {
+            Err(err)
+        };
+    }
+    Ok((st.st_mode & libc::S_IFMT) == libc::S_IFSOCK)
+}
+
 fn check(ret: c_long) -> Result<c_long, Errno> {
     if ret < 0 {
         Err(errno())
@@ -518,8 +537,7 @@ impl Kernel for RealKernel {
 
     fn sanitize_stdio(&mut self) -> Result<(), Errno> {
         for fd in [0, 1, 2] {
-            // SAFETY: isatty only inspects the fd.
-            if unsafe { libc::isatty(fd) } == 0 {
+            if !stdio_is_terminal_or_socket(fd)? {
                 continue;
             }
             self.fault_found = fd as u32;
@@ -543,7 +561,11 @@ impl Kernel for RealKernel {
     }
 
     fn install_no_exec_filter(&mut self, _plan: &Plan) -> Result<(), Errno> {
-        self.install_seccomp_filter(&crate::seccomp::no_exec_filter())
+        let ip = crate::seccomp::first_exec_ip();
+        if ip == 0 {
+            return Err(libc::EINVAL);
+        }
+        self.install_seccomp_filter(&crate::seccomp::no_exec_filter(ip))
     }
 
     fn enforcement_self_test(&mut self, plan: &Plan) -> Result<(), Errno> {
@@ -594,11 +616,16 @@ impl Kernel for RealKernel {
             close_fault_write(self);
             unsafe { libc::_exit(0) };
         }
+        // The no-exec filter is already stacked. Only `first_exec_syscall`
+        // may issue this execve. After the image is replaced, every later
+        // execve and execveat returns EPERM.
         // SAFETY: the path, argv and envp come from `plan`, which keeps every
         // pointed-to string alive and NULL-terminates both vectors. The write
         // end is O_CLOEXEC, so a successful execve closes it and the parent
         // sees EOF. Any bytes written before execve are a fault.
-        unsafe { libc::execve(plan.executable().as_ptr(), plan.argv(), plan.envp()) };
+        let _ = unsafe {
+            crate::seccomp::execve_once(plan.executable().as_ptr(), plan.argv(), plan.envp())
+        };
         Err(errno())
     }
 

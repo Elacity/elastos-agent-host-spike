@@ -19,9 +19,9 @@ step stops it.
 | pid-namespace | `unshare_pid` | `unshare(CLONE_NEWPID)`. The caller stays in the old PID namespace. A later fork puts the provider in the new one. A failed unshare refuses: `the PID namespace cannot be created` |
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
 | no_new_privs | `set_no_new_privs` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
-| seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. After confine, a second filter returns EPERM for `execveat` and for `memfd_create` with `MFD_EXEC`. A failed second install refuses and names `install_no_exec`. `execve` of the granted path stays allowed so that image can start; a later `execve` of any other path is Landlock-denied. |
+| seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. After confine, a second filter returns EPERM for every `execveat` and for every `execve` except the helper's one-shot trampoline. That trampoline is the confined program's own initial exec of the granted path. After that image starts, pathname re-exec of the granted binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM. A failed second install refuses and names `install_no_exec`. |
 | landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self`, `enforce_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. After `restrict_self` a throwaway child tries write-outside, truncate, ioctl, `execveat` of a memfd, `REFER` (rename across two storage dirs), and `make_*` (fifo, symlink, char, block, sock). Any success is a refusal. TCP bind/connect and `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED here: seccomp denies `socket` before a net probe can run, and the self-test child shares the provider's PID namespace. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
-| launch | `sanitize_stdio`, `close_fds` | before restrict, if fd 0, 1 or 2 is a terminal it is replaced with `/dev/null`. A failed replace refuses and names the fd. Before exec, close every fd except stdin, stdout, stderr and the fault pipe (`close_range`, or `/proc/self/fd` if that syscall is missing). The identity pipe stays close-on-exec. A pre-confine pty cannot be inherited, including on stdin. |
+| launch | `sanitize_stdio`, `close_fds` | before restrict, if fd 0, 1 or 2 is a terminal or a socket (`S_ISSOCK`) it is replaced with `/dev/null`. A failed replace refuses and names the fd. Before exec, close every fd except stdin, stdout, stderr and the fault pipe (`close_range`, or `/proc/self/fd` if that syscall is missing). The identity pipe stays close-on-exec. A pre-confine pty or Unix socket cannot be inherited on stdin, so `SCM_RIGHTS` cannot import a host fd. |
 
 After the six layers, `execve` starts the provider with an empty environment.
 `unshare(CLONE_NEWPID)` does not move the caller. `detach_into_pid_namespace`
@@ -115,8 +115,8 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 | Suite | Tests |
 | --- | --- |
 | `lib` (unit) | 9 passed |
-| `simulated` | 21 passed |
-| `real_kernel` | 28 passed |
+| `simulated` | 22 passed |
+| `real_kernel` | 31 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -135,14 +135,17 @@ seccomp gives the errno, and the feature itself is present.
 | seccomp cannot be installed | `sim_seccomp_install_failure_refuses` (EINVAL, ENOSYS) | `real_seccomp_install_failure_refuses` | inherited filter: `seccomp` gives ENOSYS |
 | Landlock missing | `sim_landlock_missing_refuses` (ENOSYS, EOPNOTSUPP) | `real_landlock_missing_refuses` | inherited filter: `landlock_create_ruleset` gives ENOSYS or EOPNOTSUPP |
 | Landlock ABI too old | `sim_landlock_abi_too_old_refuses` (ABI 1 to 4 name the missing right; ABI 6 with 7 required) | `real_landlock_abi_below_required_refuses` | kernel rule: `--require-landlock-abi` set to the host ABI plus 1 |
-| Per-right floor on this ABI 6 host | `sim_test_extra_right_refuses_on_abi_6` | `real_per_right_floor_refuses_on_this_kernel` | test hook: `--test-require-right future_fs` (needs ABI 7) with `FCL_TEST_HOOKS=1`. The extra floor is not this row |
-| Extra floor still names the right | `sim_extra_floor_still_names_the_missing_right` | `real_extra_floor_still_names_the_missing_right` | both `--require-landlock-abi host+1` and the test extra right; the refusal names `future_fs` |
+| Per-right floor on this host | `sim_test_extra_right_refuses_on_abi_6`, `sim_test_extra_right_does_not_refuse_on_abi_7` | `real_per_right_floor_refuses_on_this_kernel` | test hook: `--test-require-right future_fs` (needs ABI 7) with `FCL_TEST_HOOKS=1`. On ABI < 7 the row refuses and names `future_fs`. On ABI >= 7 the extra right is expressible and the provider starts. The extra floor is not this row |
+| Extra floor still names the right | `sim_extra_floor_still_names_the_missing_right` | `real_extra_floor_still_names_the_missing_right` | both `--require-landlock-abi host+1` and the test extra right. On ABI < 7 the refusal names `future_fs` and the extra floor. On ABI >= 7 it names only the extra floor |
 | Empty fault pipe (early death) | `execve_eof_is_a_start_and_confine_ready_is_a_refusal` | `real_empty_fault_pipe_is_not_a_start` | test hook: `--test-empty-pipe` with `FCL_TEST_HOOKS=1`. The helper exits before init or exec; spawn refuses |
 | ConfineReady without exec | same lib row | `real_confine_ready_without_exec_is_not_a_start` | test hook: `--test-confine-ready`. Any bytes, including a ready record, are a fault |
 | Close pipe without execve | `exe_identity_requires_matching_dev_and_inode` | `real_close_pipe_without_exec_is_not_a_start` | test hook: `--test-close-pipe`. EOF plus a live init is not a start unless `/proc/<pid>/exe` matches |
 | Inherited pty ioctl | — | `real_inherited_pty_ioctl_is_not_available` | launcher inherits a pre-confine pty on fds 3, 4 and 5; confined `TIOCGWINSZ` is `EBADF` |
 | Stdin is a pre-confine pty | — | `real_stdin_pty_is_not_a_terminal` | launcher stdin is a pty; after start `stdin_tty=0` and `TIOCGWINSZ`/`TIOCSTI` fail |
+| Stdin is an inherited Unix socket | — | `real_stdin_socket_cannot_import_fd` | launcher stdin is a Unix stream; after start `stdin_sock=0` and `recvmsg`/`SCM_RIGHTS` cannot import a host fd |
 | Memfd second image | — | `real_memfd_second_image_is_refused` | probe copies itself into a memfd and `execveat(AT_EMPTY_PATH)`; seccomp returns EPERM |
+| Memfd via `/proc/self/fd/N` | — | `real_memfd_procfd_second_image_is_refused` | memfd without `MFD_EXEC`, then `fchmod` and `execve("/proc/self/fd/N")`; seccomp returns EPERM |
+| Granted-path re-exec | — | `real_granted_path_reexec_is_refused` | pathname `execve` of the granted binary after start returns EPERM |
 | Lying enforcement | `sim_lying_kernel_enforcement_refuses` | `real_lying_enforcement_self_test_refuses` | SimKernel reports a denied op succeeded. Real hook: `--test-lie-enforcement` |
 | No-exec filter cannot be installed | `sim_no_exec_filter_failure_refuses` | — | SimKernel: `install_no_exec` fails; the refusal names the step. A real second `seccomp` failure is the same syscall as the first filter |
 | Stdio replace fails | `sim_stdio_sanitize_failure_refuses` | — | SimKernel: `sanitize_stdio` fails and names fd 0 |
@@ -287,8 +290,10 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F33-inherited-fds-left-open | inherited fds are not closed before exec | `real_inherited_pty_ioctl_is_not_available` |
 | F34-enforcement-self-test-skipped | the post-restrict self-test is skipped | lying-enforcement rows in both suites |
 | F35-close-pipe-reported-as-start | closing the fault pipe without `execve` is a start | `real_close_pipe_without_exec_is_not_a_start` |
-| F36-memfd-execveat | the no-exec filter is not installed | `real_memfd_second_image_is_refused` |
+| F36-memfd-execveat | the no-exec filter is not installed | memfd `execveat`, `/proc/self/fd` execve, and granted-path re-exec rows |
 | F37-stdio-pty | a terminal on stdin is left in place | `real_stdin_pty_is_not_a_terminal` |
+| F38-stdio-socket | a socket on stdin is left in place | `real_stdin_socket_cannot_import_fd` |
+| F39-execve-after-start | the no-exec filter allows later `execve` | granted-path re-exec and memfd `/proc/self/fd` rows |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -297,22 +302,23 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: `python3 falsify.py` on this tree: 33/33 caught; 1/1
+Result: `python3 falsify.py` on this tree: 35/35 caught; 1/1
 control survived. A skipped (`ignored`) test is `NOT RUN`, never a pass.
 F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid` is a
 host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and F32
 catch the #355 / #357 review gaps. F33-F35 catch the r3 residuals:
 inherited fds, a lying kernel that accepts a right, and close-pipe
 without `execve`. F36-F37 catch the r4 leftovers: a memfd second image
-and a pre-confine pty on stdin.
+and a pre-confine pty on stdin. F38-F39 catch the r5 leftovers: an
+inherited stdin socket and a later `execve` after start.
 
 ## Not covered here
 
-- aarch64 and Jetson: NOT RUN. `cargo check --target aarch64-unknown-linux-gnu --all-targets`
-  is a compile check only. Nothing was executed for aarch64. A 5.15-class
-  Jetson kernel cannot express `truncate` or `ioctl_dev`, so the guard
-  refuses every provider and names those rights. That is not a board
-  measurement.
+- aarch64 emulated CPU: run through the C9 qemu-system TCG guest (label
+  `emulated CPU`). A real Jetson board is NOT RUN. A 5.15-class Jetson
+  kernel cannot express `truncate` or `ioctl_dev`, so the guard refuses
+  every provider and names those rights. The emulated 5.15 ABI-1 guest
+  is a stand-in for that refusal text, not a board measurement.
 - Real provider binaries: NOT RUN. The stand-in is the static probe. A
   dynamically linked provider needs Landlock read rules for its loader and
   libraries. This lab grants none.
@@ -324,16 +330,23 @@ and a pre-confine pty on stdin.
   close-on-exec. An inherited pre-confine pty on fd 3, 4 or 5 is gone
   before `execve`, so `TIOCGWINSZ` on that fd is `EBADF`. A terminal on
   stdin, stdout or stderr is replaced with `/dev/null` before restrict.
+  An inherited Unix socket on those fds is replaced the same way, so
+  `SCM_RIGHTS` cannot import a host fd after start.
 - Start proof: EOF on the fault pipe is not enough. The parent checks
   `/proc/<provider pid>/exe` (device and inode) against the expected
   binary. Closing the pipe without `execve` is a refusal. A static
   binary that writes nothing is a start only when that identity matches.
-- Second image after start: `execveat` and `memfd_create(MFD_EXEC)` return
-  EPERM. `execve` of the granted path stays allowed so that image can
-  start. A later `execve` of any other path is Landlock-denied. Network
-  Landlock rights and `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED by the
-  self-test (seccomp denies `socket`; the self-test child is in the same
-  PID namespace as the provider).
+- Second image after start: `execve` and `execveat` return EPERM. The
+  helper's one-shot trampoline is the only allowed `execve`, and it runs
+  before the granted image starts. Pathname re-exec of the granted
+  binary and `execve("/proc/self/fd/N")` of a memfd made without
+  `MFD_EXEC` are denied. Network Landlock rights and
+  `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED by the self-test (seccomp
+  denies `socket`; the self-test child is in the same PID namespace as
+  the provider).
+- Real Jetson: NOT RUN. An emulated 5.15 ABI-1 guest is a stand-in for
+  the refusal text only. It does not prove tegra 5.15.148, JetPack LSM
+  config, or real provider binaries.
 
 ## How `lab/linux-confine` (PR #296) could plug in
 

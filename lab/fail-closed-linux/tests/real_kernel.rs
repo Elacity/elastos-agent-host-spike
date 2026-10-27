@@ -18,7 +18,7 @@ use fail_closed_linux::{PID_NAMESPACE_UNAVAILABLE, TEST_FUTURE_FS_ABI, TEST_FUTU
 use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
@@ -679,10 +679,6 @@ fn innermost_child(pid: u32) -> Option<u32> {
 #[test]
 fn real_per_right_floor_refuses_on_this_kernel() {
     let host = host_landlock_abi();
-    assert!(
-        host < TEST_FUTURE_FS_ABI,
-        "this row needs a host ABI below {TEST_FUTURE_FS_ABI}, got {host}"
-    );
     for provider in PROVIDERS {
         let fixture = Fixture::new("per-right-floor", provider);
         let mut command = launch_command(
@@ -693,17 +689,43 @@ fn real_per_right_floor_refuses_on_this_kernel() {
             Inherit::Nothing,
         );
         with_test_hooks(&mut command);
-        let run = output(command);
-        assert_refused(
-            &run,
-            &fixture,
-            provider,
-            "landlock",
-            "abi_floor",
-            &format!(
-                "this kernel's Landlock ABI {host} cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
-            ),
-        );
+        if host < TEST_FUTURE_FS_ABI {
+            let run = output(command);
+            assert_refused(
+                &run,
+                &fixture,
+                provider,
+                "landlock",
+                "abi_floor",
+                &format!(
+                    "this kernel's Landlock ABI {host} cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
+                ),
+            );
+        } else {
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().expect("cannot start the launcher");
+            let stdin = child.stdin.take().unwrap();
+            let (_pid, lines) = read_until_ready(&mut child, provider);
+            drop(stdin);
+            let done = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&done.stderr);
+            assert_eq!(
+                done.status.code(),
+                Some(0),
+                "{provider}: ABI {host} must start when the extra right is expressible\n{stderr}"
+            );
+            assert!(
+                !stderr.contains(&format!("cannot deny {TEST_FUTURE_FS_NAME}")),
+                "{provider}: ABI {host} named a right this ABI expresses\n{stderr}"
+            );
+            assert!(
+                lines.iter().any(|line| line == "ready"),
+                "{provider}: ABI {host} extra-right row did not start the probe: {lines:?}"
+            );
+        }
     }
 }
 
@@ -733,17 +755,22 @@ fn real_extra_floor_still_names_the_missing_right() {
             provider,
             "landlock",
             "abi_floor",
-            &format!(
-                "this kernel's Landlock ABI {host} cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
-            ),
+            &format!("Landlock ABI {host} is below the required {required}"),
         );
         let stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(
-            stderr.contains(&format!(
-                "Landlock ABI {host} is below the required {required}"
-            )),
-            "{provider}: extra floor hidden\n{stderr}"
-        );
+        if host < TEST_FUTURE_FS_ABI {
+            assert!(
+                stderr.contains(&format!(
+                    "this kernel's Landlock ABI {host} cannot deny {TEST_FUTURE_FS_NAME} (needs ABI {TEST_FUTURE_FS_ABI})"
+                )),
+                "{provider}: extra floor hid the missing right\n{stderr}"
+            );
+        } else {
+            assert!(
+                !stderr.contains(&format!("cannot deny {TEST_FUTURE_FS_NAME}")),
+                "{provider}: ABI {host} named a right this ABI expresses\n{stderr}"
+            );
+        }
     }
 }
 
@@ -1155,6 +1182,150 @@ fn real_memfd_second_image_is_refused() {
             String::from_utf8_lossy(&done.stderr)
         );
     }
+}
+
+#[test]
+fn real_memfd_procfd_second_image_is_refused() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("memfd-procfd", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command.arg("--memfd-procfd");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            !lines.iter().any(|line| line == "memfd_exec ran"),
+            "{provider}: memfd /proc/self/fd exec ran: {lines:?}"
+        );
+        assert!(
+            lines.contains(&format!("memfd_procfd errno={}", libc::EPERM)),
+            "{provider}: memfd /proc/self/fd execve must be EPERM, got {lines:?}"
+        );
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+#[test]
+fn real_granted_path_reexec_is_refused() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("reexec", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command.arg("--reexec");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            !lines.iter().any(|line| line == "after_reexec"),
+            "{provider}: granted-path re-exec ran: {lines:?}"
+        );
+        assert!(
+            lines.contains(&format!("reexec errno={}", libc::EPERM)),
+            "{provider}: pathname re-exec of the granted binary must be EPERM, got {lines:?}"
+        );
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+#[test]
+fn real_stdin_socket_cannot_import_fd() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("stdin-sock", provider);
+        let (host, child_end) = unix_stream_pair();
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command.arg("--scm-recv");
+        command
+            .stdin(Stdio::from(child_end))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let secret = fixture.root.join("host-secret.txt");
+        fs::write(&secret, b"host-only-bytes").unwrap();
+        let secret_file = fs::File::open(&secret).unwrap();
+        send_scm_rights(host.as_raw_fd(), secret_file.as_raw_fd());
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            lines.contains(&"stdin_sock=0".to_string()),
+            "{provider}: confined stdin must not be a socket, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line == "scm_rights ok"),
+            "{provider}: SCM_RIGHTS delivered a host fd: {lines:?}"
+        );
+        assert!(
+            lines.contains(&format!("scm_recv errno={}", libc::ENOTSOCK)),
+            "{provider}: recvmsg on replaced stdin must be ENOTSOCK, got {lines:?}"
+        );
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+fn unix_stream_pair() -> (std::fs::File, std::fs::File) {
+    let mut fds = [-1, -1];
+    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    assert_eq!(ret, 0, "socketpair: {}", std::io::Error::last_os_error());
+    unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    }
+}
+
+fn send_scm_rights(socket: i32, payload: i32) {
+    let mut dummy = [b'x'; 1];
+    let mut iov = libc::iovec {
+        iov_base: dummy.as_mut_ptr().cast(),
+        iov_len: dummy.len(),
+    };
+    let mut buf = [0u8; 256];
+    let mut msg = libc::msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iov,
+        msg_iovlen: 1,
+        msg_control: buf.as_mut_ptr().cast(),
+        msg_controllen: buf.len(),
+        msg_flags: 0,
+    };
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    assert!(!cmsg.is_null(), "CMSG_FIRSTHDR");
+    unsafe {
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as u32) as _;
+        std::ptr::write(libc::CMSG_DATA(cmsg).cast::<i32>(), payload);
+        msg.msg_controllen = (*cmsg).cmsg_len;
+    }
+    let sent = unsafe { libc::sendmsg(socket, &msg, 0) };
+    assert!(sent >= 0, "sendmsg: {}", std::io::Error::last_os_error());
 }
 
 #[test]

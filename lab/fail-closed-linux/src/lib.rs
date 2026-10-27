@@ -15,15 +15,18 @@
 //! accepted when that identity matches. After
 //! `landlock_restrict_self` a throwaway child tries one denied operation
 //! per needed right; any success is a refusal. Before restrict, a terminal
-//! on fd 0, 1 or 2 is replaced with `/dev/null`; a failed replace refuses
-//! and names the fd. After confine the guard installs a second seccomp
-//! filter that returns EPERM for `execveat` and for `memfd_create` with
-//! `MFD_EXEC`, so a later anonymous image cannot run. If that install
-//! fails, launch refuses (`install_no_exec`). Before exec the guard closes
-//! every fd except stdin, stdout, stderr and the fault pipe. The identity
-//! pipe stays close-on-exec. Any bytes on the fault pipe, including a
-//! `ConfineReady` record without `execve`, are a refusal. `launch` has no
-//! unconfined path.
+//! or a socket on fd 0, 1 or 2 is replaced with `/dev/null`; a failed
+//! replace refuses and names the fd. After confine the guard installs a
+//! second seccomp filter that returns EPERM for every `execveat` and for
+//! every `execve` except the helper's one-shot trampoline. That trampoline
+//! is the confined program's own initial exec of the granted path. After
+//! that image starts, pathname re-exec of the granted binary and
+//! `execve("/proc/self/fd/N")` of a memfd both return EPERM. If the
+//! install fails, launch refuses (`install_no_exec`). Before exec the
+//! guard closes every fd except stdin, stdout, stderr and the fault pipe.
+//! The identity pipe stays close-on-exec. Any bytes on the fault pipe,
+//! including a `ConfineReady` record without `execve`, are a refusal.
+//! `launch` has no unconfined path.
 
 pub mod real;
 pub mod seccomp;
@@ -565,7 +568,7 @@ impl Refusal {
             Step::ExecIdentity => "the running image is not the expected executable".to_string(),
             Step::EnforceSelf => "Landlock accepted a right and did not enforce it".to_string(),
             Step::SanitizeStdio => format!(
-                "fd {} is a terminal and could not be replaced: {}",
+                "fd {} is a terminal or a socket and could not be replaced: {}",
                 fault.found,
                 io::Error::from_raw_os_error(fault.errno)
             ),
@@ -938,14 +941,14 @@ pub trait Kernel {
     fn clear_capability_sets(&mut self) -> Result<(), Errno>;
     fn set_no_new_privs(&mut self) -> Result<(), Errno>;
     fn install_seccomp_filter(&mut self, filter: &[libc::sock_filter]) -> Result<(), Errno>;
-    /// Replace a terminal on fd 0, 1 or 2. On failure `named_fault_found`
-    /// is that fd.
+    /// Replace a terminal or a socket on fd 0, 1 or 2. On failure
+    /// `named_fault_found` is that fd.
     fn sanitize_stdio(&mut self) -> Result<(), Errno> {
         let _ = self;
         Ok(())
     }
-    /// Second seccomp filter: `execveat` and `memfd_create(MFD_EXEC)` return
-    /// EPERM. A failed install refuses the launch.
+    /// Second seccomp filter: `execveat` always EPERM; `execve` EPERM except
+    /// the helper's one-shot trampoline. A failed install refuses the launch.
     fn install_no_exec_filter(&mut self, plan: &Plan) -> Result<(), Errno> {
         let _ = (self, plan);
         Ok(())
@@ -1223,6 +1226,7 @@ mod tests {
             (4, Some(MISSING_IOCTL_DEV), false),
             (5, None, true),
             (6, None, true),
+            (7, None, true),
         ];
         for (abi, mask, launches) in expected {
             assert_eq!(missing_required_mask(abi), mask, "abi {abi}");
@@ -1288,10 +1292,12 @@ mod tests {
     #[test]
     fn extra_test_right_is_absent_from_the_file_profile() {
         assert_eq!(missing_required_mask(6), None);
+        assert_eq!(missing_required_mask(7), None);
         assert_eq!(
             missing_required_mask_with(6, MISSING_TEST_FUTURE_FS),
             Some(MISSING_TEST_FUTURE_FS)
         );
+        assert_eq!(missing_required_mask_with(7, MISSING_TEST_FUTURE_FS), None);
         assert_eq!(
             missing_required_mask_with(4, MISSING_TEST_FUTURE_FS),
             Some(MISSING_IOCTL_DEV | MISSING_TEST_FUTURE_FS)
@@ -1369,7 +1375,7 @@ mod tests {
         assert!(
             stdio
                 .to_string()
-                .contains("fd 0 is a terminal and could not be replaced"),
+                .contains("fd 0 is a terminal or a socket and could not be replaced"),
             "{stdio}"
         );
         let no_exec = Refusal::new(

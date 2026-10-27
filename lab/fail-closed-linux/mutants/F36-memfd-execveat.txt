@@ -1,6 +1,8 @@
 id: F36-memfd-execveat
 file: src/lib.rs
 test: real_kernel::real_memfd_second_image_is_refused
+test: real_kernel::real_memfd_procfd_second_image_is_refused
+test: real_kernel::real_granted_path_reexec_is_refused
 --- old
     kernel
         .install_no_exec_filter(plan)

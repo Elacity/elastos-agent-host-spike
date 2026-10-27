@@ -1,0 +1,9 @@
+id: F38-stdio-socket
+file: src/real.rs
+test: real_kernel::real_stdin_socket_cannot_import_fd
+--- old
+    Ok((st.st_mode & libc::S_IFMT) == libc::S_IFSOCK)
+--- new
+    let _ = st;
+    Ok(false)
+--- end

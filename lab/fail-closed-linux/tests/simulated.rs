@@ -9,9 +9,9 @@ use common::{probe, PROVIDERS};
 use fail_closed_linux::sim::{SimKernel, SIM_PID};
 use fail_closed_linux::{
     file_profile_launches_on_abi, handled_fs_for_abi, handled_net_for_abi, landlock, launch,
-    missing_required_mask, scoped_for_abi, Errno, Kernel, Layer, ProviderSpec, Refusal, Step,
-    MISSING_IOCTL_DEV, MISSING_TEST_FUTURE_FS, MISSING_TRUNCATE, PID_NAMESPACE_UNAVAILABLE,
-    TEST_FUTURE_FS_ABI, TEST_FUTURE_FS_NAME,
+    missing_required_mask, missing_required_mask_with, scoped_for_abi, Errno, Kernel, Layer,
+    ProviderSpec, Refusal, Step, MISSING_IOCTL_DEV, MISSING_TEST_FUTURE_FS, MISSING_TRUNCATE,
+    PID_NAMESPACE_UNAVAILABLE, TEST_FUTURE_FS_ABI, TEST_FUTURE_FS_NAME,
 };
 
 fn spec(provider: &str) -> ProviderSpec {
@@ -165,7 +165,7 @@ fn sim_stdio_sanitize_failure_refuses() {
     assert!(
         refusal
             .to_string()
-            .contains("fd 0 is a terminal and could not be replaced"),
+            .contains("fd 0 is a terminal or a socket and could not be replaced"),
         "{refusal}"
     );
 }
@@ -325,7 +325,7 @@ fn sim_confined_provider_starts_after_every_layer() {
 #[test]
 fn sim_per_right_floor_for_each_abi() {
     for provider in PROVIDERS {
-        for abi in 1..=6 {
+        for abi in 1..=7 {
             let mut kernel = SimKernel::with_landlock_abi(abi);
             if file_profile_launches_on_abi(abi) {
                 let started = launch(&mut kernel, &spec(provider)).expect("needed rights present");
@@ -490,6 +490,26 @@ fn sim_test_extra_right_refuses_on_abi_6() {
             "{:?}",
             kernel.steps
         );
+    }
+}
+
+#[test]
+fn sim_test_extra_right_does_not_refuse_on_abi_7() {
+    for provider in PROVIDERS {
+        let mut kernel = SimKernel::with_landlock_abi(7);
+        let started = launch(
+            &mut kernel,
+            &spec(provider).require_test_right(MISSING_TEST_FUTURE_FS),
+        )
+        .expect("ABI 7 expresses the test extra right");
+        assert_eq!(started.provider, provider);
+        assert_eq!(kernel.execs.len(), 1, "{:?}", kernel.execs);
+        assert!(
+            kernel.steps.contains(&Step::CreateRuleset),
+            "{:?}",
+            kernel.steps
+        );
+        assert_eq!(missing_required_mask_with(7, MISSING_TEST_FUTURE_FS), None);
     }
 }
 
