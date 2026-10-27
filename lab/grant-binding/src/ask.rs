@@ -115,3 +115,36 @@ fn model_over_budget_ask_is_refused() {
         }
     );
 }
+
+#[test]
+fn model_admit_ask_on_a_sibling_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let sibling_call = verifier.open_call(sibling);
+    let request = GuestRequest {
+        forged_instance: Some(instance),
+        ..super::guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(instance));
+    let refusal = verifier
+        .admit_ask(&sibling_call, &request, BudgetAsk { amount: 4 }, 10)
+        .expect_err("sibling instance does not admit");
+    assert_eq!(refusal, AdmitRefuse::Binding(Refuse::Instance));
+    assert_eq!(refusal.to_string(), "instance does not match the grant");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
