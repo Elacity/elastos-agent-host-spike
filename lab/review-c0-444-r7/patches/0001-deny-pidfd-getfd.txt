@@ -1,0 +1,15 @@
+Minimal inside-sandbox patch. Does not close host pidfd_getfd.
+
+file: lab/fail-closed-linux/src/seccomp.rs
+Add to DENIED, next to process_vm_*:
+
+    libc::SYS_pidfd_open,
+    libc::SYS_pidfd_getfd,
+
+Plant: remove those two lines. Caught by a new real_kernel row that
+starts the probe and requires the provider's `pidfd_getfd_parent` line
+to be EPERM.
+
+This does not block a same-uid host `pidfd_getfd` of the provider.
+That host path uses the 1:1 userns owner==euid CAP_SYS_PTRACE grant
+and is the same leftover as host process_vm_readv.

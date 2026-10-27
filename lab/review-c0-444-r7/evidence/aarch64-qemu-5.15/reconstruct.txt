@@ -1,0 +1,2 @@
+evidence_mount=console-only
+reconstruct=qemu-console.txt

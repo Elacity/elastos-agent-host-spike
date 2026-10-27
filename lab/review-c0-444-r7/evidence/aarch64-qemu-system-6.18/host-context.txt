@@ -1,0 +1,16 @@
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+mode=full
+host_uname=Linux 6.12.94+ x86_64
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+candidate=/workspace
+head=57cbd4af261ebecaa5fbfd7d19b2dd57cc70d7f0
+nonce=b3acb3fd6e8df016d2c437ca62680aa3
+kernel=/tmp/fcl-r7-aarch64/kernel/boot/vmlinuz-virt
+-rw-r--r-- 1 ubuntu ubuntu 32M Oct 27 02:41 /tmp/fcl-r7-aarch64/guest.cpio.gz
+qemu_exit=0

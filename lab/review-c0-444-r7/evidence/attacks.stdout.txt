@@ -1,0 +1,28 @@
+head=57cbd4af261ebecaa5fbfd7d19b2dd57cc70d7f0
+launcher=/workspace/lab/fail-closed-linux/target/debug/fcl-launch
+yama=missing
+
+inside-process_vm                CAUGHT           provider process_vm_readv/writev of init
+inside-pidfd_getfd               SURVIVED         provider pidfd_getfd of init
+inside-child-exec-ptrace         CAUGHT           child exec of a setuid-less helper, then ptrace
+inside-prctl-x32                 CAUGHT           PR_SET_DUMPABLE via prctl, high-32 alias, x32 ABI
+inside-io_uring                  CAUGHT           io_uring_setup from the provider
+inside-userfaultfd               CAUGHT           userfaultfd from the provider
+inside-perf_event_open           CAUGHT           perf_event_open from the provider
+host-process_vm-provider         SURVIVED         same-uid process_vm_readv of the provider
+host-process_vm-write-provider   CAUGHT           same-uid process_vm_writev of the provider
+host-process_vm-init             SURVIVED         same-uid process_vm_readv of init
+host-pidfd-provider              SURVIVED         same-uid pidfd_getfd of the provider
+host-pidfd-init                  SURVIVED         same-uid pidfd_getfd of init
+host-ptrace-provider             CAUGHT           same-uid PTRACE_ATTACH of the provider
+host-ptrace-init                 SURVIVED         same-uid PTRACE_ATTACH of init (claimed EPERM)
+host-perf-provider               SURVIVED         same-uid perf_event_open of the provider
+proc-files-provider              PARTIAL          same-uid /proc/provider/{environ,maps,fd,mem}
+proc-files-init                  SURVIVED         same-uid /proc/init/{environ,maps,fd,mem}
+kill-init                        CAUGHT           SIGKILL init; EXITKILL/namespace took the provider down
+signal-stop-init                 CAUGHT           SIGSTOP init, then same-uid PTRACE_ATTACH of the provider
+core-dump                        CAUGHT           dumpable 0; SIGQUIT produced no new core file
+init-confused-deputy             PARTIAL          init is attachable; injected detach did not yield the provider
+race-before-dumpable             SURVIVED         host opened /proc/<provider>/mem during the pre-exec window
+bind-mount                       NOT RUN          host bind-mount exit=32 (this uid)
+false-fail-init-dumpable         FALSE-FAIL-IF-REQUIRED Init is dumpable on purpose so the parent can read /proc/<init>/task/init/children. Requiring init /proc/mem EACCES would false-FAIL the current identity check.
