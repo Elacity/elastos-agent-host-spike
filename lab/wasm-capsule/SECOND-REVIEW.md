@@ -349,17 +349,20 @@ No finding. Every promise held at the merge. The later changes to the format,
 the test grants and one label were made on purpose by tasks 029, 031 and 039,
 and none of them broke 025's promises.
 
-### Re-run at 2b4e2f2f5
+### Re-run at 73f5fc35f
 
 Task 054 ran the same 22 ids at its base
-`2b4e2f2f5d247a9654da8bd4fe8d0244c7db43ed` (`2b4e2f2f5`, the merge of
-cc-redteam 029's PR #671), from the repo root, on a clean tree: this file was
-edited only after the run. `falsifiers.json` holds 188 entries at 2b4e2f2f5
-(`git show 2b4e2f2f5:lab/wasm-capsule/falsifiers.json | grep -c '"id"'`, and
+`73f5fc35f141b9f9a28a07d0d090edda57bdb365` (`73f5fc35f`, the merge of
+cu-bus-v2-proposal 079's PR #678), from the repo root, with this file as the
+only change in the tree. The tree was task 054's round-1 commit `7baed3aee`,
+whose parent is 73f5fc35f and whose only changed file is this one
+(`git diff --name-only 73f5fc35f 7baed3aee`). This section was rewritten only
+after the run. `falsifiers.json` holds 188 entries at 73f5fc35f
+(`git show 73f5fc35f:lab/wasm-capsule/falsifiers.json | grep -c '"id"'`, and
 the same `python3 -I -c` count), and all 22 ids are in it. The runner ran only
 while holding the shared build lease (`.git/local-ai-heavy-build.lock` in the
-main checkout, taken with `fcntl.flock`), with the wait bounded at 1500 s. The
-first try took the lease after 995 s:
+main checkout, taken with `fcntl.flock`), with the wait bounded at 1500 s. It
+took the lease after 50 s:
 
 ```
 $ RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py \
