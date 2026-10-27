@@ -152,12 +152,18 @@ stand-in never starts the binary outside `sandbox-exec`.
 the full wallet journey through the stand-in.
 `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` runs one
 suite of permitted and denied cases on a provider started under the committed
-`confine.sb` and on one Started by the stand-in, and requires the two records
-to agree entry by entry, and
+`confine.sb` and on one Started by the stand-in. Each case is pushed with its
+class, and every record must hold the cases of `SUITE_CASES` in order with
+their names and classes, so a case that drops out or changes class fails with
+the case named. A refusal keeps its answer's `status`, its `code` and the
+stable start of its message, so two refusals that differ only in code do not
+compare equal. The comparison then requires the two records to agree entry by
+entry, and
 `standin_start_runs_under_the_generated_profile_not_the_committed_file`
 requires the stand-in to refuse a start when the generated profile drops the
-wallet-root write. The stand-in's start matches the committed profile on the
-permitted and denied suite.
+wallet-root write. The stand-in's start matches the committed `confine.sb` on
+the permitted and denied suite in the lab, and this section makes no claim
+about a Runtime launch.
 
 ## The model provider's inline profile
 
@@ -905,6 +911,16 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   (c3), which panics in `resolved` with "wallet directory must resolve".
 - Return `Ok(provider)` for an `init` answer that is not `ok` (WP120): the same
   test fails on case (f), which returns Started instead of the answer.
+- Remove the suite's planted-key push (WP121):
+  `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
+  because the record holds eight entries where `SUITE_CASES` holds nine, and
+  the failure names the missing case.
+- Drop the refusal `code` from `suite_entry` (WP122):
+  `suite_entry_keeps_the_refusal_code` fails because two refusals that differ
+  only in `code` then compare equal.
+- Record every bound result as `Ok` in `wallet_suite_entry` (WP123):
+  `wallet_suite_entry_records_an_inner_refusal_as_refused` fails because the
+  inner refusal reads `Ok`.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
