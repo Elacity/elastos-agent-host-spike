@@ -678,3 +678,11 @@ The active agent-host checks under `--agent-host` include
 `staging_uses_manifest_entrypoint_and_refuses_escape`. The shared
 `agent_host_grants::tests` also run. These exercise the harness with fixtures;
 the real capsule's shell-denial journey stays BLOCKED.
+
+## Session binding of a Runtime grant (M1 A5 half)
+
+These rows use lab client sessions on the run client's attach and provider routes. A permitted Public read is the positive control and earns no A5 credit.
+
+- `grant_refused_from_another_session`: sessions A and B each hold a session-duration grant for their own seeded file; B's presentation of A's token is HTTP 403 `Capability denied: wrong capsule`, expected A's pending-list session and got B's, then A reads again with the same token.
+- `grant_refused_from_a_new_session`: after A's read, a new client session from the same attach secret presents A's token and receives that refusal, with A expected and the new session got, then A reads again.
+- `grant_record_names_agent_identity`: BLOCKED (AC-038-GRANT-PRINCIPAL). The journey reads the Runtime `capability_grant` record and compares its principal and capsule with separate verified caller evidence for the requesting session. Runtime must supply that evidence before the row can pass. GAPS.md records Anders's change (https://github.com/Elacity/elastos-runtime/issues/464).

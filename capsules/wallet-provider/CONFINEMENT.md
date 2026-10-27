@@ -78,6 +78,10 @@ or names a parameter the launch does not bind, `sandbox-exec` exits before the
 provider starts and gives its reason on standard error; the Runtime then
 refuses the start with that reason and never starts the provider another way
 (P11).
+The lab writer `write_generated_profile` writes no wallet-provider profile when
+the declared-rights file names an id the shared contract does not name, and
+`generator_refuses_an_unnamed_right_and_the_start_is_refused` shows that the
+start under that path is refused; the Runtime's own refusal is not built.
 
 One generator covers `did-provider`, `wallet-provider` and `model-provider`,
 parameterized by the provider's approved declared rights and its storage root,
@@ -807,6 +811,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   the contract head (WP105):
   `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
   because neither declared-rights file names that rule.
+- Make the declared-rights check's rights-list id refusal never fire (WP106):
+  `generator_refuses_an_unnamed_right_and_the_start_is_refused` fails because
+  case (a) writes a profile for the unnamed right.
+- Make the platform-baseline id refusal never fire (WP107): the same test fails
+  because case (b) writes a profile for the unnamed baseline rule.
+- Make the lab writer create the profile path before it calls the generator
+  (WP108): the same test fails because both cases create the refused path.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

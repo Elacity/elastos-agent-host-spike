@@ -2945,6 +2945,135 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     }
 }
 
+/// The lab writer refuses an unnamed right and writes no profile, so the start
+/// under that unwritten path is refused before the provider runs.
+///
+/// Both cases read the real wallet declared-rights file and add one entry: a
+/// rights entry `unnamed-right` (case (a)) or a platform-baseline entry
+/// `unnamed-baseline` with the wallet justification prefix and a reason (case
+/// (b)). `write_generated_profile` returns the existing unnamed-id refusal,
+/// creates no path, and the confined start under that missing path exits
+/// non-zero before any request; `try_send` of `init` fails naming the request,
+/// the exit status and the missing path, and no wallet directory is created.
+/// On a host without the sandbox gate the file half still runs and the start
+/// half is skipped through the existing gate only.
+///
+/// Falsifier: WP106 makes the rights-list id refusal in `declared_entries`
+/// never fire, so case (a) writes a profile and fails the no-file assertion;
+/// WP107 makes the platform-baseline id refusal never fire, so case (b) fails
+/// the same way; WP108 makes `write_generated_profile` create the path before
+/// it calls `generate_profile`, so both cases fail the no-file assertion.
+#[test]
+fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
+    let fixture = tempfile::tempdir().expect("temporary wallet root");
+    let base = resolved(fixture.path());
+    let declared_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
+    let declared = read_declared_rights("wallet-provider", &declared_path)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let rule = r#"(allow file-read* (literal "/private/var/cc-confine-unnamed"))"#;
+    let prefix = platform_baseline_justification("wallet-provider");
+    let cases: [(&str, &str, Value); 2] = [
+        (
+            "(a) an unnamed right",
+            "unnamed-right",
+            json!({ "id": "unnamed-right", "rules": [rule] }),
+        ),
+        (
+            "(b) an unnamed platform-baseline rule",
+            "unnamed-baseline",
+            json!({
+                "id": "unnamed-baseline",
+                "justification": format!(
+                    "{prefix}a declared right that the shared contract does not name"
+                ),
+                "rules": [rule],
+            }),
+        ),
+    ];
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_root = resolved(profile_root.path());
+    let canonical = canonical_bindings(&base);
+    create_shared_ancestors(&canonical);
+    let wallet_root = wallet_dir(&base);
+    let request = json!({
+        "op": "init",
+        "config": { "base_path": base.display().to_string() }
+    });
+    for (case, id, entry) in cases {
+        let mut declared = declared.clone();
+        if id == "unnamed-right" {
+            declared["rights"]
+                .as_array_mut()
+                .expect("wallet declared rights")
+                .push(entry);
+        } else {
+            declared[PLATFORM_BASELINE]["rules"]
+                .as_array_mut()
+                .expect("wallet platform-baseline rules")
+                .push(entry);
+        }
+        let path = profile_root.join(format!("{id}-profile.sb"));
+        let refusal = write_generated_profile("wallet-provider", &declared, &path)
+            .expect_err("an unnamed right must be refused");
+        assert_eq!(
+            refusal,
+            format!("wallet-provider declares {id}, which the shared contract does not name"),
+            "{case}: the refusal must be the one unnamed-id reason"
+        );
+        eprintln!("{case} refusal: {refusal}");
+        assert!(
+            !path.exists(),
+            "{case}: a refused profile must create no file: {}",
+            path.display()
+        );
+        if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+            continue;
+        }
+        let bindings: Vec<(&str, &Path)> = canonical
+            .iter()
+            .map(|(name, path)| (*name, path.as_path()))
+            .collect();
+        let mut provider =
+            ConfinedProvider::start_under(&path, &bindings, Path::new(PROVIDER_BINARY));
+        let exit = provider.wait_for_exit();
+        assert!(
+            exit.code().is_some(),
+            "{case}: sandbox-exec must exit instead of starting the provider: {exit}"
+        );
+        assert_ne!(
+            exit.code(),
+            Some(0),
+            "{case}: sandbox-exec must refuse the missing profile: {exit}"
+        );
+        let failure = provider
+            .try_send(&request)
+            .expect_err("a refused start must not answer a request");
+        assert!(
+            failure.contains(&request.to_string()),
+            "{case}: the failure must name the request: {failure}"
+        );
+        assert!(
+            failure.contains(&exit.to_string()),
+            "{case}: the failure must name the exit status: {failure}"
+        );
+        assert!(
+            failure.contains(&path.display().to_string()),
+            "{case}: the failure must name the missing path: {failure}"
+        );
+        assert!(
+            !failure.contains("execvp"),
+            "{case}: sandbox-exec must refuse the profile before any exec: {failure}"
+        );
+        assert!(
+            !wallet_root.exists(),
+            "{case}: a refused start must create no wallet directory: {}",
+            wallet_root.display()
+        );
+        eprintln!("{case} startup refusal: {failure}");
+    }
+}
+
 /// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
 /// and its control. It keeps the temporary base alive, resolves it, creates
 /// `STORAGE_ROOT` first, and copies the provider binary there byte for byte,
@@ -3752,6 +3881,21 @@ fn generate_profile(name: &str, declared: &Value) -> Result<String, String> {
         }
     }
     Ok(profile)
+}
+
+/// The one lab writer of a generated profile: it calls `generate_profile`
+/// first and returns that refusal unchanged, before it creates, opens or
+/// truncates `path`; only a generated profile is written, and a write failure
+/// is a refusal that names the provider and the path. It adds no validation of
+/// its own: every refusal reason comes from `declared_entries`.
+fn write_generated_profile(name: &str, declared: &Value, path: &Path) -> Result<(), String> {
+    let profile = generate_profile(name, declared)?;
+    fs::write(path, profile).map_err(|err| {
+        format!(
+            "{name} generated profile {} must be writable: {err}",
+            path.display()
+        )
+    })
 }
 
 /// The declared entries of `entries`, each proven to hold a string id and a

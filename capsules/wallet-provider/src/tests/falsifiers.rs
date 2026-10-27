@@ -136,8 +136,15 @@ use std::process::Command;
 /// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after the
 /// contract head, so
 /// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
-/// because neither declared-rights file names that rule.
-const EXPECTED_FALSIFIERS: usize = 103;
+/// because neither declared-rights file names that rule. Task 090's WP106
+/// makes the rights-list id refusal in `declared_entries` never fire, so case
+/// (a) writes a profile for the unnamed right, WP107 makes the
+/// platform-baseline id refusal never fire, so case (b) writes one for the
+/// unnamed baseline rule, and WP108 makes `write_generated_profile` create the
+/// path before it calls `generate_profile`; each makes
+/// `generator_refuses_an_unnamed_right_and_the_start_is_refused` fail on its
+/// no-file assertion.
+const EXPECTED_FALSIFIERS: usize = 106;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
