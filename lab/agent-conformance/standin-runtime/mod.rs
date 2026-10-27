@@ -299,6 +299,53 @@ impl StandIn {
         Ok(json!({ "requests": requests }))
     }
 
+    /// Lab observation, not a route.
+    ///
+    /// Reads the shell capsule list and that session's shell request records
+    /// through the existing reads. A `stopped` or `failed` instance at the
+    /// test instant stays listed with that status and one request record that
+    /// is not pending. This method reads no clock and no disk.
+    pub fn watch_ended(&self, session_id: &str, ended: &str) -> Result<(), (u16, String)> {
+        if ended != "stopped" && ended != "failed" {
+            return Err((400, "watch status must be stopped or failed".to_owned()));
+        }
+        let listed = self.get_capsules(Caller::Shell)?;
+        let Some(entry) = listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == session_id))
+        else {
+            return Err((400, format!("left the instance list: {session_id}")));
+        };
+        let status = entry["status"].as_str().unwrap_or("");
+        if status != ended {
+            return Err((
+                400,
+                format!("changed from {ended} to {status}: {session_id}"),
+            ));
+        }
+        let records = self.get_capability_requests(Caller::Shell, Some(session_id))?;
+        let requests = records["requests"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if requests
+            .iter()
+            .any(|request| request["status"] == "pending")
+        {
+            return Err((400, format!("made a request after it ended: {session_id}")));
+        }
+        if requests.len() != 1 {
+            return Err((
+                400,
+                format!(
+                    "{session_id} has {} request records after it ended",
+                    requests.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// `POST /api/capability/deny`.
     ///
     /// A shell denies one pending request through the one writer, which stores
@@ -3755,6 +3802,269 @@ mod tests {
                 }]
             }),
             "the stand-in omits a stopped instance 60 seconds after the stop and keeps the running sibling"
+        );
+    }
+
+    #[test]
+    fn standin_stopped_instance_makes_no_request() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in numbers the two running launches component-1 and component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in lists component-1 running before the stop",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in lists component-2 running before the stop",
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 at instant 0");
+        standin.set_instant(2);
+        let watched = standin.watch_ended("component-1", "stopped");
+        assert!(
+            watched.is_ok(),
+            "the stand-in watch reports the stopped instance two seconds after the stop: {watched:?}"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in lists the stopped instance two seconds after the stop",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the running sibling listed after the watch",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![denied_request("req-1", "component-1", "stopped: stop one",)],
+            "the stand-in request record for the stopped instance is not pending"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("req-2", "component-2")],
+            "the stand-in leaves the sibling's request pending after the watch"
+        );
+        standin
+            .seed_request(
+                "req-retry",
+                "component-1",
+                SHARED_RESOURCE,
+                "read",
+                "read shared",
+            )
+            .expect("the stand-in seeds a pending request after the instance ended");
+        let retried = standin.watch_ended("component-1", "stopped");
+        assert_request_refused(
+            &retried,
+            "made a request after it ended: component-1",
+            "the stand-in watch reports the pending request that appeared after the end",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in leaves the stopped instance listed after the refusal",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                denied_request("req-1", "component-1", "stopped: stop one"),
+                pending_request("req-retry", "component-1"),
+            ],
+            "the stand-in leaves req-1 denied and req-retry pending after the refusal"
+        );
+        let unchanged = request_entries(&standin, "component-1");
+        let wrong_status = standin.watch_ended("component-1", "running");
+        assert_request_refused(
+            &wrong_status,
+            "watch status must be stopped or failed",
+            "the stand-in watch refuses a status other than stopped or failed",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            unchanged,
+            "the refused watch status changes no request record"
+        );
+        let missing = standin.watch_ended("component-9", "stopped");
+        assert_request_refused(
+            &missing,
+            "left the instance list: component-9",
+            "the stand-in watch reports an instance that is not listed",
+        );
+
+        let mut later = StandIn::new();
+        admit_shared(&mut later, Start::Ok);
+        launch_finished(&mut later);
+        launch_finished(&mut later);
+        seed_shared_request(&mut later, "req-1", "component-1");
+        later
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 at instant 0");
+        later.set_instant(2);
+        assert!(
+            later.watch_ended("component-1", "stopped").is_ok(),
+            "the stand-in watch reports the stopped instance two seconds after the stop"
+        );
+        later.set_instant(60);
+        let left = later.watch_ended("component-1", "stopped");
+        assert_request_refused(
+            &left,
+            "left the instance list: component-1",
+            "the stand-in watch reports the stopped instance that left the list at 60 seconds",
+        );
+        assert_eq!(
+            request_entries(&later, "component-1"),
+            vec![denied_request("req-1", "component-1", "stopped: stop one",)],
+            "the stand-in leaves the one denied request after the 60-second refusal"
+        );
+    }
+
+    #[test]
+    fn standin_failed_instance_makes_no_request() {
+        const FAILING_PATH: &str = "/capsules/fail-after-submit";
+        const FAILING_NAME: &str = "fail-after-submit";
+
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident(
+                FAILING_PATH,
+                FAILING_NAME,
+                Start::Error("start refused".to_owned()),
+            )
+            .expect("the stand-in admits the failing path");
+        admit_shared(&mut standin, Start::Ok);
+        let failing = standin
+            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
+            .expect("the stand-in launches the failing path");
+        let sibling = standin
+            .post_capsules(Caller::Shell, &agent_body(SHARED_PATH))
+            .expect("the stand-in launches the shared path");
+        assert_eq!(
+            (failing["id"].as_str(), failing["status"].as_str()),
+            (Some("component-1"), Some("starting")),
+            "the stand-in answers starting for the failing launch component-1"
+        );
+        assert_eq!(
+            (sibling["id"].as_str(), sibling["status"].as_str()),
+            (Some("component-2"), Some("starting")),
+            "the stand-in answers starting for the sibling launch component-2"
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes the failing start at instant 0");
+        standin.set_instant(2);
+        let watched = standin.watch_ended("component-1", "failed");
+        assert!(
+            watched.is_ok(),
+            "the stand-in watch reports the failed instance two seconds after the failure: {watched:?}"
+        );
+        let listed = shell_list(&standin);
+        let ended = listed["capsules"]
+            .as_array()
+            .expect("the stand-in returns capsules")
+            .iter()
+            .find(|entry| entry["id"] == "component-1");
+        assert_eq!(
+            ended,
+            Some(&json!({
+                "id": "component-1",
+                "name": FAILING_NAME,
+                "status": "failed",
+                "session_id": "component-1",
+                "cause": "start refused",
+            })),
+            "the stand-in lists the failed instance two seconds after the failure"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "starting",
+            "",
+            "the stand-in leaves the sibling starting after the watch",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![denied_request("req-1", "component-1", "start refused",)],
+            "the stand-in request record for the failed instance is not pending"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("req-2", "component-2")],
+            "the stand-in leaves the sibling's request pending after the watch"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "starting",
+            "",
+            "the stand-in stops no sibling of the failed instance",
+        );
+
+        let mut empty = StandIn::new();
+        empty
+            .admit_resident(
+                FAILING_PATH,
+                FAILING_NAME,
+                Start::Error("start refused".to_owned()),
+            )
+            .expect("the stand-in admits the failing path");
+        let only = empty
+            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
+            .expect("the stand-in launches the failing path once");
+        assert_eq!(
+            only["id"], "component-1",
+            "the stand-in numbers the only failing launch component-1"
+        );
+        empty
+            .finish_start("component-1")
+            .expect("the stand-in finishes the failing start with no seeded request");
+        empty.set_instant(2);
+        let no_records = empty.watch_ended("component-1", "failed");
+        assert_request_refused(
+            &no_records,
+            "component-1 has 0 request records after it ended",
+            "the stand-in watch counts the failed instance's request records",
+        );
+        assert_eq!(
+            shell_list(&empty),
+            json!({
+                "capsules": [{
+                    "id": "component-1",
+                    "name": FAILING_NAME,
+                    "status": "failed",
+                    "session_id": "component-1",
+                    "cause": "start refused",
+                }]
+            }),
+            "the stand-in leaves the failed entry listed after the count refusal"
+        );
+        assert!(
+            empty.grants.is_empty(),
+            "the stand-in mints no grant from the watch"
         );
     }
 

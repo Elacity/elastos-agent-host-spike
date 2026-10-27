@@ -725,3 +725,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_shell_deny_fails_the_waiting_sibling` is this stand-in, and a PASS there gives the Runtime no A6 credit.
 
 `standin_shell_grant_makes_one_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_stopped_instance_makes_no_request` and `standin_failed_instance_makes_no_request` are this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for the watch.

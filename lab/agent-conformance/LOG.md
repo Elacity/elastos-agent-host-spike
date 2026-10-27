@@ -8805,3 +8805,145 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | The grant writes one request record and one grant at `:369-380`; it changes no instance phase, so `finish_start` remains the admission decision and `duration` stays an allowance value; `authorise` at `:403` stays the presentation check. |
 
 The real A6 row stays open: the real route returns a token and the Runtime still owns the admission decision. A PASS here gives the Runtime no A6 credit for this grant.
+
+## 062 — A10/A11: an ended instance makes no request and stays listed
+
+062: `StandIn` gains one lab observation, `watch_ended(session_id, ended) -> Result<(), (u16, String)>`. Its doc comment starts `Lab observation, not a route.` It takes `&self`, reads no clock and no disk, and calls the existing `get_capsules(Caller::Shell)` and `get_capability_requests(Caller::Shell, Some(session_id))`. It walks neither `instances` nor `requests`, adds no renderer, and calls no writer. The checks run in this order, each refusal status 400: an `ended` other than `stopped` or `failed` is `watch status must be stopped or failed` before either read; a missing list entry is `left the instance list: ` plus the id; a listed status other than `ended` is `changed from ` plus `ended` plus ` to ` plus the actual status plus `: ` plus the id; a `pending` record is `made a request after it ended: ` plus the id; a request count other than 1 is the id plus ` has ` plus the decimal count plus ` request records after it ended`. `Ok(())` and every refusal leave instances, requests and grants as they were. `seed_request`, `settle_pending`, `stop_one`, `finish_start`, `keeps_instance`, `get_capsules` and `get_capability_requests` are unchanged. No `falsifiers.json` id was added.
+
+### Quote from the resident SPEC (read only)
+
+> All bounds below are the harness's: 10 seconds for every awaited transition,
+> a 2-second watch after an instance ends, and a 1-second dwell for residency.
+
+> For the watch, instance 1 makes no request and stays
+> `stopped`. Stop instance 2, then run the census.
+
+> For the watch, instance 1 makes no request and stays `failed`. Stop
+> instance 2, then run the census.
+
+### Tests
+
+Two tests in `standin_runtime::tests`, each passing with no operator and no probe build. Both use the existing `denied_request`, `pending_request`, `request_entries`, `assert_capsule` and `assert_request_refused` helpers.
+
+- `standin_stopped_instance_makes_no_request` (`:3809`) admits `/capsules/read-shared`, launches twice and finishes both starts, so `component-1` and `component-2` are `running`. It seeds `req-1` on `component-1` and `req-2` on `component-2`, stops `component-1` with `{"reason":"stop one"}` at instant 0, sets instant 2, and `watch_ended("component-1", "stopped")` is `Ok(())`. The list keeps `component-1` `stopped` with cause `stopped: stop one` and `component-2` `running`; the shell record for `component-1` is `denied_request("req-1", "component-1", "stopped: stop one")` and for `component-2` is `pending_request("req-2", "component-2")`. `seed_request("req-retry", "component-1", ...)` then `watch_ended` is 400 with `made a request after it ended: component-1`; `req-1` stays denied, `req-retry` stays pending and the entry stays `stopped`. `watch_ended("component-1", "running")` is `watch status must be stopped or failed` and changes no record, and `watch_ended("component-9", "stopped")` is `left the instance list: component-9`. A second `StandIn` stops `component-1` at instant 0 with one seeded request: the watch is `Ok(())` at instant 2 and 400 with `left the instance list: component-1` at instant 60, and the record is still the one denied request.
+- `standin_failed_instance_makes_no_request` (`:3945`) admits `/capsules/fail-after-submit` as `fail-after-submit` with `Start::Error("start refused")` and `/capsules/read-shared` with `Start::Ok`, launches both (`component-1` and `component-2`, both `starting`), seeds `req-1` and `req-2` before `finish_start`, finishes `component-1` at instant 0 and sets instant 2. `watch_ended("component-1", "failed")` is `Ok(())`; the list keeps `component-1` `failed` with cause `start refused` and `component-2` `starting`; `req-1` is `denied_request("req-1", "component-1", "start refused")` and `req-2` stays pending. A third `StandIn` admits only the failing path, launches once and finishes the start with no seeded request: at instant 2 the watch is 400 with `component-1 has 0 request records after it ended`, the entry stays `failed` with cause `start refused`, `grants` is empty and no sibling stops.
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `env RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact`. The planted crate compiled every time, and every planted run exited 101. After the last restore, `sha256sum standin-runtime/mod.rs` was `03ec278bad100bf68039f38c821f487a453112c9638a4ff9090853e477bf4e53`, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` showed the candidate only, and no plant expression remained.
+
+F-standin-watch-stub. Named test `standin_stopped_instance_makes_no_request`. Planted exit 101 in 1.53 seconds; restored it passes in the proof run. Assertion: `src/../standin-runtime/mod.rs:1625:9` `the stand-in watch reports the pending request that appeared after the end: Ok(())`.
+
+Old:
+
+```text
+    pub fn watch_ended(&self, session_id: &str, ended: &str) -> Result<(), (u16, String)> {
+        if ended != "stopped" && ended != "failed" {
+```
+
+New:
+
+```text
+    pub fn watch_ended(&self, session_id: &str, ended: &str) -> Result<(), (u16, String)> {
+        return Ok(());
+        if ended != "stopped" && ended != "failed" {
+```
+
+F-standin-watch-ignore-pending. Named test `standin_stopped_instance_makes_no_request`. Planted exit 101 in 0.98 seconds; restored it passes in the proof run. Assertion: `src/../standin-runtime/mod.rs:1618:9` `the stand-in watch reports the pending request that appeared after the end: Err((400, "component-1 has 2 request records after it ended"))`.
+
+Old:
+
+```text
+            .unwrap_or(&[]);
+        if requests
+            .iter()
+            .any(|request| request["status"] == "pending")
+        {
+            return Err((400, format!("made a request after it ended: {session_id}")));
+        }
+        if requests.len() != 1 {
+```
+
+New:
+
+```text
+            .unwrap_or(&[]);
+        if requests.len() != 1 {
+```
+
+F-standin-watch-ignore-list. Named test `standin_stopped_instance_makes_no_request`. Planted exit 101 in 1.69 seconds; restored it passes in the proof run. Assertion: `src/../standin-runtime/mod.rs:1623:9` `the stand-in watch reports an instance that is not listed: Err((400, "component-9 has 0 request records after it ended"))`.
+
+Old:
+
+```text
+        let Some(entry) = listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == session_id))
+        else {
+            return Err((400, format!("left the instance list: {session_id}")));
+        };
+        let status = entry["status"].as_str().unwrap_or("");
+        if status != ended {
+```
+
+New:
+
+```text
+        let entry = listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == session_id));
+        let status = entry
+            .map(|entry| entry["status"].as_str().unwrap_or(""))
+            .unwrap_or("");
+        if entry.is_some() && status != ended {
+```
+
+F-standin-watch-ignore-count. Named test `standin_failed_instance_makes_no_request`. Planted exit 101 in 1.24 seconds; restored it passes in the proof run. Assertion: `src/../standin-runtime/mod.rs:1615:9` `the stand-in watch counts the failed instance's request records: Ok(())`.
+
+Old:
+
+```text
+        if requests.len() != 1 {
+            return Err((
+                400,
+                format!(
+                    "{session_id} has {} request records after it ended",
+                    requests.len()
+                ),
+            ));
+        }
+        Ok(())
+```
+
+New:
+
+```text
+        Ok(())
+```
+
+### Docs
+
+`standin-runtime/README.md:47` adds one paragraph immediately before `## Callers`: `watch_ended` is a lab observation, not a route; it calls `get_capsules` and `get_capability_requests`; two seconds after a stop the instance is still listed `stopped` with one request that is not pending, and two seconds after a failed start the same holds for `failed`; a pending request on that session is `made a request after it ended`; at 60 seconds the instance has left the list; `seed_request` can still store a pending record after the end, and the watch reports it and does not remove it; a PASS gives the Runtime no A10 or A11 credit for this watch. The RA-1 section, the RI-1 to RI-4 section, the settlement paragraph, the census sentence and `## Callers` stay. `RUNBOOK.md:729` adds one paragraph after the last stand-in paragraph naming both tests and the no-credit limit.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/standin_contract.rs`, `tests/common/grants.rs`, `GAPS.md`, `Cargo.toml` and `Cargo.lock` is empty.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 261.12 seconds, inside the 600-second bound. The lib target holds 54 tests, including both new ones (57 across lib and probe by `-- --list`). The observed tail: report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the restores: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.16 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib instance_makes_no_request` exit 0, real 0.11 seconds, 2 passed and 0 failed.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The observation reads the stored `session_id` at `standin-runtime/mod.rs:308`; it adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `watch_ended` takes `&self` at `:308` and reads no file, network, clock or hardware; it grants nothing and mints no token. |
+| 3. A second path or a second copy of one rule? | No | It calls `get_capsules` at `:312` and `get_capability_requests` at `:326`; it walks no store, adds no renderer and calls no writer. |
+| 4. Runtime core grows? | No | The diff touches only `lab/agent-conformance/`; `elastos/`, `capsules/` and `scripts/` are untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | Each check returns status 400 with the named reason at `:309`, `:317`, `:320`, `:335` and `:337`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | This is a lab observation with no capsule code; it reads the shell view that the real route already answers. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:3809` and `:3945`; the stub, ignore-pending, ignore-list and ignore-count plants each fail the named test, and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | The watch reads the instance list and request records at `:312-330`; it changes no phase, request or grant, so `finish_start` stays the admission decision and no allowance is minted. |
+
+A passing row gives the real Runtime no A10 or A11 credit for this watch.
