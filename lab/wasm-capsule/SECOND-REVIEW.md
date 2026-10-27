@@ -17,9 +17,30 @@ Then each promise says "still true at dc78bca5b", or which later merge changed
 it. This file fixes nothing; each `FOLLOWUP:` line would become a later task.
 Task 007's old name rule is written here as "the retired label".
 
+Task 047's two sections were written and run at `dc78bca5b`. They were then
+merged onto `286b983b676a6572f4220b8fb788d16a771321fa` (`286b983b6`, the merge
+of task 046, PR #600), so "at dc78bca5b" in them means the tree the runs used,
+not the parent of 047's commit. Task 051 checked each `file:line` they give at
+dc78bca5b with `git show 286b983b6:<path>`. Only two differ (the README cites
+in PR #235's promise 5); each has its `286b983b6` line beside it. Every other
+cite is the same on both commits.
+
 Task 048's four sections (after 047's two) use base commit
 `43b4af9441fa6a0a3a5d379721633c158bcc8c1d` (`43b4af944`, the merge of 047's
 PR #608). In those sections, "still true at 43b4af944" is said of that base.
+
+## Verdicts
+
+One line per PR section below, in file order, with that section's
+`FOLLOWUP:` lines under it, word for word.
+
+- PR #231 (task 024): PASS
+- PR #235 (task 025): PASS
+- PR #238 (task 021): PASS
+- PR #240 (task 022): PASS
+- PR #241 (task 023): PASS
+- PR #245 (task 026): FOLLOWUP
+  FOLLOWUP: lab/wasm-capsule/README.md:2832 says `tools/src/run.rs` is not a recovery target, so F-WC-ENGINE-RUN-MODULE-DOC and F-WC-ENGINE-RUN-ENUM-DOC stay hand-proven with no `falsifiers.json` entry, but run.rs has been a target since provider PR #242 merged before #245 (README:3067 says so too) — hand check: `grep -n '"lab/wasm-capsule/tools/src/run.rs"' examples/agent-host/falsify.py` prints `357:`, and `grep -c F-WC-ENGINE-RUN lab/wasm-capsule/falsifiers.json` prints `0`.
 
 ## PR #231 (task 024), merge f1f627250
 
@@ -195,11 +216,37 @@ Lane diff: `git diff a5b4e8a10^1 a5b4e8a10 -- lab/wasm-capsule/` (10 files,
 - Promise 4: the canonical runner catches each of the 17 `F-WC9-*` entries and
   the four re-anchored entries. At the merge, `falsifiers.json` holds 139
   entries. 17 of them are `F-WC9-*`, and every one of their edits is in
-  `tools/src/verify.rs`. `LOG.md:381-383` records "summary: 21 CAUGHT of 21".
-  Re-run at dc78bca5b (below): "summary: 22 CAUGHT of 22", exit 0. That covers
-  all 18 `F-WC9-*` ids now in the list and the four re-anchored entries
-  (F-WC5a, F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY, F-WC4-SEALED-NEW).
-  Still true at dc78bca5b.
+  `tools/src/verify.rs`. Which four were re-anchored: task 020's LOG entry
+  (`git show 5f3d23418:lab/wasm-capsule/LOG.md`, lines 238-239) names F-WC5a,
+  F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY and F-WC4-SEALED-NEW. Task
+  025's task text named F-WC-README-COUNT in place of F-WC4-SEALED-NEW. The
+  runs, and the ids each one named:
+  - The merge's run (`LOG.md:381-383` at `a5b4e8a10`). Its tokens are `F-WC9
+    F-WC5a F-WC5-VERIFY-TWICE F-WC5-QUERY-BEFORE-VERIFY F-WC-README-COUNT`. The
+    runner reads a bare token as an id prefix. On the merge's list, `F-WC9`
+    selects the 17 `F-WC9-*` ids and each other token selects one id. So it
+    ran 21 ids, with F-WC-README-COUNT and without F-WC4-SEALED-NEW: "summary:
+    21 CAUGHT of 21".
+  - Task 020's own run, at its commit `5f3d23418` (base `36fa6d89c`, before
+    task 024; 025 carried that commit, it did not merge as it is). Its LOG
+    (lines 240-244 there) names the prefixes `F-WC9 F-WC4 F-WC5
+    F-WC-README-COUNT`, which select F-WC4-SEALED-NEW: "summary: 1 BUILD
+    FAILED, 93 CAUGHT of 94". The one not caught was F-WC5a, caught after a
+    fourth edit ("1 CAUGHT of 1").
+  - Task 047's run at dc78bca5b (below). It named 22 ids: the 18 `F-WC9-*` ids
+    now in the list and 020's four re-anchored entries, F-WC4-SEALED-NEW
+    included, and not F-WC-README-COUNT: "summary: 22 CAUGHT of 22", exit 0.
+    So on a tree that holds 025's merged change, F-WC4-SEALED-NEW was first
+    run by the canonical runner in 047's run.
+  - Task 051's re-run of the same 22 ids at 720cdde57 (below, "Re-run at
+    720cdde57"): "summary: 22 CAUGHT of 22", exit 0.
+
+  This bullet used to say the merge's 21-of-21 run covered all four of 020's
+  re-anchored entries; it did not. The verdict stays PASS, because the promise
+  still holds at a base: every entry it names is runner-caught at dc78bca5b by
+  047's run, and at 720cdde57 by 051's re-run. The miss was in the merge's
+  record of its run, not in the merged code: the merge's `falsifiers.json` is
+  the same blob as at `5f3d23418` (promise 1).
 - Promise 5: README keeps the link rule in Rong's words, the grants file
   format, the exact label and the hand-proven labels. At the merge,
   `README.md:662-668` quotes Rong: "link an import only if it is in the signed
@@ -214,8 +261,9 @@ Lane diff: `git diff a5b4e8a10^1 a5b4e8a10 -- lab/wasm-capsule/` (10 files,
   made the format `wc-009.lab-grants/v2`, with a `right` per grant
   (`README.md:910`). Task 029 (PR #269, merge `a541cd7ba`) added the runner
   entry F-WC9-RUN-DROPS-GRANTS for the `&[]` bug and relabelled it runner-caught
-  (`README.md:2780-2783`, `:2912-2915`). The runner run below confirms that
-  entry.
+  (`README.md:2780-2783`, `:2912-2915`; at 286b983b6, after task 046 added
+  lines above them, the same text is at `README.md:2795-2798` and
+  `:2927-2930`). The runner run below confirms that entry.
 - Promise 6: no new dependency, and `tools/Cargo.toml`, `Cargo.toml` and
   `Cargo.lock` unchanged. `git diff --stat a5b4e8a10^1 a5b4e8a10 --
   lab/wasm-capsule/tools/Cargo.toml lab/wasm-capsule/Cargo.toml
@@ -255,6 +303,26 @@ exit 0
 
 Each of the 22 entries printed CAUGHT. After the run, `git status --short`
 printed nothing, and no `*.falsify-original` backup was left in the lane.
+
+Re-run at 720cdde57. Task 051 ran the same 22 ids at its base
+`720cdde578bfcd1063069a8d717f3baf5c8a979f` (`720cdde57`, the merge of 048's
+PR #621), from the repo root, with this file as the only change in the tree.
+All 22 ids are still in the list (184 entries), so no merge removed one. The
+runner ran only while holding the shared build lease (`fcntl.flock` on
+`/Users/sash/code/elastos-runtime/.git/local-ai-heavy-build.lock`), with the
+wait bounded at 1500 s. The first try timed out on that wait and ran nothing;
+the second took the lease after 135 s:
+
+```
+$ RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py \
+    --from lab/wasm-capsule/falsifiers.json <the same 22 ids as above>
+baseline: 10 named tests pass without an edit, 0 do not
+summary: 22 CAUGHT of 22
+exit 0
+```
+
+Each of the 22 entries printed CAUGHT. After the run, `git status --short`
+showed only this file, and no `*.falsify-original` backup was left in the lane.
 
 No finding. Every promise held at the merge. The later changes to the format,
 the test grants and one label were made on purpose by tasks 029, 031 and 039,

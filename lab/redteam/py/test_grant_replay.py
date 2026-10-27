@@ -27,6 +27,10 @@ A replay the real crate accepts, or a binding refusal followed by
 ``OverCeiling``, is ``findings/grant-binding-001.md``. Only a probe named
 there is an expected failure. A compile error, a run of zero tests, and a
 second unrecorded failure stay failures.
+
+A path dependency Cargo resolves through a TOML escape, while the link test
+still passes, is ``findings/grant-binding-002.md``. ``record_escaped_link``
+is the only writer for that file.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ CRATE = REPO / "lab" / "grant-binding"
 LIB = CRATE / "src" / "lib.rs"
 LEDGER = CRATE / "src" / "ledger.rs"
 FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-001.md"
+LINK_FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-002.md"
 
 FINDING_ID = "grant-binding-001"
 
@@ -65,6 +70,16 @@ REPO_MARKER = "@@REDTEAM_REPO@@"
 NAME_ONLY_MANIFEST = 'name = "grant-binding"'
 AUDIT_SHAPED_MANIFEST = 'audit = { path = "../wasm-capsule/audit" }'
 PATH_MANIFEST = 'grant-binding = { path = "lab/grant-binding" }'
+# Cargo decodes \\u0069. The raw bytes do not contain grant-binding.
+ESCAPED_MANIFEST = """\
+[package]
+name = "escape-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+gb = { path = "../grant-bind\\u0069ng", package = "grant-bind\\u0069ng" }
+"""
 
 TIMEOUT_S = 240
 CLEAN = "these two stale calls were refused and did not spend the ceiling, and the same call's child path was refused, and the same call was refused after the identity change, on {commit}"
@@ -421,6 +436,69 @@ def pin_line():
         parts.append("sha256")
         parts.append(digest)
     return " ".join(parts)
+
+
+def link_pin_line():
+    """The link finding's first line, from the live detector file."""
+    rel = "lab/grant-binding/src/link.rs"
+    commit = git_text("log", "-1", "--format=%H", "HEAD", "--", rel)
+    digest = sha256_file(REPO / rel)
+    return f"grant-binding-002 {rel} {commit} sha256 {digest}"
+
+
+def live_escaped_document():
+    """Finding text from the live detector file. The writer does not call this."""
+    rel = "lab/grant-binding/src/link.rs"
+    commit = git_text("log", "-1", "--format=%H", "HEAD", "--", rel)
+    digest = sha256_file(REPO / rel)
+    return (
+        f"grant-binding-002 {rel} {commit} sha256 {digest}\n"
+        "\n"
+        "probe: test_escaped_path_dependency_matches_cargo\n"
+        "observed: detector returned false\n"
+        "cargo metadata package: grant-binding\n"
+    )
+
+
+def record_escaped_link(outcome, metadata_code, metadata_output, finding):
+    """Write grant-binding-002, or raise without writing.
+
+    A metadata failure or a link error writes nothing. A caught failure
+    returns the package names and writes nothing. A pass writes the live
+    pin and the three probe lines and returns that text.
+    """
+    if metadata_code != 0:
+        raise ProbeError(f"cargo metadata exited {metadata_code}")
+    start = metadata_output.find("{")
+    if start < 0:
+        raise ProbeError("cargo metadata output has no JSON object")
+    try:
+        document, _end = json.JSONDecoder().raw_decode(metadata_output, start)
+    except json.JSONDecodeError:
+        raise ProbeError("cargo metadata JSON is invalid") from None
+    packages = document.get("packages") if isinstance(document, dict) else None
+    names = []
+    if isinstance(packages, list):
+        for package in packages:
+            if isinstance(package, dict) and isinstance(package.get("name"), str):
+                names.append(package["name"])
+    if "grant-binding" not in names:
+        raise ProbeError("cargo metadata names no grant-binding package")
+    if outcome.kind == "error":
+        raise ProbeError(f"link outcome was error: {outcome.detail}")
+    if outcome.kind == "failed" and outcome.caught:
+        return names
+    if outcome.kind != "passed":
+        raise ProbeError(f"link outcome was {outcome.kind}")
+    text = (
+        link_pin_line()
+        + "\n\n"
+        + "probe: test_escaped_path_dependency_matches_cargo\n"
+        + "observed: detector returned false\n"
+        + "cargo metadata package: grant-binding\n"
+    )
+    Path(finding).write_text(text)
+    return text
 
 
 def toolchain_reason():
@@ -1487,6 +1565,219 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertTrue(outcome.caught)
         self.assertNotEqual(outcome.kind, "error")
         self.assertIn("has a path dependency on grant-binding", outcome.output)
+
+    def lay_escaped_probe(self):
+        """Lay the dependency at grant-binding and the probe whose path decodes to it."""
+        dependency = self.work / "grant-binding"
+        probe = self.work / "escaped-probe"
+        self._lay_crate(
+            dependency,
+            "[package]\n"
+            'name = "grant-binding"\n'
+            'version = "0.0.0"\n'
+            'edition = "2021"\n',
+            "pub fn f() {}\n",
+        )
+        self._lay_crate(probe, ESCAPED_MANIFEST, "pub fn g() {}\n")
+        return probe
+
+    def _lay_crate(self, root, manifest, lib):
+        source = Path(root) / "src"
+        source.mkdir(parents=True, exist_ok=True)
+        (Path(root) / "Cargo.toml").write_text(manifest)
+        (source / "lib.rs").write_text(lib)
+
+    def test_escaped_path_dependency_matches_cargo(self):
+        """Cargo resolves the escaped path. The raw text does not name the crate.
+
+        The owner's detector reads that raw text. A pass writes
+        grant-binding-002. A caught failure writes nothing and says the
+        detector returned true. An error propagates. A false detector
+        result is not a skip.
+        """
+        self.assertNotIn(self._testMethodName, PROBE_NAMES)
+        self.assertNotIn(self._testMethodName, STALE_NAMES)
+        encoded = ESCAPED_MANIFEST.encode()
+        self.assertIn(b"\\u0069", encoded)
+        self.assertNotIn(b"grant-binding", encoded)
+        _code, _output, outcome = self._link_outcome(ESCAPED_MANIFEST)
+        probe = self.lay_escaped_probe()
+        self.assertEqual((probe / "Cargo.toml").read_bytes(), encoded)
+        manifest_path = str(probe / "Cargo.toml")
+        meta_code, meta_output = cargo(
+            probe,
+            [
+                "metadata",
+                "--offline",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                manifest_path,
+            ],
+            self.target,
+        )
+        print(f"escaped link outcome: {outcome.kind}", file=sys.stderr, flush=True)
+        if outcome.kind == "failed" and outcome.caught and LINK_FINDING.is_file():
+            LINK_FINDING.unlink()
+        returned = record_escaped_link(outcome, meta_code, meta_output, LINK_FINDING)
+        start = meta_output.find("{")
+        parsed, _end = json.JSONDecoder().raw_decode(meta_output, start)
+        names = [package["name"] for package in parsed["packages"]]
+        print(
+            f"escaped metadata packages: {', '.join(names)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        grant_dir = next(
+            Path(package["manifest_path"]).resolve().parent
+            for package in parsed["packages"]
+            if package["name"] == "grant-binding"
+        )
+        self.assertEqual(grant_dir, (self.work / "grant-binding").resolve())
+        self.assertIn("grant-binding", names)
+        self.assertFalse(FINDING.is_file())
+        if outcome.kind == "passed":
+            document = live_escaped_document()
+            self.assertEqual(link_pin_line(), document.splitlines()[0])
+            self.assertEqual(returned, document)
+            self.assertEqual(LINK_FINDING.read_text(), returned)
+            self.assertEqual(LINK_FINDING.read_text().splitlines()[0], link_pin_line())
+            self.assertEqual(
+                LINK_FINDING.read_text().splitlines()[2:],
+                [
+                    "probe: test_escaped_path_dependency_matches_cargo",
+                    "observed: detector returned false",
+                    "cargo metadata package: grant-binding",
+                ],
+            )
+        elif outcome.kind == "failed" and outcome.caught:
+            self.assertFalse(LINK_FINDING.is_file())
+            self.assertEqual(returned, names)
+            print("detector returned true", file=sys.stderr, flush=True)
+        else:
+            self.fail(f"escaped link outcome: {outcome.kind}")
+
+    def test_escaped_probe_errors_are_probe_errors(self):
+        """Each metadata or link error is its own ProbeError and writes nothing.
+
+        Removing that reason's raise makes that subTest fail.
+        """
+        valid = '{"packages":[{"name":"grant-binding"}]}'
+        passed = Outcome("passed", "ok", "")
+        cases = (
+            (
+                "cargo metadata exited",
+                1,
+                valid,
+                passed,
+                "cargo metadata exited 1",
+            ),
+            (
+                "cargo metadata output has no JSON object",
+                0,
+                "cargo metadata produced no object",
+                passed,
+                "cargo metadata output has no JSON object",
+            ),
+            (
+                "cargo metadata JSON is invalid",
+                0,
+                "{not json",
+                passed,
+                "cargo metadata JSON is invalid",
+            ),
+            (
+                "cargo metadata names no grant-binding package",
+                0,
+                '{"packages":[{"name":"escape-probe"}]}',
+                passed,
+                "cargo metadata names no grant-binding package",
+            ),
+            (
+                "link outcome was error",
+                0,
+                valid,
+                Outcome("error", "compile error", "could not compile"),
+                "link outcome was error: compile error",
+            ),
+        )
+        findings = REPO / "lab" / "redteam" / "findings"
+        before_names = sorted(path.name for path in findings.iterdir())
+        before_link = LINK_FINDING.read_bytes() if LINK_FINDING.is_file() else None
+        for index, (name, code, output, outcome, reason) in enumerate(cases):
+            with self.subTest(name):
+                dest = self.work / "escaped-errors" / f"{index}.md"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                self.assertFalse(dest.is_file())
+                with self.assertRaises(ProbeError) as caught:
+                    record_escaped_link(outcome, code, output, dest)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertFalse(dest.is_file())
+                self.assertEqual(
+                    sorted(path.name for path in findings.iterdir()),
+                    before_names,
+                )
+                after_link = LINK_FINDING.read_bytes() if LINK_FINDING.is_file() else None
+                self.assertEqual(after_link, before_link)
+
+    def test_escaped_finding_contract(self):
+        """A pass writes the live document. A caught failure leaves the destination absent.
+
+        The two calls share one cargo metadata result. The outcome the live
+        link did not return is built here. A wrong pin or a wrong body fails
+        the pass. A finding left behind fails the failure.
+        """
+        _code, _output, live = self._link_outcome(ESCAPED_MANIFEST)
+        probe = self.lay_escaped_probe()
+        meta_code, meta_output = cargo(
+            probe,
+            [
+                "metadata",
+                "--offline",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                str(probe / "Cargo.toml"),
+            ],
+            self.target,
+        )
+        if live.kind == "passed":
+            other = Outcome(
+                "failed",
+                "test redteam_manifest_is_not_a_grant_link ... FAILED",
+                live.output,
+            )
+        elif live.kind == "failed" and live.caught:
+            other = Outcome(
+                "passed",
+                "test redteam_manifest_is_not_a_grant_link ... ok",
+                live.output,
+            )
+        else:
+            record_escaped_link(
+                live, meta_code, meta_output, self.work / "escaped-link-error.md",
+            )
+            self.fail(f"link outcome was {live.kind}")
+        document = live_escaped_document()
+        self.assertEqual(link_pin_line(), document.splitlines()[0])
+        names = None
+        for item in (live, other):
+            dest = self.work / f"link-contract-{item.kind}.md"
+            self.assertFalse(dest.exists())
+            returned = record_escaped_link(item, meta_code, meta_output, dest)
+            if names is None:
+                start = meta_output.find("{")
+                parsed, _end = json.JSONDecoder().raw_decode(meta_output, start)
+                names = [package["name"] for package in parsed["packages"]]
+            if item.kind == "passed":
+                self.assertTrue(dest.is_file())
+                self.assertEqual(dest.read_text(), document)
+                self.assertEqual(returned, document)
+                self.assertEqual(dest.read_text().splitlines()[0], link_pin_line())
+            else:
+                self.assertTrue(item.caught)
+                self.assertFalse(dest.exists())
+                self.assertEqual(returned, names)
 
     def run_link_manifest(self, text):
         """Run the one link test in the real package against a temp manifest.

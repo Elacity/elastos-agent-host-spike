@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031 and 032). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032 and 033). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -4170,6 +4170,55 @@
       ],
       "tests": [
         "standin_launches_a_signed_bundle_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI33a",
+      "title": "a launch gives the instance one grant for each capabilities entry of its manifest, so a valid signature alone yields a grant",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        Ok(self.launch(name))\n",
+          "new": "        let answer = self.launch(name);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for capability in manifest.capabilities {\n            self.seed_grant(&session_id, &capability, \"*\", \"session\");\n        }\n        Ok(answer)\n"
+        }
+      ],
+      "tests": [
+        "standin_valid_signature_alone_yields_no_grant"
+      ]
+    },
+    {
+      "id": "F-CI33b",
+      "title": "the grant view answers no entries whatever is held, so it is a constant",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "self.grants.iter().map(Grant::entry).collect();\n",
+          "new": "self.grants.iter().take(0).map(Grant::entry).collect();\n"
+        }
+      ],
+      "tests": [
+        "standin_grant_view_lists_a_seeded_grant"
+      ]
+    },
+    {
+      "id": "F-CI33c",
+      "title": "the grant view drops the all_sessions_live scope marker",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        json!({ \"scope\": \"all_sessions_live\", \"capabilities\": capabilities })\n",
+          "new": "        json!({ \"capabilities\": capabilities })\n"
+        }
+      ],
+      "tests": [
+        "standin_valid_signature_alone_yields_no_grant",
+        "standin_grant_view_lists_a_seeded_grant"
       ]
     }
   ]

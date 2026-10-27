@@ -3965,12 +3965,13 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
 
 /// The did suite's cases in the order the suite runs them, with the class each
 /// case must answer with. The permitted cases are from
-/// `confined_provider_serves_did_operations_under_its_root`; the outside write
-/// is the first target of `outside_write_denied`; the planted read is the read
+/// `confined_provider_serves_did_operations_under_its_root`; the outside
+/// writes are both targets of `outside_write_denied`, the unrelated directory
+/// and the sibling of `did/` under the same base; the planted read is the read
 /// half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`;
 /// and the final `get_did` is the service check both tests make after a
 /// refusal.
-const DID_SUITE_CASES: [(&str, SuiteClass); 8] = [
+const DID_SUITE_CASES: [(&str, SuiteClass); 9] = [
     // `confined_provider_serves_did_operations_under_its_root` (did's
     // tests/confine.rs:407) runs these five operations.
     ("init at the did root", SuiteClass::Permitted),
@@ -3981,6 +3982,14 @@ const DID_SUITE_CASES: [(&str, SuiteClass); 8] = [
     // The first target of `outside_write_denied` (did's tests/confine.rs:557).
     (
         "outside write through the granted nickname file",
+        SuiteClass::Denied,
+    ),
+    // The second target of `outside_write_denied`
+    // (did's tests/confine.rs:576): a sibling of `did/` under the same base,
+    // which the test creates before it links. Only this target separates a
+    // write grant on `STORAGE_ROOT` from one on `STORAGE_PARENT`.
+    (
+        "outside write to a sibling of the did root",
         SuiteClass::Denied,
     ),
     // The read half of
@@ -4147,8 +4156,9 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
 /// and judgement of `wallet_standin_suite`. It returns one entry per case of
 /// `DID_SUITE_CASES` in its order: `init` with did's fixture device key,
 /// `get_did`, `set_nickname`, `get_nickname` and `get_persona_did`; the outside
-/// write of did's first `outside_write_denied` target, which points the granted
-/// nickname file at an unrelated directory; the planted read of
+/// writes of both `outside_write_denied` targets, the first pointing the
+/// granted nickname file at an unrelated directory and the second at a sibling
+/// of `did/` under the same base; the planted read of
 /// `planted_file_beneath_storage_parent_is_neither_read_nor_written`, which
 /// points the granted file at its own encrypted copy beneath `STORAGE_PARENT`;
 /// and `get_did` after the denied cases. Each entry carries the class of the
@@ -4246,6 +4256,52 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
         &denied,
     ));
     fs::remove_file(&granted).expect("remove the outside symlink");
+
+    // The second `outside_write_denied` target: a sibling of `did/` under the
+    // same base. The test creates it before it links, so the refusal comes from
+    // the profile and not from a missing path, and only this target separates a
+    // write grant on `STORAGE_ROOT` from one on `STORAGE_PARENT`.
+    let restored = provider.send(&json!({ "op": "set_nickname", "nickname": "Sibling source" }));
+    assert_eq!(
+        restored["status"], "ok",
+        "the granted write must recover the file: {restored}"
+    );
+    let sibling = storage_parent(DID_PROVIDER, root).join("sibling");
+    fs::create_dir_all(&sibling).expect("sibling directory under the same base");
+    let target = sibling.join("nickname.enc");
+    fs::remove_file(&granted).expect("remove the granted nickname file");
+    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path at its sibling");
+    let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Sibling" }));
+    assert_eq!(
+        denied["status"], "error",
+        "the sibling write must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
+        "the denial must name the failed write: {denied}"
+    );
+    assert!(
+        !target.exists(),
+        "nothing may land beside the storage root: {}",
+        target.display()
+    );
+    assert_eq!(
+        fs::read_dir(&sibling)
+            .expect("the sibling directory must be readable")
+            .count(),
+        0,
+        "the sibling directory must stay empty: {}",
+        sibling.display()
+    );
+    record.push(suite_entry(
+        "outside write to a sibling of the did root",
+        SuiteClass::Denied,
+        &denied,
+    ));
+    fs::remove_file(&granted).expect("remove the sibling symlink");
 
     // The read half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`:
     // the provider's own encrypted nickname is copied beneath STORAGE_PARENT,
@@ -4435,13 +4491,19 @@ fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
 /// record must hold one entry per case of `DID_SUITE_CASES`, in its order, with
 /// its name and class; every permitted case answers `ok`, every denied case is
 /// refused in both records, and the two records are equal entry by entry; a
-/// difference names the first differing case. The lab stand-in is test code and
-/// not the Runtime.
+/// difference names the first differing case. The second outside write is the
+/// sibling of `did/` under the same base, so a write grant that stops at
+/// `STORAGE_ROOT` is separable from one that covers `STORAGE_PARENT`; the
+/// unrelated directory alone cannot separate them because both grants refuse
+/// it. The lab stand-in is test code and not the Runtime.
 ///
 /// Falsifier: WP124 makes the stand-in use wallet's root layout for did; the
 /// stand-in binds `STORAGE_ROOT` to `<root>/ElastOS/SystemServices/Wallet`, so
 /// its `init` cannot write `<root>/did` and the start is Refused. This test
-/// fails at the start and records no case.
+/// fails at the start and records no case. WP127 appends a write grant on
+/// `STORAGE_PARENT` to the stand-in's generated profile for did, so its sibling
+/// write answers `ok` while the committed profile refuses it, and this test
+/// fails naming that case.
 #[test]
 fn standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {

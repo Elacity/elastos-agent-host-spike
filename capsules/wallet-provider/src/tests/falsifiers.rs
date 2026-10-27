@@ -179,10 +179,14 @@ use std::process::Command;
 /// fails. Task 096's WP124 makes the stand-in use wallet's root layout for did,
 /// so `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
 /// fails because the did start is refused at its first `init`. Task 099's
-/// WP125 makes the absent-tool check never fire, so did's case (c) is answered
+/// WP126 makes the absent-tool check never fire, so did's case (c) is answered
 /// by the wrong-tool reason and lacks `is absent`; and WP126 drops the OS from
-/// the wrong-tool reason, so did's case (c2) lacks `macos`.
-const EXPECTED_FALSIFIERS: usize = 124;
+/// the wrong-tool reason, so did's case (c2) lacks `macos`. Task 100's WP127
+/// appends a write grant on `STORAGE_PARENT` to the stand-in's generated
+/// profile for did, so
+/// `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+/// fails on the sibling write case, which answers `ok`.
+const EXPECTED_FALSIFIERS: usize = 125;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
