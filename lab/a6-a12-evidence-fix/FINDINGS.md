@@ -92,18 +92,17 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: `test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.30s`.
-`--list` names those 49 tests (the previous 43 plus six r4 tests).
-`planted_bugs_are_caught` printed **28 CAUGHT lines** from **25 plants**
-(the previous 19 plus M-A6-LIVE-PIDS, M-A12-NO-ISOLATION,
-M-A12-SNAP-IGNORE-LIVE, M-A12-NO-HANDLE, M-A12-HASH-MTIME,
-M-A12-TOCTOU-FOLLOW; F-A12-DROP-ROOTS, M-A12-TMP-DOTDOT, and
-M-A6-COMMENT-STEP4 each name two tests). After the suite,
-`ls /tmp/elastos` was `No such file or directory`. Runtime `manager.rs`
-sha256 stayed
+Result: `test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 95.66s`.
+`--list` names those 57 tests (the previous 49 plus eight r5 tests).
+`planted_bugs_are_caught` printed **39 CAUGHT lines** from **34 plants**
+(the previous 25 plus M-A12-NO-SYSTEM-TEMPS, M-A12-NO-LIVE-WATCH,
+M-A12-HASH-CAP-64K, M-A12-SPARSE-READ, M-A12-NO-RECHECK,
+M-A12-HANDLE-EMPTY-OK, M-A6-CLAIMED-NO-RA6, M-A6-PROVE-ALWAYS-OK,
+M-A6-INSPECT-ALWAYS-SOME; F-A12-DROP-ROOTS, M-A12-TMP-DOTDOT,
+M-A12-TOCTOU-FOLLOW, M-A6-COMMENT-STEP4, and M-A6-PROVE-ALWAYS-OK
+each name two tests). After the suite, `ls /tmp/elastos` was `No such
+file or directory`. Runtime `manager.rs` sha256 stayed
 `cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
-Independent mutants M-R4-GUARD-NO-ISOLATION and M-R4-SNAP-IGNORE-LIVE
-are **CAUGHT**; `a12.rs` was restored after each.
 r3 `lab/review-a6-a12-343-r3/run.sh` still pins `87b974a1` and refuses
 this head. That pin is honest for the head r3 reviewed. This folder
 does not edit the r3 runner.
