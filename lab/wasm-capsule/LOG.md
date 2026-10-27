@@ -1014,3 +1014,43 @@
   exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `tools/src/`, `capsule/`, `tools/build`, lab
   CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 042 (three wrong claims from PASS reviews: 040's killed-run test, 039's claim sentence, 036's guard
+  label). Base `ed88c8670`. `tests/run.rs`, `tools/src/run.rs` (module doc only), README, ADOPTION and LOG; no
+  `falsifiers.json` change. (1) `tests/run.rs`: `census_tool` now returns an `Err` ("the census tool <path> did not
+  start: ...") in place of a panic, so the census still fails the test with the path (`census failed: ...`) and the
+  killed-run test can stop its engines first; new `PKILL` (`/usr/bin/pkill`) and `stop_run_engines`
+  (`pkill -KILL -f <work root>` every 50 ms while the runner thread has not finished, at most 10 s; returns any
+  `pkill` start error, exit other than 0 or 1, or a runner still running). In
+  `killed_run_leaves_nothing_under_the_scratch_root`, a failed wait (pgrep error, no process in 10 s, run ended
+  first) and a `/bin/kill` that does not start or fails each call it, then join the thread, then fail with the first
+  reason; if the thread still runs, the join waits, so no detached thread is left. Passing path unchanged: run alone,
+  both "live argv held no preopen" PASS lines and both census PASS lines, `ok. 1 passed`. Hand proof,
+  hand-proven, pending R1 (`tests/run.rs` is not a recovery target, so no `falsifiers.json` entry), each followed by
+  `/usr/bin/pgrep -f run40-killed`: with `PGREP` = `/nonexistent/pgrep`, the test failed at `tests/run.rs:3605:17`,
+  "wasmtime: the census tool /nonexistent/pgrep did not start: No such file or directory (os error 2); then stopped
+  its engines (problems: []) and joined the runner (it panicked: false)", in 0.08s; pgrep printed nothing, exit 1.
+  With `PGREP` = `/usr/bin/false` (exit 1, nothing printed: the 10 s path), it failed after 10.09s, "wasmtime: no
+  engine process showed up within 10 s, or the run ended first; then stopped its engines (problems: []) and joined
+  the runner (it panicked: false)"; pgrep printed nothing, exit 1. Before the fix, on the base: `/usr/bin/false`
+  failed at `tests/run.rs:3549:48` after 10.04s, and pgrep then exited 0 with one live engine, `/opt/homebrew/bin/wasmtime
+  run --invoke digest -W max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y
+  <tmp>/wc001-run40-killed-71932-.../work-wasmtime/wasmtime/module.wasm 1592590337`, killed by hand with `/bin/kill
+  -KILL` (pgrep then exit 1). `/nonexistent/pgrep` on the base panicked at `tests/run.rs:3223:33` with the same start
+  error, but left no engine in ten tries (eight run alone, each "finished in 0.00s"; one with the whole `run` test
+  binary): the test binary exited, or the panic's unwinding removed the temp root, before the detached thread started
+  the engine. So that path leaked only by timing; the 10 s path leaked every time. Each `PGREP` edit restored byte
+  for byte (`git diff --stat -- tests/run.rs` empty before the fix was written). (2) The claim sentence in
+  `tools/src/run.rs`'s module doc, README's "**The claim.**" and ADOPTION's task 039 line now say a failed removal
+  leaves that run folder (step 6), refused after a success; no code change in `tools/src/`. (3) Task 036's
+  `/bin/bash` 3.2 guard is labelled hand-proven, pending R1 in README (named tests, a "Falsifiers" paragraph) and
+  here; re-run now: with ` version 5.3.` in place of ` version 3.2.` in `require_system_bash_3_2`, the status test
+  failed at `tests/reproducible.rs:103:5`, "this test needs /bin/bash 3.2, where a `set -u` error reaches the EXIT
+  trap with $? 0; found: \"GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)\" (exit status: 0)";
+  restored (`git diff --stat -- tests/reproducible.rs` empty), then `ok. 1 passed`. README's hand-proven total is 66
+  (the 64 entries, plus this guard and task 042's stop, each once, outside the 175); runner-caught stays 111, total
+  175. Every `falsifiers.json` anchor found exactly once (64 in `tools/src/run.rs`, none touched; `grep -c "nothing
+  the runner made is left in" tools/src/run.rs` = 1). Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `cargo test --locked` (112 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo
+  fmt -p wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `capsule/`,
+  `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

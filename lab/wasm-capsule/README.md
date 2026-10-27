@@ -535,7 +535,9 @@ sections), so `run_engine`'s one start per call holds.
 `cid()` is the name, and the bytes written are exactly the bytes that name
 covers. The runner reads no environment variable and no file, parses no
 manifest or module, writes nothing outside the new folder, and (task 039)
-leaves nothing it made in the work root once `run_engine` returns. The engine gets
+leaves nothing it made in the work root once `run_engine` returns, except when
+removing it failed: that run folder stays (step 6), and after a success the
+run is refused (task 042 corrects this sentence). The engine gets
 no folder, env or network flag, and an empty environment. This is a behaviour
 proof on one core module, not the Component ABI. `wasmtime` and `wasmer` are
 test-only host engines, not endorsed.
@@ -1409,9 +1411,18 @@ the pinned versions, task 038), each followed by an empty census:
   engine on a thread, on a module whose `digest` loops forever. The test polls
   `pgrep -f <work root>` (at most 10 s) until the one engine process is up,
   reads its argv, sends it `SIGKILL` with `/bin/kill -KILL <pid>` and joins the
-  thread: refused as `EngineFailed`, stopped by signal 9. Every check waits
-  until the engine is killed, so a failed check never leaves an engine looping.
-  The argv seen: `<wasmtime> run --invoke digest -W
+  thread: refused as `EngineFailed`, stopped by signal 9. Task 042: the
+  thread is joined on every path before any check can fail. If the wait fails
+  (a `pgrep` that does not start or answers with an error, no engine process
+  within 10 s, or the run ending first), or `/bin/kill` does not start or
+  fails, the test first runs `/usr/bin/pkill -KILL -f <work root>` every 50 ms
+  until the thread has finished (at most 10 s), then joins it, and only then
+  fails with the first reason. If the thread still runs after those 10 s, the
+  join waits for it, so no detached thread is left that can still start the
+  engine, and a failed check never leaves an engine looping (hand-proven,
+  pending R1: "Falsifiers", task 042). A census tool that does not start is
+  now an `Err` like any other census failure, not a panic, so the stop can run
+  first; the census still fails the test with its path. The argv seen: `<wasmtime> run --invoke digest -W
   max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
   root>/wasmtime/module.wasm 1592590337` and `<wasmer> run --invoke digest
   <work root>/wasmer/module.wasm 1592590337`.
@@ -1546,7 +1557,8 @@ Limits, not claimed:
   with `/bin/bash` 3.2.57 and that variable unset, exits non-zero with bash's
   `unbound variable` line and writes no capsule or receipt. Task 036: it first
   fails with a clear reason unless `/bin/bash --version` names 3.2 (never a
-  SKIP); the planted copy also prints its target dir, which must be inside the
+  SKIP; this `/bin/bash` 3.2 guard, `require_system_bash_3_2`, is hand-proven,
+  pending R1: "Falsifiers", task 036); the planted copy also prints its target dir, which must be inside the
   TMPDIR the test gives it, so the check that this TMPDIR is left empty watches
   the folder the trap deletes.
 - `finished_build_leaves_its_tmpdir_empty` — task 036: one real build with
@@ -2023,7 +2035,9 @@ prints `SKIPPED` and gives no result, never a PASS.
 - `killed_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
   that loops forever, killed with `SIGKILL` once `pgrep` sees it: its live argv
   held no preopen, env or network flag and no work-root path but the module
-  file; `EngineFailed` stopped by signal 9; then the census is empty.
+  file; `EngineFailed` stopped by signal 9; then the census is empty. Task
+  042: a failed wait or kill stops the run's engines and joins the thread
+  before the test fails.
 
 Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
 (M1 A8 lab half)"):
@@ -2061,8 +2075,12 @@ marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
 029, 031, 032, 035, 036, 038, 039, 040 and 041: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
 + 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
-wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
+Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
+marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
+and two proofs with no `falsifiers.json` entry, outside the 175 (task 036's
+`/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
+stop in `tests/run.rs`; neither file is a recovery target, so a proof that
+edits one is a hand proof), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
 labels stay until each is run by the canonical runner and its summary line is
 quoted.
@@ -2594,6 +2612,15 @@ Before task 036 the empty-TMPDIR check watched nothing: with `rm -rf
 (still caught) and re-anchors F-WC-README-COUNT to the new total, the same bug
 as before.
 
+Task 036's `/bin/bash` 3.2 guard, hand-proven, pending R1 (no
+`falsifiers.json` entry: `tests/reproducible.rs` is not a recovery target; it
+is counted once in the hand-proven total above, never in the runner-caught
+one; LOG.md, tasks 036 and 042, has the runs): with ` version 5.3.` in place of `
+version 3.2.` in `require_system_bash_3_2`, the status test
+`build_script_fails_closed_after_an_unbound_variable` fails at its version
+assertion ("this test needs /bin/bash 3.2, ..."; found `GNU bash, version
+3.2.57(1)-release (arm64-apple-darwin25)`); restored.
+
 Task 038's five, runner-caught (the canonical runner's summary line is in
 LOG.md, task 038). Each anchor is a new line of `tools/src/run.rs`, a recovery
 target, and the named test fails at its assertion:
@@ -2676,3 +2703,30 @@ assertion:
 
 Task 041 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before, and keeps its runner-caught label above.
+
+Task 042's killed-run stop, hand-proven, pending R1 (no `falsifiers.json`
+entry: `tests/run.rs` is not a recovery target; it is counted once in the
+hand-proven total above, never in the runner-caught one; LOG.md, task 042, has
+the runs). The planted fault is a census tool that fails during the wait, in
+`killed_run_leaves_nothing_under_the_scratch_root`, each restored byte for
+byte, each followed by `/usr/bin/pgrep -f run40-killed`:
+
+- `PGREP` pointed at `/nonexistent/pgrep`: the test fails with the `pgrep`
+  start error ("wasmtime: the census tool /nonexistent/pgrep did not start:
+  No such file or directory (os error 2); then stopped its engines ..."), and
+  `pgrep` then prints nothing and exits 1.
+- `PGREP` pointed at `/usr/bin/false` (exit 1, nothing printed, read as no
+  process yet): the test fails after 10 s ("wasmtime: no engine process showed
+  up within 10 s, or the run ended first; then stopped its engines ..."), and
+  `pgrep` then prints nothing and exits 1.
+
+Before task 042, the same `/usr/bin/false` run left a live `wasmtime run
+--invoke digest ... <tmp>/.../work-wasmtime/wasmtime/module.wasm 1592590337`
+looping after the test failed (killed by hand). The `/nonexistent/pgrep` run
+left none in ten tries there: the test binary exited, or its temp root was
+removed, before the detached thread started the engine, so that path leaked
+only by timing.
+
+Task 042 adds no `falsifiers.json` entry, so the total (175) and the
+runner-caught count (111) are unchanged; the hand-proven total (64 entries
+before) gains this proof and task 036's guard, 66.

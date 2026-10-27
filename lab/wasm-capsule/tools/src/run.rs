@@ -60,7 +60,8 @@
 //! manifest or module: the verified value already holds the bytes its lab CID
 //! names, and the entrypoint the verifier's one manifest read found. Nothing
 //! is written outside the new folder, and nothing the runner made is left in
-//! the work root after `run_engine` returns.
+//! the work root after `run_engine` returns, except when removing it failed:
+//! that run folder stays (step 6), and after a success the run is refused.
 //!
 //! Claim scope. The argv and the empty environment are what this runner
 //! controls. With no folder, env or network flag the guest is given no host
