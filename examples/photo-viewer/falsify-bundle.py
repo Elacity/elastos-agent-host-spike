@@ -23,6 +23,14 @@ BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 # (name, file under bundle/src, [(exact old text, new text)], tests that must fail)
 CASES = [
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    ("stand-in load forgets an absent content CID", "admit.rs",
+     [("        if err.kind() == std::io::ErrorKind::NotFound {",
+       "        if false && err.kind() == std::io::ErrorKind::NotFound {")],
+     ["stand_in_load_names_an_absent_content_cid", "load_takes_only_a_cid"]),
+    ("stand-in load drops the bytes it hashed", "admit.rs",
+     [("        manifest,\n        bytes,\n    })",
+       "        manifest,\n        bytes: BTreeMap::new(),\n    })")],
+     ["stand_in_load_keeps_the_bytes_it_hashed"]),
     ("stand-in F15 content ships only its entrypoint", "pack.rs",
      [("if content || manifest.get(\"execution\").and_then(Value::as_str) == Some(\"web-projection\") {",
        "if manifest.get(\"execution\").and_then(Value::as_str) == Some(\"web-projection\") {")],
