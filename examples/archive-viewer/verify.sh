@@ -51,6 +51,37 @@ if [[ $GATE -eq 1 && $RUNTIME -ne 1 ]]; then
     exit 1
 fi
 
+python3 -I "${VIEWER_DIR}/falsify_restore_test.py"
+python3 -I "${VIEWER_DIR}/falsify_restore_test.py" --falsify
+(
+    cd "${VIEWER_DIR}"
+    python3 -I - <<'PY'
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path.cwd()))
+from falsify import SNAPSHOT_FILES, restore_interrupted_plants
+
+restore_interrupted_plants()
+snapshot = pathlib.Path(".verify-snapshot")
+for name in SNAPSHOT_FILES:
+    saved = snapshot / name
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    saved.write_bytes(pathlib.Path(name).read_bytes())
+(snapshot / "INCOMPLETE").touch()
+PY
+)
+
+# Install this trap after recovery, so a failed restore keeps its snapshot.
+host_log=""
+runtime_log=""
+cleanup() {
+    rm -rf "${VIEWER_DIR}/.verify-snapshot"
+    if [[ -n "$host_log" ]]; then rm -f "$host_log"; fi
+    if [[ -n "$runtime_log" ]]; then rm -f "$runtime_log"; fi
+}
+trap cleanup EXIT
+
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
 
@@ -84,7 +115,6 @@ fi
 if [[ $RUNTIME -eq 1 ]]; then
     host_log="$(mktemp)"
     runtime_log="$(mktemp)"
-    trap 'rm -f "$host_log" "$runtime_log"' EXIT
 
     # Component: built with the repository builder.
     "${VIEWER_DIR}/build.sh"

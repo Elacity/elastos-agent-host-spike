@@ -23,11 +23,32 @@ component.
 """
 import pathlib
 import re
+import shutil
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
 import falsify_kit as kit  # noqa: E402
+
+SNAPSHOT_FILES = ("src/lib.rs", "src/zip.rs", "src/preview.rs", "src/request.rs")
+
+
+def restore_interrupted_plants(root=HERE):
+    """Restore a stamped snapshot before another verification can test a plant."""
+    root = pathlib.Path(root)
+    snapshot = root / ".verify-snapshot"
+    if not (snapshot / "INCOMPLETE").exists():
+        return
+    saved = {}
+    for name in SNAPSHOT_FILES:
+        path = snapshot / name
+        if not path.is_file():
+            raise SystemExit(f"cannot restore interrupted falsifier: missing snapshot file {path}")
+        saved[name] = path.read_bytes()
+    for name, data in saved.items():
+        (root / name).write_bytes(data)
+    shutil.rmtree(snapshot)
+
 
 # (name, file under the crate, exact old text, new text, tests that must fail)
 CASES = [
