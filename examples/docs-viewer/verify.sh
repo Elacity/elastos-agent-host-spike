@@ -13,6 +13,10 @@ python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANI
 python3 -I "${VIEWER_DIR}/verify_gate_test.py"
 python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
 
+# Restore both pattern plants before Bash reads the bus2 directory change.
+python3 -I "${VIEWER_DIR}/patterns_test.py"
+python3 -I "${VIEWER_DIR}/patterns_test.py" --falsify
+
 GATE=0
 case "${GATE_LIST:-}" in
     # run-lane.sh exports the gate commands (the substring is `gates-photo`),
