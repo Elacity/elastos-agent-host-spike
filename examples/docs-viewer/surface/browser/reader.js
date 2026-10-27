@@ -16,20 +16,15 @@
 // The structure follows examples/photo-viewer/surface/browser/photos.js.
 
 import { MAX_BLOCKS, cut, drawBlock, readBlock } from "./docs-render.js";
+import { launchToken, pageClient } from "./page-client.js";
 
 export const PAGES_ROUTE = "/api/viewers/docs-reader/pages";
 export const PAGES_SCHEMA = "elastos.docs-viewer.pages/v1";
-export const TOKEN_HEADER = "x-elastos-home-token";
 
 // The page-only bounds. The renderer's own bounds are in docs-render.js.
 export const MAX_DOCUMENTS = 8;
 const MAX_TITLE_CHARS = 120;
 const MAX_MESSAGE_CHARS = 200;
-
-/** The launch token from `#home_token=...`, or "". */
-export function launchToken(hash) {
-  return new URLSearchParams(String(hash || "").replace(/^#/, "")).get("home_token") || "";
-}
 
 function isPosition(value) {
   return Number.isSafeInteger(value) && value >= 0;
@@ -83,32 +78,10 @@ export function readPages(value) {
   return { documents, skipped };
 }
 
-/** The only request this page makes. */
+/** The page's route and refusal label. */
 export function readerClient(fetchFn, token) {
-  return {
-    async pages() {
-      const response = await fetchFn(PAGES_ROUTE, {
-        method: "GET",
-        headers: { [TOKEN_HEADER]: token },
-        credentials: "omit",
-        cache: "no-store",
-        redirect: "error",
-      });
-      if (!response.ok) {
-        let reason = "";
-        try {
-          const body = await response.json();
-          reason = body && typeof body.error === "string" ? body.error : "";
-        } catch {
-          reason = "";
-        }
-        const error = new Error(cut(reason || null, MAX_MESSAGE_CHARS, `Documents could not read this (${response.status}).`));
-        error.status = response.status;
-        throw error;
-      }
-      return response.json();
-    },
-  };
+  const client = pageClient(fetchFn, PAGES_ROUTE, token, "Documents could not read this", MAX_MESSAGE_CHARS);
+  return { pages: () => client.get() };
 }
 
 /** Mounts the reader on `env.document`. Returns its controls (for tests). */

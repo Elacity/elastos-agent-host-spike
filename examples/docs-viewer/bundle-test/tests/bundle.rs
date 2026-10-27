@@ -197,6 +197,7 @@ fn each_capsule_ships_only_what_it_runs_from() {
             "browser/docs-render.js",
             "browser/index.html",
             "browser/main.js",
+            "browser/page-client.js",
             "browser/reader.css",
             "browser/reader.js",
             "capsule.json",

@@ -3,8 +3,8 @@
 
 Usage: python3 -I falsify-surface.py [--check]
 
-The page rules live in two files: the page glue in surface/browser/reader.js,
-and the docs-model renderer's rules in the kit's one owner,
+The page glue lives in surface/browser/reader.js, the launch client in
+surface/browser/page-client.js, and the docs-model renderer in the kit's one owner,
 examples/capsule-kit/surface/docs-render.js. A renderer mutant is written to
 the owner and then copied to the page's shipped browser/docs-render.js, as the
 build does, so the page tests see it and the copy stays pinned to the owner.
@@ -27,6 +27,7 @@ import falsify_kit as kit  # noqa: E402
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
 PAGE = SURFACE / "browser" / "reader.js"
+CLIENT = SURFACE / "browser" / "page-client.js"
 OWNER = REPO / "capsule-kit" / "surface" / "docs-render.js"
 COPY = SURFACE / "browser" / "docs-render.js"
 TESTS = SURFACE / "reader.test.mjs"
@@ -50,18 +51,6 @@ PAGE_CASES = [
         "line.textContent = skip.order === null",
         "line.innerHTML = skip.order === null",
         ["markup in a document stays text", "the page has no way to hold or reach anything else"],
-    ),
-    (
-        "an unreadable refusal shows no text",
-        "cut(reason || null, MAX_MESSAGE_CHARS,",
-        "cut(reason, MAX_MESSAGE_CHARS,",
-        ["a refusal is shown as its text"],
-    ),
-    (
-        "requests carry cookies",
-        'credentials: "omit",',
-        'credentials: "include",',
-        ["it makes one request, a GET with the launch token and nothing else"],
     ),
     (
         "requests are made without a launch token",
@@ -92,6 +81,44 @@ PAGE_CASES = [
         "    documents.push({ order, title:",
         "    documents.push({ order, uri: document.uri, title:",
         ["it never requests a path: the uri fields are dropped unread"],
+    ),
+]
+
+# Launch-client rules: each case runs only the page's node tests.
+CLIENT_CASES = [
+    (
+        "the launch client follows redirects",
+        'redirect: "error",',
+        'redirect: "follow",',
+        ["it makes one request, a GET with the launch token and nothing else"],
+    ),
+    (
+        "the launch client carries cookies",
+        'credentials: "omit",',
+        'credentials: "include",',
+        ["it makes one request, a GET with the launch token and nothing else"],
+    ),
+    (
+        "the launch client reads another fragment key",
+        '.get("home_token")',
+        '.get("other_token")',
+        [
+            "the token comes from the fragment only",
+            "it draws each block kind as its element, with text only",
+            "markup in a document stays text",
+            "it never requests a path: the uri fields are dropped unread",
+            "it makes one request, a GET with the launch token and nothing else",
+            "a refusal is shown as its text",
+            "pages that are not ones are refused",
+            "the titles and the arrow keys switch documents, in shelf order",
+            "it reads the pages the core writes, every block, and shows their markup as text",
+        ],
+    ),
+    (
+        "the launch client leaves the reason untrimmed",
+        "body.error.trim()",
+        "body.error",
+        ["a blank server reason shows the status"],
     ),
 ]
 
@@ -185,6 +212,7 @@ def sync_copy():
 
 def main():
     page = [(name, PAGE, [(old, new)], tests) for name, old, new, tests in PAGE_CASES]
+    client = [(name, CLIENT, [(old, new)], tests) for name, old, new, tests in CLIENT_CASES]
     render = [
         (name, OWNER, [(old, new)], tests, [(COPY, "")])
         for name, old, new, tests in RENDER_CASES
@@ -194,10 +222,11 @@ def main():
     kit.main(
         [
             (page, None, test_fails, None, True, every_failure),
+            (client, None, test_fails, None, True, every_failure),
             (render, sync_copy, test_fails, None, True, every_failure),
             (drift, None, test_fails, None, True, every_failure),
         ],
-        done=f"all {len(page) + len(render) + len(drift)} surface falsifiers caught",
+        done=f"all {len(page) + len(client) + len(render) + len(drift)} surface falsifiers caught",
     )
 
 
