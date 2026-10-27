@@ -14,7 +14,10 @@
 //! `get_capability_requests` answers `GET /api/capability/requests?session=`
 //! from one request store beside the grants. `seed_request` is the test seam.
 //! An accepted stop denies that session's pending requests with the stop
-//! cause; a failed start denies them with the failure cause.
+//! cause; a failed start denies them with the failure cause. One writer stores
+//! those three fields. `post_capability_deny` answers
+//! `POST /api/capability/deny` through that writer with `shell` as settler,
+//! and a `starting` instance of that session ends `failed` with the reason.
 
 use serde_json::{json, Map, Value};
 use std::path::{Component, Path, PathBuf};
@@ -292,6 +295,46 @@ impl StandIn {
         Ok(json!({ "requests": requests }))
     }
 
+    /// `POST /api/capability/deny`.
+    ///
+    /// A shell denies one pending request through the one writer, which stores
+    /// `shell` as settler. A `starting` instance with that session ends
+    /// `failed` with the deny reason as its cause; any other phase stays. Ok is
+    /// `{"success": true}`.
+    pub fn post_capability_deny(
+        &mut self,
+        caller: Caller<'_>,
+        body: &Value,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let (request_id, reason) = deny_body(body)?;
+        let Some(request) = self
+            .requests
+            .iter()
+            .find(|request| request.request_id == request_id)
+        else {
+            return Err((400, format!("unknown request: {request_id}")));
+        };
+        if request.status != RequestStatus::Pending {
+            return Err((400, format!("request is not pending: {request_id}")));
+        }
+        let session_id = request.session_id.clone();
+        self.deny_record(request_id, reason, "shell");
+        let instant = self.instant;
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.id == session_id.as_str())
+        {
+            if instance.phase == ResidentStatus::Starting {
+                instance.phase = ResidentStatus::Failed;
+                instance.cause = reason.to_owned();
+                instance.ended_at = Some(instant);
+            }
+        }
+        Ok(json!({ "success": true }))
+    }
+
     /// `GET /api/capability/list` for the plain route or `?scope=`.
     pub fn get_capability_list(
         &self,
@@ -467,16 +510,37 @@ impl StandIn {
         }
     }
 
+    /// The one deny writer. It stores `denied`, the reason and the settler.
+    ///
+    /// The stop and failed-start settlement passes `runtime`; the shell deny
+    /// route passes `shell`.
+    fn deny_record(&mut self, request_id: &str, reason: &str, settled_by: &'static str) {
+        if let Some(request) = self
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == request_id)
+        {
+            request.status = RequestStatus::Denied;
+            request.decision_reason = reason.to_owned();
+            request.settled_by = Some(settled_by);
+        }
+    }
+
     /// Denies the pending requests of one session with that instance's cause.
     ///
-    /// Only `Pending` records change; a record of another session stays.
+    /// Only `Pending` records change; a record of another session stays. The
+    /// one writer stores `runtime` as settler.
     fn settle_pending(&mut self, session_id: &str, cause: &str) {
-        for request in &mut self.requests {
-            if request.session_id == session_id && request.status == RequestStatus::Pending {
-                request.status = RequestStatus::Denied;
-                request.settled_by = Some("runtime");
-                request.decision_reason = cause.to_owned();
-            }
+        let pending = self
+            .requests
+            .iter()
+            .filter(|request| {
+                request.session_id == session_id && request.status == RequestStatus::Pending
+            })
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in pending {
+            self.deny_record(&request_id, cause, "runtime");
         }
     }
 
@@ -725,6 +789,43 @@ fn not_live(status: ResidentStatus) -> (u16, String) {
         400,
         format!("instance is not live: {}", status_text(status)),
     )
+}
+
+/// The deny body's only keys are `request_id` and an optional string `reason`.
+///
+/// A missing reason is `Denied by user`.
+fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
+    const NEEDS_ID: &str = "deny body needs request_id";
+    const DEFAULT_REASON: &str = "Denied by user";
+
+    let Some(object) = body.as_object() else {
+        return Err((400, NEEDS_ID.to_owned()));
+    };
+    let mut request_id = None;
+    let mut reason = None;
+    let mut request_id_not_string = false;
+    let mut reason_not_string = false;
+    for (key, value) in object {
+        match key.as_str() {
+            "request_id" => match value {
+                Value::String(text) => request_id = Some(text.as_str()),
+                _ => request_id_not_string = true,
+            },
+            "reason" => match value {
+                Value::String(text) => reason = Some(text.as_str()),
+                _ => reason_not_string = true,
+            },
+            other => return Err((400, format!("deny body rejects {other}"))),
+        }
+    }
+    if request_id_not_string {
+        return Err((400, "deny request_id must be a string".to_owned()));
+    }
+    if reason_not_string {
+        return Err((400, "deny reason must be a string".to_owned()));
+    }
+    let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
+    Ok((request_id, reason.unwrap_or(DEFAULT_REASON)))
 }
 
 /// The stop body is an object whose only key is a non-empty string `reason`.
@@ -1327,6 +1428,19 @@ mod tests {
             "status": "denied",
             "decision_reason": cause,
             "settled_by": "runtime",
+        })
+    }
+
+    fn shell_denied_request(request_id: &str, session_id: &str, cause: &str) -> Value {
+        json!({
+            "request_id": request_id,
+            "session_id": session_id,
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "read shared",
+            "status": "denied",
+            "decision_reason": cause,
+            "settled_by": "shell",
         })
     }
 
@@ -2511,6 +2625,319 @@ mod tests {
             request_entries(&standin, "component-1"),
             vec![pending_request("req-1", "component-1")],
             "the stand-in returns a shell request record for a valid session"
+        );
+    }
+
+    #[test]
+    fn standin_shell_deny_fails_the_waiting_sibling() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches the first read-shared instance");
+        let second = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches the second read-shared instance");
+        assert_eq!(
+            first["id"], "component-1",
+            "the stand-in numbers the first launch component-1"
+        );
+        assert_eq!(
+            second["id"], "component-2",
+            "the stand-in numbers the second launch component-2"
+        );
+        assert_eq!(
+            first["status"], "starting",
+            "the stand-in answers starting for the first launch"
+        );
+        assert_eq!(
+            second["status"], "starting",
+            "the stand-in answers starting for the second launch"
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        seed_shared_request(&mut standin, "req-extra", "component-2");
+        standin.seed_grant(
+            "req-g",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "session",
+            0,
+            Life::Live,
+            false,
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes the granted instance start");
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-2", "reason": "sibling read denied" }),
+            )
+            .expect("the stand-in denies the waiting sibling request");
+        assert_keys(&denied, &["success"], "the stand-in deny body has one key");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in answers success true for the shell deny"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![
+                shell_denied_request("req-2", "component-2", "sibling read denied"),
+                pending_request("req-extra", "component-2"),
+            ],
+            "the stand-in denies the named request with the shell as settler and leaves req-extra pending"
+        );
+        assert!(
+            request_entries(&standin, "component-2")[1]["settled_by"].is_null(),
+            "the stand-in leaves the other sibling request with no settler"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-1", "component-1")],
+            "the stand-in leaves the first instance's request pending"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in keeps the first instance running with its grant",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "failed",
+            "sibling read denied",
+            "the stand-in ends the waiting instance failed with the deny reason",
+        );
+        let live = standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in shell live view");
+        assert_eq!(
+            request_ids(&live),
+            BTreeSet::from(["req-g".to_owned()]),
+            "the stand-in still shows exactly the first instance's live grant"
+        );
+        standin
+            .authorise(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                "req-g",
+            )
+            .expect("the stand-in authorises the first instance with its grant");
+        let sibling = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-g",
+        );
+        assert!(
+            matches!(&sibling, Err((403, reason)) if reason.contains("wrong capsule")),
+            "the stand-in refuses the sibling presentation of the first instance's grant: {sibling:?}"
+        );
+
+        let refused_start = standin.finish_start("component-2");
+        assert!(
+            matches!(&refused_start, Err((400, reason)) if reason == "start already returned"),
+            "the stand-in refuses finish_start for the denied instance: {refused_start:?}"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "failed",
+            "sibling read denied",
+            "the stand-in keeps the deny reason after the refused start",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![
+                shell_denied_request("req-2", "component-2", "sibling read denied"),
+                pending_request("req-extra", "component-2"),
+            ],
+            "the stand-in keeps the shell deny after the refused start"
+        );
+
+        standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-extra", "reason": "still denied" }),
+            )
+            .expect("the stand-in denies the remaining sibling request");
+        assert_capsule(
+            &standin,
+            "component-2",
+            "failed",
+            "sibling read denied",
+            "the stand-in keeps a failed instance's phase and cause after a later shell deny",
+        );
+    }
+
+    #[test]
+    fn standin_shell_deny_refuses_a_bad_request() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let id = launch_finished(&mut standin);
+        seed_shared_request(&mut standin, "req-1", &id);
+
+        let client = standin.post_capability_deny(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &json!({ "request_id": "req-1" }),
+        );
+        assert!(
+            matches!(&client, Err((403, reason)) if reason == "This endpoint requires shell privileges"),
+            "the stand-in refuses a client deny before reading the body: {client:?}"
+        );
+
+        for body in [json!({}), json!("req-1")] {
+            let refused = standin.post_capability_deny(Caller::Shell, &body);
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "deny body needs request_id"),
+                "the stand-in refuses a deny body without request_id: {refused:?}"
+            );
+        }
+        for (body, reason) in [
+            (
+                json!({ "request_id": 4 }),
+                "deny request_id must be a string",
+            ),
+            (
+                json!({ "request_id": "req-1", "reason": 4 }),
+                "deny reason must be a string",
+            ),
+        ] {
+            let refused = standin.post_capability_deny(Caller::Shell, &body);
+            assert!(
+                matches!(&refused, Err((400, got)) if got == reason),
+                "the stand-in refuses a non-string deny field: {refused:?}"
+            );
+        }
+        let unknown =
+            standin.post_capability_deny(Caller::Shell, &json!({ "request_id": "missing" }));
+        assert!(
+            matches!(
+                &unknown,
+                Err((400, reason)) if reason.starts_with("unknown request:") && reason.contains("missing")
+            ),
+            "the stand-in refuses an unknown deny request id: {unknown:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, &id),
+            vec![pending_request("req-1", "component-1")],
+            "the stand-in leaves the pending record after a refused deny"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves the running instance after a refused deny",
+        );
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-1", "reason": "shell said no" }),
+            )
+            .expect("the stand-in accepts the shell deny");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in answers success true for the accepted deny"
+        );
+        let settled = vec![shell_denied_request(
+            "req-1",
+            "component-1",
+            "shell said no",
+        )];
+        assert_eq!(
+            request_entries(&standin, &id),
+            settled,
+            "the stand-in stores the shell deny on the named record"
+        );
+
+        let again = standin.post_capability_deny(
+            Caller::Shell,
+            &json!({ "request_id": "req-1", "reason": "again" }),
+        );
+        assert!(
+            matches!(
+                &again,
+                Err((400, reason)) if reason.starts_with("request is not pending:") && reason.contains("req-1")
+            ),
+            "the stand-in refuses a second deny of the settled request: {again:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, &id),
+            settled,
+            "the stand-in keeps the first shell deny after a refused second deny"
+        );
+
+        seed_shared_request(&mut standin, "req-2", &id);
+        let extra = standin.post_capability_deny(
+            Caller::Shell,
+            &json!({ "request_id": "req-2", "token": "secret" }),
+        );
+        assert!(
+            matches!(
+                &extra,
+                Err((400, reason)) if reason.starts_with("deny body rejects ") && reason.contains("token")
+            ),
+            "the stand-in refuses a deny body with an extra key: {extra:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, &id),
+            vec![
+                shell_denied_request("req-1", "component-1", "shell said no"),
+                pending_request("req-2", "component-1"),
+            ],
+            "the stand-in changes nothing for a denied body with an extra key"
+        );
+
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops the first instance");
+        seed_shared_request(&mut standin, "req-s", "component-1");
+        standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-s", "reason": "late deny" }),
+            )
+            .expect("the stand-in denies a request of the stopped instance");
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in keeps a stopped instance's phase and cause after a shell deny",
+        );
+
+        let waiting = launch_starting(&mut standin);
+        seed_shared_request(&mut standin, "req-d", &waiting);
+        standin
+            .post_capability_deny(Caller::Shell, &json!({ "request_id": "req-d" }))
+            .expect("the stand-in accepts a deny without a reason");
+        assert_eq!(
+            request_entries(&standin, &waiting),
+            vec![shell_denied_request(
+                "req-d",
+                "component-2",
+                "Denied by user"
+            )],
+            "the stand-in stores the default deny reason with the shell as settler"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "failed",
+            "Denied by user",
+            "the stand-in ends the starting instance failed with the default reason",
         );
     }
 

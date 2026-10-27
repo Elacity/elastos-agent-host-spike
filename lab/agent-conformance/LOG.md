@@ -8463,3 +8463,146 @@ The two entries were appended after `F-standin-a12-skip-cleanup`; its `old` and 
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The test seeds the stand-in and adds no capsule import; the real capability call still returns the grant. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:1170` `standin_stopped_run_leaves_no_live_grant`; the two plants above fail it and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | `tests/effects.rs:1129` reads the grant view, `:1144` the instance list and `:1151` the request store as separate reads; the stop at `:1266` settles only that session's requests. |
+
+## 060 — A6: a shell deny fails the waiting sibling
+
+060: `StandIn` gains `post_capability_deny` at `standin-runtime/mod.rs:304`, the answer for `POST /api/capability/deny`. It calls `require_shell` at `:309` before the body is read, parses the body once in `deny_body` at `:797`, refuses an unknown id at `:316` or a non-pending record at `:319`, and calls the one writer `deny_record` at `:322` with `shell`. `deny_record` at `:517` now holds the three settlement writes; `settle_pending` at `:533` collects one session's pending ids and calls that same writer with `runtime`, so `stop_one` at `:500` and the failed-start arm at `:424` keep their behaviour and there is no second writer. When the denied request's session has an instance whose phase is `Starting` at `:329`, the route stores `failed`, the deny reason as `cause` and `ended_at` from the test instant; any other phase stays. `authorise`, `seed_grant`, `finish_start`, `stop_one`, `revoke_live`, `keep`, `visible`, `storage_for_home` and `confirm_storage` are unchanged. Two tests sit in the module's `#[cfg(test)]`: `standin_shell_deny_fails_the_waiting_sibling` at `:2632` and `standin_shell_deny_refuses_a_bad_request` at `:2781`.
+
+### Quote from the resident SPEC (read only at `35697329be0aad89eb68d0adf78aa94d24751317`)
+
+```text
+**A6.** Launch `read-shared` twice. Grant instance 1 only, and wait until it
+is `running`. The live-grant view shows exactly one grant, bound to instance 1.
+Instance 2's request for the same resource is still pending, in its own
+session. Deny it. Instance 2 ends `failed` with the denial in its cause, and
+instance 1 is still `running` with the same single grant. Stop instance 1. The
+census also requires zero live grants for both sessions.
+```
+
+This task takes the deny sentence only: instance 2's request stays pending while instance 1's grant is live, the deny ends instance 2 `failed` with the denial in its cause, and instance 1 stays `running` with that grant. The census sentence stays 049 and 059.
+
+### Quote of the two route facts (read only)
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:366-371`:
+
+```rust
+pub struct DenyRequestInput {
+    /// Request ID to deny
+    pub request_id: String,
+    /// Reason for denial (optional)
+    pub reason: Option<String>,
+}
+```
+
+`:388` gives the missing reason, and `:403-406` gives the Ok body:
+
+```rust
+    let reason = input.reason.unwrap_or_else(|| "Denied by user".to_string());
+```
+
+```rust
+    Ok(Json(DenyRequestOutput {
+        success: true,
+        error: None,
+    }))
+```
+
+`elastos/crates/elastos-runtime/src/capability/pending.rs:393-395` applies a denial only to a pending request:
+
+```rust
+        if !matches!(request.status, RequestStatus::Pending) {
+            return Err(format!("Request {} is not pending", request_id));
+        }
+```
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. Each planted crate compiled. Each named test failed on its assertion and passed again after the restore.
+
+F-standin-a6-deny-stub. Planted exit 101 in 2.30 seconds. Restored exit 0 in 0.07 seconds. Assertion: `standin-runtime/mod.rs:2687:9` `the stand-in denies the named request with the shell as settler and leaves req-extra pending`.
+
+Old:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let (request_id, reason) = deny_body(body)?;
+```
+
+New:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "success": true }));
+        require_shell(caller)?;
+        let (request_id, reason) = deny_body(body)?;
+```
+
+F-standin-a6-deny-runtime. Planted exit 101 in 2.31 seconds. Restored exit 0 in 1.14 seconds. Assertion: `standin-runtime/mod.rs:2686:9` `the stand-in denies the named request with the shell as settler and leaves req-extra pending`.
+
+Old:
+
+```text
+        self.deny_record(request_id, reason, "shell");
+```
+
+New:
+
+```text
+        self.deny_record(request_id, reason, "runtime");
+```
+
+F-standin-a6-deny-stays-starting. Planted exit 101 in 1.97 seconds. Restored exit 0 in 0.79 seconds. Assertion: `standin-runtime/mod.rs:1346:9` in `assert_capsule` `the stand-in ends the waiting instance failed with the deny reason`.
+
+Old:
+
+```text
+        let session_id = request.session_id.clone();
+        self.deny_record(request_id, reason, "shell");
+        let instant = self.instant;
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.id == session_id.as_str())
+        {
+            if instance.phase == ResidentStatus::Starting {
+                instance.phase = ResidentStatus::Failed;
+                instance.cause = reason.to_owned();
+                instance.ended_at = Some(instant);
+            }
+        }
+        Ok(json!({ "success": true }))
+```
+
+New:
+
+```text
+        let session_id = request.session_id.clone();
+        self.deny_record(request_id, reason, "shell");
+        let _ = session_id;
+        Ok(json!({ "success": true }))
+```
+
+After the restores, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` added lines contain only `self.deny_record(request_id, reason, "shell");` among the three plant markers, so no plant remains. No `falsifiers.json` id was added.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.12 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, first run: real 270.82 seconds, inside the 600-second bound. Cargo ran every target through the doc-tests and printed no `error: test failed` line.
+- Recorded run: exit 0, real 276.79 seconds. 50 lib tests, 1 report binary, 7 artifact, 1 build, 59 effects passed with 12 ignored, 9 harness, 23 report, 10 runtime with 2 ignored, 2 standin_contract, 3 probe. Both new deny tests passed. The earlier 059 ignores stay: `run_leaves_no_live_grant` on `AC-021-GRANTS`, `parallel_capsules_complete_independently` on `RT4`, and `instance_grant_does_not_authorise_sibling`.
+- One intermediate run failed on a process leftover: exit 101, real 267.12 seconds. The only failure was `undeclared_network_manifest_is_refused`, at `tests/effects.rs:82:14`, with `cleanup census: FAIL retained:target/home-30204-1793134595005459000-231; process leftover; processes:1 paths:["stdout-237"] API sockets:0 temp:0 paths:[]`. That row and the census are untouched by this task; the leftover path is `stdout-<digits>`, with no `host-process.lock` and no `config.toml` path. The following identical run passed as recorded above.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:1370` keeps the seeded Public resource path; the route identifies the request by its stored `request_id` at `:314`, and no code or content identity is added. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:309` refuses every client with `This endpoint requires shell privileges`; the route is a lab stand-in method and `seed_grant` at `:212` is unchanged, so no grant is created or widened. |
+| 3. A second path or a second copy of one rule? | No | One body parser at `:797`, one settlement writer at `:517`; `settle_pending` at `:533` and the deny route at `:322` both call it, and `get_capability_requests` at `:279` stays the one read. |
+| 4. Runtime core grows? | No | No `elastos/`, `capsules/` or `scripts/` edit; the diff touches only `lab/agent-conformance/`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:309` gives 403; `:316`, `:319` and `deny_body` at `:797-829` give 400 with a reason that names the refused id, status or key. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The change adds no capsule code or import; `authorise` at `:357` still refuses the sibling with `wrong capsule` at `:2740`. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2632` and `:2781`; the three plants above fail their named test and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | The deny writes only the request record at `:517` and the instance phase at `:329`; `seed_grant` at `:212` is untouched, so the live set stays exactly `req-g` at `:2721`, and the sibling still fails presentation at `:2740`. |
