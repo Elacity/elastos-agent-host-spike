@@ -1755,9 +1755,10 @@ fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more
         ),
         "the hosted run must report an open status while the answer is held: {create}"
     );
-    // A request reaches the stand-in only after `request.send()` has left the
-    // worker's select (`src/adapters.rs:1990-1996`), so the worker owns the
-    // open send before the cancel arrives.
+    // The stand-in reads and records the request while `request.send()` is
+    // still the pending arm of the worker's select
+    // (`src/adapters.rs:1990-1996`), so the worker owns the open send before
+    // the cancel arrives.
     stand_in.wait_for_connections(1);
 
     let cancel = provider.request(json!({
@@ -1964,6 +1965,10 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
         created_b["data"]["terminal"]["error"]["code"], "model_busy",
         "a run above the offer ceiling must carry the busy reason: {created_b}"
     );
+    assert_eq!(
+        created_b["data"]["terminal"]["error"]["class"], "rate_limited",
+        "a run above the offer ceiling must carry the rate-limited class: {created_b}"
+    );
     assert!(
         created_b["data"]["terminal"]["output"].is_null(),
         "a refused run must carry no output: {created_b}"
@@ -2037,6 +2042,113 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
             "a hosted run must carry no bearer key"
         );
     }
+
+    provider.shutdown();
+}
+
+/// A hosted run whose Runtime binding names no grant is refused before the
+/// provider opens the Runtime socket. The binding check is the first step of
+/// `handle_runs_create` after `reject_untrusted_binding_fields`
+/// (`src/state.rs:506-510`); it reads `grant_id` through
+/// `validate_bounded_trimmed`
+/// (`elastos/crates/elastos-model-contract/src/lib.rs:136`) and maps every
+/// failure to `invalid_request` with `invalid runtime binding`. The control
+/// run in the same test carries a grant and reaches the stand-in exactly once,
+/// so the stand-in was listening and the refused run sent nothing.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_run_with_no_grant_is_refused_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted run with no grant: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-no-grant");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-no-grant");
+    let init = hosted_effect_init(&root, &stand_in);
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted run with no grant"
+    });
+    let input_hash = model_input_hash(&input).unwrap();
+    let refused_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "",
+            "request_id": test_support::fixture_model_request_id("request:hosted-no-grant"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": input_hash
+        }
+    });
+    let mut accepted_request = refused_request.clone();
+    accepted_request["runtime_binding"]["grant_id"] = json!("grant:test");
+    accepted_request["runtime_binding"]["request_id"] = json!(
+        test_support::fixture_model_request_id("request:hosted-no-grant-control")
+    );
+
+    let refused = provider.request(refused_request);
+    assert_eq!(
+        refused,
+        json!({
+            "status": "error",
+            "code": "invalid_request",
+            "message": "invalid runtime binding",
+        }),
+        "a run with no grant must be refused with the provider's own error \
+         response: {refused}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the refused run must open no connection to the Runtime socket: {refused}"
+    );
+
+    // The control run is the same request with a grant and a new request id.
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(accepted_request["runtime_binding"].clone()).unwrap();
+    let accepted = provider.request(accepted_request);
+    assert_eq!(
+        accepted["status"], "ok",
+        "unexpected create response: {accepted}"
+    );
+    assert_eq!(
+        accepted["data"]["run_id"],
+        model_run_id(&binding),
+        "runs_create must return the contract run id"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the control run may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the control run may send a hosted request"
+    );
 
     provider.shutdown();
 }

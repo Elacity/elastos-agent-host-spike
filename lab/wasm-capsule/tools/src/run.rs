@@ -40,9 +40,22 @@
 //! max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y`: the cap is
 //! per linear memory, so a module with a second memory, which would get a
 //! second cap, is refused at start ("memory count too high"); a `memory.grow`
-//! past the cap traps. `wasmer` gets none: its CLI has no memory cap flag (wc-010a), so
-//! no cap is claimed for it. The flag is a test-only limit, never an engine
-//! choice; the engine choice is Anders's.
+//! past the cap traps. `wasmer` gets none: its CLI has no memory cap flag
+//! (wc-010a). The flag is a test-only limit, never an engine choice; the
+//! engine choice is Anders's.
+//!
+//! Task 033 (M1 C0 lab half): the cap every engine applies is the module's own
+//! memory maximum (task 030: wasmtime 45.0.1 and wasmer 7.5.0 both apply it
+//! with no flag). So right after the zero-budget check, before the program
+//! and work root are checked or anything is made, [`run_engine`] checks the verified
+//! entrypoint's memory limits, read only through
+//! `wasm_capsule_audit::memories`, the lab's one module reader; [`run`] calls
+//! the same check once, right after verification. A module with no memory
+//! passes. One with more than one memory, a memory with no maximum, or a
+//! maximum above the declared `memory_mb` is refused, each with its own
+//! reason, before any engine process starts: a module is never run uncapped,
+//! and there is no fallback. On a grow past the maximum, wasmer returns -1;
+//! wasmtime traps, because of the `trap-on-grow-failure=y` it is given.
 //!
 //! It returns the engine's exit status and stdout. A nonzero exit is refused
 //! with the engine, the exit status and its stderr. Every refusal has its own reason and the
@@ -73,8 +86,10 @@
 //! promised, and no limit other than this budget and the memory cap.
 //!
 //! The runner reads no environment variable and no file, and parses no
-//! manifest or module: the verified value already holds the bytes its lab CID
-//! names, and the entrypoint the verifier's one manifest read found. Nothing
+//! manifest or module of its own: the verified value already holds the bytes
+//! its lab CID names, and the entrypoint the verifier's one manifest read
+//! found; its memory limits are read only by `wasm_capsule_audit::memories`
+//! (task 033). Nothing
 //! is written outside the new folder, and nothing the runner made is left in
 //! the work root after `run_engine` returns, except when removing it failed:
 //! that run folder stays (step 6), and after a success the run is refused.
@@ -98,7 +113,10 @@
 //! 1. wc-004's [`verify_bundle`] is called once, with the granted imports
 //!    passed unchanged. A refusal is returned unchanged; nothing is written and
 //!    no engine is started, so a module with an import that is not granted
-//!    never reaches an engine;
+//!    never reaches an engine; task 033: then the verified module's memory
+//!    check, the one [`run_engine`] calls; a refusal is returned as
+//!    [`TwoEngineRefusal::Memory`], and no engine process starts, not even a
+//!    `--version` query;
 //! 2. wc-005c: each engine is asked `--version`, `wasmtime` and then `wasmer`,
 //!    by the same absolute program path a module run starts and with the same
 //!    no-ambient rules (one process each, an empty environment, stdin null).
@@ -150,6 +168,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use wasm_capsule_audit::{memories, Refusal as AuditRefusal};
 
 /// The export the runner calls: the capsule's one function.
 pub const DIGEST_EXPORT: &str = "digest";
@@ -167,6 +186,9 @@ const RUN_DIR_MODE: u32 = 0o700;
 /// The bytes in one declared MB: the manifest's `memory_mb` is read as 2^20
 /// bytes, as wc-010a's probes read it.
 const BYTES_PER_MB: u64 = 1 << 20;
+
+/// The bytes in one Wasm page, the unit of a memory's limits: 64 KiB.
+const WASM_PAGE_BYTES: u64 = 1 << 16;
 
 /// The one `wasmtime` version [`run`] starts (task 038). Task 021 (wc-010a)
 /// measured `-W max-memory-size=...` on wasmtime 45.0.1, and task 030 measured
@@ -328,6 +350,19 @@ pub enum Reason {
     EngineNotWaited { engine: Engine, error: io::Error },
     /// The engine's stdout or stderr could not be read (task 043).
     OutputNotRead { engine: Engine, error: io::Error },
+    /// `wasm_capsule_audit::memories` refused the entrypoint module, its
+    /// refusal carried unchanged; no engine is started (task 033).
+    MemoryNotRead(AuditRefusal),
+    /// The entrypoint module has more than one memory, imported or defined;
+    /// the declared size caps one linear memory, so no engine is started (task
+    /// 033).
+    MemoryCountAboveOne { count: usize },
+    /// The entrypoint module's memory declares no maximum, so no engine
+    /// applies the declared size to it; it is not run uncapped (task 033).
+    MemoryMaximumMissing { minimum: u64 },
+    /// The entrypoint module's memory maximum, in pages, is above the declared
+    /// `memory_mb`; it is not run uncapped (task 033).
+    MemoryMaximumAboveDeclared { maximum: u64, memory_mb: u32 },
 }
 
 impl fmt::Display for Reason {
@@ -426,6 +461,23 @@ impl fmt::Display for Reason {
             Reason::OutputNotRead { engine, error } => {
                 write!(f, "{engine}'s output could not be read: {error}")
             }
+            Reason::MemoryNotRead(refusal) => write!(
+                f,
+                "the module's memory limits cannot be read: {refusal}; no engine is started"
+            ),
+            Reason::MemoryCountAboveOne { count } => write!(
+                f,
+                "the module has {count} memories: the declared size caps one linear memory, so the module is not run uncapped"
+            ),
+            Reason::MemoryMaximumMissing { minimum } => write!(
+                f,
+                "the module's memory (minimum {minimum} × 64 KiB) declares no maximum: the module is not run uncapped"
+            ),
+            Reason::MemoryMaximumAboveDeclared { maximum, memory_mb } => write!(
+                f,
+                "the module's memory maximum, {maximum} × 64 KiB, is above the declared {memory_mb} MB ({} × 64 KiB): the module is not run uncapped",
+                memory_cap_bytes(*memory_mb) / WASM_PAGE_BYTES
+            ),
         }
     }
 }
@@ -472,6 +524,8 @@ pub struct EngineRun {
 /// `bundle`'s verified entrypoint bytes, written into a new folder inside
 /// `work_root`, which is removed again once the engine has exited. Task 043:
 /// the engine runs at most `control`'s budget; a zero budget is refused first.
+/// Task 033: then the module's memory is checked ([`check_module_memory`]),
+/// before any folder is made.
 /// The steps and their order are in the module docs; the first refusal is the
 /// answer. Success returns the engine's exit status and stdout.
 pub fn run_engine(
@@ -482,6 +536,7 @@ pub fn run_engine(
     control: &RunControl,
 ) -> Result<EngineRun, Refusal> {
     check_budget(control, work_root)?;
+    check_module_memory(bundle)?;
     check_program(program)?;
     check_work_root(work_root)?;
     let run_dir = make_run_dir(work_root, engine)?;
@@ -497,6 +552,44 @@ fn check_budget(control: &RunControl, work_root: &Path) -> Result<(), Refusal> {
         return Err(Refusal::new(work_root, Reason::BudgetZero));
     }
     Ok(())
+}
+
+/// Task 033 (M1 C0 lab half): the one memory check. The entrypoint module's
+/// memory limits are read only through `wasm_capsule_audit::memories`, the
+/// lab's one module reader, on the verified bytes; a refusal of that reader is
+/// carried unchanged. A module with no memory passes, with none: it has no
+/// linear memory to grow. More than one memory is refused; so is a memory with
+/// no maximum, and one whose maximum in bytes (pages × 65536, in `u64`,
+/// saturating) is above [`memory_cap_bytes`] of the declared `memory_mb`. Each
+/// refusal has the entrypoint's path in the bundle and its own reason, and
+/// nothing is made or started, so a module is never run uncapped. Success
+/// returns the checked maximum in pages. [`run_engine`] and [`run`] both check
+/// here, before any engine process starts.
+fn check_module_memory(bundle: &VerifiedBundle) -> Result<Option<u64>, Refusal> {
+    let module = bundle.entrypoint();
+    let refuse = |reason| Refusal::new(Path::new(&module.path), reason);
+    let limits =
+        memories(&module.content).map_err(|refusal| refuse(Reason::MemoryNotRead(refusal)))?;
+    let memory = match limits.as_slice() {
+        [] => return Ok(None),
+        [memory] => memory,
+        _ => {
+            let count = limits.len();
+            return Err(refuse(Reason::MemoryCountAboveOne { count }));
+        }
+    };
+    let minimum = memory.minimum;
+    let maximum = memory
+        .maximum
+        .ok_or_else(|| refuse(Reason::MemoryMaximumMissing { minimum }))?;
+    let memory_mb = bundle.memory_mb();
+    if maximum.saturating_mul(WASM_PAGE_BYTES) > memory_cap_bytes(memory_mb) {
+        return Err(refuse(Reason::MemoryMaximumAboveDeclared {
+            maximum,
+            memory_mb,
+        }));
+    }
+    Ok(Some(maximum))
 }
 
 /// Step 3: one new folder, `<work_root>/<engine name>`, with mode `0o700`. A
@@ -1012,6 +1105,9 @@ pub enum TwoEngineRefusal {
     Verify(VerifyRefusal),
     /// An engine's `--version` query was refused; no module run started.
     Version(Refusal),
+    /// Task 033: the entrypoint module's memory limits were refused by the one
+    /// memory check; no engine process started, not even a `--version` query.
+    Memory(Refusal),
     /// [`run_engine`] refused, for either engine.
     Engine(Refusal),
     /// Both engines exited successfully, with different stdouts.
@@ -1023,6 +1119,7 @@ impl fmt::Display for TwoEngineRefusal {
         match self {
             TwoEngineRefusal::Verify(refusal) => write!(f, "{refusal}"),
             TwoEngineRefusal::Version(refusal) => write!(f, "{refusal}"),
+            TwoEngineRefusal::Memory(refusal) => write!(f, "{refusal}"),
             TwoEngineRefusal::Engine(refusal) => write!(f, "{refusal}"),
             TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer } => write!(
                 f,
@@ -1040,7 +1137,10 @@ impl Error for TwoEngineRefusal {}
 /// `wasmtime` and then on `wasmer`, and require byte-identical stdout. The
 /// steps and their order are in the module docs; the first refusal is the
 /// answer. Task 043: a zero budget in `input.control` is refused first, as
-/// [`run_engine`] refuses it, before any `--version` query.
+/// [`run_engine`] refuses it, before any `--version` query. Task 033: the
+/// verified module's memory is checked by the same [`check_module_memory`]
+/// [`run_engine`] calls, right after verification and before any `--version`
+/// query.
 pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     check_budget(input.control, input.work_root).map_err(TwoEngineRefusal::Engine)?;
     // Task 043: both module runs get `input.control`, each counting its own
@@ -1051,6 +1151,7 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     };
     let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)
         .map_err(TwoEngineRefusal::Verify)?;
+    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;
     let wasmtime_version =
         query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;
     let wasmer_version =
