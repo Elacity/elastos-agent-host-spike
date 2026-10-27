@@ -101,3 +101,25 @@ The non-exhaustive `Refusal` enum gains two variants with these exact strings:
 - After validation and custom-section checks, the first undeclared interface
   in section order returns `UndeclaredInterface` with its full name. Callers
   match the variant's field and use its Display string for people to read.
+
+## Additive under v1 (cwa-020)
+
+`AUDIT_API` stays 1. The items and strings above keep their v1 meaning.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLimits {
+    pub minimum: u64,
+    pub maximum: Option<u64>,
+    pub memory64: bool,
+    pub shared: bool,
+}
+
+pub fn memories(wasm: &[u8]) -> Result<Vec<MemoryLimits>, Refusal>;
+```
+
+On success the vec is every memory the module defines, in memory-section order.
+`minimum` and `maximum` are 64 KiB page counts. `maximum` is `None` when that
+memory declares no maximum. `memory64` and `shared` are that memory's flags.
+Invalid core-module bytes return the existing `Malformed` with the string
+`malformed module`.
