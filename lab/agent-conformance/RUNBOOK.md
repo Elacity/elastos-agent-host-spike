@@ -717,3 +717,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_storage_follows_the_selected_home` is this stand-in, and a PASS there gives the Runtime no A9 credit.
 
 `standin_storage_refuses_root_symlink_swap` is this stand-in, and a PASS there gives the Runtime no A9 credit.
+
+`standin_failed_start_denies_that_sessions_pending` is this stand-in, and a PASS there gives the Runtime no A11 credit.

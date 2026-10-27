@@ -346,8 +346,10 @@ impl ThrowawayHome {
     }
 
     /// Collect a completed census tool's captures before removing its scratch
-    /// Home. The same inventory and credential checker then cover both tools
-    /// and Runtime children. A census tool runs outside the root it inspects.
+    /// Home. The copies carry the same inventory and credential checker. A
+    /// census tool runs outside the root it inspects, so its capture stays in
+    /// the tool root: a forked stat helper can outlive the tool and hold its
+    /// capture file, and that file must not appear under the inspected root.
     pub fn collect_captures_from(&self, other: &Self) -> Result<()> {
         self.guard(self.home(), self.data())?;
         other.guard(other.home(), other.data())?;
@@ -362,7 +364,7 @@ impl ThrowawayHome {
                 {
                     return Err("census capture destination already exists");
                 }
-                fs::rename(other.root.join(&name), self.root.join(&name))
+                fs::copy(other.root.join(&name), self.root.join(&name))
                     .map_err(|_| "could not collect census capture")?;
             }
             self.captures.borrow_mut().push(*serial);

@@ -8231,3 +8231,161 @@ Planted exit 1, test result FAILED. Assertion: `src/../standin-runtime/mod.rs:34
 | 8. Identity, admission and allowance stay separate? | Yes | `confirm_storage` reads no grant, no capsule list and no clock at `:163-203`; admission stays in `admit_resident` and allowance unchanged. |
 
 The real A9 row stays blocked. `root-symlink-swap` and `host-hardlink` are refused by this lab stand-in, and a PASS gives the Runtime no A9 credit. `operator_storage_is_under_throwaway_home` stays `#[ignore = "blocked: AC-006-STORAGE"]` with its panic body.
+
+## 058 — A11: a failed stand-in start settles its pending request
+
+058: `finish_start` stores the phase, cause and `ended_at` as before, then calls the existing `settle_pending` once when that phase is `Failed`, with that session and the stored cause. `Start::Error` and `Start::Trap` both reach that one call. `Start::Ok` returns before it. An unknown id, a stop and a second `finish_start` return before it. `settle_pending`'s body and `stop_one` are unchanged. There is no second deny function, no second record renderer and no new Bus call. `seed_request` still stores the pending record while the instance is `starting`. No grant is minted from a pending request. The module header and the README settlement clause now state the failed-start rule. There is no new `falsifiers.json` id. `GAPS.md`, `falsify.py`, `src/census.rs`, `tests/effects.rs`, `probe/` and `Cargo.toml`/`Cargo.lock` are unchanged.
+
+### Quote from the resident SPEC (read only)
+
+> **A11.** Launch `fail-after-submit` and `read-shared`. Instance 1 ends
+> `failed` with a cause. Its one request record is `denied`, settled by the
+> Runtime, with the failure cause in its decision, and the harness never decided
+> it. Nothing from instance 1 is pending. Grant instance 2; it reaches
+> `running`. For the watch, instance 1 makes no request and stays `failed`. Stop
+> instance 2, then run the census.
+
+> ### RI-6 A pending request outlives the guest's call
+>
+> The RI-1 world lets a guest submit a capability request and continue before
+> the decision. The decision reaches the guest later, as an event or through a
+> later call. The Runtime records the pending request before the submit call
+> returns. Only with this can an instance fail while its own request is pending,
+> which A11 needs.
+>
+> Gap evidence: the only capability call returns the grant itself, so the guest
+> waits inside it, and the bridge polls inside that call.
+
+### Quote of the two option titles (read only)
+
+- **Option 1, a non-blocking submit.**
+- **Option 2, an instance deadline.**
+
+This task takes neither option into `elastos/`. The stand-in keeps the blocked call shape and stores the request before `finish_start`, so the A11 row here is the lab stand-in only.
+
+### The settlement
+
+`finish_start` finds the instance, refuses an unknown id or a non-live phase, applies the admitted `Start`, stores the result, then returns early unless the phase is `Failed`. A `Failed` result clones that instance's id and stored cause after the mutable borrow ends and calls `settle_pending` once. `settle_pending` changes only that session's `Pending` records to `Denied`, sets `settled_by` to `runtime` and writes the cause. A stop still calls the same function with its `stopped: ` cause.
+
+### Tests
+
+The lib target has three named tests in `standin_runtime::tests`:
+
+- `standin_failed_start_denies_that_sessions_pending` replaces `standin_failed_start_leaves_the_request`. `Start::Error("start refused")` and `Start::Trap("start trapped")` each settle `req-1` as `denied_request("req-1", "component-1", cause)` with that failure cause, and the list entry stays `failed` with the same cause.
+- `standin_failed_start_leaves_the_siblings_request` admits `/capsules/fail-after-submit` as `fail-after-submit` with `Start::Error("start refused")` and `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches each path once for `component-1` and `component-2`, both `starting`, and seeds `req-1` and `req-2` before either `finish_start`. The failed start denies `req-1` with `start refused`; `req-2` stays `pending_request("req-2", "component-2")` and `component-2` stays `starting`. The `Ok` start leaves `req-2` pending and `component-2` `running`. The test asserts `standin.grants.is_empty()`. No operator starts and the probe is not built.
+- `standin_refused_finish_start_preserves_requests` proves the guards precede settlement: a second start, an unknown id, and a start after a stop all leave the request list unchanged; the failed instance keeps its failure settlement through a refused second start.
+
+`standin_stop_denies_that_sessions_pending` still expects `stopped: stop one`.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. The planted crate compiled every time. After the last restore, `standin-runtime/mod.rs` matched its post-edit candidate bytes (`sha256 00043bbc31739947b879cfc36b76a8aa21ba6249db8705a14e86e865427b2d40`) and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` showed the candidate only. The plant expressions are absent from that file.
+
+F-standin-a11-stub. Named test `standin_failed_start_denies_that_sessions_pending`. Planted exit 101 in 1.36 seconds. Restored exit 0 in 1.59 seconds. Assertion: `src/../standin-runtime/mod.rs:2327:13` `assertion left == right failed: the stand-in denies the failed start's pending request with start refused`. The record stayed `pending` with no settler.
+
+Old:
+
+```text
+        if phase != ResidentStatus::Failed {
+            return Ok(());
+        }
+        let session_id = instance.id.clone();
+```
+
+New:
+
+```text
+        if phase != ResidentStatus::Failed {
+            return Ok(());
+        }
+        if phase == ResidentStatus::Failed {
+            return Ok(());
+        }
+        let session_id = instance.id.clone();
+```
+
+F-standin-a11-blank. Named test `standin_failed_start_denies_that_sessions_pending`. Planted exit 101 in 1.73 seconds. Restored exit 0 in 1.72 seconds. Assertion: `src/../standin-runtime/mod.rs:2324:13` `assertion left == right failed: the stand-in denies the failed start's pending request with start refused`. The record had `status` `denied` and `decision_reason` `""`.
+
+Old:
+
+```text
+        let cause = instance.cause.clone();
+        self.settle_pending(&session_id, &cause);
+```
+
+New:
+
+```text
+        let cause = instance.cause.clone();
+        self.settle_pending(&session_id, "");
+```
+
+F-standin-a11-ok-settles. Named test `standin_failed_start_leaves_the_siblings_request`. Planted exit 101 in 0.96 seconds. Restored exit 0 in 1.45 seconds. Assertion: `src/../standin-runtime/mod.rs:2397:9` `assertion left == right failed: the stand-in leaves the sibling's request pending after an Ok start`. The sibling's request was `denied` with `decision_reason` `""`.
+
+Old:
+
+```text
+        if phase != ResidentStatus::Failed {
+            return Ok(());
+        }
+        let session_id = instance.id.clone();
+        let cause = instance.cause.clone();
+        self.settle_pending(&session_id, &cause);
+```
+
+New:
+
+```text
+        let session_id = instance.id.clone();
+        let cause = instance.cause.clone();
+        self.settle_pending(&session_id, &cause);
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 339.08 seconds, inside the 600-second bound. 176 tests ran before the review-round harness tests: 162 passed, 0 failed, 14 ignored. Lib 48, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, harness 9, artifact 7, build 1, standin_contract 2, probe 3. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:358-383` settles one lab instance by its launch id; the change introduces no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:473-481` writes one in-memory request record; it reads no file, network, clock or hardware and imports no `wasi:*`. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:381` is the one `settle_pending` call from `finish_start`, and `:473` is the one deny rule for `start`, `error`, `trap` and stop. |
+| 4. Runtime core grows? | No | The edits are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md:721` and `LOG.md`; `elastos/`, `capsules/` and `scripts/` are unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:362-378` returns the unknown, non-live and repeated-start reasons before settlement; a `Failed` start denies with that stored failure cause. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The seam settles a request record and mints nothing; the real capability call still returns the grant (`standin-runtime/README.md:29`). |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | Tests at `standin-runtime/mod.rs:2311`, `:2340` and `:2419`; the stub, blank-cause and `Ok`-settle plants failed at `:2327`, `:2324` and `:2397`. |
+| 8. Identity, admission and allowance stay separate? | Yes | `settle_pending` at `:473-481` reads no grant, no capsule and no budget; `standin_failed_start_leaves_the_siblings_request` asserts the grant list stays empty (`:2414`). |
+
+The real A11 row stays open: the real capability call returns the grant, so RI-6 is a Runtime gap. A PASS here gives the Runtime no A11 credit.
+
+### Review round: the census test's own leftover
+
+The supervisor's rerun failed `cleanup_census_refuses_each_leftover` at `tests/runtime.rs:403` with `cleanup census: FAIL retained:target/home-67644-...-1; process leftover; processes:1 paths:["stdout-25"]`. The retained root holds `stdout-25` with 646 bytes, the size of an `lsof +D` listing, so the counted file was a collected census-tool capture.
+
+Cause: `collect_captures_from` renamed a completed census tool's captures into the inspected root. The census runs `lsof`, whose forked stat helper inherits the capture file and can outlive the tool; the renamed file then appears under the inspected root, and the next census counts the helper as a process leftover. `src/census.rs:40-41` already states that the tool's captures stay outside the inspected roots.
+
+Fix: `src/harness.rs:353-374` copies the tool capture bytes into the inspected Home and leaves the originals in the tool root until that root is removed. The collected bytes, the inventory and every JSON shape stay the same. The refusal strings are unchanged.
+
+New tests in `tests/harness.rs:366` and `:402`:
+
+- `collect_captures_copies_before_the_tool_root_is_removed`: after collection the tool's `stdout` and `stderr` are still files in its own root, the inspected Home holds one capture with the same stdout bytes, and `tool.finish()` removes the originals.
+- `collect_captures_refuses_before_it_writes`: a pre-existing destination returns `census capture destination already exists` and leaves both the source captures and the destination bytes; a missing source returns `could not collect census capture`; a refused collection leaves `capture inventory is empty`. The `guard` reasons stay asserted in `home_is_throwaway`.
+
+Hand-run falsifiers, each restored before the next. Command `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`.
+
+F-058-copy. Named test `collect_captures_copies_before_the_tool_root_is_removed`. `fs::copy` planted back to `fs::rename`. Planted exit 101 in 1.75 seconds at `tests/harness.rs:378:5` `the census tool keeps its captures in its own root until that root is removed`. Restored exit 0 in 1.93 seconds.
+
+F-058-destination. Named test `collect_captures_refuses_before_it_writes`. The destination-exists refusal was removed, so the copy overwrote the occupied file. Planted exit 101 in 1.21 seconds at `tests/harness.rs:414:5` `assertion left == right failed`, `left: Ok(())`, `right: Err("census capture destination already exists")`. Restored exit 0 in 0.87 seconds. After both restores `src/harness.rs` matched `sha256 660cc1591a49a001e479b71bdca9098ca986f76d25c0d217abc69388e336a77b`.
+
+Rerun after the fix:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 277.37 seconds, inside the 600-second bound. 178 tests: 164 passed, 0 failed, 14 ignored. Lib 48, harness 11, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, artifact 7, build 1, standin_contract 2, probe 3.
+- `cargo test --locked --test runtime` passed three times in a row: 10 passed, 2 ignored, 0 failed, 15.23, 13.64 and 14.46 seconds.
+
+No census code, operator fixture, test assertion or dependency changed.

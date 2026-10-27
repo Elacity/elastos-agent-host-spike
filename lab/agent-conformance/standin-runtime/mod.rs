@@ -14,7 +14,7 @@
 //! `get_capability_requests` answers `GET /api/capability/requests?session=`
 //! from one request store beside the grants. `seed_request` is the test seam.
 //! An accepted stop denies that session's pending requests with the stop
-//! cause; a failed start leaves them pending.
+//! cause; a failed start denies them with the failure cause.
 
 use serde_json::{json, Map, Value};
 use std::path::{Component, Path, PathBuf};
@@ -373,6 +373,12 @@ impl StandIn {
         instance.phase = phase;
         instance.cause = cause;
         instance.ended_at = ended_at;
+        if phase != ResidentStatus::Failed {
+            return Ok(());
+        }
+        let session_id = instance.id.clone();
+        let cause = instance.cause.clone();
+        self.settle_pending(&session_id, &cause);
         Ok(())
     }
 
@@ -2302,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn standin_failed_start_leaves_the_request() {
+    fn standin_failed_start_denies_that_sessions_pending() {
         let cases = [
             (Start::Error("start refused".to_owned()), "start refused"),
             (Start::Trap("start trapped".to_owned()), "start trapped"),
@@ -2317,8 +2323,8 @@ mod tests {
                 .expect("the stand-in finishes a failed start");
             assert_eq!(
                 request_entries(&standin, "component-1"),
-                vec![pending_request("req-1", "component-1")],
-                "the stand-in leaves the request pending when start fails with {cause}"
+                vec![denied_request("req-1", "component-1", cause)],
+                "the stand-in denies the failed start's pending request with {cause}"
             );
             assert_capsule(
                 &standin,
@@ -2328,6 +2334,151 @@ mod tests {
                 "the stand-in stores the failed start cause",
             );
         }
+    }
+
+    #[test]
+    fn standin_failed_start_leaves_the_siblings_request() {
+        const FAILING_PATH: &str = "/capsules/fail-after-submit";
+        const FAILING_NAME: &str = "fail-after-submit";
+
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident(
+                FAILING_PATH,
+                FAILING_NAME,
+                Start::Error("start refused".to_owned()),
+            )
+            .expect("the stand-in admits the failing path");
+        admit_shared(&mut standin, Start::Ok);
+        let failing = standin
+            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
+            .expect("the stand-in launches the failing path");
+        let sibling = standin
+            .post_capsules(Caller::Shell, &agent_body(SHARED_PATH))
+            .expect("the stand-in launches the shared path");
+        assert_eq!(
+            failing["id"], "component-1",
+            "the stand-in numbers the failing launch component-1"
+        );
+        assert_eq!(
+            sibling["id"], "component-2",
+            "the stand-in numbers the sibling launch component-2"
+        );
+        assert_eq!(
+            failing["status"], "starting",
+            "the stand-in answers starting for the failing launch"
+        );
+        assert_eq!(
+            sibling["status"], "starting",
+            "the stand-in answers starting for the sibling launch"
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes the failing start");
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![denied_request("req-1", "component-1", "start refused")],
+            "the stand-in denies the failed instance's request with the failure cause"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("req-2", "component-2")],
+            "the stand-in leaves the sibling's request pending after the failed start"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "starting",
+            "",
+            "the stand-in leaves the sibling starting",
+        );
+        standin
+            .finish_start("component-2")
+            .expect("the stand-in finishes the sibling start");
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("req-2", "component-2")],
+            "the stand-in leaves the sibling's request pending after an Ok start"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the sibling running after an Ok start",
+        );
+        assert!(
+            standin.grants.is_empty(),
+            "the stand-in mints no grant from a pending request"
+        );
+    }
+
+    #[test]
+    fn standin_refused_finish_start_preserves_requests() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        seed_shared_request(&mut standin, "req-1", "component-1");
+
+        let second = standin.finish_start("component-1");
+        assert!(
+            matches!(&second, Err((400, reason)) if reason == "start already returned"),
+            "the stand-in refuses a second start: {second:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-1", "component-1")],
+            "the stand-in leaves the request pending after a second start"
+        );
+
+        let unknown = standin.finish_start("component-9");
+        assert!(
+            matches!(&unknown, Err((400, reason)) if reason == "unknown instance: component-9"),
+            "the stand-in refuses an unknown instance: {unknown:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-1", "component-1")],
+            "the stand-in leaves the request pending after an unknown instance"
+        );
+
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1");
+        seed_shared_request(&mut standin, "req-2", "component-1");
+        let stopped = standin.finish_start("component-1");
+        assert!(
+            matches!(&stopped, Err((400, reason)) if reason == "instance is not live: stopped"),
+            "the stand-in refuses a start after a stop: {stopped:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                denied_request("req-1", "component-1", "stopped: stop one"),
+                pending_request("req-2", "component-1"),
+            ],
+            "the stand-in keeps the stop settlement and leaves the later request pending"
+        );
+
+        let mut failed = StandIn::new();
+        admit_shared(&mut failed, Start::Error("start refused".to_owned()));
+        launch_starting(&mut failed);
+        seed_shared_request(&mut failed, "req-3", "component-1");
+        failed
+            .finish_start("component-1")
+            .expect("the stand-in finishes the failing start");
+        let second_failed = failed.finish_start("component-1");
+        assert!(
+            matches!(&second_failed, Err((400, reason)) if reason == "start already returned"),
+            "the stand-in refuses a second failed start: {second_failed:?}"
+        );
+        assert_eq!(
+            request_entries(&failed, "component-1"),
+            vec![denied_request("req-3", "component-1", "start refused")],
+            "the stand-in keeps the failure settlement after a refused second start"
+        );
     }
 
     #[test]
