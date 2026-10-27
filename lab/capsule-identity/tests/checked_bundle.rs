@@ -310,3 +310,34 @@ fn checked_bundle_fields_are_private() {
         "the library takes a CheckedBundle by &mut"
     );
 }
+
+#[test]
+fn checked_bundle_hands_out_the_manifest_name() {
+    // The checked manifest's `name` comes from the one manifest check, so a
+    // caller never parses capsule.json again. Each expected name is written
+    // here, from the committed manifest, never taken from the accessor.
+    let names = [
+        (&CONTENT_SAMPLE, "example-content"),
+        (&WEB_APP, "example-web-app"),
+        (&WC001_CORE, "wc001-core"),
+        (&AGENT_HOST, "agent-host"),
+        (&PROVIDER, "ipfs-provider"),
+        (&MODEL, "model-fixture"),
+        (&PROVIDER_VARIANT_A, "ipfs-provider"),
+        (&PROVIDER_VARIANT_B, "ipfs-provider"),
+    ];
+    let mut listed: Vec<&str> = names.iter().map(|(fixture, _)| fixture.name).collect();
+    let mut committed: Vec<&str> = FIXTURES.iter().map(|fixture| fixture.name).collect();
+    listed.sort_unstable();
+    committed.sort_unstable();
+    assert_eq!(listed, committed, "every committed fixture, once");
+    for (fixture, name) in names {
+        let bundle = assemble(fixture);
+        assert_eq!(
+            checked(bundle.path()).manifest_name(),
+            name,
+            "{}",
+            fixture.name
+        );
+    }
+}

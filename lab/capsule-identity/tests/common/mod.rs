@@ -27,9 +27,8 @@ use rand::rngs::OsRng;
 use capsule_identity::{
     check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed,
     verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
-    Refusal, MANIFEST_FILE,
+    Refusal,
 };
-use elastos_common::CapsuleManifest;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -1524,8 +1523,9 @@ impl StandInRuntime {
     /// store, (d) the one walk, (e) the one name compare against the stored
     /// bytes, (f) a package record for that CID, (g) the one record check.
     /// (a), (b) and (c) come before the CID check. The answer is the stored
-    /// manifest's `name` and the bundle's `asks.json` bytes, both from the one
-    /// checked bundle that passed every check.
+    /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
+    /// bundle's `asks.json` bytes, both from the one checked bundle that
+    /// passed every check.
     fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
@@ -1535,13 +1535,27 @@ impl StandInRuntime {
             .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
         let checked = checked_bundle(folder).map_err(said)?;
         checked.check_name(&cid).map_err(said)?;
-        let record = self
-            .records
-            .iter()
-            .find(|record| record.cid == cid)
-            .ok_or_else(|| format!("unsigned: no package record binds {cid}"))?;
-        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;
-        Ok((manifest_name(&checked), signed_asks(&checked)))
+        self.check_records(&checked, &cid)?;
+        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))
+    }
+
+    /// Checks (f) and (g): every package record that binds `cid`, in store
+    /// order, gets the one record check. The launch goes on when at least one
+    /// of them passes, so the answer does not depend on the records' order.
+    /// When none passes, the answer is the first one's own refusal; when no
+    /// record binds `cid`, the bundle is unsigned.
+    fn check_records(&self, checked: &CheckedBundle, cid: &str) -> Result<(), String> {
+        let mut first_refusal = None;
+        for record in self.records.iter().filter(|record| record.cid == cid) {
+            match verify_checked_package_record(checked, record, &self.accepted) {
+                Ok(()) => return Ok(()),
+                Err(refusal) => first_refusal = first_refusal.or(Some(refusal)),
+            }
+        }
+        match first_refusal {
+            Some(refusal) => Err(said(refusal)),
+            None => Err(format!("unsigned: no package record binds {cid}")),
+        }
     }
 
     /// Check (a): the body is a JSON object whose only key is `cid`, with a
@@ -1591,19 +1605,6 @@ impl StandInRuntime {
 /// A library refusal as the stand-in answers it: its own text, unchanged.
 fn said(refusal: Refusal) -> String {
     refusal.to_string()
-}
-
-/// The `name` of the manifest the walk checked, read from the checked bytes
-/// with the Runtime's own `CapsuleManifest`, never from the folder again.
-fn manifest_name(checked: &CheckedBundle) -> String {
-    let manifest = checked
-        .entries()
-        .iter()
-        .find(|entry| entry.path == MANIFEST_FILE)
-        .expect("a checked bundle holds its manifest");
-    let manifest: CapsuleManifest =
-        serde_json::from_slice(&manifest.content).expect("a checked manifest parses");
-    manifest.name
 }
 
 /// The asks file of a bundle, which the lab never parses.
