@@ -11,6 +11,8 @@ every use.
 
 reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)
 
+`Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
+
 A forged identity, session, instance, usage, ceiling or set of rights changes
 nothing. A host call whose identity, session or instance differs from the
 stored binding is refused with a typed reason, and an unknown handle is refused
