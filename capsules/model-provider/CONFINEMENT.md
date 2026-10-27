@@ -264,6 +264,12 @@ copy is refused with exit 71 and `Operation not permitted`. The launcher
 records the profile path it applies, and the test requires that path to be
 the stand-in file. This evidence is for the lab launcher.
 
+`generated_profile_bound_copy_serves` starts the copy bound as
+`PROVIDER_EXECUTABLE` under the file the stand-in writes. The copy answers
+`init`, creates `runs/`, and shuts down cleanly. The launched file has no
+`;;` line, and the recorded path is that file. This evidence is for the lab
+launcher.
+
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
 exec rule word for word. Under each, the copy starts and answers `init`, and
@@ -596,6 +602,11 @@ profile does not grant".
 - `generated_profile_refuses_an_unbound_copy`: the stand-in file starts the
   unbound copy. The copy is refused with exit 71 and `Operation not permitted`.
   The launched file has no `;;` line. This evidence is for the lab launcher.
+  See "Starting other programs".
+- `generated_profile_bound_copy_serves`: the stand-in file starts the copy
+  bound as `PROVIDER_EXECUTABLE`. The copy answers `init`, creates `runs/`,
+  and shuts down cleanly. The launched file has no `;;` line, and the
+  recorded path is that file. This evidence is for the lab launcher.
   See "Starting other programs".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
