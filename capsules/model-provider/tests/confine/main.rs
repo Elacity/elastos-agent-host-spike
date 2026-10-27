@@ -869,7 +869,9 @@ fn wait_for_terminal(
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
-/// acceptance, so the in-memory stand-in citation fails.
+/// acceptance, so the in-memory stand-in citation fails. F-cc50a drops the
+/// exact `allow_rules_trace_to_declared_rights` return, so the in-memory
+/// trace citation fails.
 #[test]
 fn operations_section_cites_existing_tests() {
     fn cited_test_name(span: &str) -> bool {
