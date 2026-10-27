@@ -865,18 +865,30 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         if !is_local {
             return Ok(());
         }
-        let stored_offer = run.offer.clone();
-        transition_terminal(
-            &stored_offer,
-            &mut run,
-            RunStatus::SettlementUnknown,
-            None,
-            Some(RunError {
-                class: ErrorClass::SettlementUnknown,
-                code: "settlement_unknown".to_string(),
-                message: "model backend settlement is unknown".to_string(),
-            }),
-        )?;
+        // The stop settlement is the same rule as a read after a restart: with
+        // no worker for the run, `reconcile_local_text` (`src/adapters.rs:1424`)
+        // returns the `settlement_unknown` terminal. A run with no current
+        // offer or no stored backend state keeps the unknown terminal here,
+        // because reconcile cannot read a backend it cannot name.
+        let offer = self.current_execution_offer_for_run(&run)?;
+        let settled = match offer.as_ref() {
+            Some(offer) => self.reconcile_run_with_offer(offer, &mut run)?,
+            None => false,
+        };
+        if !settled {
+            let stored_offer = run.offer.clone();
+            transition_terminal(
+                &stored_offer,
+                &mut run,
+                RunStatus::SettlementUnknown,
+                None,
+                Some(RunError {
+                    class: ErrorClass::SettlementUnknown,
+                    code: "settlement_unknown".to_string(),
+                    message: "model backend settlement is unknown".to_string(),
+                }),
+            )?;
+        }
         self.journal.store_run(&run)?;
         Ok(())
     }
@@ -1014,25 +1026,38 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             self.journal.store_run(run)?;
             return Ok(());
         }
-        let Some(backend_state) = run.backend_state.as_ref() else {
+        if !self.reconcile_run_with_offer(offer, run)? {
             return Ok(());
-        };
-        match self
-            .adapters
-            .reconcile(&offer.adapter, offer, &run.runtime_binding, backend_state)
-        {
-            Ok(result) => {
-                let stored_offer = run.offer.clone();
-                apply_reconcile_result(&stored_offer, run, result)?
-            }
-            Err(fault) => {
-                fault.log();
-                let stored_offer = run.offer.clone();
-                transition_error(&stored_offer, run, fault.error)?;
-            }
         }
         self.journal.store_run(run)?;
         Ok(())
+    }
+
+    /// Applies the one reconcile rule to `run`, and says whether it did. A run
+    /// with no stored backend state has nothing to reconcile, so its caller
+    /// keeps its own settlement. `refresh_run_if_needed` and the stop
+    /// settlement share this path (P10), so a run left without a worker settles
+    /// through `reconcile_local_text` (`src/adapters.rs:1424`) after a restart
+    /// and after a clean shutdown.
+    fn reconcile_run_with_offer(
+        &mut self,
+        offer: &ConfiguredOffer,
+        run: &mut StoredRun,
+    ) -> Result<bool, ProviderFault> {
+        let Some(backend_state) = run.backend_state.clone() else {
+            return Ok(false);
+        };
+        match self
+            .adapters
+            .reconcile(&offer.adapter, offer, &run.runtime_binding, &backend_state)
+        {
+            Ok(result) => apply_reconcile_result(offer, run, result)?,
+            Err(fault) => {
+                fault.log();
+                transition_error(offer, run, fault.error)?;
+            }
+        }
+        Ok(true)
     }
 
     fn current_execution_offer_for_run(
@@ -6682,7 +6707,24 @@ mod tests {
     fn bounded_settlement_visitor_validates_all_records_before_mutation() {
         let root = temp_root("visitor-full-validation");
         let model = offer("local-text");
-        let adapters = FakeAdapters::default();
+        // The stop settlement takes the one reconcile rule
+        // (`src/state.rs:849-893`), so each surviving run answers with the
+        // unknown terminal the visitor test asserts.
+        let unknown = Ok(ReconcileResult::Terminal {
+            events: vec![],
+            status: RunStatus::SettlementUnknown,
+            output: None,
+            error: Some(RunError {
+                class: ErrorClass::SettlementUnknown,
+                code: "settlement_unknown".into(),
+                message: "Unknown".into(),
+            }),
+            backend_report: None,
+        });
+        let adapters = FakeAdapters {
+            reconcile_results: Arc::new(Mutex::new(vec![unknown.clone(), unknown])),
+            ..Default::default()
+        };
         let mut state = init_state(&root, vec![model.clone()], adapters.clone());
         let mut paths = Vec::new();
         for index in 0..2 {

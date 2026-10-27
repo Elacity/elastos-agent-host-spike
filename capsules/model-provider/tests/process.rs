@@ -4912,3 +4912,386 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
 
     provider.shutdown();
 }
+
+/// A hosted run left open when its provider process stops settles
+/// `settlement_unknown` after a restart, and the restarted provider does not
+/// send it again. The one rule is the no-worker branch of
+/// `reconcile_local_text` (`src/adapters.rs:1424-1453`): a restarted provider
+/// has no worker for the run (`has_local_text_worker`,
+/// `src/adapters.rs:683`), so reconciliation returns a `SettlementUnknown`
+/// terminal with code `settlement_unknown` and no output (`:1442-1451`), and
+/// `refresh_run_if_needed` (`src/state.rs:968`, which calls `reconcile` at
+/// `:1029`) stores it when the owner reads the run. A crash and a clean
+/// `shutdown` (`shutdown_workers`, `src/adapters.rs:745`) both reach this one
+/// rule because the stop settlement also aborts the workers first and then
+/// asks the same reconcile rule (`src/state.rs:849-893`). This is the design's
+/// "disconnect and reconnect without redispatch, restart with unknown
+/// settlement" (`docs/MODEL_PROVIDER.md:527`), "Reconnection cannot dispatch
+/// the model request again" (`:214`), the journal rule that tells apart "a
+/// request with unknown backend settlement that requires reconciliation"
+/// (`:271-276`), and "cancellation and unknown settlement are distinguishable"
+/// (`:547`). The `backend_report` the restarted provider records is the
+/// unknown triple the held cancel test asserts, because a hosted terminal with
+/// no backend report becomes `BackendReport::unknown()`
+/// (`src/state.rs:1380-1382`).
+///
+/// The test holds the stand-in's answer, so the run is open when the first
+/// provider stops. This helper stops that provider through `stop`, starts a
+/// second provider on the same root with the same stand-in, and asserts, in
+/// order: the owner's read (`settlement_unknown`, the reason code, no output,
+/// the unknown backend report), one ordered event page with exactly one
+/// terminal event last, the retried create returning the same run, the same
+/// terminal JSON after the answer is released, and the one connection and one
+/// request both provider processes made in total.
+fn assert_hosted_run_settles_unknown_after_restart(
+    root: &Path,
+    stand_in: HostedEffectStandIn,
+    create_request: &Value,
+    provider: &mut ProviderProcess,
+    stop: fn(&mut ProviderProcess),
+) {
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let access = access_binding(create_request);
+
+    // b: the first provider stops. A killed and a cleanly shut-down provider
+    // both leave the run without a worker.
+    stop(provider);
+
+    // c: a second provider on the same root, initialised with the same
+    // stand-in, settles the run on the owner's read. `wait_for_run_terminal`
+    // bounds the wait with `FIXTURE_EVENT_TIMEOUT`, so a run that never
+    // settles fails with a named message instead of hanging.
+    let mut restarted = ProviderProcess::start();
+    let started = restarted.request(hosted_effect_init(
+        root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    ));
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected restarted init response: {started}"
+    );
+    let settled = wait_for_run_terminal(&mut restarted, &expected_run_id, &access);
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "settlement_unknown",
+        "a hosted run left open by a stopped provider must settle unknown after a restart: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "settlement_unknown",
+        "an unknown restart settlement must carry its reason: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("output").is_none(),
+        "an unknown settlement must carry no output: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a restart with unknown settlement must record resolved_model, usage and cost as unknown: {settled}"
+    );
+
+    // d: one ordered page from 0, with exactly one terminal event, last, and
+    // it carries the unknown settlement.
+    let page = restarted.request(json!({
+        "op": "runs_events",
+        "run_id": expected_run_id,
+        "runtime_binding": access,
+        "after_sequence": 0
+    }));
+    assert_eq!(page["status"], "ok", "unexpected events response: {page}");
+    assert_eq!(
+        page["data"]["has_more"], false,
+        "the fixture run's events must fit one page: {page}"
+    );
+    let events = page["data"]["events"]
+        .as_array()
+        .expect("runs_events returns an event array");
+    assert!(!events.is_empty(), "the run must keep its events: {page}");
+    for (position, event) in events.iter().enumerate() {
+        assert_eq!(
+            event["sequence"].as_u64(),
+            Some(position as u64 + 1),
+            "event sequences must start at 1 and rise by exactly one: {page}"
+        );
+    }
+    let terminal_position = events.len() - 1;
+    assert_eq!(
+        events[terminal_position]["terminal"], true,
+        "the last event must be the terminal: {page}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["terminal"] == true)
+            .count(),
+        1,
+        "the run must keep exactly one terminal event: {page}"
+    );
+    assert_eq!(
+        events[terminal_position]["kind"], "settlement_unknown",
+        "the terminal event must carry the unknown settlement: {page}"
+    );
+
+    // e: the same create is a replay, not a second effect.
+    let retry = restarted.request(create_request.clone());
+    assert_eq!(retry["status"], "ok", "unexpected retry response: {retry}");
+    assert_eq!(
+        retry["data"]["run_id"], expected_run_id,
+        "the retry after a restart must return the same run id"
+    );
+    assert_eq!(
+        retry["data"]["status"], "settlement_unknown",
+        "the retry after a restart must report the same unknown settlement: {retry}"
+    );
+
+    // f: releasing the answer changes nothing, because the second provider
+    // never reattached to the run.
+    stand_in.release_answer();
+    let reread = restarted.request(json!({
+        "op": "runs_get",
+        "run_id": expected_run_id,
+        "runtime_binding": access
+    }));
+    assert_eq!(reread["status"], "ok", "unexpected run response: {reread}");
+    assert_eq!(
+        reread["data"]["status"], "settlement_unknown",
+        "a released answer must not change an unknown settlement: {reread}"
+    );
+    assert_eq!(
+        reread["data"]["terminal"], settled["data"]["terminal"],
+        "a released answer must keep the same terminal JSON: {reread}"
+    );
+
+    restarted.shutdown();
+
+    // g: both provider processes together opened one connection and sent one
+    // request, so the restart repeated no inference and no effect.
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the open run and its restart must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the open run and its restart must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+}
+
+/// A hosted run still open when the provider process is killed settles
+/// `settlement_unknown` after a restart and is not sent again. The rule, its
+/// citations and every assertion after the kill are on
+/// `assert_hosted_run_settles_unknown_after_restart`; this test creates the
+/// open run and checks the stand-in saw its one connection first. Off macOS
+/// the provider refuses every hosted run before any socket, so the test prints
+/// one `SKIP` line and returns.
+#[test]
+fn hosted_run_open_when_the_provider_is_killed_settles_unknown_after_restart() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider killed open run restart: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-killed-open-run");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-killed-open-run");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted run the provider is killed under"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-killed-open-run"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        create["data"]["terminal"].is_null(),
+        "the hosted run must stay open while the Runtime socket holds its answer: {create}"
+    );
+    assert!(
+        matches!(
+            create["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the hosted run must report an open status: {create}"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    assert_hosted_run_settles_unknown_after_restart(
+        &root,
+        stand_in,
+        &create_request,
+        &mut provider,
+        ProviderProcess::hard_kill,
+    );
+}
+
+/// A hosted run still open at a clean `shutdown` settles `settlement_unknown`
+/// after a restart and is not sent again. The shutdown collects the active run
+/// ids, aborts every worker (`src/execution.rs:422-424`), and settles through
+/// the same reconcile rule a restart read takes (`src/state.rs:849-893`). The
+/// rule, its citations and every assertion after the stop are on
+/// `assert_hosted_run_settles_unknown_after_restart`; this test creates the
+/// open run and checks the stand-in saw its one connection first. Off macOS
+/// the provider refuses every hosted run before any socket, so the test prints
+/// one `SKIP` line and returns.
+#[test]
+fn hosted_run_open_at_a_clean_shutdown_settles_unknown_after_restart() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider clean shutdown open run restart: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root =
+        test_support::temp_root_path("model-provider-process", "hosted-clean-shutdown-open-run");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-clean-shutdown-open-run");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted run open at a clean provider shutdown"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-clean-shutdown-open-run"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        create["data"]["terminal"].is_null(),
+        "the hosted run must stay open while the Runtime socket holds its answer: {create}"
+    );
+    assert!(
+        matches!(
+            create["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the hosted run must report an open status: {create}"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    assert_hosted_run_settles_unknown_after_restart(
+        &root,
+        stand_in,
+        &create_request,
+        &mut provider,
+        ProviderProcess::shutdown,
+    );
+}

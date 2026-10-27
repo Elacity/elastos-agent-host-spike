@@ -2968,6 +2968,40 @@
       "tests": [
         "another_caller_cannot_read_page_or_cancel_a_hosted_run"
       ]
+    },
+    {
+      "id": "MP53",
+      "title": "the no-worker branch keeps the run running instead of settling it unknown, so a run left by a stopped provider never settles after a restart",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    }\n    Ok(ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::SettlementUnknown,\n            code: \"settlement_unknown\".to_string(),\n            message: \"model backend settlement is unknown\".to_string(),\n        }),\n        backend_report: None,\n    })\n}",
+          "new": "    }\n    Ok(ReconcileResult::StillRunning {\n        events: Vec::new(),\n        backend_state: serialize_local_text_backend_state(state.cancel_requested)?,\n        status: RunStatus::Running,\n    })\n}"
+        }
+      ],
+      "tests": [
+        "hosted_run_open_when_the_provider_is_killed_settles_unknown_after_restart",
+        "hosted_run_open_at_a_clean_shutdown_settles_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP54",
+      "title": "the no-worker branch claims a confirmed cancel instead of an unknown settlement, so a restart reports cancellation for a run whose backend outcome is unknown",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    }\n    Ok(ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::SettlementUnknown,\n            code: \"settlement_unknown\".to_string(),\n            message: \"model backend settlement is unknown\".to_string(),\n        }),\n        backend_report: None,\n    })\n}",
+          "new": "    }\n    Ok(ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::Cancelled,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::Cancelled,\n            code: \"cancelled\".to_string(),\n            message: \"model run was cancelled\".to_string(),\n        }),\n        backend_report: None,\n    })\n}"
+        }
+      ],
+      "tests": [
+        "hosted_run_open_when_the_provider_is_killed_settles_unknown_after_restart",
+        "hosted_run_open_at_a_clean_shutdown_settles_unknown_after_restart"
+      ]
     }
   ]
 }
