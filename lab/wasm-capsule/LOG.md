@@ -1490,3 +1490,34 @@
   --locked --workspace` (156 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p
   wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 060 (README's wasmer help-search lists name every line they matched; P12, second review of PRs #238
+  and #240). Base `c76403f1c26ac1ed8be7ed218b988d9d34ce2327`. README only, the two "### wasmer 7.5.0: SKIPPED" parts;
+  both SKIPPED results, every table row, command, exit code and stdout stay word for word. `/opt/homebrew/bin/wasmer
+  --version` printed `wasmer 7.5.0`. `wasmer run --help > R` exit 0 (272 lines), `wasmer --help > T` exit 0 (66
+  lines), then one `grep -n -i <word>` per word on each file (exit 1 = no match). Memory cap words, `R`: `memory` 91,
+  92, 111, 112, 120, 121, 123, 124 (`--enable-experimental-unaligned-memory-accesses`, `--enable-bulk-memory`,
+  `--enable-multi-memory`, `--enable-memory64`); `grow` 220, 221, 223 (`--with-compact-on-growth`); `trap` 241
+  (`--skip-journal-stdio`, inside "bootstrap"), 266 (`--COREDUMP_PATH <COREDUMP_PATH>`, "Generate a coredump at this
+  path if a WebAssembly trap occurs"); `max` 200 (`--enable-cpu-backoff`); `size` 221 (`--with-compact-on-growth`),
+  256, 257 (`--stack-size`); `limit`, `pages`, `heap`, `resource`, `rlimit`, `bytes` exit 1. `T`: all eleven words
+  exit 1. The old list left out 241 and 266 (and named no flag for 200); README now names all three. No line is about
+  capping linear memory, so the SKIPPED result holds. Import words, `R`: `preload` exit 1; `import` 249
+  (`--deny-multiple-wasi-versions`), 269 (`--experimental-napi`); `link` 117, 118 (`--enable-module-linking`);
+  `module` 86, 117, 118, 142, 145, 159, 173, 238, 241, 249, 252, 254, 260, 269; `host` 109 (`--enable-multi-value`),
+  141, 142, 153, 154, 156, 171; `use` 17, 23, 37, 47, 52, 68, 86, 158, 195, 200, 203, 208, 228, 232, 254; `env` 16,
+  22, 34, 43, 47, 49, 57 (`[env: NAME=]` and token lines of `--wasmer-dir`, `--cache-dir`, `--registry`,
+  `--log-format`, `--token`, `--log-events`), 147, 148 (`--env`), 150, 151 (`--env-file`), 153, 154, 156
+  (`--forward-host-env`), 232 (`--snapshot-on`). `T`: `preload`, `import`, `link`, `module`, `host` exit 1; `use` 12
+  (`config`), 17 (`whoami`), 43 (`--log-format`); `env` 49, 55 (`--log-format`, `--log-events`). README now names the
+  flag of every matched line, says `--env-file` and `--forward-host-env` are ambient like `--env` (they hand the guest
+  host environment), not imports, and that each `[env: NAME=]` line names the host variable for a wasmer option. No
+  line supplies a core-module import from another module file, so the SKIPPED result holds. No test or falsifier (no
+  new rule). Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (129
+  passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (156 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep
+  -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both
+  empty, exit 1. `git status --short` listed only `README.md` and `LOG.md`. Round 2: the supervisor's `cargo test
+  --locked` failed once on `run_stops_wasmtime_at_its_budget_and_never_starts_wasmer` (`tests/run.rs:4330`, "refused
+  after 5.633411667s, not within 5 s of its budget 500ms"), a wall-clock bound that reads no README or LOG line;
+  nothing was changed for it (`tests/` is out of scope). Re-run: `cargo test --locked` (129 passed, 3 ignored, 0
+  failed, that test passed) and `cargo test --locked --workspace` (156 passed, 3 ignored, 0 failed).
