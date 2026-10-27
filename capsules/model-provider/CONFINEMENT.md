@@ -183,18 +183,25 @@ the same redirected `init`: `STORAGE_ROOT/escape` is a link to
   `STORAGE_ROOT` succeeds, and `shutdown` exits cleanly. The evidence is
   the lab launcher's. It makes no claim that the Runtime enforced the
   profile or that B3 is complete. Test: `model_outside_write_denied`.
-- When only a metadata read of the outside path is added, the sandbox refuses
-  the journal create, and the provider reports `journal_access_denied`
-  (provider task 012). It logs the create of `<journal_dir>/runs` with
-  `Operation not permitted`. Test:
-  `model_outside_create_reports_access_denied`.
+- The same journey runs under the oracle copy and under the stand-in file
+  plus the one metadata rule. When only that metadata read of the outside
+  path is added, the sandbox refuses the journal create, and the provider
+  reports `journal_access_denied` (provider task 012). It logs the create of
+  `<journal_dir>/runs` with `Operation not permitted`. The launched stand-in
+  copy has no line that starts with `;;`. The evidence is for the lab
+  launcher. Test: `model_outside_create_reports_access_denied`.
 
-The second test runs a test-time copy of `confine.sb` with one fixture grant:
-`file-read-metadata` of `outside/inner`, bound as a resolved path. It is
-metadata only. The fixture adds no content read and no write. The inspect of
-`runs/`, which does not exist yet, needs no grant: the sandbox answers it with
-not-found. The test also checks that the outside sibling keeps its entries,
-modes and bytes, and that a later normal `init` on `STORAGE_ROOT` succeeds.
+The same journey runs under the oracle copy and under the stand-in file plus
+the one metadata rule. The oracle case runs a test-time copy of `confine.sb`
+with one fixture grant: `file-read-metadata` of `outside/inner`, bound as a
+resolved path. The generated case reads the declared fixture, writes the
+stand-in text under that case's storage, and the one fixture writer appends
+the same grant. The launched stand-in copy has no line that starts with
+`;;`. The grant is metadata only. The fixture adds no content read and no
+write. The inspect of `runs/`, which does not exist yet, needs no grant: the
+sandbox answers it with not-found. Each case checks that the outside sibling
+keeps its entries, modes and bytes, and that a later normal `init` on
+`STORAGE_ROOT` succeeds. The evidence is for the lab launcher.
 
 `redirect_journal_materializes_outside_when_unconfined` is the control for
 both tests: the same fixture and request without a profile create the journal
@@ -250,6 +257,12 @@ when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
 when the file changes (`bound_executable_digest_mismatch_refuses_start`).
 That refusal is a lab stand-in for the Runtime's launch-by-hash check, not the
 Runtime's check. This stand-in counts toward no M1 check.
+
+`generated_profile_refuses_an_unbound_copy` starts that same unbound copy
+under the file the stand-in writes. The launched file has no `;;` line. The
+copy is refused with exit 71 and `Operation not permitted`. The launcher
+records the profile path it applies, and the test requires that path to be
+the stand-in file. This evidence is for the lab launcher.
 
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
@@ -530,11 +543,12 @@ profile does not grant".
   no `;;` line. This evidence is for the lab launcher. See "Reads outside the
   storage root".
 - `model_outside_create_reports_access_denied`: the same redirected `init`
-  under a test-time copy of `confine.sb` that adds only a metadata read of the
-  outside journal root. The sandbox refuses the journal create, and the
-  answer is `journal_access_denied`. Its control is
-  `redirect_journal_materializes_outside_when_unconfined`. See "Writes
-  outside the storage root".
+  runs under the oracle copy and under the stand-in file plus the one
+  metadata rule. The launched stand-in copy has no line that starts with
+  `;;`. The sandbox refuses the journal create, and the answer is
+  `journal_access_denied`. Its control is
+  `redirect_journal_materializes_outside_when_unconfined`. The evidence is
+  for the lab launcher. See "Writes outside the storage root".
 - `model_local_offer_fails_closed_under_profile`: an `init` whose one offer is
   a local engine offer fails closed under the profile, writes nothing, and
   leaves the provider in service. See "What the profile does not grant".
@@ -579,6 +593,10 @@ profile does not grant".
   `PROVIDER_EXECUTABLE`, never answers `init`. `sandbox-exec` exits 71 and logs
   the refused `execvp()` with `Operation not permitted`, and nothing is
   written. See "Starting other programs".
+- `generated_profile_refuses_an_unbound_copy`: the stand-in file starts the
+  unbound copy. The copy is refused with exit 71 and `Operation not permitted`.
+  The launched file has no `;;` line. This evidence is for the lab launcher.
+  See "Starting other programs".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
   answers `init`, creates `runs/` and exits cleanly after `shutdown`.
@@ -730,9 +748,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the twenty-four
+uses command `provider`. Each mutates `confine.sb` only, except the twenty-five
 entries that edit `tests/confine/main.rs`.
-The twenty-four are: F-cc1e removes the outside-read
+The twenty-five are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
@@ -744,7 +762,7 @@ keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
 the digest compare in refuse_changed_provider_executable, and F-cc31a
 renames `model_provider_ops_under_profile`, and F-cc30b,
 F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
-allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*). F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file.
+allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*). F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file. F-cc46a makes Launch::Program pass the committed oracle to sandboxed instead of the profile it was given, so generated_profile_refuses_an_unbound_copy fails because the recorded profile path is the committed oracle.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -760,8 +778,8 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc1e | Remove the outside-read fixture rule from the test | `model_outside_read_denied` | `runs_get` stops at the record's existence check (`model run is unreadable`), before the open, so the check for EPERM on the open fails. |
 | F-cc7a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_local_offer_fails_closed_under_profile` | The local offer's `init` answers `ok`. `(deny network*)` stays, so no run could complete; the test sends none. |
 | F-cc7b | One line, `(allow file-read*)`, is added after the last rule; `(deny default)` and every other rule stay | `model_local_offer_fails_closed_under_profile` | With reads alone added, the same `init` answers `ok`. So the test watches the profile's read boundary at `base_path`, not only `(deny default)`. |
-| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The redirected `init` answers `ok`. |
-| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
+| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The plant edits `confine.sb` and the stand-in case launches the generated file. The oracle copy's redirected `init` answers `ok`. |
+| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The plant edits `confine.sb` and the stand-in case launches the generated file. The oracle copy's create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
 | F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
 | F-cc10a | `(deny default)` becomes `(allow default)` and `(deny network*)` is removed; `(version 1)` stays first | `model_hosted_run_fails_closed_under_profile` | The hosted run's request reaches the Runtime socket stand-in. `(allow default)` alone is not enough: `(deny network*)` still refuses the connect. |
 | F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
@@ -804,13 +822,14 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc43a | In the test, `standin_profile` returns an empty profile when the rights list is missing | `standin_refuses_a_start_it_cannot_apply` and `generated_model_profile_matches_the_oracle` | The missing rights list is accepted. |
 | F-cc44a | In the test, `standin_profile` emits `(allow network*)` instead of `(deny network*)` | `generated_profile_denies_the_hosted_connect` and `generated_model_profile_matches_the_oracle` | The stand-in counts a connection and the generated head's third line is `(allow network*)`. |
 | F-cc45a | In the test, the launch uses the committed oracle instead of the generated file | `standin_launch_uses_the_generated_profile` | `init` answers ok because the launch uses the committed oracle, which still has the storage write. |
+| F-cc46a | In the test, `Launch::Program` passes the committed oracle to `sandboxed` instead of the profile it was given | `generated_profile_refuses_an_unbound_copy` | The recorded profile path is the committed oracle. The copy is still refused with exit 71. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
 for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
-F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a and F-cc45a. F-cc30a and F-cc30f need no rebuild:
+F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc45a and F-cc46a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
@@ -824,7 +843,7 @@ F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 F-cc39a needs no rebuild: the test reads confine.sb at runtime.
 F-cc40a needs a rebuild: it edits tests/confine/main.rs.
 F-cc41a needs a rebuild: it edits tests/confine/main.rs.
-F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider.
+F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider. F-cc46a needs a rebuild: it edits tests/confine/main.rs. F-cc46a needs the sandbox: the named test launches the provider.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when

@@ -12,8 +12,8 @@
 //! test-time copy of `confine.sb` with fixture rules appended; the copy is
 //! made from the one profile source, so a `confine.sb` edit reaches it too.
 //! Its program launch binds one path as `PROVIDER_EXECUTABLE` and starts the
-//! program it names, that path or another, under `confine.sb`, so the
-//! profile's exec rule alone decides whether that program runs. Before
+//! program it names, that path or another, under the profile path that launch
+//! carries, so the profile's exec rule alone decides whether that program runs. Before
 //! `spawn`, a launch that binds `PROVIDER_EXECUTABLE` records that file's
 //! sha256 and refuses to start when the file no longer has that digest.
 //! The profile binds PROVIDER_EXECUTABLE by path. That refusal is a lab
@@ -46,6 +46,7 @@ use elastos_model_contract::{
 };
 use serde_json::{json, Value};
 use std::any::Any;
+use std::cell::RefCell;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -236,7 +237,7 @@ enum Launch<'a> {
     /// Under a test-time copy of `confine.sb` with fixture rules appended,
     /// with the contract's three parameters and the fixture's own bound.
     Fixture(&'a Storage, &'a FixtureProfile),
-    /// Under `confine.sb`, starting `program` with `executable` bound as
+    /// Under `profile`, starting `program` with `executable` bound as
     /// `PROVIDER_EXECUTABLE` and the storage parameters bound as usual.
     /// `bound_digest` is a sha256 recorded earlier for `executable`. `None`
     /// records the file at this launch.
@@ -244,6 +245,7 @@ enum Launch<'a> {
         storage: &'a Storage,
         executable: &'a Path,
         program: &'a Path,
+        profile: &'a Path,
         bound_digest: Option<String>,
     },
     /// The real provider binary under `profile`, with exactly `bindings`.
@@ -294,11 +296,34 @@ fn canonical_bindings(storage: &Storage, executable: &Path) -> [(&'static str, P
     ]
 }
 
+thread_local! {
+    static APPLIED_PROFILE: RefCell<Option<PathBuf>> = RefCell::new(None);
+}
+
+/// Records the profile path the one launch builder applies on this thread.
+///
+/// The stand-in file and the committed oracle both refuse an unbound copy
+/// with exit 71. `generated_profile_refuses_an_unbound_copy` reads the record
+/// and requires the stand-in file.
+fn note_applied_profile(profile: &Path) {
+    APPLIED_PROFILE.with(|slot| *slot.borrow_mut() = Some(profile.to_path_buf()));
+}
+
+fn applied_profile() -> PathBuf {
+    APPLIED_PROFILE.with(|slot| {
+        slot.borrow()
+            .clone()
+            .expect("the launch must record the profile it applies")
+    })
+}
+
 /// The one launch builder. `sandbox-exec` starts `program` under `profile`,
 /// with one `-D name=value` for each binding, in list order. It applies the
 /// profile to its own process before it executes `program`, so the profile's
 /// exec rule checks that exec as it checks any exec by the confined provider.
+/// It records `profile` so a launch can require the stand-in file.
 fn sandboxed(profile: &Path, bindings: &[(&'static str, PathBuf)], program: &Path) -> Command {
+    note_applied_profile(profile);
     let mut command = Command::new(SANDBOX_EXEC);
     command.arg("-f").arg(profile);
     for (name, value) in bindings {
@@ -364,11 +389,12 @@ impl Provider {
                 storage,
                 executable,
                 program,
+                profile,
                 bound_digest,
             } => {
                 check_provider_executable(executable, bound_digest.as_deref());
                 let bindings = canonical_bindings(storage, executable);
-                sandboxed(Path::new(PROFILE_PATH), &bindings, program)
+                sandboxed(profile, &bindings, program)
             }
             Launch::Profile { profile, bindings } => {
                 if let Some((_, path)) = bindings
@@ -1660,76 +1686,131 @@ const CREATE_FIXTURE_RULE: &str =
 /// Under the profile the sandbox refuses the redirected journal at the write
 /// itself, and the provider then says that access was denied.
 ///
-/// The test runs a fixture copy of `confine.sb` that adds only
-/// `CREATE_FIXTURE_RULE`. With it, the `Redirect` request's `init` passes the
-/// inspect that `model_outside_write_denied` is refused at, and the refused
-/// step is the create of `<journal_dir>/runs` (`fs::create_dir` in
+/// The same journey runs under the oracle copy and under the stand-in file
+/// plus the one metadata rule, `CREATE_FIXTURE_RULE`. The oracle case calls
+/// `FixtureProfile::write` on `confine.sb` and starts under `Launch::Fixture`.
+/// The generated case reads the declared fixture, calls `standin_profile`,
+/// writes that text with `write_standin_profile` under that case's storage,
+/// and calls the same writer on that file. `Launch::Fixture` applies the
+/// file. The launched stand-in copy contains the rule and has no line that
+/// starts with `;;`. Each case has its own `Redirect` fixture. With the rule,
+/// the `Redirect` request's `init` passes the inspect that
+/// `model_outside_write_denied` is refused at, and the refused step is the
+/// create of `<journal_dir>/runs` (`fs::create_dir` in
 /// `create_missing_journal_directory`, `src/journal.rs`). The answer is
-/// `journal_access_denied`, the provider logs that create with EPERM
-/// (`Operation not permitted`), the outside sibling keeps its entries, modes
-/// and bytes, and a later normal `init` on `STORAGE_ROOT` succeeds.
+/// `journal_access_denied` with message `model run journal is not writable`.
+/// The provider logs that create with EPERM (`Operation not permitted`). The
+/// outside sibling keeps its entries, modes and bytes. `STORAGE_ROOT/runs`
+/// stays absent. A later normal `init` on `STORAGE_ROOT` succeeds, and
+/// `shutdown` exits cleanly. This evidence is for the lab launcher.
 /// `redirect_journal_materializes_outside_when_unconfined` is the control: the
 /// same fixture and request without a profile create the journal under the
 /// outside sibling.
 ///
-/// Falsifiers: F-cc8a (`(allow default)`) lets the redirected `init` answer
-/// ok. F-cc8c keeps `(deny default)` and adds only a `file-write*` grant on
-/// `STORAGE_PARENT`; the create then succeeds, `runs/` appears under the
-/// outside sibling, and the answer is no longer `journal_access_denied`, so
-/// this test watches the write grant itself. F-cc8-rm-journal removes the
-/// fixture rule; the sandbox then refuses the inspect first, and `init`
-/// answers `journal_corrupt`.
+/// Falsifiers: F-cc8a (`(allow default)`) edits `confine.sb`, so the oracle
+/// copy's redirected `init` answers ok. The stand-in case launches the
+/// generated file. F-cc8c keeps `(deny default)` and adds only a `file-write*`
+/// grant on `STORAGE_PARENT` in `confine.sb`; the oracle copy's create then
+/// succeeds, `runs/` appears under the outside sibling, and the answer is no
+/// longer `journal_access_denied`, so this test watches the write grant
+/// itself. F-cc8-rm-journal removes the fixture rule; the sandbox then refuses
+/// the inspect first, and `init` answers `journal_corrupt`.
 #[test]
 fn model_outside_create_reports_access_denied() {
+    /// Both create denials. `case` names a failure.
+    fn assert_outside_create_denied(case: &str, mut provider: Provider, fixture: &Redirect) {
+        let before = tree_snapshot(&fixture.outside);
+        let denied = provider.request(&fixture.request);
+        assert_eq!(
+            denied,
+            json!({
+                "status": "error",
+                "code": "journal_access_denied",
+                "message": "model run journal is not writable"
+            }),
+            "{case}: the redirected journal create must be refused as access denied: {denied}"
+        );
+        let logged = provider
+            .logged_fault("journal_access_denied")
+            .unwrap_or_else(|| {
+                panic!("{case}: the provider must log the journal_access_denied detail")
+            });
+        let refused = format!(
+            "create provider journal directory {} (Operation not permitted",
+            fixture.journal_dir.join("runs").display()
+        );
+        assert!(
+            logged.contains(&refused),
+            "{case}: the sandbox must refuse the create of runs/ with EPERM: {logged}"
+        );
+        assert_eq!(
+            tree_snapshot(&fixture.outside),
+            before,
+            "{case}: the outside sibling must keep its entries, modes and bytes"
+        );
+        assert!(
+            !fixture.storage.root.join("runs").exists(),
+            "{case}: STORAGE_ROOT/runs must be absent after the refusal"
+        );
+        let init = provider.request(&init_request(&fixture.storage, None));
+        assert_eq!(
+            init["status"], "ok",
+            "{case}: the later normal init must succeed: {init}"
+        );
+        assert_serving(&init["data"]);
+        assert!(
+            fixture.storage.root.join("runs").is_dir(),
+            "{case}: the later normal init must use STORAGE_ROOT"
+        );
+        provider.shutdown();
+    }
+
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
-    let fixture = Redirect::prepare("outside-create");
+
+    let redirect = Redirect::prepare("outside-create");
     // `Storage` resolves its paths, so this is the path the sandbox matches.
     let profile = FixtureProfile::write(
         Path::new(PROFILE_PATH),
-        &fixture.storage,
+        &redirect.storage,
         CREATE_FIXTURE_RULE,
-        vec![("CREATE_FIXTURE_JOURNAL", fixture.outside.join("inner"))],
+        vec![("CREATE_FIXTURE_JOURNAL", redirect.outside.join("inner"))],
     );
-    let before = tree_snapshot(&fixture.outside);
-    let mut provider = Provider::start(Launch::Fixture(&fixture.storage, &profile));
+    let provider = Provider::start(Launch::Fixture(&redirect.storage, &profile));
+    assert_outside_create_denied("oracle", provider, &redirect);
 
-    let denied = provider.request(&fixture.request);
-    assert_eq!(
-        denied,
-        json!({
-            "status": "error",
-            "code": "journal_access_denied",
-            "message": "model run journal is not writable"
-        }),
-        "the redirected journal create must be refused as access denied"
+    let redirect = Redirect::prepare("outside-create-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let standin = redirect.storage.base.join("standin.sb");
+    write_standin_profile(&standin, &generated);
+    let profile = FixtureProfile::write(
+        &standin,
+        &redirect.storage,
+        CREATE_FIXTURE_RULE,
+        vec![("CREATE_FIXTURE_JOURNAL", redirect.outside.join("inner"))],
     );
-    let logged = provider
-        .logged_fault("journal_access_denied")
-        .expect("the provider must log the journal_access_denied detail");
-    let refused = format!(
-        "create provider journal directory {} (Operation not permitted",
-        fixture.journal_dir.join("runs").display()
+    let launched = fs::read_to_string(&profile.path)
+        .unwrap_or_else(|err| panic!("stand-in: the launched profile must be readable: {err}"));
+    assert!(
+        launched.contains(CREATE_FIXTURE_RULE),
+        "stand-in: the launched profile must contain the metadata rule"
     );
     assert!(
-        logged.contains(&refused),
-        "the sandbox must refuse the create of runs/ with EPERM: {logged}"
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "stand-in: the launched profile must have no line that starts with ;;: {launched}"
     );
-
-    assert_eq!(
-        tree_snapshot(&fixture.outside),
-        before,
-        "the outside sibling must keep its entries, modes and bytes"
-    );
-
-    assert!(!fixture.storage.root.join("runs").exists());
-    assert_serving(&provider.ok(&init_request(&fixture.storage, None)));
-    assert!(
-        fixture.storage.root.join("runs").is_dir(),
-        "the later normal init must use STORAGE_ROOT"
-    );
-    provider.shutdown();
+    let provider = Provider::start(Launch::Fixture(&redirect.storage, &profile));
+    assert_outside_create_denied("stand-in", provider, &redirect);
 }
 
 /// The local engine fixture shared by
@@ -2372,6 +2453,7 @@ fn model_unbound_program_refused_under_profile() {
         storage: &fixture.storage,
         executable: &fixture.binary,
         program: &fixture.copy,
+        profile: Path::new(PROFILE_PATH),
         bound_digest: None,
     });
 
@@ -2432,6 +2514,7 @@ fn model_bound_copy_serves_under_profile() {
         storage: &fixture.storage,
         executable: &fixture.copy,
         program: &fixture.copy,
+        profile: Path::new(PROFILE_PATH),
         bound_digest: None,
     });
 
@@ -2441,6 +2524,108 @@ fn model_bound_copy_serves_under_profile() {
         "init must create runs/ under STORAGE_ROOT beside the copy"
     );
     provider.shutdown();
+}
+
+/// The stand-in file refuses an unbound copy.
+///
+/// The oracle launch stays `model_unbound_program_refused_under_profile`.
+/// This launch is the stand-in file. `standin_profile` builds the text,
+/// `write_standin_profile` writes it under the storage base, and the written
+/// file has no `;;` line. Its sorted allow lines equal the oracle's. The
+/// real binary is bound as `PROVIDER_EXECUTABLE` and the copy is started.
+/// `init` gets no answer. `sandbox-exec` exits 71 and logs `execvp()` of the
+/// copy with `Operation not permitted`. `STORAGE_ROOT` holds only the copy.
+/// The launch records the profile path it applies, and that path is the
+/// stand-in file.
+///
+/// Falsifier: F-cc46a makes `Launch::Program` pass the committed oracle to
+/// `sandboxed` instead of the profile it was given, so the recorded path is
+/// the oracle and this test fails.
+#[test]
+fn generated_profile_refuses_an_unbound_copy() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = StoredCopy::prepare("standin-unbound-copy");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let declared: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&declared).expect("declared rights build a profile");
+    let written = fixture.storage.base.join("standin.sb");
+    write_standin_profile(&written, &generated);
+    let written_text = fs::read_to_string(&written)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in file has no comment line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+
+    let before = tree_snapshot(&fixture.storage.root);
+    let mut provider = Provider::start(Launch::Program {
+        storage: &fixture.storage,
+        executable: &fixture.binary,
+        program: &fixture.copy,
+        profile: &written,
+        bound_digest: None,
+    });
+
+    if let Some(answer) = provider.answer(&init_request(&fixture.storage, None)) {
+        panic!(
+            "the profile must refuse to execute the unbound copy, but it started and \
+             answered init with status {} and code {}",
+            answer["status"], answer["code"]
+        );
+    }
+    let ended = provider.ended();
+    assert_eq!(
+        ended.status.and_then(|status| status.code()),
+        Some(71),
+        "sandbox-exec must exit 71 when the profile refuses the exec: {}",
+        describe(ended.status)
+    );
+    let copy = fixture.copy.display().to_string();
+    let execs: Vec<&String> = ended
+        .stderr
+        .iter()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    assert!(
+        execs
+            .iter()
+            .any(|line| line.contains(&copy) && line.contains("Operation not permitted")),
+        "sandbox-exec must log the refused exec of {copy} with EPERM: {execs:?}"
+    );
+    assert_eq!(
+        applied_profile(),
+        written,
+        "the launch must apply the stand-in file"
+    );
+
+    let after = tree_snapshot(&fixture.storage.root);
+    let entries: Vec<&Path> = after.iter().map(|(path, ..)| path.as_path()).collect();
+    let copy_name = Path::new(fixture.copy.file_name().expect("the copy's file name"));
+    assert_eq!(
+        entries,
+        [copy_name],
+        "STORAGE_ROOT must hold only the copy, with no runs/"
+    );
+    assert!(after == before, "the copy must keep its mode and bytes");
 }
 
 /// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
@@ -2524,6 +2709,7 @@ fn byte_different_file_at_bound_path_starts() {
         storage: &storage,
         executable: &copy,
         program: &copy,
+        profile: Path::new(PROFILE_PATH),
         bound_digest: None,
     });
     let (status, stderr) = provider.outcome_within(Duration::from_secs(2));
@@ -2596,6 +2782,7 @@ fn bound_executable_digest_mismatch_refuses_start() {
             storage: &storage,
             executable: &program,
             program: &program,
+            profile: Path::new(PROFILE_PATH),
             bound_digest: Some(recorded.clone()),
         })
     }));
