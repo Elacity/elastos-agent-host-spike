@@ -444,7 +444,9 @@ name is a lab CID, not the Runtime's CID.
 
 ```rust
 wasm_capsule_tools::run::run_engine(bundle: &VerifiedBundle, engine: Engine, program: &Path,
-    work_root: &Path) -> Result<EngineRun, Refusal>
+    work_root: &Path, control: &RunControl) -> Result<EngineRun, Refusal>
+
+pub struct RunControl { /* private */ }   // task 043: RunControl::new(budget: Duration)
 
 pub struct EngineRun { pub status: ExitStatus, pub stdout: Vec<u8> }
 ```
@@ -454,6 +456,8 @@ engine (`Engine::Wasmtime` or `Engine::Wasmer`) once on the verified
 entrypoint and returns its exit status (as the OS reported it; only a success
 is returned) and its stdout. In order, the first refusal is the answer:
 
+0. task 043: a zero run budget (`RunControl::new(Duration::ZERO)`) is refused
+   before anything is made or started;
 1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
    so it is never looked up on PATH; the same path is the one started;
 2. `work_root` must be absolute, resolve, be byte for byte its own
@@ -471,7 +475,8 @@ is returned) and its stdout. In order, the first refusal is the answer:
    (`1592590337` is `FIXED_INPUT`, `0x5EED_0001`), with stdin null and an
    empty environment (`engine_command`, the one place these two rules are
    set, which task 016's version query uses too). The module argument is absolute, so it is never read as
-   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag;
+   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag.
+   Task 043: the runner waits for it at most the run budget (below);
 6. task 039: once the engine has exited (its outcome is read first), the run
    folder and its module file are removed, on every outcome after step 3: a
    refused module write, an engine that did not start, failed or succeeded
@@ -512,7 +517,38 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
   (task 038, below);
 - `<engine> failed (exit status: <n>): <its stderr>`;
 - `the run folder cannot be removed after the engine exited: <OS error>`
-  (task 039, after a success only).
+  (task 039, after a success only);
+- task 043: `the run budget is zero: no engine is started` (its path is the
+  work root); `<engine> still ran at its run budget of <n> ms: the runner
+  stopped it with SIGKILL`; `the runner could not stop <engine> with SIGKILL:
+  <OS error>`; `the runner could not wait for <engine>: <OS error>` (a failed
+  `try_wait`, after which the engine is stopped too, or a failed reap); and
+  `<engine>'s output could not be read: <OS error>`.
+
+**The run budget (task 043, M1 A7 lab half).** Every module run has a
+wall-clock budget, applied by the runner from outside the engine process. The
+caller passes it explicitly as `RunControl::new(budget)`: there is no default,
+and none is read from the environment or a file
+(`runner_uses_only_explicit_inputs`). `start_engine` starts the engine with the
+same argv, empty environment and null stdin as before, reads its stdout and
+stderr on a thread each (so a full pipe never blocks it), and polls `try_wait`
+every `WAIT_POLL` (10 ms) until the engine exits or the budget, counted from
+just after the start, has passed. An engine that exits in time gives the same
+success or refusal as before. One still running at the budget is sent SIGKILL
+by the runner (`Child::kill`), reaped (`Child::wait`), both readers are joined,
+its run folder is removed (`finish_run`, step 6), and the run is refused with
+the budget reason above, which names the engine and the budget in ms. A kill
+that fails is refused with its own reason and OS cause, never ignored. An
+engine killed by someone else is still `<engine> failed (signal: 9 ...)`, never
+the budget reason. The budget is never given to the engine or the guest: no
+fuel flag, no timeout flag, the argv is unchanged, so the guest can neither see
+nor change it. `run` gives each module run the same control and each counts
+its own budget from its own start, `wasmtime`'s and then `wasmer`'s, never one
+shared clock. Known limits: the `--version` queries have no budget; the budget
+is wall-clock time, not CPU time; a stopped run's partial stdout and stderr are
+dropped; a runner process that is itself killed leaves its engine running, as
+it leaves its folder (task 039). This is lab input for M1 A7, not a Runtime
+admission or launch claim. The refusal receipt is task 044, cancel task 045.
 
 **A rejected cap argument (task 038).** A module run that was given a memory
 cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
@@ -570,6 +606,7 @@ pub struct RunInput<'a> {
     pub wasmtime: &'a Path,                     // absolute program paths
     pub wasmer: &'a Path,
     pub work_root: &'a Path,
+    pub control: &'a RunControl,                // task 043: each module run's budget
 }
 ```
 
@@ -577,6 +614,9 @@ A library function; there is no command, no binary and no signature file. Every
 input is in the struct; nothing is read from the environment. In order, the
 first refusal is the answer:
 
+0. task 043: a zero budget in `input.control` is refused (the same check as
+   `run_engine`'s) as `TwoEngineRefusal::Engine`, before verification and any
+   `--version` query;
 1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, input.granted)`
    is called once, with the caller's granted imports unchanged (wc-009a). A
    refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
@@ -1062,9 +1102,11 @@ admission or launch decision.
 receipt (wc-005c)"). A capped start that wasmtime rejects (exit 2, a first
 stderr line that starts `error: ` and holds ` -W `, measured in LOG.md, task
 038) is refused as a rejected cap, and the module is never run without its cap
-("Run one engine (wc-005a)"). The runner promises no fuel or time limit and
-no limit other than this memory cap, so it checks none and passes no fuel
-flag.
+("Run one engine (wc-005a)"). Task 043: the runner applies one other limit,
+a wall-clock budget per module run, by SIGKILL from outside the engine
+("Run one engine (wc-005a)", "The run budget"). It promises no fuel limit and
+passes no fuel or timeout flag; nothing about the budget is in the engine argv
+or reaches the guest.
 
 ## Module memory maximum discovery (wc-010d0)
 
@@ -2055,29 +2097,57 @@ Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
   `run` as undeclared with no grant and as untyped with a `call` grant (exact
   text and variant), with no run folder and no engine start.
 
+Task 043, the run budget (`tests/run.rs`; README "Run one engine (wc-005a)",
+"The run budget"). Every other test run passes one explicit control,
+`TEST_CONTROL` (30 s), far above any run here; the killed-run test passes
+120 s, so its own SIGKILL still reads `EngineFailed`. A test that waits on a
+looping engine has its own watchdog (`answer_within_watchdog`: at most the
+budget + 20 s, then `stop_run_engines`, a join, and a failure), since the
+canonical runner gives `cargo test` no time limit.
+
+- `looping_capsule_is_stopped_at_its_run_budget_on_both_engines` — per real
+  engine, `run_engine` on a `digest` that loops forever with a 500 ms budget:
+  `BudgetExceeded` for that engine and budget (exact text), after at least the
+  budget and under budget + 5 s; then the census is empty. SKIPPED, no result,
+  when either engine is missing.
+- `run_stops_wasmtime_at_its_budget_and_never_starts_wasmer` — `run` with a
+  looping `wasmtime` (the real one, or a pinned stand-in that `exec`s
+  `/bin/sleep 600` under the module path as its `argv[0]`) and a `counting`
+  `wasmer`: `TwoEngineRefusal::Engine` with `BudgetExceeded` for `wasmtime`;
+  `wasmer` is asked `--version` once and never started for a module run; the
+  census is empty.
+- `zero_run_budget_is_refused_before_any_engine_starts` — `run_engine` per
+  engine and then `run`, each with `counting` stand-ins and a zero budget: the
+  zero-budget reason (exact text, the work root as its path), no module run,
+  no `--version` query, and an empty work root.
+- `engine_output_past_a_pipe_buffer_never_blocks_it` — a stand-in that writes
+  128 KiB to stderr and then 128 KiB to stdout, with shell builtins only: its
+  whole stdout comes back when it exits 0, and its whole stderr in
+  `EngineFailed` when it exits 3, under a 5 s budget and the watchdog.
+
 ## Falsifiers
 
-`falsifiers.json` holds 175 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 177 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
-039, one task 040 and one task 041.
+039, one task 040, one task 041 and two task 043.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 111, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 113, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040 and 041: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041 and 043: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 175 (task 036's
+and two proofs with no `falsifiers.json` entry, outside the 177 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
 stop in `tests/run.rs`; neither file is a recovery target, so a proof that
 edits one is a hand proof), each proved by the repo's break →
@@ -2728,5 +2798,29 @@ removed, before the detached thread started the engine, so that path leaked
 only by timing.
 
 Task 042 adds no `falsifiers.json` entry, so the total (175) and the
-runner-caught count (111) are unchanged; the hand-proven total (64 entries
+runner-caught count (111) were unchanged; the hand-proven total (64 entries
 before) gains this proof and task 036's guard, 66.
+
+Task 043's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 043). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and its named test fails at its assertion:
+
+- F-WC-A7-BUDGET-IGNORED — the wait loop's budget check is made `false`, so
+  the runner never treats the budget as passed and a looping capsule holds its
+  run (`looping_capsule_is_stopped_at_its_run_budget_on_both_engines`, at its
+  watchdog: no answer within the budget + 20 s, then its engines are stopped).
+- F-WC-A7-PIPE-BLOCKED — the runner reads the engine's stdout to its end
+  before it starts reading stderr, so an engine that fills its stderr pipe
+  first blocks (`engine_output_past_a_pipe_buffer_never_blocks_it`, at its
+  watchdog).
+
+`run_engine` and `start_engine` take the control as a new last argument. So
+that every existing anchor stays found exactly once, `run` and
+`write_and_start` each bind it into a local closure of the same name, and the
+anchored four-argument calls are unchanged. F-WC5a's and
+F-WC5-BYPASS-RUN-ENGINE's planted direct `start_engine` calls in `run` now pass
+`input.control`, so they still build; the same bug as before, anchors
+unchanged. Task 043 also re-anchors F-WC-README-COUNT to the new total, the
+same bug as before. In the same canonical runner run every other entry that
+edits `tools/src/run.rs` was re-run and is still caught (LOG.md, task 043).
+Each keeps its own evidence label above.

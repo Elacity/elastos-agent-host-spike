@@ -1054,3 +1054,45 @@
   fmt -p wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `capsule/`,
   `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 043 (M1 A7 lab half: the runner stops an engine run at its wall-clock budget). Base `970abb4ca`.
+  `tools/src/run.rs`: new `RunControl` (`RunControl::new(budget: Duration)`, `const fn`, no default) as `run_engine`'s
+  last argument and a `RunInput::control` field; `check_budget` refuses a zero budget (`Reason::BudgetZero`, the work
+  root as its path) first in `run_engine` and first in `run` (as `TwoEngineRefusal::Engine`, before verification and
+  any `--version` query). `start_engine` spawns with the same argv, empty environment and null stdin, stdout and stderr
+  piped, and calls `wait_within_budget`: one reader thread per pipe (`read_pipe`, `io::copy`), `try_wait` every
+  `WAIT_POLL` (10 ms), the budget counted from just after the spawn. On overrun `stop_engine` sends SIGKILL
+  (`Child::kill`) and reaps (`Child::wait`), both readers are joined, the output dropped, and the run refused
+  `BudgetExceeded { engine, budget }`, "<engine> still ran at its run budget of <n> ms: the runner stopped it with
+  SIGKILL"; `finish_run` removes the folder as on every outcome. New reasons with their OS cause: `EngineNotStopped`
+  (a failed kill; the engine is then neither waited for nor its pipes read), `EngineNotWaited` (a failed `try_wait`,
+  after which the engine is stopped too, or a failed reap) and `OutputNotRead`. These three have no test: there is no
+  seam to make `kill`, `try_wait` or a pipe read fail. The engine argv is unchanged (no fuel or timeout flag); no
+  expected argv in any test changed. To keep all 64 existing `run.rs` anchors found exactly once (each checked with a
+  `str.count` = 1 loop over `falsifiers.json`), `run` and `write_and_start` bind the control into a local closure
+  named `run_engine` / `start_engine`, so the anchored four-argument calls are unchanged; F-WC5a's and
+  F-WC5-BYPASS-RUN-ENGINE's planted direct `start_engine` calls now pass `input.control` (anchors unchanged).
+  `tests/run.rs`: every passing run passes `TEST_CONTROL` (`static`, 30 s); the killed-run test passes
+  `KILLED_RUN_CONTROL` (120 s), so its own SIGKILL still reads `EngineFailed` with signal 9 (it passed). New tests:
+  `looping_capsule_is_stopped_at_its_run_budget_on_both_engines` (real engines; wasmtime stopped after 505.5 ms, wasmer
+  after 504.6 ms, census empty), `run_stops_wasmtime_at_its_budget_and_never_starts_wasmer` (passed with the real
+  wasmtime, and with `PATH=$HOME/.cargo/bin:/usr/bin:/bin` so the stand-in `exec -a "$module" /bin/sleep 600` ran;
+  `pgrep -f run43-` then found nothing), `zero_run_budget_is_refused_before_any_engine_starts`, and
+  `engine_output_past_a_pipe_buffer_never_blocks_it` (128 KiB to stderr then stdout, shell builtins only). The two
+  looping and the pipe test use `answer_within_watchdog` (budget + 20 s, then `stop_run_engines`, join, fail), since
+  `falsify.py` gives `cargo test` no time limit. New falsifiers F-WC-A7-BUDGET-IGNORED (the line `Ok(None) if
+  started.elapsed() >= control.budget() => {` becomes `Ok(None) if false => {`) and F-WC-A7-PIPE-BLOCKED (stdout is
+  read to its end before the stderr reader starts); F-WC-README-COUNT re-anchored to 177. Canonical runner, from the
+  repo root: `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC-A7-` gave
+  "baseline: 2 named tests pass without an edit, 0 do not", "F-WC-A7-BUDGET-IGNORED CAUGHT", "F-WC-A7-PIPE-BLOCKED
+  CAUGHT", "summary: 2 CAUGHT of 2"; then every entry that edits `tools/src/run.rs` plus F-WC-README-COUNT (63 ids)
+  gave "baseline: 39 named tests pass without an edit, 0 do not", "summary: 63 CAUGHT of 63", exit 0, no
+  `*.falsify-original` left. README: "Run one engine (wc-005a)" (signature, step 0, the reasons, "The run budget"
+  with its limits: no budget on `--version`, wall-clock not CPU, partial output dropped, a killed runner leaves its
+  engine), `RunInput` and step 0 in "Same output on two engines", the memory-cap section's "no fuel or time limit"
+  sentence replaced, four named tests, totals 177 (two task 043) and 113 runner-caught, a task 043 section. ADOPTION:
+  its "no fuel or time limit" sentence fixed, one task 043 line. Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (116 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`,
+  `tools/Cargo.toml`, `capsule/`, `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo root
+  (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
+  lab/wasm-capsule/`): both empty, exit 1.

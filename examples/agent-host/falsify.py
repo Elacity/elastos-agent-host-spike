@@ -270,9 +270,9 @@ def load(path=DATA):
 # target is restored on startup; a file under examples/agent-host is already
 # covered by this runner's own search. The lists and their targets:
 # - capsules/model-provider/falsifiers.json: the model provider's
-#   src/local_memory.rs, src/journal.rs, src/contract.rs, src/local_llama.rs
-#   and src/adapters.rs. Its `selftest` entries edit falsify.py, which
-#   recovery finds under examples/agent-host.
+#   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
+#   src/local_llama.rs and src/adapters.rs. Its `selftest` entries edit
+#   falsify.py, which recovery finds under examples/agent-host.
 # - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`
 #   and tests/confine/main.rs.
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
@@ -348,6 +348,7 @@ PROVIDER_TARGETS = (
     "lab/wasm-capsule/tools/src/run.rs",
     "lab/wasm-capsule/tools/src/receipt.rs",
     "lab/wasm-capsule/tests/lab_cid.rs",
+    "capsules/model-provider/src/state.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
     "lab/agent-conformance/fixtures/granted-bytes.txt",
@@ -1955,7 +1956,8 @@ def a_killed_provider_edit_is_recovered():
     with their owners."""
     owned = {entry["id"]: entry
              for entry in load(REPO / "capsules/model-provider/falsifiers.json")
-             if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16")}
+             if entry["id"] in ("MP01", "MP02", "MP05", "MP12", "MP15", "MP16",
+                                "MP23")}
     profile = "../../capsules/model-provider/confine.sb"
     # The did and wallet targets, both confinement test harnesses, wallet's
     # falsifier honesty test, capsule-identity's .gitignore, README.md,
@@ -2015,7 +2017,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/agent-conformance/tests/common/probe.rs",
                  "../../lab/agent-conformance/tests/effects.rs",
                  "../../lab/agent-conformance/tests/runtime.rs")
-    entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16",
+    entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16+MP23",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
                 {"file": profile, "old": "original bytes", "new": "mutated bytes"}]

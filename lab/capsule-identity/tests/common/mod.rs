@@ -4,9 +4,10 @@
 //! the library's code for tests that read it, the refusal asserts both
 //! signature checks share, the one key-material scan, the run of README's
 //! Python rule, the scan for lab crates that use this one, read through
-//! `cargo metadata`, and the scan of the lane's docs and code for what they
-//! claim about the lab CID (all four kept here, a file the falsifier runner
-//! restores after a killed run).
+//! `cargo metadata`, the scan of the lane's docs and code for what they
+//! claim about the lab CID, and the check of the falsifier list's inventory
+//! (all five kept here, a file the falsifier runner restores after a killed
+//! run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
@@ -1197,4 +1198,146 @@ pub fn claim_wording_findings(readme: &str, library: &str) -> Vec<String> {
 fn lacks(place: &str, text: &str, needed: &str) -> Option<String> {
     let holds = one_line(text).contains(&one_line(needed));
     (!holds).then(|| format!("{place} does not say {needed:?}"))
+}
+
+/// The heading of README's section that says what `falsifiers.json` holds.
+pub const FALSIFIERS_HEADING: &str = "## Falsifiers\n";
+
+/// falsifiers.json as committed. No falsifier edits it.
+const FALSIFIER_LIST: &str = include_str!("../../falsifiers.json");
+
+/// The committed list's `about` text and its ids, in order. A list that is
+/// not JSON, or has no `about` text, no `falsifiers` array or an entry with
+/// no string `id`, fails the test with its reason.
+pub fn falsifier_list() -> (String, Vec<String>) {
+    let list: serde_json::Value =
+        serde_json::from_str(FALSIFIER_LIST).expect("falsifiers.json is JSON");
+    let about = list["about"]
+        .as_str()
+        .expect("falsifiers.json has an about text");
+    let entries = list["falsifiers"]
+        .as_array()
+        .expect("falsifiers.json has a falsifiers array");
+    let ids = entries
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .expect("each entry has an id")
+                .to_owned()
+        })
+        .collect();
+    (about.to_owned(), ids)
+}
+
+/// README's "Falsifiers" section, as committed.
+pub fn readme_falsifiers_section() -> Result<&'static str, String> {
+    section_under(README, FALSIFIERS_HEADING)
+}
+
+/// Where the list's two inventories differ from the list itself: (a) a task
+/// with entries that `about`'s "(tasks ...)" list does not name, (b) a task
+/// that list names with no entry, and (c) a README "Falsifiers" `section`
+/// whose "holds N planted bugs" differs from the number of `ids`. Each
+/// mismatch is its own message. One form only is read: `about` holds one
+/// "(tasks NNN, NNN and NNN)" list of three-digit items; an id is `F-CI`, a
+/// task number of one to three digits with no leading zero, and lowercase
+/// letters; the section says "holds N planted bugs" once. Anything else is
+/// refused with its reason, never read as no mismatch.
+pub fn falsifier_inventory_findings(
+    about: &str,
+    ids: &[&str],
+    section: &str,
+) -> Result<Vec<String>, String> {
+    let named = about_tasks(about)?;
+    let mut with_entries = Vec::new();
+    for id in ids {
+        let task = falsifier_task(id)?;
+        if !with_entries.contains(&task) {
+            with_entries.push(task);
+        }
+    }
+    let count = planted_bug_count(section)?;
+    let mut found = Vec::new();
+    for task in &with_entries {
+        if !named.contains(task) {
+            found.push(format!(
+                "task {task} has falsifiers but `about` does not name it"
+            ));
+        }
+    }
+    for task in &named {
+        if !with_entries.contains(task) {
+            found.push(format!("`about` names task {task}, which has no falsifier"));
+        }
+    }
+    if count != ids.len() {
+        found.push(format!(
+            "README says {count} planted bugs; the list holds {}",
+            ids.len()
+        ));
+    }
+    Ok(found)
+}
+
+/// The three-digit items of `about`'s one "(tasks ...)" list, in order,
+/// split on ", " and " and ".
+fn about_tasks(about: &str) -> Result<Vec<String>, String> {
+    let open = "(tasks ";
+    match about.matches(open).count() {
+        1 => {}
+        0 => return Err("`about` holds no \"(tasks ...)\" list".to_owned()),
+        more => {
+            return Err(format!(
+                "`about` holds {more} \"(tasks ...)\" lists, not one"
+            ))
+        }
+    }
+    let list = &about[about.find(open).expect("found once") + open.len()..];
+    let end = list
+        .find(')')
+        .ok_or("`about`'s \"(tasks ...)\" list is never closed")?;
+    let mut tasks = Vec::new();
+    for item in list[..end].split(", ").flat_map(|item| item.split(" and ")) {
+        if item.len() != 3 || !item.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("`about`'s task {item:?} is not three digits"));
+        }
+        tasks.push(item.to_owned());
+    }
+    Ok(tasks)
+}
+
+/// The task that added the falsifier `id`, as three digits: `F-CI27d` is
+/// task 027.
+fn falsifier_task(id: &str) -> Result<String, String> {
+    let refused = || format!("the id {id:?} is not F-CI<n><letters>");
+    let rest = id.strip_prefix("F-CI").ok_or_else(refused)?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (number, letters) = rest.split_at(digits);
+    let letters_only = !letters.is_empty() && letters.bytes().all(|b| b.is_ascii_lowercase());
+    if !(1..=3).contains(&number.len()) || number.starts_with('0') || !letters_only {
+        return Err(refused());
+    }
+    let task = format!("{number:0>3}");
+    Ok(task)
+}
+
+/// The N of the one "holds N planted bugs" in `section`, read word by word,
+/// so README may wrap it anywhere.
+fn planted_bug_count(section: &str) -> Result<usize, String> {
+    let words: Vec<&str> = section.split_whitespace().collect();
+    let counts: Vec<usize> = words
+        .windows(4)
+        .filter(|four| (four[0], four[2], four[3]) == ("holds", "planted", "bugs"))
+        .filter(|four| four[1].bytes().all(|byte| byte.is_ascii_digit()))
+        .filter_map(|four| four[1].parse().ok())
+        .collect();
+    match counts[..] {
+        [count] => Ok(count),
+        [] => Err("README's \"Falsifiers\" has no \"holds N planted bugs\" sentence".to_owned()),
+        _ => Err(format!(
+            "README's \"Falsifiers\" says \"holds N planted bugs\" {} times, not once",
+            counts.len()
+        )),
+    }
 }
