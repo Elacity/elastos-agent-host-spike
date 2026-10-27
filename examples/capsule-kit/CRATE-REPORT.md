@@ -64,7 +64,7 @@ the runner's self-test, falsifiers). Both viewers' `verify.sh` run it first.
 | | sha256 | Worst album |
 |---|---|---|
 | Before (`3ecb8ae9`) | `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22` | 64.9% |
-| After, in the container | `053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc` | 59.1% (measured on the native build, `5a284f2f…`) |
+| After, in the container | [recorded-hashes.txt](repro/recorded-hashes.txt) | 59.1% (measured on the native build, `5a284f2f…`) |
 | After task 012, native in this worktree | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | not measured |
 
 Why it changed: the guest's code now comes from another crate (every symbol's crate name and the link order
@@ -84,7 +84,7 @@ The container build is now the only reference, and the container recipe changed 
 
 | | Photo core | Documents core |
 |---|---|---|
-| Pinned container, recorded before task 012 (stale: not rerun, the Mac has no Docker) | `053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc` | `c946ad9e0959f8ef985e978d30d0543e0d2bb7b17883f621ef61167366a3a7cf` |
+| Pinned container, recorded before task 012 (stale: not rerun, the Mac has no Docker) | [recorded-hashes.txt](repro/recorded-hashes.txt) | [recorded-hashes.txt](repro/recorded-hashes.txt) |
 | Native, this worktree (`/Users/sash/code/wt-lane-photo`), after task 012 | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | `9eef034ffba27f156f1922fef9dafb20483d1e1e1bcf30302bfc1ab161c67fc1` |
 | Native, the old checkout (`/home/user/...`) | `5a284f2f…a516` | `a479a911…066b` |
 
@@ -161,8 +161,9 @@ lone braces.
 | `host-test/tests/component.rs` | 70 | App paths, names, fixtures and the fuel-gate wrapper around the kit harness (`v1-host-test`) |
 | `verify.sh`, `build.sh`, `falsify.py` | 18, 5, 46 | Script skeletons: which crates, which tests, which artifact |
 
-Also still per page: the about 25 lines of `launchToken`, the client and `cut` in each `surface/browser/*.js`,
-because the Runtime's gateway test installs exactly four Photos page files (unchanged from #32).
+The docs page ships verified copies of the kit's launch client and docs-model renderer. The archive page
+still has its own client copy. The Photos page keeps its client copy until the Runtime's four-file gateway
+test allows a fifth file.
 
 ## Counts
 
@@ -221,8 +222,9 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
 - **The strict input-list parser** is done (task 012): one copy, `guest/src/list.rs`, used by `album.rs` and
   `shelf.rs`, with its kit tests and falsifiers.
 - **The typed blocks** (markdown to blocks) are `docs-model`, not the kit; only the text checks moved.
-- **Page code** (`launchToken`, the client, `cut`) is still per page, because the Runtime's gateway test installs
-  exactly four Photos page files.
+- **Page code**: The docs page ships the kit `page-client.js`. The archive page and the Photos page still
+  keep their own client copies. The Photos page keeps its copy until the Runtime's four-file gateway test
+  allows a fifth file; the docs client imports `cut` from the kit's `docs-render.js` copy.
 - **One shared `examples/` workspace** would make native builds path-free again: a proposed slice, above.
 - **From the archive design:** M4 (lying-archive fixtures) is the app's; M5, M6 and M7 need Anders, the Runtime
   or the real move PR.

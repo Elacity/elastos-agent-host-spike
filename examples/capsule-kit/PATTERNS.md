@@ -273,6 +273,11 @@ Every check has a test, and every test is shown to catch its check being broken.
 
 On Bus v2 the core is a resident guest. It runs until Runtime closes its events, under limits it cannot escape.
 
+Bus v2 `bus-error` has `conflict`, which v1 does not. A v1 refusal is not mapped to `conflict`.
+
+`verify.sh` cds into the `bus2` directory before the `cargo` commands for that guest, because `rustup` reads
+the toolchain from the current folder, not from `--manifest-path`.
+
 **The core must:**
 
 - [ ] import only `elastos:bus/*@2.0.0`, never v1 and v2 together.
@@ -292,6 +297,9 @@ and the run in the same place as the stop and the grace timer; end every run wit
 **Proof:** tests that the guest stops on close, that a guest that does not is cancelled after the grace
 period (also during start-up), that the epoch deadline ends one that never yields, and that a busy guest does
 not starve a second guest. Each with a falsifier.
+
+The documents viewer's `patterns_test.py` pins the two rules above with `bus v2 conflict is named and is not
+a v1 error` and `the bus2 checks run from the bus2 folder`, each with a falsifier.
 
 **In the Bus v2 proof:** `examples/bus2-proof/host/src/run.rs`, `host/tests/lifecycle.rs`,
 `host/tests/fairness.rs`, and the photo guest in `guests/photo`.

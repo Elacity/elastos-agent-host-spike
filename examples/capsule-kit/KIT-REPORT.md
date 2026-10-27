@@ -201,7 +201,7 @@ are.
 | A2 | A host-test crate: the fake bridge, the `ComponentProvider` run, the fuel runner, and the admission check exported by Runtime instead of copied | the 63% copy of `component.rs` |
 | A3 | `scripts/` for build, verify and the pinned container, each taking a capsule folder; pins in one file; a recorded hash and a check | `build.sh`, the manifest check in `verify.sh`, `repro/` |
 | A4 | One mutation runner that reads a case list per app, knows crates, and has `--check` and filters; a case can declare its complete failing set, and the whole file is then checked so an undeclared failing test cannot hide | three `falsify*.py` runners |
-| A5 | A page kit: `launchToken`, the client, `cut`, a typed-document renderer; the fake window for tests; the stand-in server with Runtime's app headers taken from Runtime. **Delivered:** `surface/docs-render.js` is the one owner of the typed-document renderer; each page's build copies it into its `browser/`, and a named drift test pins the copy byte for byte | half of `reader.js`, the test fakes, the smoke server |
+| A5 | A page kit: `launchToken`, the client, `cut`, a typed-document renderer; the fake window for tests; the stand-in server with Runtime's app headers taken from Runtime. **Delivered:** `surface/docs-render.js` owns the typed-document renderer, and `surface/page-client.js` owns `launchToken` and `pageClient`. The docs build copies both into `surface/browser/`, and named drift tests pin the copies byte for byte | half of `reader.js`, the test fakes, the smoke server |
 | A6 | `capsule-bundle pack` and test support (`World`, sealed stores) | `pack` and the helpers in `bundle.rs` |
 | A7 | The Bus v2 host as test support: `guest()`, `within()`, a busy guest, the toolchain pin | the copies in `bus2/` |
 | A8 | The checklist (`PATTERNS.md`), with the changes above: bounded body reads, read and output budgets, linear parsers with hostile inputs in the fuel gate, the page has no parser, the stop and skip rule for resident guests | - |
@@ -213,10 +213,15 @@ are.
 `drawBlock`, `readSpans`, `cut`, the style map (`STYLES`, `styleTag`) and the renderer bounds. Runtime serves a
 page from its own folder with `script-src 'self'`, so a page cannot import the kit's file at runtime: the
 page's `build.sh` copies the owner to `surface/browser/docs-render.js`, and the named surface test
-`the shipped renderer matches the kit owner` fails if any byte differs. The page keeps only its glue
-(`launchToken`, the one-call-site client, the document-list framing and the page bounds). A page that draws
-the docs model, such as the archive page, reuses this owner as a verified copy instead of carrying a second
-renderer.
+`the shipped renderer matches the kit owner` fails if any byte differs. The page keeps its document-list
+framing and page bounds. A page that draws the docs model, such as the archive page, reuses this owner as a
+verified copy instead of carrying a second renderer.
+
+page-client.js is the one owner of launchToken and pageClient.
+The docs build copies it to `surface/browser/page-client.js`, and `the shipped client matches the kit owner`
+compares the bytes. The client imports `cut` from the sibling `docs-render.js`. The archive page still has
+its own client copy. The Photos page keeps its client copy until the Runtime's four-file gateway test allows
+a fifth file.
 
 ## How to check it
 

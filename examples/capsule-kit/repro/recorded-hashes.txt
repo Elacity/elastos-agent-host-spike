@@ -1,0 +1,3 @@
+# Container component hashes; stale until a cloud container run refreshes them.
+photo-viewer 053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc
+docs-viewer c946ad9e0959f8ef985e978d30d0543e0d2bb7b17883f621ef61167366a3a7cf
