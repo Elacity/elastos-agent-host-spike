@@ -1,0 +1,15 @@
+id: F-A5-useid
+file: src/lib.rs
+test: model_forged_identity_does_not_move_the_use_path
+--- old
+        resource_name(&record.identity, path, Some(&record.owned_root))?;
+--- new
+        resource_name(
+            request
+                .forged_identity
+                .as_deref()
+                .unwrap_or(&record.identity),
+            path,
+            Some(&record.owned_root),
+        )?;
+--- end
