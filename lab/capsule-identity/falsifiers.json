@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 051 and 053). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 051, 053 and 055). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -2778,14 +2778,14 @@
     },
     {
       "id": "F-CI18e",
-      "title": "a file's tree stops at one level: leaves past the first 174 are dropped (retargeted by task 051: the leaf-limit refusal it once removed is gone; first retargeted by task 048)",
+      "title": "a file's tree stops at one level: leaves past the first 174 are dropped (retargeted by task 055: the leaves arrive as leaf metadata; retargeted by task 051: the leaf-limit refusal it once removed is gone; first retargeted by task 048)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let mut level: Vec<FileTreeNode> = content\n        .chunks(CHUNK_SIZE)\n",
-          "new": "    let mut level: Vec<FileTreeNode> = content\n        .chunks(CHUNK_SIZE)\n        .take(MAX_FILE_LINKS)\n"
+          "old": "    let mut level: Vec<FileTreeNode> = leaves\n        .iter()\n        .map(|leaf| {\n",
+          "new": "    let mut level: Vec<FileTreeNode> = leaves\n        .iter()\n        .take(MAX_FILE_LINKS)\n        .map(|leaf| {\n"
         }
       ],
       "tests": [
@@ -4656,6 +4656,54 @@
       ],
       "tests": [
         "directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI55a",
+      "title": "the chunk digests are reversed before the one file-tree builder: a file's leaves name another file",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let leaves: Vec<FileLeaf> = file\n            .chunk_sha256\n            .iter()\n            .enumerate()\n",
+          "new": "        let ordered: Vec<[u8; 32]> = file.chunk_sha256.iter().rev().copied().collect();\n        let leaves: Vec<FileLeaf> = ordered\n            .iter()\n            .enumerate()\n"
+        }
+      ],
+      "tests": [
+        "chunked_listing_reproduces_every_existing_pin"
+      ]
+    },
+    {
+      "id": "F-CI55b",
+      "title": "a surplus chunk is dropped before the count check: the extra digest names no refusal",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let supplied = file.chunk_sha256.len();\n",
+          "new": "        let supplied = file\n            .chunk_sha256\n            .len()\n            .min(usize::try_from(chunk_count(file.size)).unwrap_or(usize::MAX));\n"
+        }
+      ],
+      "tests": [
+        "chunked_listing_refuses_a_wrong_chunk_count"
+      ]
+    },
+    {
+      "id": "F-CI55c",
+      "title": "a multi-leaf file is given its first raw leaf's CID instead of its balanced file root",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let (cid, tsize) = file_root_leaves(&leaves);\n",
+          "new": "        let first = &leaves[0];\n        let (cid, tsize) = raw_leaf(&first.sha256, first.size);\n"
+        }
+      ],
+      "tests": [
+        "chunked_listing_reproduces_every_existing_pin"
       ]
     }
   ]

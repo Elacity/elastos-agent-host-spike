@@ -27,10 +27,11 @@ use rand::rngs::OsRng;
 
 use capsule_identity::{
     check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed,
-    verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
-    Refusal,
+    verify_checked_package_record, BundleEntry, CheckedBundle, ChunkedFile, LabCid, Moment,
+    PackageRecord, Refusal,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
@@ -81,6 +82,31 @@ pub const BIG_BIN: &str = "core/big.bin";
 /// hold the same bytes.
 pub fn big_bin_bytes() -> Vec<u8> {
     (0..600_000u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// The raw-leaf digests of `content`, in file-byte order, as
+/// `encode_chunked_files` takes them: the SHA-256 of each 262144-byte chunk,
+/// the last one shorter, and one digest of the empty block for an empty
+/// file. Computed here from the bytes with `sha2`, not by the library.
+pub fn chunk_digests(content: &[u8]) -> Vec<[u8; 32]> {
+    let mut digests: Vec<[u8; 32]> = content
+        .chunks(262_144)
+        .map(|chunk| Sha256::digest(chunk).into())
+        .collect();
+    if digests.is_empty() {
+        digests.push(Sha256::digest(b"").into());
+    }
+    digests
+}
+
+/// One entry as a chunked listing: its path, its length and the digests of
+/// its bytes from [`chunk_digests`].
+pub fn chunked_file(path: &str, content: &[u8]) -> ChunkedFile {
+    ChunkedFile {
+        path: path.to_owned(),
+        size: content.len() as u64,
+        chunk_sha256: chunk_digests(content),
+    }
 }
 
 /// content-sample with `sample.example` as [`two_level_bytes`]: 175 raw

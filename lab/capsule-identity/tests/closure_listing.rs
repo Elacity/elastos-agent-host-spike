@@ -13,9 +13,9 @@ use std::fs;
 use std::path::Path;
 
 use capsule_identity::{
-    encode_entries, encode_listed_files, lab_cid, sign_cid_record, sign_package_record,
-    verify_checked_package_record, verify_cid_record, verify_package_record, BundleEntry,
-    CheckedBundle, LabCid, ListedFile, PackageRecord, Refusal,
+    encode_chunked_files, encode_entries, encode_listed_files, lab_cid, sign_cid_record,
+    sign_package_record, verify_checked_package_record, verify_cid_record, verify_package_record,
+    BundleEntry, CheckedBundle, ChunkedFile, LabCid, ListedFile, PackageRecord, Refusal,
 };
 use common::*;
 use sha2::{Digest, Sha256};
@@ -200,6 +200,118 @@ fn listed_file_over_one_leaf_names_the_bytes_call() {
     .expect("the bytes call names the same file");
 }
 
+/// A chunked file with `supplied` zero digests.
+fn chunked_with(path: &str, size: u64, supplied: usize) -> ChunkedFile {
+    ChunkedFile {
+        path: path.to_owned(),
+        size,
+        chunk_sha256: vec![[0; 32]; supplied],
+    }
+}
+
+#[test]
+fn chunked_listing_refuses_a_wrong_chunk_count() {
+    // The count is max(1, ceil(size / 262144)). `u64::MAX` divides without
+    // overflow: a whole count and a non-zero remainder.
+    let huge = u64::MAX;
+    let huge_expected = usize::try_from(huge / 262_144 + 1).expect("the count fits usize");
+    for (size, expected) in [
+        (0u64, 1usize),
+        (1, 1),
+        (262_144, 1),
+        (262_145, 2),
+        (huge, huge_expected),
+    ] {
+        // One digest too few: 0 for 1, 1 for 2, 1 for the largest count.
+        let short = if expected > 1 { 1 } else { 0 };
+        let missing = encode_chunked_files(&[chunked_with("images/short.raw", size, short)])
+            .expect_err("a short digest list is refused");
+        assert_eq!(
+            missing,
+            Refusal::ChunkCountMismatch {
+                path: "images/short.raw".into(),
+                size,
+                expected,
+                supplied: short,
+            },
+            "the missing-chunk case at {size} bytes"
+        );
+        let text = missing.to_string();
+        for part in [
+            "images/short.raw".to_owned(),
+            format!("{size} bytes"),
+            format!("holds {short} chunk digests"),
+            format!("gives {expected} chunks"),
+        ] {
+            assert!(text.contains(&part), "{part}: {text}");
+        }
+
+        // One digest too many, except past the largest count the size holds:
+        // a list that long would not fit memory, so the `u64::MAX` row keeps
+        // its short list only.
+        if size != huge {
+            let surplus = expected + 1;
+            let extra = encode_chunked_files(&[chunked_with("images/extra.raw", size, surplus)])
+                .expect_err("a surplus digest is refused");
+            assert_eq!(
+                extra,
+                Refusal::ChunkCountMismatch {
+                    path: "images/extra.raw".into(),
+                    size,
+                    expected,
+                    supplied: surplus,
+                },
+                "the extra-chunk case at {size} bytes"
+            );
+            let text = extra.to_string();
+            for part in [
+                "images/extra.raw".to_owned(),
+                format!("{size} bytes"),
+                format!("holds {surplus} chunk digests"),
+                format!("gives {expected} chunks"),
+            ] {
+                assert!(text.contains(&part), "{part}: {text}");
+            }
+        }
+    }
+
+    // Accepted shapes: an empty file is one empty leaf, a file of exactly one
+    // chunk is one leaf, and a short last chunk is the last of two.
+    for (size, count) in [(0u64, 1usize), (262_144, 1), (262_145, 2)] {
+        encode_chunked_files(&[chunked_with("images/ok.raw", size, count)])
+            .unwrap_or_else(|refusal| panic!("{size} bytes with {count} digests: {refusal}"));
+    }
+}
+
+#[test]
+fn chunked_listing_keeps_the_one_path_checker() {
+    // Paths reach `Directory::insert`, the one path check: hidden names,
+    // duplicates and file-and-directory paths keep its refusals.
+    for (files, refusal) in [
+        (
+            vec![chunked_with(".hidden", 0, 1)],
+            Refusal::HiddenName {
+                path: ".hidden".into(),
+            },
+        ),
+        (
+            vec![chunked_with("a.raw", 0, 1), chunked_with("a.raw", 0, 1)],
+            Refusal::DuplicatePath {
+                path: "a.raw".into(),
+            },
+        ),
+        (
+            vec![chunked_with("a", 0, 1), chunked_with("a/b.raw", 0, 1)],
+            Refusal::FileAndDirectory { path: "a".into() },
+        ),
+    ] {
+        assert_eq!(
+            encode_chunked_files(&files).expect_err("the path check refuses"),
+            refusal
+        );
+    }
+}
+
 /// The canonical `did:key` of `key`, from the Runtime's own encoder.
 fn did_of(key: &ed25519_dalek::SigningKey) -> String {
     elastos_identity::encode_signing_key_did(key)
@@ -286,6 +398,81 @@ fn a_closure_listing_gets_a_package_record_by_its_cid() {
     assert_eq!(payload, expected);
     verify_cid_record(cid, &record, &[did])
         .unwrap_or_else(|refusal| panic!("the listing's record was refused: {refusal}"));
+}
+
+#[test]
+fn chunked_photo_listing_keeps_its_signed_name_after_source_changes() {
+    // The exact PH6 entries, whose `capsule.json` keeps the object `viewer`
+    // the closure encoder never parses, plus the three-leaf `core/big.bin`.
+    let mut entries = photo_stand_in_entries();
+    entries.push(BundleEntry {
+        path: BIG_BIN.to_owned(),
+        content: big_bin_bytes(),
+    });
+    let manifest = entries
+        .iter()
+        .find(|entry| entry.path == "capsule.json")
+        .expect("the copy holds capsule.json");
+    assert!(
+        String::from_utf8_lossy(&manifest.content).contains(VIEWER_OBJECT),
+        "the PH6 object viewer changed"
+    );
+
+    // The observed CID comes from the bytes call; the saved listing keeps
+    // only its digests.
+    let observed =
+        encode_entries(&entries).unwrap_or_else(|refusal| panic!("the entries: {refusal}"));
+    let saved_listing: Vec<ChunkedFile> = entries
+        .iter()
+        .map(|entry| chunked_file(&entry.path, &entry.content))
+        .collect();
+
+    // The source file changes after the walk that made the listing.
+    let big = entries
+        .iter_mut()
+        .find(|entry| entry.path == BIG_BIN)
+        .expect("the entries hold core/big.bin");
+    big.content[0] ^= 0xff;
+
+    let saved = encode_chunked_files(&saved_listing)
+        .unwrap_or_else(|refusal| panic!("the saved listing: {refusal}"));
+    assert_eq!(
+        saved, observed,
+        "the saved listing names the bytes it was collected from"
+    );
+
+    // The saved name signs and verifies with a fresh test key.
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let record = sign_cid_record(&key, saved);
+    verify_cid_record(saved, &record, &[did.clone()])
+        .unwrap_or_else(|refusal| panic!("the saved listing's record: {refusal}"));
+
+    // A new listing of the changed bytes names another CID, and the old
+    // record is refused with both values.
+    let changed_listing: Vec<ChunkedFile> = entries
+        .iter()
+        .map(|entry| chunked_file(&entry.path, &entry.content))
+        .collect();
+    let changed = encode_chunked_files(&changed_listing)
+        .unwrap_or_else(|refusal| panic!("the changed listing: {refusal}"));
+    assert_ne!(changed, saved, "one changed byte changes the name");
+    let refusal = verify_cid_record(changed, &record, &[did])
+        .expect_err("the record names the saved listing's CID");
+    assert_names_another_cid(refusal, saved, changed);
+
+    // The digests are in file-byte order: reversing this file's distinct
+    // chunk digests changes the name, because a file root is order-bound.
+    let mut reversed = saved_listing.clone();
+    let big = reversed
+        .iter_mut()
+        .find(|file| file.path == BIG_BIN)
+        .expect("the listing holds core/big.bin");
+    assert_eq!(big.chunk_sha256.len(), 3);
+    big.chunk_sha256.reverse();
+    let reordered = encode_chunked_files(&reversed)
+        .unwrap_or_else(|refusal| panic!("the reversed chunks: {refusal}"));
+    assert_ne!(reordered, saved, "reversed chunk digests name another file");
 }
 
 #[test]

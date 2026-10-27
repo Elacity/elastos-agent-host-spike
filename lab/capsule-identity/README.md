@@ -845,6 +845,35 @@ tool names a closure by a second rule, a raw CIDv1 over a JSON listing of
 `cid.rs:5`), so one bundle gets two lab names. The photo lane switches its
 `cid_of` to this call itself; this lane edits none of its files.
 
+**A file of any size.** A walk that kept each raw leaf's digest instead of
+the bytes calls `encode_chunked_files(&[ChunkedFile])` (task 055).
+`ChunkedFile` is `{ path: String, size: u64, chunk_sha256: Vec<[u8; 32]> }`:
+the SHA-256 of each 262144-byte chunk in file-byte order, the last one
+shorter, and one empty-block digest for an empty file. The call makes each
+leaf from its digest and length, builds the balanced file root with the
+builder `encode_entries` uses, and hands the node to the same `encode_tree`.
+It checks the count its size gives, `max(1, ceil(size / 262144))`, once
+before a node is built, and refuses a mismatch with `ChunkCountMismatch`
+naming the path, the size, the expected count and the supplied count. It
+reads no payload and parses no manifest: the caller supplies `size` and the
+digests from the same observed bytes and owns reading and hashing them. Byte
+verification stays the caller's job; the name is computed by the lab.
+
+A short example, with the digests the caller already holds:
+
+```rust
+let files = vec![ChunkedFile {
+    path: "images/a.raw".to_owned(),
+    size: 262_145,
+    chunk_sha256: vec![first_leaf, last_leaf],
+}];
+let cid = encode_chunked_files(&files)?;   // the one lab CID
+let record = sign_cid_record(&key, cid);   // the one package record, below
+```
+
+The photo lane can adopt this call in its own lane; its existing
+`encode_listed_files` path and values stay as they are.
+
 **Signing the name.** A listing-named closure is signed with
 `sign_cid_record(key, cid)` and checked with `verify_cid_record(cid, record,
 accepted)` (task 049), the one package record
@@ -892,6 +921,10 @@ not loosen, skip or copy the manifest check.
 | A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
 | A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
 | The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
+| A chunked listing of every pinned bundle names the pin, agrees with `encode_entries`, and keeps each root when the file list is reversed (task 055) | `chunked_listing_reproduces_every_existing_pin` | F-CI55a (the chunk order is reversed before the one file-tree builder), F-CI55c (a multi-leaf file gets its first leaf's CID) |
+| A digest count its size does not give is refused, naming the path, the size, the expected count and the supplied count; an empty file, an exact full chunk and a short last chunk are accepted (task 055) | `chunked_listing_refuses_a_wrong_chunk_count` | F-CI55b (a surplus chunk is dropped before the count check) |
+| A saved chunked listing keeps the name of the bytes it was collected from after the source changes, signs and verifies, refuses the old record for the changed bytes with both names, and names another CID when distinct chunk digests are reversed (task 055) | `chunked_photo_listing_keeps_its_signed_name_after_source_changes` | F-CI49c |
+| Chunked paths reach the one path checker: hidden names, duplicate paths and file-and-directory paths keep its refusals (task 055) | `chunked_listing_keeps_the_one_path_checker` | F-CI18p, F-CI18q (the file-and-directory conflict) |
 
 The tests are in `tests/closure_listing.rs`. Task 047 also named
 `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` on F-CI1g, task
@@ -1912,7 +1945,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 281 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 284 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1960,7 +1993,8 @@ F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
 F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
 051's F-CI51a to F-CI51c, and task 053's F-CI53a and F-CI53b (both: see
-[the encoding](#the-encoding)).
+[the encoding](#the-encoding)), and task 055's F-CI55a to F-CI55c (see
+[naming a closure listing](#naming-a-closure-listing)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its

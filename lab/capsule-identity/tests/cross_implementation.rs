@@ -27,8 +27,8 @@ use std::path::Path;
 use std::process::Command;
 
 use capsule_identity::{
-    domain_separated_digest, encode_entries, lab_cid, name_signature_message, sign_package_record,
-    BundleEntry, PackageRecord, Refusal, PACKAGE_RECORD_DOMAIN,
+    domain_separated_digest, encode_chunked_files, encode_entries, lab_cid, name_signature_message,
+    sign_package_record, BundleEntry, ChunkedFile, PackageRecord, Refusal, PACKAGE_RECORD_DOMAIN,
 };
 use common::*;
 use ed25519_dalek::{Signature, Verifier};
@@ -249,6 +249,53 @@ fn readme_python_recomputes_every_lab_cid_pin() {
     }
     assert_eq!(checked, PINNED_BUNDLES, "checked {checked} bundles");
     assert_eq!(python.len(), bundles.len());
+}
+
+/// Task 055: a caller that kept only its listing's chunk digests names every
+/// pinned bundle as `encode_entries` and the pin do, and the file list's
+/// order changes no root.
+#[test]
+fn chunked_listing_reproduces_every_existing_pin() {
+    let bundles = pinned_bundles();
+    let mut checked = 0;
+    for bundle in &bundles {
+        // The digests come from the bytes with `chunk_digests`, not from a
+        // second CID or protobuf rule.
+        let files: Vec<ChunkedFile> = bundle
+            .entries
+            .iter()
+            .map(|entry| chunked_file(&entry.path, &entry.content))
+            .collect();
+        let from_chunks = encode_chunked_files(&files)
+            .unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.what));
+        let from_entries = encode_entries(&bundle.entries)
+            .unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.what));
+        assert_eq!(
+            from_chunks.to_string(),
+            bundle.pin,
+            "{}: the chunked listing against its pin",
+            bundle.what
+        );
+        assert_eq!(
+            from_chunks, from_entries,
+            "{}: the chunked listing against encode_entries",
+            bundle.what
+        );
+
+        // Entries are given in any order: reversing the file list, whose
+        // digests stay in file-byte order, preserves the root.
+        let mut reversed = files.clone();
+        reversed.reverse();
+        let from_reversed = encode_chunked_files(&reversed)
+            .unwrap_or_else(|refusal| panic!("{} reversed: {refusal}", bundle.what));
+        assert_eq!(
+            from_reversed, from_chunks,
+            "{}: the reversed file list",
+            bundle.what
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, PINNED_BUNDLES, "checked {checked} bundles");
 }
 
 /// A README section without exactly one closed block is no pass: no
