@@ -1744,9 +1744,14 @@ inner test's `run` of the signed built capsule and an empty grants file:
 The inner test asserts each of these for each engine: the module run's argv
 passes task 040's `argv_faults` (no `--dir`, `--mapdir`, `--env`, `--net` or
 `-S` flag, no work-root path but the module, the module path once) and no
-argument holds the home folder; no recorded environment line starts with
-`HOME=` or holds the home folder, the fixture path or the marker; and the
-stdout is exactly `FIXED_OUTPUT` and a newline.
+argument holds the home folder; each of the four environment records (two
+engines, `version` and `run` starts) is not empty and holds the exact line
+`_=/usr/bin/env`, which proves `/usr/bin/env` wrote it (task 049,
+`HostSecretCase::recorded_env`, checked before the absence checks); no
+recorded environment line starts with `HOME=` or holds the home folder, the
+fixture path or the marker; and the stdout is exactly `FIXED_OUTPUT` and a
+newline. A shim whose record write fails exits 70 with one stderr line naming
+the record, before `exec`, so the real engine never starts unrecorded.
 
 The five probe imports (`host_secret_probe_imports_are_refused_before_any_engine_starts`),
 each a signed module with one `() -> ()` import from `wasi_snapshot_preview1`,
@@ -2462,12 +2467,13 @@ marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
 029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045 and 046: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
 + 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
+Hand-proven, pending R1: 68, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 184 (task 036's
-`/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
-stop in `tests/run.rs`; neither file is a recovery target, so a proof that
-edits one is a hand proof), each proved by the repo's break →
+and four proofs with no `falsifiers.json` entry, outside the 184 (task 036's
+`/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
+stop and task 049's two environment record proofs in `tests/run.rs`; neither
+file is a recovery target, so a proof that edits one is a hand proof), each
+proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
 labels stay until each is run by the canonical runner and its summary line is
 quoted.
@@ -2658,7 +2664,9 @@ restore it for the F-WC5 entries (ask R2):
 - F-WC5-LOCAL-WRITER — the module is written with `fs::write`, not the shared
   writer (`runner_reuses_shared_writer`).
 - F-WC5-ENGINE-ENV — the engine inherits the test process's environment
-  (`engine_starts_with_an_empty_environment`).
+  (`engine_starts_with_an_empty_environment`; since task 049 also
+  `host_secret_fixture_never_reaches_either_real_engine`, at "the child ...
+  did not pass").
 - F-WC5-FAIL-STDERR, -START-CAUSE and -EXIT-IGNORED — a failed engine's
   stderr is dropped, a start failure loses its OS error, or a nonzero exit is
   accepted (`engine_failures_keep_their_cause`).
@@ -3232,3 +3240,29 @@ found exactly once, and the one named test fails at its assertion:
 
 Task 046 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before, and keeps its runner-caught label above.
+
+Task 049's two environment record proofs, hand-proven, pending R1 (no
+`falsifiers.json` entry: `tests/run.rs` is not a recovery target; each is
+counted once in the hand-proven total above, never in the runner-caught one;
+LOG.md, task 049, has the runs). Each planted change is in `host_secret_shim`,
+both lines at once, restored byte for byte, and
+`host_secret_fixture_never_reaches_either_real_engine` fails at "the child
+host_secret_fixture_run_inside_the_child did not pass":
+
+- Both `/usr/bin/env > ` lines changed to `: > ` with the same path: the child
+  fails at the new record check ("wasmtime version: the environment record
+  <tmp>/records/wasmtime.version.env is empty or was not written by
+  /usr/bin/env (no line _=/usr/bin/env): []"). The same plant on the base
+  before task 049 (`286b983b6`) passed: the empty record passed every absence
+  check, so the A8 environment claim was vacuous.
+- Both `/usr/bin/env` changed to `/usr/bin/false`: the shim exits 70 at the
+  version query and the child fails at the refused run ("the two-engine runner
+  refused: <tmp>/shims/wasmtime: wasmtime --version failed (exit status: 70):
+  shim: cannot write the record <tmp>/records/wasmtime.version.env").
+
+Task 049 also adds `host_secret_fixture_never_reaches_either_real_engine` to
+F-WC5-ENGINE-ENV's named tests (dropping `env_clear()` gives the child's fixture
+`HOME` to both shims' records). The canonical runner reports it CAUGHT with
+both named tests failing (LOG.md, task 049), and it keeps its runner-caught
+label above. No entry is added, so the total (184) and the runner-caught count
+(120) are unchanged; the hand-proven total (66 before) gains these two, 68.

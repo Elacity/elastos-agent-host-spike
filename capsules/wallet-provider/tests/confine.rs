@@ -39,6 +39,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -51,6 +52,13 @@ const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
 const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
+/// The provider names the stand-in launcher serves. One derivation picks each
+/// provider's storage-root layout from its name.
+const DID_PROVIDER: &str = "did-provider";
+const WALLET_PROVIDER: &str = "wallet-provider";
+/// The isolated fixture device key, the same input did's own confinement test
+/// uses, so a started did provider derives the same DID there and here.
+const DID_DEVICE_KEY: [u8; 32] = [0x42; 32];
 /// How long a failure path waits for the child to exit before it reports.
 const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 /// How often the bounded wait checks whether the child has exited.
@@ -88,7 +96,7 @@ fn sandbox_available(os: &str, sandbox_exec: &Path) -> bool {
         Ok(true) => true,
         Ok(false) => {
             eprintln!(
-                "SKIP wallet-provider confinement test: {} is absent; \
+                "SKIP provider confinement test: {} is absent; \
                  the profile was not exercised on this machine",
                 sandbox_exec.display()
             );
@@ -322,26 +330,146 @@ fn wallet_dir(root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
-/// The three parameter bindings the tests make for one storage root and the
-/// program a launch binds. Every caller passes the program it names, so a
-/// launch for another binary binds that binary and never a second copy of this
-/// derivation.
-fn canonical_bindings(base: &Path, program: &Path) -> [(&'static str, PathBuf); 3] {
-    let wallet_root = wallet_dir(base);
-    let parent = wallet_root.parent().expect("wallet parent").to_path_buf();
+/// The did-provider crate's directory, the source of its binary, profile and
+/// declared-rights fixture.
+fn did_provider_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/")
+        .join(DID_PROVIDER)
+}
+
+/// The declared-rights fixture of the named provider, the stand-in's input.
+fn declared_rights_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/")
+        .join(name)
+        .join("tests/fixtures/confine/declared-rights.json")
+}
+
+/// The did-provider binary this test crate starts.
+///
+/// One `cargo build` for did's manifest, run once per test process by the
+/// `LazyLock` below, reads the `did-provider` bin artifact's `executable`. The
+/// build uses the `CARGO` environment variable when set, `--locked` and
+/// `--offline`, and creates nothing outside cargo's own target directories. A
+/// failed build, or an artifact that names no executable, fails with the
+/// command's output; there is no skip and no fallback to another binary.
+fn did_provider_binary() -> &'static Path {
+    static BINARY: LazyLock<PathBuf> = LazyLock::new(build_did_provider_binary);
+    BINARY.as_path()
+}
+
+fn build_did_provider_binary() -> PathBuf {
+    let manifest = did_provider_dir().join("Cargo.toml");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(&cargo)
+        .arg("build")
+        .arg("--locked")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--bin")
+        .arg(DID_PROVIDER)
+        .arg("--message-format=json")
+        .current_dir(did_provider_dir())
+        .output()
+        .unwrap_or_else(|err| {
+            panic!(
+                "did-provider build {} must start: {err}",
+                manifest.display()
+            )
+        });
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "did-provider build {} must succeed: {stderr}",
+        manifest.display()
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if message["reason"].as_str() != Some("compiler-artifact") {
+            continue;
+        }
+        if message["target"]["name"].as_str() != Some(DID_PROVIDER) {
+            continue;
+        }
+        let is_bin = message["target"]["kind"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+        if !is_bin {
+            continue;
+        }
+        if let Some(executable) = message["executable"].as_str() {
+            return PathBuf::from(executable);
+        }
+    }
+    panic!(
+        "the did-provider build must report its bin artifact's executable; \
+         standard output: {stdout}"
+    );
+}
+
+/// The storage root a provider name keeps under `base`. did-provider keeps
+/// its identity state at `<base>/did`; wallet-provider keeps its state under
+/// `wallet_dir(base)`. The launcher and the oracle both read this one
+/// derivation, so a did start cannot drift into wallet's layout.
+fn provider_storage_root(name: &str, base: &Path) -> PathBuf {
+    if name == DID_PROVIDER {
+        base.join("did")
+    } else {
+        wallet_dir(base)
+    }
+}
+
+/// The three parameter bindings the tests make for one provider's storage
+/// root and the program a launch binds. The provider name picks the layout:
+/// did's `STORAGE_PARENT` is `base` and wallet's is the wallet directory's
+/// parent. Every caller passes the program it names, so a launch for another
+/// binary binds that binary and never a second copy of this derivation.
+fn canonical_bindings(name: &str, base: &Path, program: &Path) -> [(&'static str, PathBuf); 3] {
+    let root = provider_storage_root(name, base);
+    let parent = storage_parent(name, base);
     [
-        ("STORAGE_ROOT", wallet_root),
+        ("STORAGE_ROOT", root),
         ("STORAGE_PARENT", parent),
         ("PROVIDER_EXECUTABLE", resolved(program)),
     ]
 }
 
+/// The `STORAGE_PARENT` path the canonical bindings derive for `base`, so a
+/// fixture that needs the granted parent reads the one derivation instead of
+/// building the path again.
+fn storage_parent(name: &str, base: &Path) -> PathBuf {
+    provider_storage_root(name, base)
+        .parent()
+        .expect("provider storage parent")
+        .to_path_buf()
+}
+
+/// The `init` config the stand-in sends for `name` at `base`. Every provider
+/// receives `base_path`; did also receives the isolated fixture device key so
+/// its `get_did` answers, as the Runtime passes a provider its config. The
+/// stand-in builds this one config for both providers.
+fn provider_init_config(name: &str, base: &Path) -> Value {
+    let mut config = json!({ "base_path": base.display().to_string() });
+    if name == DID_PROVIDER {
+        config["encryption_key"] = json!(hex::encode(DID_DEVICE_KEY));
+    }
+    config
+}
+
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
-/// and the provider creates `Wallet`. The binding the launch receives names
-/// that directory, so the folder created and the folder bound cannot drift
-/// apart (P10). `start_with_profile` refuses a second binding of a canonical
-/// parameter, so this derivation stays the only source of those three paths;
-/// `start_with_profile_refuses_a_canonical_parameter` and WP54 hold that rule.
+/// and the provider creates its storage root (`Wallet` or `did`). The binding
+/// the launch receives names that directory, so the folder created and the
+/// folder bound cannot drift apart (P10). `start_with_profile` refuses a second
+/// binding of a canonical parameter, so this derivation stays the only source
+/// of those three paths; `start_with_profile_refuses_a_canonical_parameter` and
+/// WP54 hold that rule.
 /// `start_with_profile_refuses_an_encoded_canonical_parameter` and WP55 cover
 /// names encoded before `=` through the same check.
 fn create_shared_ancestors(bindings: &[(&'static str, PathBuf)]) {
@@ -486,7 +614,7 @@ impl ConfinedProvider {
                  canonical bindings come only from canonical_bindings"
             );
         }
-        let canonical = canonical_bindings(base, Path::new(PROVIDER_BINARY));
+        let canonical = canonical_bindings(WALLET_PROVIDER, base, Path::new(PROVIDER_BINARY));
         create_shared_ancestors(&canonical);
         let mut bindings: Vec<(&str, &Path)> = canonical
             .iter()
@@ -670,16 +798,17 @@ impl Drop for ConfinedProvider {
 /// 4. a `binary_path` that is not a file, with a reason that names the
 ///    provider and that path, before any profile is written;
 /// 5. a refusal of `write_generated_profile`, returned unchanged;
-/// 6. a start that `sandbox-exec` refuses, or an `init` that does not answer
-///    `ok`, with the `try_send` failure or the answer.
+/// 6. a start that `sandbox-exec` refuses, with the `try_send` failure;
+/// 7. an `init` that does not answer `ok`, with the answer.
 ///
 /// Otherwise it writes the profile the one lab writer generates from the
 /// declared rights into `profile_dir`, creates the shared ancestors, starts
 /// `binary_path` under that profile through `start_under` with the canonical
-/// bindings for `base_path` and `binary_path`, and sends `init` with
-/// `base_path`. It never starts `binary_path` outside `sandbox-exec`.
-/// `name` and `binary_path` are inputs rather than this provider's constants,
-/// so another provider's binary can start through this same function.
+/// bindings for `name`, `base_path` and `binary_path`, and sends `init` with
+/// the provider config from `provider_init_config`. It never starts
+/// `binary_path` outside `sandbox-exec`. `name` and `binary_path` are inputs
+/// rather than this provider's constants, so another provider's binary can
+/// start through this same function.
 fn standin_spawn_confined_provider(
     os: &str,
     sandbox_exec: &Path,
@@ -717,7 +846,7 @@ fn standin_spawn_confined_provider(
     }
     let profile = profile_dir.join(format!("{name}-standin.sb"));
     write_generated_profile(name, declared, &profile)?;
-    let canonical = canonical_bindings(base_path, binary_path);
+    let canonical = canonical_bindings(name, base_path, binary_path);
     create_shared_ancestors(&canonical);
     let bindings: Vec<(&str, &Path)> = canonical
         .iter()
@@ -726,7 +855,7 @@ fn standin_spawn_confined_provider(
     let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);
     let init = json!({
         "op": "init",
-        "config": { "base_path": base_path.display().to_string() }
+        "config": provider_init_config(name, base_path),
     });
     match provider.try_send(&init) {
         Ok(answer) if answer["status"] == "ok" => Ok(provider),
@@ -2408,10 +2537,7 @@ const FRESH_OUTSIDE_CASE: &str = "<STORAGE_PARENT>/Fresh";
 /// beneath `STORAGE_PARENT`. `confined_outside_write_is_denied` and the
 /// stand-in suite both read this one list.
 fn outside_write_cases(root: &Path, outside: &Path) -> [(&'static str, PathBuf); 4] {
-    let storage_parent = wallet_dir(root)
-        .parent()
-        .expect("wallet parent")
-        .to_path_buf();
+    let parent = storage_parent(WALLET_PROVIDER, root);
     [
         ("an unrelated base", outside.to_path_buf()),
         ("<root>/sibling", root.join("sibling")),
@@ -2419,7 +2545,7 @@ fn outside_write_cases(root: &Path, outside: &Path) -> [(&'static str, PathBuf);
             "<root>/ElastOS/SystemServices/Sibling",
             root.join("ElastOS/SystemServices/Sibling"),
         ),
-        (FRESH_OUTSIDE_CASE, storage_parent.join("Fresh")),
+        (FRESH_OUTSIDE_CASE, parent.join("Fresh")),
     ]
 }
 
@@ -2592,10 +2718,7 @@ fn planted_key_beneath_storage_parent_is_not_read() {
     let root = resolved(root.path());
     // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
     // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
-    let planted = wallet_dir(&root)
-        .parent()
-        .expect("wallet parent")
-        .join("Sibling");
+    let planted = storage_parent(WALLET_PROVIDER, &root).join("Sibling");
     let planted_wallet = wallet_dir(&planted);
     plant_storage_key(&planted_wallet);
     let planted_key = planted_wallet.join(WALLET_KEY_FILE);
@@ -2680,10 +2803,7 @@ fn account_operations_beneath_storage_parent_are_refused() {
     let root = resolved(root.path());
     // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
     // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
-    let sibling = wallet_dir(&root)
-        .parent()
-        .expect("wallet parent")
-        .join("Sibling");
+    let sibling = storage_parent(WALLET_PROVIDER, &root).join("Sibling");
     let sibling_wallet = wallet_dir(&sibling);
     fs::create_dir_all(&sibling_wallet).expect("precreate the sibling wallet directory");
     let mut provider = ConfinedProvider::start(&root);
@@ -2990,7 +3110,7 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     fs::write(&unclosed_profile, unclosed).expect("unclosed profile must be writable");
 
     let wallet_root = wallet_dir(&base);
-    let canonical = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&canonical);
     let unbound_root: Vec<(&str, PathBuf)> = canonical
         .iter()
@@ -3103,7 +3223,7 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
     let rule = r#"(allow file-read* (literal "/private/var/cc-confine-unnamed"))"#;
     let profile_root = tempfile::tempdir().expect("temporary profile root");
     let profile_root = resolved(profile_root.path());
-    let canonical = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&canonical);
     let wallet_root = wallet_dir(&base);
     let request = json!({
@@ -3217,30 +3337,81 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
     }
 }
 
-/// The lab stand-in launcher refuses a start it cannot confine.
+/// The stand-in finds the did binary through one build of did's manifest.
+///
+/// `did_provider_binary` runs `cargo build --locked --offline --manifest-path
+/// capsules/did-provider/Cargo.toml --bin did-provider --message-format=json`
+/// once and reads the bin artifact's `executable`. The path must be an existing
+/// file named `did-provider` under did's own `target` directory, or under the
+/// target directory cargo reported. A failed build fails this test with the
+/// build's output; there is no skip and no fallback to another binary.
+#[test]
+fn standin_launcher_finds_the_built_did_binary() {
+    let binary = did_provider_binary();
+    assert!(
+        binary.is_file(),
+        "the did-provider binary must exist: {}",
+        binary.display()
+    );
+    assert_eq!(
+        binary.file_name().and_then(std::ffi::OsStr::to_str),
+        Some(DID_PROVIDER),
+        "the binary must be named {DID_PROVIDER}: {}",
+        binary.display()
+    );
+    assert!(
+        binary
+            .ancestors()
+            .any(|dir| dir.file_name().is_some_and(|part| part == "target")),
+        "the binary must sit under a target directory: {}",
+        binary.display()
+    );
+    let did_target = did_provider_dir().join("target");
+    let cargo_target = std::env::var_os("CARGO_TARGET_DIR").map(|dir| {
+        let dir = PathBuf::from(dir);
+        if dir.is_absolute() {
+            dir
+        } else {
+            did_provider_dir().join(dir)
+        }
+    });
+    assert!(
+        binary.starts_with(&did_target)
+            || cargo_target
+                .as_ref()
+                .is_some_and(|target| binary.starts_with(target)),
+        "the binary must sit under did's target directory or the target \
+         directory cargo reported: {}",
+        binary.display()
+    );
+}
+
+/// The lab stand-in launcher refuses a start it cannot confine, for the named
+/// provider with its own binary and declared rights.
 ///
 /// Cases (a) `plan9`, a forced unsupported OS, and (b) `linux`, with a present
 /// tool path, each refuse with one reason that names that OS and the list
 /// where the stand-in applies confinement. Case (c) `macos` with the absent
-/// `tests/absent-sandbox-exec` refuses with a reason that names the OS and the
-/// path. Case (c2) `macos` with the test executable as the tool refuses with a
-/// reason that names that path and `SANDBOX_EXEC`. Those four run on every
-/// host and start no process; each creates no wallet directory under its base
-/// and no profile file.
+/// `tests/absent-sandbox-exec` refuses with a reason that names the OS, the
+/// path and `is absent`, and carries no `SANDBOX_EXEC` path, so the absent
+/// check answers it and not the later wrong-tool check. Case (c2) `macos` with
+/// the test executable as the tool refuses with a reason that names the OS,
+/// that path and `SANDBOX_EXEC`. Those four run on every host and start no
+/// process; each creates no storage root under its base and no profile file.
 ///
 /// Cases (c3) a `binary_path` that is not a file, (d) an added
 /// `unnamed-right` rights entry, (e) a declared `storage` rule that names a
 /// parameter the launch does not bind, and (f) an `init` that cannot create
-/// its wallet directory run only through `sandbox_available`. Case (c3)
+/// its storage root run only through `sandbox_available`. Case (c3)
 /// refuses with a reason that names the provider and the absent path before
-/// any profile, and creates neither a profile nor a wallet directory. Case (d)
+/// any profile, and creates neither a profile nor a storage root. Case (d)
 /// returns the exact unnamed-id reason and writes no profile. Case (e) writes
 /// the profile, and `sandbox-exec` exits before the provider, so the reason
 /// carries the exit status and `sandbox-exec`'s line. Case (f) writes the
-/// profile, and `init` answers a JSON error because `wallet_dir(base)` is a
-/// planted regular file, so the reason holds `init answered` and the answer,
-/// and the planted path stays a regular file. Cases (c3), (d) and (e) create
-/// no wallet directory.
+/// profile, and `init` answers a JSON error because the provider's storage
+/// root is a planted regular file, so the reason holds `init answered` and the
+/// answer, and the planted path stays a regular file. Cases (c3), (d) and (e)
+/// create no storage root.
 ///
 /// Falsifier: WP112 starts the binary bare in the OS refusal, so (a) and (b)
 /// return Started; WP113 starts it bare after a failed `init`, so (e) returns
@@ -3249,13 +3420,10 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
 /// the check that the tool is `SANDBOX_EXEC`, so (c2) is Started; WP119
 /// removes the binary-file check, so (c3) panics in `resolved`; WP120 returns
 /// `Ok(provider)` for an `init` answer that is not `ok`, so (f) is Started.
-#[test]
-fn standin_launcher_refuses_a_start_it_cannot_confine() {
-    let declared_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
-    let declared = read_declared_rights("wallet-provider", &declared_path)
-        .unwrap_or_else(|err| panic!("{err}"));
-    let provider = Path::new(PROVIDER_BINARY);
+/// WP125 makes the absent-tool check never fire, so (c) reads the wrong-tool
+/// reason instead; WP126 drops the OS from the wrong-tool reason, so (c2)
+/// loses `macos`.
+fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let present = std::env::current_exe().expect("the test executable path must be available");
     let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
     assert!(
@@ -3266,33 +3434,37 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let confined_os = DECLARED_CONFINED_OS.join(", ");
     let absent_text = absent.display().to_string();
     let present_text = present.display().to_string();
-    let cases: [(&str, &str, &Path, Vec<&str>); 4] = [
+    let cases: [(&str, &str, &Path, Vec<&str>, Vec<&str>); 4] = [
         (
             "(a) a forced unsupported OS",
             "plan9",
             present.as_path(),
             vec!["plan9", confined_os.as_str()],
+            vec![],
         ),
         (
             "(b) linux",
             "linux",
             present.as_path(),
             vec!["linux", confined_os.as_str()],
+            vec![],
         ),
         (
             "(c) macos without the tool",
             "macos",
             absent.as_path(),
-            vec!["macos", absent_text.as_str()],
+            vec!["macos", "is absent", absent_text.as_str()],
+            vec![SANDBOX_EXEC],
         ),
         (
             "(c2) macos with another tool",
             "macos",
             present.as_path(),
-            vec![present_text.as_str(), SANDBOX_EXEC],
+            vec!["macos", present_text.as_str(), SANDBOX_EXEC],
+            vec![],
         ),
     ];
-    for (case, os, sandbox_exec, named) in cases {
+    for (case, os, sandbox_exec, named, forbidden) in cases {
         let fixture = tempfile::tempdir().expect("temporary wallet base");
         let base = resolved(fixture.path());
         let profile_root = tempfile::tempdir().expect("temporary profile root");
@@ -3300,25 +3472,31 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         let refusal = standin_spawn_confined_provider(
             os,
             sandbox_exec,
-            "wallet-provider",
+            name,
             provider,
             &base,
-            &declared,
+            declared,
             &profile_dir,
         )
         .err()
         .unwrap_or_else(|| panic!("{case}: a start on {os} must be refused"));
-        for name in named {
+        for expected in named {
             assert!(
-                refusal.contains(name),
-                "{case}: the refusal must name {name}: {refusal}"
+                refusal.contains(expected),
+                "{case}: the refusal must name {expected}: {refusal}"
             );
         }
-        eprintln!("{case} stand-in refusal: {refusal}");
+        for unexpected in forbidden {
+            assert!(
+                !refusal.contains(unexpected),
+                "{case}: the refusal must not carry {unexpected}: {refusal}"
+            );
+        }
+        eprintln!("{name} {case} stand-in refusal: {refusal}");
         assert!(
-            !wallet_dir(&base).exists(),
-            "{case}: a refused start must create no wallet directory: {}",
-            wallet_dir(&base).display()
+            !provider_storage_root(name, &base).exists(),
+            "{case}: a refused start must create no storage root: {}",
+            provider_storage_root(name, &base).display()
         );
         assert!(
             fs::read_dir(&profile_dir)
@@ -3348,24 +3526,23 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let refusal = standin_spawn_confined_provider(
         std::env::consts::OS,
         Path::new(SANDBOX_EXEC),
-        "wallet-provider",
+        name,
         &absent_binary,
         &base,
-        &declared,
+        declared,
         &profile_dir,
     )
     .err()
     .expect("(c3) a binary path that is not a file must be refused");
     assert!(
-        refusal.contains("wallet-provider")
-            && refusal.contains(&absent_binary.display().to_string()),
+        refusal.contains(name) && refusal.contains(&absent_binary.display().to_string()),
         "(c3) the refusal must name the provider and the path: {refusal}"
     );
     assert!(
         !refusal.contains("must resolve"),
         "(c3) the refusal must come before the binary is resolved: {refusal}"
     );
-    eprintln!("(c3) stand-in refusal: {refusal}");
+    eprintln!("{name} (c3) stand-in refusal: {refusal}");
     assert!(
         fs::read_dir(&profile_dir)
             .expect("the profile directory must be readable")
@@ -3375,9 +3552,9 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         profile_dir.display()
     );
     assert!(
-        !wallet_dir(&base).exists(),
-        "(c3) a refused start must create no wallet directory: {}",
-        wallet_dir(&base).display()
+        !provider_storage_root(name, &base).exists(),
+        "(c3) a refused start must create no storage root: {}",
+        provider_storage_root(name, &base).display()
     );
 
     // (d) A right the shared contract does not name is refused unchanged.
@@ -3396,7 +3573,7 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let refusal = standin_spawn_confined_provider(
         std::env::consts::OS,
         Path::new(SANDBOX_EXEC),
-        "wallet-provider",
+        name,
         provider,
         &base,
         &unnamed,
@@ -3405,10 +3582,11 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     .err()
     .expect("(d) an unnamed right must be refused");
     assert_eq!(
-        refusal, "wallet-provider declares unnamed-right, which the shared contract does not name",
+        refusal,
+        format!("{name} declares unnamed-right, which the shared contract does not name"),
         "(d) the refusal must be the one unnamed-id reason"
     );
-    eprintln!("(d) stand-in refusal: {refusal}");
+    eprintln!("{name} (d) stand-in refusal: {refusal}");
     assert!(
         fs::read_dir(&profile_dir)
             .expect("the profile directory must be readable")
@@ -3418,9 +3596,9 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         profile_dir.display()
     );
     assert!(
-        !wallet_dir(&base).exists(),
-        "(d) a refused start must create no wallet directory: {}",
-        wallet_dir(&base).display()
+        !provider_storage_root(name, &base).exists(),
+        "(d) a refused start must create no storage root: {}",
+        provider_storage_root(name, &base).display()
     );
 
     // (e) A parameter the launch does not bind makes sandbox-exec exit before
@@ -3445,7 +3623,7 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let refusal = standin_spawn_confined_provider(
         std::env::consts::OS,
         Path::new(SANDBOX_EXEC),
-        "wallet-provider",
+        name,
         provider,
         &base,
         &unbound,
@@ -3465,11 +3643,11 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         !refusal.contains("execvp"),
         "(e) sandbox-exec must refuse the profile before any exec: {refusal}"
     );
-    eprintln!("(e) stand-in refusal: {refusal}");
+    eprintln!("{name} (e) stand-in refusal: {refusal}");
     assert!(
-        !wallet_dir(&base).exists(),
-        "(e) a refused start must create no wallet directory: {}",
-        wallet_dir(&base).display()
+        !provider_storage_root(name, &base).exists(),
+        "(e) a refused start must create no storage root: {}",
+        provider_storage_root(name, &base).display()
     );
 
     // (f) An init answer whose status is not ok is refused with the answer.
@@ -3477,17 +3655,17 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let base = resolved(fixture.path());
     let profile_root = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_root.path());
-    let planted = wallet_dir(&base);
-    fs::create_dir_all(planted.parent().expect("wallet parent"))
-        .expect("prepare the wallet parent");
-    fs::write(&planted, b"not a directory").expect("plant a regular file at the wallet directory");
+    let planted = provider_storage_root(name, &base);
+    fs::create_dir_all(planted.parent().expect("storage parent"))
+        .expect("prepare the storage parent");
+    fs::write(&planted, b"not a directory").expect("plant a regular file at the storage root");
     let refusal = standin_spawn_confined_provider(
         std::env::consts::OS,
         Path::new(SANDBOX_EXEC),
-        "wallet-provider",
+        name,
         provider,
         &base,
-        &declared,
+        declared,
         &profile_dir,
     )
     .err()
@@ -3500,14 +3678,54 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         refusal.contains(r#""status":"error""#),
         "(f) the refusal must carry the answer's status: {refusal}"
     );
-    eprintln!("(f) stand-in refusal: {refusal}");
+    eprintln!("{name} (f) stand-in refusal: {refusal}");
     assert!(
         fs::metadata(&planted)
             .expect("the planted path must still exist")
             .is_file(),
-        "(f) the planted wallet directory path must stay a regular file: {}",
+        "(f) the planted storage-root path must stay a regular file: {}",
         planted.display()
     );
+}
+
+/// The stand-in refuses every start it cannot confine, for did first and then
+/// for wallet.
+///
+/// Each provider passes its own committed declared-rights file and its own
+/// binary to `standin_refusals_for`, which runs 094's cases. The did binary
+/// comes from `did_provider_binary`; the wallet binary comes from
+/// `CARGO_BIN_EXE_wallet-provider`. Either start that this test does not refuse
+/// returns no provider and creates no storage root or profile.
+///
+/// Falsifier: WP112 starts the binary bare in the OS refusal, so did's case (a)
+/// returns Started; WP113 starts it bare after a failed `init`, so did's case
+/// (e) returns Started; WP115 ignores the writer's refusal and starts under the
+/// committed `confine.sb`, so did's case (d) returns Started instead of its
+/// reason. WP118 removes the tool check, so did's case (c2) is Started; WP119
+/// removes the binary-file check, so did's case (c3) panics in `resolved`;
+/// WP120 returns `Ok(provider)` for an `init` answer that is not `ok`, so did's
+/// case (f) is Started. WP125 makes the absent-tool check never fire, so did's
+/// case (c) reads the wrong-tool reason and lacks `is absent`; WP126 drops the
+/// OS from the wrong-tool reason, so did's case (c2) loses `macos`.
+#[test]
+fn standin_launcher_refuses_a_start_it_cannot_confine() {
+    let providers: [(&str, &Path, Value); 2] = [
+        (
+            DID_PROVIDER,
+            did_provider_binary(),
+            read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
+                .unwrap_or_else(|err| panic!("{err}")),
+        ),
+        (
+            WALLET_PROVIDER,
+            Path::new(PROVIDER_BINARY),
+            read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+                .unwrap_or_else(|err| panic!("{err}")),
+        ),
+    ];
+    for (name, provider, declared) in &providers {
+        standin_refusals_for(name, provider, declared);
+    }
 }
 
 /// The lab stand-in launcher starts the wallet provider confined.
@@ -3586,26 +3804,195 @@ fn standin_launcher_starts_wallet_confined_under_the_generated_profile() {
     provider.shutdown();
 }
 
-/// One suite case's answer: `Ok`, or the refusal answer's `status` and the
-/// stable start of its `message`.
+/// The lab stand-in launcher starts the did provider confined.
+///
+/// The launcher is Started from did's committed declared-rights file: it wrote
+/// one profile, the provider answered `init` `ok` with did's fixture device
+/// key, and `get_did` names the derived DID. One outside write, did's first
+/// `outside_write_denied` case, points the granted nickname file at an
+/// unrelated directory; `set_nickname` is refused with `storage_error` and
+/// creates nothing. The root still answers `get_did`, and `shutdown` answers
+/// `ok` and exits 0.
+///
+/// Falsifier: WP124 makes the stand-in use wallet's root layout for did; `init`
+/// cannot write `<base>/did`, so the launcher is Refused and this test fails at
+/// the start.
+#[test]
+fn standin_launcher_starts_did_confined_under_the_generated_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary did base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let mut provider = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        DID_PROVIDER,
+        did_provider_binary(),
+        &base,
+        &declared,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+
+    let did = provider.send(&json!({ "op": "get_did" }));
+    assert_eq!(
+        did["status"], "ok",
+        "the started provider must answer get_did: {did}"
+    );
+    let did_value = did["data"]["did"]
+        .as_str()
+        .expect("get_did must name the DID")
+        .to_string();
+    assert!(
+        did_value.starts_with("did:key:"),
+        "get_did must answer a did:key DID: {did}"
+    );
+
+    let storage = provider_storage_root(DID_PROVIDER, &base);
+    let granted = storage.join("nickname.enc");
+    let allowed = provider.send(&json!({ "op": "set_nickname", "nickname": "Allowed" }));
+    assert_eq!(
+        allowed["status"], "ok",
+        "the granted write must succeed: {allowed}"
+    );
+    assert!(
+        granted.is_file(),
+        "the granted nickname file must exist: {}",
+        granted.display()
+    );
+
+    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = resolved(outside.path());
+    let target = outside.join("nickname.enc");
+    fs::remove_file(&granted).expect("remove the granted nickname file");
+    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path outside");
+    let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
+    assert_eq!(
+        denied["status"], "error",
+        "the outside write must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
+        "the denial must name the failed write: {denied}"
+    );
+    assert!(
+        !target.exists(),
+        "the outside write must create nothing: {}",
+        target.display()
+    );
+    assert_eq!(
+        fs::read_dir(&outside)
+            .expect("the outside directory must be readable")
+            .count(),
+        0,
+        "the outside directory must stay empty: {}",
+        outside.display()
+    );
+    fs::remove_file(&granted).expect("remove the outside symlink");
+
+    let after = provider.send(&json!({ "op": "get_did" }));
+    assert_eq!(
+        after["status"], "ok",
+        "the provider must stay in service: {after}"
+    );
+    assert_eq!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .count(),
+        1,
+        "the launcher must write one profile into the directory it is given: {}",
+        profile_dir.display()
+    );
+    provider.shutdown();
+}
+
+/// The class one suite case must answer with, carried by the entry the suite
+/// pushes for that case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuiteClass {
+    /// A permitted call, which must answer `ok`.
+    Permitted,
+    /// A denied call, which the profile must refuse.
+    Denied,
+}
+
+/// One suite case's answer: `Ok`, or the refusal answer's `status`, its `code`
+/// and the stable start of its `message`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SuiteOutcome {
     Ok,
-    Refused { status: String, message: String },
+    Refused {
+        status: String,
+        code: String,
+        message: String,
+    },
 }
 
-/// One named case of the stand-in suite, in the order the suite runs it.
+/// One named case of the stand-in suite, in the order the suite runs it, with
+/// the class the suite expects of it and the answer it gave.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SuiteEntry {
     case: &'static str,
+    class: SuiteClass,
     outcome: SuiteOutcome,
 }
 
-/// The entries before the denied cases are the permitted calls.
-const SUITE_PERMITTED_CASES: usize = 3;
+/// The suite's cases in the order the suite runs them, with the class each
+/// case must answer with. `assert_suite_outcomes` requires every record's
+/// names and classes to equal this list, so a case that drops out or changes
+/// class fails with the case named. `outside_write_cases` holds the four
+/// outside bases and their names, and this list repeats those names as the
+/// expectation each record is checked against.
+const SUITE_CASES: [(&str, SuiteClass); 9] = [
+    ("init at the wallet root", SuiteClass::Permitted),
+    ("status", SuiteClass::Permitted),
+    ("create_managed_account", SuiteClass::Permitted),
+    ("an unrelated base", SuiteClass::Denied),
+    ("<root>/sibling", SuiteClass::Denied),
+    ("<root>/ElastOS/SystemServices/Sibling", SuiteClass::Denied),
+    (FRESH_OUTSIDE_CASE, SuiteClass::Denied),
+    ("planted key beneath STORAGE_PARENT", SuiteClass::Denied),
+    ("status after the denied cases", SuiteClass::Permitted),
+];
 
-/// The suite ends with one permitted `status` call after the denied cases.
-const SUITE_TRAILING_PERMITTED_CASES: usize = 1;
+/// The did suite's cases in the order the suite runs them, with the class each
+/// case must answer with. The permitted cases are from
+/// `confined_provider_serves_did_operations_under_its_root`; the outside write
+/// is the first target of `outside_write_denied`; the planted read is the read
+/// half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`;
+/// and the final `get_did` is the service check both tests make after a
+/// refusal.
+const DID_SUITE_CASES: [(&str, SuiteClass); 8] = [
+    // `confined_provider_serves_did_operations_under_its_root` (did's
+    // tests/confine.rs:407) runs these five operations.
+    ("init at the did root", SuiteClass::Permitted),
+    ("get_did", SuiteClass::Permitted),
+    ("set_nickname", SuiteClass::Permitted),
+    ("get_nickname", SuiteClass::Permitted),
+    ("get_persona_did", SuiteClass::Permitted),
+    // The first target of `outside_write_denied` (did's tests/confine.rs:557).
+    (
+        "outside write through the granted nickname file",
+        SuiteClass::Denied,
+    ),
+    // The read half of
+    // `planted_file_beneath_storage_parent_is_neither_read_nor_written`
+    // (did's tests/confine.rs:703).
+    (
+        "planted nickname beneath STORAGE_PARENT",
+        SuiteClass::Denied,
+    ),
+    // The service check that both tests make after a refusal.
+    ("get_did after the denied cases", SuiteClass::Permitted),
+];
 
 /// The stable start of a refusal message: its text before the first path
 /// separator, trimmed. Each provider runs on its own temporary root, so the
@@ -3620,28 +4007,37 @@ fn stable_message_start(message: &str) -> String {
 }
 
 /// The suite entry for one answer, so a permitted call and a refusal share one
-/// record shape.
-fn suite_entry(case: &'static str, answer: &Value) -> SuiteEntry {
+/// record shape. The refusal keeps the answer's `status` and its `code` through
+/// the one field reader, so two refusals that differ only in `code` do not
+/// compare equal.
+fn suite_entry(case: &'static str, class: SuiteClass, answer: &Value) -> SuiteEntry {
     let outcome = if answer["status"] == "ok" {
         SuiteOutcome::Ok
     } else {
         SuiteOutcome::Refused {
             status: refusal_field(answer.get("status")),
+            code: refusal_field(answer.get("code")),
             message: stable_message_start(answer["message"].as_str().unwrap_or_default()),
         }
     };
-    SuiteEntry { case, outcome }
+    SuiteEntry {
+        case,
+        class,
+        outcome,
+    }
 }
 
 /// The suite entry for one wallet answer: `Ok` only when the bound result is
-/// `Ok`, and the inner result's `code` and stable message start for an error.
-/// The provider answers every `wallet_contract` request with an outer `ok` and
-/// puts the result in `data.result`, so the outer status proves nothing about
-/// the effect. An outer answer that is not `ok` or that does not bind to its
-/// request fails the test, because the one wallet request path always answers a
-/// bound response.
+/// `Ok`, and the outer answer's `status` beside the inner result's `code` and
+/// stable message start for an error. The provider answers every
+/// `wallet_contract` request with an outer `ok` and puts the result in
+/// `data.result`, so the outer status proves nothing about the effect and the
+/// inner `code` is the refusal a permitted case must not hide. An outer answer
+/// that is not `ok` or that does not bind to its request fails the test,
+/// because the one wallet request path always answers a bound response.
 fn wallet_suite_entry(
     case: &'static str,
+    class: SuiteClass,
     request: &WalletProviderRequestV2,
     answer: &Value,
 ) -> SuiteEntry {
@@ -3659,11 +4055,16 @@ fn wallet_suite_entry(
     let outcome = match result {
         WalletResultV2::Ok { .. } => SuiteOutcome::Ok,
         WalletResultV2::Error { code, message } => SuiteOutcome::Refused {
-            status: code,
+            status: refusal_field(answer.get("status")),
+            code,
             message: stable_message_start(&message),
         },
     };
-    SuiteEntry { case, outcome }
+    SuiteEntry {
+        case,
+        class,
+        outcome,
+    }
 }
 
 /// The one stand-in suite: the permitted wallet calls of
@@ -3677,19 +4078,25 @@ fn wallet_suite_entry(
 /// read beneath `STORAGE_PARENT` on its own base, and the `status` after the
 /// denied cases, which shows the provider stays in service. The denied cases
 /// run between the permitted calls because `init` resets the root before it
-/// refuses. A wallet call is `Ok` only when its bound result is `Ok`, so an
-/// inner storage or validation refusal cannot read as a permitted case. A
-/// refusal keeps the answer's `status` and the stable start of its `message`,
-/// so two records from different roots compare equal. Both callers drive one
-/// started provider through this function; it starts none.
+/// refuses. Each entry carries the class of the case it was pushed for, so no
+/// caller reads the class from the entry's position. A wallet call is `Ok` only
+/// when its bound result is `Ok`, so an inner storage or validation refusal
+/// cannot read as a permitted case. A refusal keeps the answer's `status`, its
+/// `code` and the stable start of its `message`, so two records from different
+/// roots compare equal. Both callers drive one started provider through this
+/// function; it starts none.
 fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.init(root);
-    record.push(suite_entry("init at the wallet root", &init));
+    record.push(suite_entry(
+        "init at the wallet root",
+        SuiteClass::Permitted,
+        &init,
+    ));
 
     let status = provider.send(&json!({ "op": "status" }));
-    record.push(suite_entry("status", &status));
+    record.push(suite_entry("status", SuiteClass::Permitted, &status));
 
     let (request, answer) =
         provider.wallet_request_and_answer(WalletProviderOperationV2::CreateManagedAccount {
@@ -3699,6 +4106,7 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
         });
     record.push(wallet_suite_entry(
         "create_managed_account",
+        SuiteClass::Permitted,
         &request,
         &answer,
     ));
@@ -3708,52 +4116,251 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
     for (case, denied_base) in &outside_write_cases(root, &outside) {
         prepare_outside_write_case(case, denied_base);
         let denied = provider.init(denied_base);
-        record.push(suite_entry(case, &denied));
+        record.push(suite_entry(case, SuiteClass::Denied, &denied));
     }
 
-    // Its own base beneath `STORAGE_PARENT`, so the planted read starts
-    // without the refused `init` of the outside-write sibling case.
-    let planted = wallet_dir(root)
-        .parent()
-        .expect("wallet parent")
-        .join("Planted");
+    // Its own base beneath `STORAGE_PARENT`, taken from the canonical bindings
+    // so the fixture and the launch keep one source for that path, and so the
+    // planted read starts without the refused `init` of the outside-write
+    // sibling case.
+    let planted = storage_parent(WALLET_PROVIDER, root).join("Planted");
     let planted_wallet = wallet_dir(&planted);
     plant_storage_key(&planted_wallet);
     let denied = provider.init(&planted);
-    record.push(suite_entry("planted key beneath STORAGE_PARENT", &denied));
+    record.push(suite_entry(
+        "planted key beneath STORAGE_PARENT",
+        SuiteClass::Denied,
+        &denied,
+    ));
 
     let status = provider.send(&json!({ "op": "status" }));
-    record.push(suite_entry("status after the denied cases", &status));
+    record.push(suite_entry(
+        "status after the denied cases",
+        SuiteClass::Permitted,
+        &status,
+    ));
 
     record
 }
 
-/// Requires the leading permitted calls and the trailing `status` to answer
-/// `ok` and every entry between them to be refused, and fails with the case
-/// name on the first entry that disagrees.
-fn assert_suite_outcomes(label: &str, record: &[SuiteEntry]) {
-    assert!(
-        record.len() > SUITE_PERMITTED_CASES + SUITE_TRAILING_PERMITTED_CASES,
-        "{label} suite must hold the permitted cases, at least one denied case and the trailing status"
+/// The did suite on one started provider and one root, using the record type
+/// and judgement of `wallet_standin_suite`. It returns one entry per case of
+/// `DID_SUITE_CASES` in its order: `init` with did's fixture device key,
+/// `get_did`, `set_nickname`, `get_nickname` and `get_persona_did`; the outside
+/// write of did's first `outside_write_denied` target, which points the granted
+/// nickname file at an unrelated directory; the planted read of
+/// `planted_file_beneath_storage_parent_is_neither_read_nor_written`, which
+/// points the granted file at its own encrypted copy beneath `STORAGE_PARENT`;
+/// and `get_did` after the denied cases. Each entry carries the class of the
+/// case it was pushed for. A refusal keeps the answer's `status`, its `code`
+/// and the stable start of its `message`, so two records from different roots
+/// compare equal. Both callers drive one started provider through this
+/// function; it starts none.
+fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
+    let mut record = Vec::new();
+
+    let init = provider.send(&json!({
+        "op": "init",
+        "config": provider_init_config(DID_PROVIDER, root),
+    }));
+    record.push(suite_entry(
+        "init at the did root",
+        SuiteClass::Permitted,
+        &init,
+    ));
+
+    let did_data = provider.send(&json!({ "op": "get_did" }));
+    let did = did_data["data"]["did"]
+        .as_str()
+        .expect("get_did must name the DID")
+        .to_string();
+    record.push(suite_entry("get_did", SuiteClass::Permitted, &did_data));
+
+    let set = provider.send(&json!({ "op": "set_nickname", "nickname": "Confined" }));
+    record.push(suite_entry("set_nickname", SuiteClass::Permitted, &set));
+
+    let nickname = provider.send(&json!({ "op": "get_nickname" }));
+    assert_eq!(
+        nickname["data"]["nickname"], "Confined",
+        "the confined provider must return the stored nickname: {nickname}"
     );
-    for (index, entry) in record.iter().enumerate() {
-        let permitted =
-            index < SUITE_PERMITTED_CASES || index >= record.len() - SUITE_TRAILING_PERMITTED_CASES;
-        if permitted {
-            assert!(
+    record.push(suite_entry(
+        "get_nickname",
+        SuiteClass::Permitted,
+        &nickname,
+    ));
+
+    let persona = provider.send(&json!({ "op": "get_persona_did", "name": "fixture" }));
+    assert_eq!(
+        persona["data"]["owner_did"], did,
+        "the persona must belong to the provider's DID: {persona}"
+    );
+    record.push(suite_entry(
+        "get_persona_did",
+        SuiteClass::Permitted,
+        &persona,
+    ));
+
+    // The first `outside_write_denied` target: an unrelated directory. The
+    // granted nickname file is a symlink to that target, so the profile must
+    // refuse the write and the target directory must stay empty.
+    let granted = provider_storage_root(DID_PROVIDER, root).join("nickname.enc");
+    assert!(
+        granted.is_file(),
+        "set_nickname must have written the granted file: {}",
+        granted.display()
+    );
+    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = resolved(outside.path());
+    let target = outside.join("nickname.enc");
+    fs::remove_file(&granted).expect("remove the granted nickname file");
+    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path outside");
+    let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
+    assert_eq!(
+        denied["status"], "error",
+        "the outside write must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
+        "the denial must name the failed write: {denied}"
+    );
+    assert!(
+        !target.exists(),
+        "nothing may land outside the storage root: {}",
+        target.display()
+    );
+    assert_eq!(
+        fs::read_dir(&outside)
+            .expect("the outside directory must be readable")
+            .count(),
+        0,
+        "the outside directory must stay empty: {}",
+        outside.display()
+    );
+    record.push(suite_entry(
+        "outside write through the granted nickname file",
+        SuiteClass::Denied,
+        &denied,
+    ));
+    fs::remove_file(&granted).expect("remove the outside symlink");
+
+    // The read half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`:
+    // the provider's own encrypted nickname is copied beneath STORAGE_PARENT,
+    // and the granted path points at that copy. `init` must refuse the read.
+    let restored = provider.send(&json!({ "op": "set_nickname", "nickname": "Planted source" }));
+    assert_eq!(
+        restored["status"], "ok",
+        "the granted write must recover the file: {restored}"
+    );
+    let planted = storage_parent(DID_PROVIDER, root)
+        .join("sibling")
+        .join("did");
+    fs::create_dir_all(&planted).expect("planted directory beneath STORAGE_PARENT");
+    let planted_path = planted.join("nickname.enc");
+    fs::copy(&granted, &planted_path).expect("copy the encrypted nickname beneath the parent");
+    let planted_bytes = fs::read(&planted_path).expect("read the planted file");
+    fs::remove_file(&granted).expect("remove the granted nickname file");
+    std::os::unix::fs::symlink(&planted_path, &granted)
+        .expect("point the granted path at the plant");
+    let denied = provider.send(&json!({
+        "op": "init",
+        "config": provider_init_config(DID_PROVIDER, root),
+    }));
+    assert_eq!(
+        denied["status"], "error",
+        "the planted read must be denied: {denied}"
+    );
+    assert_eq!(denied["code"], "storage_error");
+    assert!(
+        denied["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("did-provider: failed to read nickname:")),
+        "the refusal must reach the nickname loader: {denied}"
+    );
+    assert_eq!(
+        fs::read(&planted_path).expect("the planted file must stay readable"),
+        planted_bytes,
+        "the planted file must stay unchanged"
+    );
+    record.push(suite_entry(
+        "planted nickname beneath STORAGE_PARENT",
+        SuiteClass::Denied,
+        &denied,
+    ));
+    fs::remove_file(&granted).expect("remove the planted symlink");
+
+    let after = provider.send(&json!({ "op": "get_did" }));
+    record.push(suite_entry(
+        "get_did after the denied cases",
+        SuiteClass::Permitted,
+        &after,
+    ));
+
+    record
+}
+
+/// Requires the record to hold one entry per case of `cases`, in that order,
+/// with that case's name and class, and judges each entry's own class: a
+/// permitted case answers `ok` and a denied case is refused. A case that drops
+/// out, arrives in another order or changes class fails with the case named.
+fn assert_suite_outcomes(label: &str, record: &[SuiteEntry], cases: &[(&str, SuiteClass)]) {
+    for (index, (case, class)) in cases.iter().enumerate() {
+        let Some(entry) = record.get(index) else {
+            panic!(
+                "{label} suite must record case {case:?} as {class:?}: the record holds {} entries",
+                record.len()
+            );
+        };
+        assert_eq!(
+            (entry.case, entry.class),
+            (*case, *class),
+            "{label} must record case {case:?} as {class:?}"
+        );
+        match entry.class {
+            SuiteClass::Permitted => assert!(
                 entry.outcome == SuiteOutcome::Ok,
                 "{label} must permit case {:?}: {:?}",
                 entry.case,
                 entry.outcome
-            );
-        } else {
-            assert!(
+            ),
+            SuiteClass::Denied => assert!(
                 matches!(entry.outcome, SuiteOutcome::Refused { .. }),
                 "{label} must refuse case {:?}: {:?}",
                 entry.case,
                 entry.outcome
-            );
+            ),
         }
+    }
+    assert_eq!(
+        record.len(),
+        cases.len(),
+        "{label} suite must record no case beyond {:?}",
+        cases.last().map(|(case, _)| *case)
+    );
+}
+
+/// Requires the stand-in record to equal the committed-profile record entry by
+/// entry, and names the first case that differs. Both suite callers share this
+/// comparison, so the wallet and did proofs apply one rule.
+fn assert_standin_matches_oracle(oracle_record: &[SuiteEntry], standin_record: &[SuiteEntry]) {
+    assert_eq!(
+        oracle_record.len(),
+        standin_record.len(),
+        "the stand-in start must record as many cases as the committed confine.sb: \
+         committed {}, stand-in {}",
+        oracle_record.len(),
+        standin_record.len()
+    );
+    for (oracle_entry, standin_entry) in oracle_record.iter().zip(standin_record) {
+        assert_eq!(
+            oracle_entry, standin_entry,
+            "the stand-in start differs from the committed confine.sb on case {:?}: \
+             committed {:?}, stand-in {:?}",
+            oracle_entry.case, oracle_entry.outcome, standin_entry.outcome
+        );
     }
 }
 
@@ -3763,16 +4370,18 @@ fn assert_suite_outcomes(label: &str, record: &[SuiteEntry]) {
 /// `wallet_standin_suite` runs once on a provider started under the committed
 /// profile through `ConfinedProvider::start`, and once on a provider Started by
 /// `standin_spawn_confined_provider` from wallet's committed declared-rights
-/// file, each on its own fresh temporary root. Every permitted case answers
-/// `ok`, and the key-writing call answers `ok` only when its bound wallet
-/// result is `ok`; every denied case is refused in both records, and the two
-/// records are equal entry by entry; a difference names the first differing
-/// case. The lab stand-in is test code and not the Runtime.
+/// file, each on its own fresh temporary root. Each record must hold one entry
+/// per case of `SUITE_CASES`, in its order, with its name and class; every
+/// permitted case answers `ok`, and the key-writing call answers `ok` only when
+/// its bound wallet result is `ok`; every denied case is refused in both
+/// records, and the two records are equal entry by entry; a difference names
+/// the first differing case. The lab stand-in is test code and not the Runtime.
 ///
 /// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
 /// the wallet directory; the widened grant permits `<root>/sibling`, so the
 /// stand-in record holds `ok` where the committed profile refuses and this test
-/// fails on that case.
+/// fails on that case. WP121 removes the planted-key push, so the record holds
+/// eight entries and this test fails naming the missing case.
 #[test]
 fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -3807,23 +4416,83 @@ fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
     oracle.shutdown();
     standin.shutdown();
 
-    assert_eq!(
-        oracle_record.len(),
-        standin_record.len(),
-        "the two suite records must hold one entry per case: committed {}, stand-in {}",
-        oracle_record.len(),
-        standin_record.len()
+    assert_suite_outcomes("the committed confine.sb", &oracle_record, &SUITE_CASES);
+    assert_suite_outcomes(
+        "the stand-in's generated profile",
+        &standin_record,
+        &SUITE_CASES,
     );
-    for (oracle_entry, standin_entry) in oracle_record.iter().zip(&standin_record) {
-        assert_eq!(
-            oracle_entry, standin_entry,
-            "the stand-in start differs from the committed confine.sb on case {:?}: \
-             committed {:?}, stand-in {:?}",
-            oracle_entry.case, oracle_entry.outcome, standin_entry.outcome
-        );
+    assert_standin_matches_oracle(&oracle_record, &standin_record);
+}
+
+/// The stand-in's did start answers every permitted and denied did suite case
+/// as the committed `confine.sb` does.
+///
+/// `did_standin_suite` runs once on did's binary started under did's committed
+/// `confine.sb` through `ConfinedProvider::start_under` with did's layout, and
+/// once on a provider Started by `standin_spawn_confined_provider` from did's
+/// committed declared-rights file, each on its own fresh temporary root. Each
+/// record must hold one entry per case of `DID_SUITE_CASES`, in its order, with
+/// its name and class; every permitted case answers `ok`, every denied case is
+/// refused in both records, and the two records are equal entry by entry; a
+/// difference names the first differing case. The lab stand-in is test code and
+/// not the Runtime.
+///
+/// Falsifier: WP124 makes the stand-in use wallet's root layout for did; the
+/// stand-in binds `STORAGE_ROOT` to `<root>/ElastOS/SystemServices/Wallet`, so
+/// its `init` cannot write `<root>/did` and the start is Refused. This test
+/// fails at the start and records no case.
+#[test]
+fn standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
     }
-    assert_suite_outcomes("the committed confine.sb", &oracle_record);
-    assert_suite_outcomes("the stand-in's generated profile", &standin_record);
+    let did_binary = did_provider_binary();
+    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let oracle_fixture = tempfile::tempdir().expect("temporary did root");
+    let oracle_root = resolved(oracle_fixture.path());
+    let bindings = canonical_bindings(DID_PROVIDER, &oracle_root, did_binary);
+    create_shared_ancestors(&bindings);
+    let paths: Vec<(&str, &Path)> = bindings
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut oracle =
+        ConfinedProvider::start_under(&did_provider_dir().join("confine.sb"), &paths, did_binary);
+    let oracle_record = did_standin_suite(&mut oracle, &oracle_root);
+
+    let standin_fixture = tempfile::tempdir().expect("temporary did root");
+    let standin_root = resolved(standin_fixture.path());
+    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_fixture.path());
+    let mut standin = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        DID_PROVIDER,
+        did_binary,
+        &standin_root,
+        &declared,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    let standin_record = did_standin_suite(&mut standin, &standin_root);
+
+    oracle.shutdown();
+    standin.shutdown();
+
+    assert_suite_outcomes(
+        "did's committed confine.sb",
+        &oracle_record,
+        &DID_SUITE_CASES,
+    );
+    assert_suite_outcomes(
+        "did's stand-in generated profile",
+        &standin_record,
+        &DID_SUITE_CASES,
+    );
+    assert_standin_matches_oracle(&oracle_record, &standin_record);
 }
 
 /// The stand-in start uses the generated profile, not the committed file.
@@ -3890,12 +4559,12 @@ fn standin_start_runs_under_the_generated_profile_not_the_committed_file() {
 /// must not read as a permitted case. The test starts the provider under the
 /// committed profile, `init`s the root, sends `create_managed_account` with a
 /// chain namespace the wallet refuses, and requires `wallet_suite_entry` to
-/// record `Refused` with the inner `invalid_request` code and its reason, while
-/// the outer answer is still `ok`. Both callers of the suite read this one
-/// entry function.
+/// record `Refused` with the outer `ok` status beside the inner
+/// `invalid_request` code and its reason. Both callers of the suite read this
+/// one entry function.
 ///
-/// Falsifier: read only the outer `status` in `wallet_suite_entry`; this test
-/// fails because the entry reads `Ok`.
+/// Falsifier: WP123 records every bound result as `Ok` in `wallet_suite_entry`;
+/// this test fails because the entry reads `Ok`.
 #[test]
 fn wallet_suite_entry_records_an_inner_refusal_as_refused() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -3917,17 +4586,80 @@ fn wallet_suite_entry_records_an_inner_refusal_as_refused() {
         answer["status"], "ok",
         "the outer answer stays ok for an inner refusal: {answer}"
     );
-    let entry = wallet_suite_entry("create_managed_account", &request, &answer);
+    let entry = wallet_suite_entry(
+        "create_managed_account",
+        SuiteClass::Denied,
+        &request,
+        &answer,
+    );
     assert_eq!(
         entry.outcome,
         SuiteOutcome::Refused {
-            status: "invalid_request".to_string(),
+            status: "ok".to_string(),
+            code: "invalid_request".to_string(),
             message: "managed wallets support EVM chains and Bitcoin mainnet P2WPKH".to_string(),
         },
         "an inner refusal must be recorded from the bound result: {entry:?}"
     );
 
     provider.shutdown();
+}
+
+/// A suite refusal keeps the answer's `code` beside its `status`, so two
+/// refusals that differ only in `code` do not compare equal.
+///
+/// The two answers below carry the same `status` and the same message text and
+/// differ only in `code`, which is what the stand-in comparison would otherwise
+/// miss. The test builds both answers in the test, reads no file and starts no
+/// process, so it runs on every host.
+///
+/// Falsifier: WP122 drops the `code` from the refusal record in `suite_entry`;
+/// this test fails because the two entries are equal.
+#[test]
+fn suite_entry_keeps_the_refusal_code() {
+    let storage_refusal = json!({
+        "status": "error",
+        "code": "storage_error",
+        "message": "wallet storage is not writable",
+    });
+    let invalid_refusal = json!({
+        "status": "error",
+        "code": "invalid_request",
+        "message": "wallet storage is not writable",
+    });
+
+    let storage_entry = suite_entry(
+        "init at the wallet root",
+        SuiteClass::Denied,
+        &storage_refusal,
+    );
+    let invalid_entry = suite_entry(
+        "init at the wallet root",
+        SuiteClass::Denied,
+        &invalid_refusal,
+    );
+    assert_ne!(
+        storage_entry, invalid_entry,
+        "two refusals that differ only in code must not compare equal"
+    );
+    assert_eq!(
+        storage_entry.outcome,
+        SuiteOutcome::Refused {
+            status: "error".to_string(),
+            code: "storage_error".to_string(),
+            message: "wallet storage is not writable".to_string(),
+        },
+        "the refusal record must keep status, code and message start: {storage_entry:?}"
+    );
+    assert_eq!(
+        invalid_entry.outcome,
+        SuiteOutcome::Refused {
+            status: "error".to_string(),
+            code: "invalid_request".to_string(),
+            message: "wallet storage is not writable".to_string(),
+        },
+        "the refusal record must keep status, code and message start: {invalid_entry:?}"
+    );
 }
 
 /// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
@@ -3946,7 +4678,7 @@ impl StoredCopy {
         let fixture = tempfile::tempdir().expect("temporary wallet base");
         let base = resolved(fixture.path());
         let binary = resolved(Path::new(PROVIDER_BINARY));
-        let bindings = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
+        let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
         create_shared_ancestors(&bindings);
         let storage = wallet_dir(&base);
         fs::create_dir(&storage).expect("STORAGE_ROOT must be created first");
@@ -3994,7 +4726,7 @@ fn unbound_copy_is_refused_under_profile() {
         "op": "init",
         "config": { "base_path": stored.base.display().to_string() }
     });
-    let canonical = canonical_bindings(&stored.base, Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(WALLET_PROVIDER, &stored.base, Path::new(PROVIDER_BINARY));
     let bindings: Vec<(&str, &Path)> = canonical
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
@@ -4058,13 +4790,14 @@ fn bound_copy_serves_under_profile() {
         return;
     }
     let stored = StoredCopy::prepare();
-    let bound: Vec<(&str, PathBuf)> = canonical_bindings(&stored.base, Path::new(PROVIDER_BINARY))
-        .into_iter()
-        .map(|(name, path)| match name {
-            "PROVIDER_EXECUTABLE" => (name, stored.copy.clone()),
-            _ => (name, path),
-        })
-        .collect();
+    let bound: Vec<(&str, PathBuf)> =
+        canonical_bindings(WALLET_PROVIDER, &stored.base, Path::new(PROVIDER_BINARY))
+            .into_iter()
+            .map(|(name, path)| match name {
+                "PROVIDER_EXECUTABLE" => (name, stored.copy.clone()),
+                _ => (name, path),
+            })
+            .collect();
     let bindings: Vec<(&str, &Path)> = bound
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
@@ -4113,7 +4846,7 @@ fn startup_denial_reports_its_reason() {
 
     // The denied provider exits before it reads the request, so the harness
     // cannot write it. It reports the exit status and the sandbox denial.
-    let canonical = canonical_bindings(&base, Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&canonical);
     let bindings: Vec<(&str, &Path)> = canonical
         .iter()

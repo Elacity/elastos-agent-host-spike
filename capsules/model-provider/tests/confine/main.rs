@@ -1256,17 +1256,29 @@ fn redirect_journal_materializes_outside_when_unconfined() {
 }
 
 /// After `init`, the storage tree is the same after `status`, `offers_list`
-/// and `shutdown`.
+/// and `shutdown`, under the committed oracle and under the stand-in file.
+///
+/// The oracle case calls `Launch::Confined` with
+/// `Storage::prepare("status-offers-shutdown")`. The generated case reads the
+/// declared fixture, calls `standin_profile`, writes that text with
+/// `write_standin_profile` under a fresh
+/// `Storage::prepare("status-offers-shutdown-standin")` base, and starts with
+/// `Launch::Profile` and `canonical_bindings`. The file passed to
+/// `Launch::Profile` has no line that starts with `;;`, and
+/// `collect_allow_lines` on that file, sorted, equals the oracle's allow
+/// lines, sorted. One local function holds the journey, and both cases call
+/// it. The two local compare functions stay in this test; the journey calls
+/// them for both cases. Each case answers `init`, then `status` data equals
+/// that `init` data, `offers_list` returns the hosted offer id, and the
+/// storage-root snapshot after `status`, after `offers_list`, and after
+/// `provider.shutdown()` returns equals the snapshot taken after `init`. A
+/// failure names the case. The compare uses `tree_snapshot`. The test starts
+/// no run and sets no `runtime_hosted_socket`. This is lab stand-in evidence.
 ///
 /// `tree_snapshot` records each relative path, its mode and its file bytes
-/// under `storage.root`. The first snapshot is taken once `init` has answered
-/// and `runs/` exists. The snapshot after `status`, the snapshot after
-/// `offers_list`, and the snapshot taken after `Provider::shutdown` returns
-/// each equal that first snapshot. `status` data equals the `init` data.
-/// `offers_list` returns the hosted offer id. The test starts no run and sets
-/// no `runtime_hosted_socket`. A difference names the call and the relative
-/// paths whose mode or bytes differ. On a host where `sandbox_available`
-/// fails, the test returns.
+/// under `storage.root`. A difference names the case, the call, and the
+/// relative paths whose mode or bytes differ. On a host where
+/// `sandbox_available` fails, the test returns.
 #[test]
 fn model_status_offers_and_shutdown_leave_storage_unchanged() {
     fn storage_tree_changes(
@@ -1308,6 +1320,7 @@ fn model_status_offers_and_shutdown_leave_storage_unchanged() {
     }
 
     fn same_storage_tree(
+        case: &str,
         call: &str,
         before: &[(PathBuf, u32, Vec<u8>)],
         after: &[(PathBuf, u32, Vec<u8>)],
@@ -1315,43 +1328,92 @@ fn model_status_offers_and_shutdown_leave_storage_unchanged() {
         let paths = storage_tree_changes(before, after).join(", ");
         assert_eq!(
             after, before,
-            "{call} changed the storage tree; relative paths whose mode or bytes differ: {paths}"
+            "{case}: {call} changed the storage tree; relative paths whose mode or bytes differ: {paths}"
         );
+    }
+
+    /// `init`, then `status`, `offers_list` and `shutdown`. Each snapshot
+    /// after those calls equals the snapshot taken after `init`.
+    fn status_offers_and_shutdown(case: &str, storage: &Storage, mut provider: Provider) {
+        let init = provider.ok(&init_request(storage, None));
+        assert!(
+            storage.root.join("runs").is_dir(),
+            "{case}: init must create runs/ under STORAGE_ROOT"
+        );
+        let after_init = tree_snapshot(&storage.root);
+
+        let status = provider.ok(&json!({ "op": "status" }));
+        assert_eq!(status, init, "{case}: status data must equal the init data");
+        same_storage_tree(case, "status", &after_init, &tree_snapshot(&storage.root));
+
+        let listed = provider.ok(&json!({ "op": "offers_list" }));
+        let ids: Vec<&Value> = listed["offers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case}: offers_list must return an offer array"))
+            .iter()
+            .map(|offer| &offer["id"])
+            .collect();
+        assert_eq!(
+            ids,
+            [HOSTED_OFFER],
+            "{case}: offers_list must return the configured offer: {listed}"
+        );
+        same_storage_tree(
+            case,
+            "offers_list",
+            &after_init,
+            &tree_snapshot(&storage.root),
+        );
+
+        provider.shutdown();
+        same_storage_tree(case, "shutdown", &after_init, &tree_snapshot(&storage.root));
     }
 
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
+
     let storage = Storage::prepare("status-offers-shutdown");
-    let mut provider = Provider::start(Launch::Confined(&storage));
+    let provider = Provider::start(Launch::Confined(&storage));
+    status_offers_and_shutdown("oracle", &storage, provider);
 
-    let init = provider.ok(&init_request(&storage, None));
+    let storage = Storage::prepare("status-offers-shutdown-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
+        panic!("generated: the file passed to Launch::Profile must be readable: {err}")
+    });
     assert!(
-        storage.root.join("runs").is_dir(),
-        "init must create runs/ under STORAGE_ROOT"
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "generated: the file passed to Launch::Profile has no line that starts with ;;"
     );
-    let after_init = tree_snapshot(&storage.root);
-
-    let status = provider.ok(&json!({ "op": "status" }));
-    assert_eq!(status, init, "status data must equal the init data");
-    same_storage_tree("status", &after_init, &tree_snapshot(&storage.root));
-
-    let listed = provider.ok(&json!({ "op": "offers_list" }));
-    let ids: Vec<&Value> = listed["offers"]
-        .as_array()
-        .expect("offers_list must return an offer array")
-        .iter()
-        .map(|offer| &offer["id"])
-        .collect();
+    let mut launched_lines = collect_allow_lines(&launched);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("generated: the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    launched_lines.sort();
+    oracle_lines.sort();
     assert_eq!(
-        ids,
-        [HOSTED_OFFER],
-        "offers_list must return the configured offer: {listed}"
+        launched_lines, oracle_lines,
+        "generated: sorted allow lines must equal the oracle's"
     );
-    same_storage_tree("offers_list", &after_init, &tree_snapshot(&storage.root));
-
-    provider.shutdown();
-    same_storage_tree("shutdown", &after_init, &tree_snapshot(&storage.root));
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    status_offers_and_shutdown("generated", &storage, provider);
 }
 
 /// The outside-read fixture's one rule: metadata, never content, of the run
@@ -1599,78 +1661,165 @@ fn model_outside_read_denied() {
     provider.shutdown();
 }
 
-/// Under the profile, `runs_events` and a terminal `runs_cancel` load the
-/// stored failed run and leave the storage tree unchanged.
+/// Under the oracle and under the generated stand-in file, `runs_events`
+/// and a terminal `runs_cancel` load the stored failed run and leave the
+/// storage tree unchanged.
 ///
-/// `runs_create` without `runtime_hosted_socket` stores the run as failed
-/// before any socket. The create data's `terminal.error.message` is
-/// `Hosted external HTTPS is paused.` `runs_events` with `after_sequence` 0
-/// returns schema `elastos.model.run-events/v1`, that run's `run_id`,
-/// `has_more` false, and a last event whose `kind` is `failed`.
-/// `runs_cancel` returns the create data. The storage tree after both calls
-/// equals the tree after create. A live cancel is not shown: the run is
-/// already terminal, so the call does not reach the adapter.
+/// The oracle case is `Launch::Confined` with
+/// `Storage::prepare("terminal-read")`. The generated case reads the
+/// declared fixture, calls `standin_profile`, writes that text with
+/// `write_standin_profile` under a fresh
+/// `Storage::prepare("terminal-read-standin")`, and starts with
+/// `Launch::Profile` and `canonical_bindings`. The file passed to
+/// `Launch::Profile` has no line that starts with `;;`, and its sorted
+/// allow lines equal the oracle's. One local function holds the page and
+/// cancel assertions, and both cases call it.
+///
+/// Each case stores one run. `runs_create` sets no `runtime_hosted_socket`
+/// and stores the run as failed before any socket. The create data's
+/// `terminal.error.message` is `Hosted external HTTPS is paused.`
+/// `runs_events` with `after_sequence` 0 returns schema
+/// `elastos.model.run-events/v1`, that run's `run_id`, `has_more` false,
+/// and a last event whose `kind` is `failed`. `runs_cancel` returns the
+/// create data. The storage tree after both calls equals the tree after
+/// create. Then `offers_list` answers and `shutdown` exits cleanly. A
+/// failure names the case. The test does not call `settle`. A live cancel
+/// is not shown: the run is already terminal, so the call does not reach
+/// the adapter. This evidence is for the lab launcher.
 #[test]
 fn model_terminal_run_page_and_cancel_read_under_profile() {
+    /// The stored run's page and terminal cancel. `runs_events` and
+    /// `runs_cancel` are built from `run.get`, with `after_sequence` 0.
+    /// `offers_list` answers and `shutdown` exits cleanly. A failure names
+    /// `case`.
+    fn assert_terminal_page_and_cancel(
+        case: &str,
+        mut provider: Provider,
+        storage: &Storage,
+        run: &HostedRun,
+    ) {
+        let init = provider.request(&init_request(storage, None));
+        assert_eq!(init["status"], "ok", "{case}: init must succeed: {init}");
+        assert_serving(&init["data"]);
+
+        let created_response = provider.request(&run.create);
+        assert_eq!(
+            created_response["status"], "ok",
+            "{case}: runs_create must store the run: {created_response}"
+        );
+        let created = &created_response["data"];
+        assert_eq!(
+            created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
+            "{case}: the binary must refuse hosted dispatch before any socket: {created}"
+        );
+        let after_create = tree_snapshot(&storage.root);
+
+        let events_response = provider.request(&json!({
+            "op": "runs_events",
+            "run_id": run.get["run_id"].clone(),
+            "after_sequence": 0,
+            "runtime_binding": run.get["runtime_binding"].clone()
+        }));
+        assert_eq!(
+            events_response["status"], "ok",
+            "{case}: runs_events must answer: {events_response}"
+        );
+        let events = &events_response["data"];
+        assert_eq!(
+            events["schema"], "elastos.model.run-events/v1",
+            "{case}: runs_events must use the run-events schema: {events}"
+        );
+        assert_eq!(
+            events["run_id"], created["run_id"],
+            "{case}: runs_events must name the stored run: {events}"
+        );
+        assert_eq!(
+            events["has_more"], false,
+            "{case}: the terminal page must not continue: {events}"
+        );
+        let last = events["events"]
+            .as_array()
+            .and_then(|page| page.last())
+            .unwrap_or_else(|| panic!("{case}: the stored run must keep a last event"));
+        assert_eq!(
+            last["kind"], "failed",
+            "{case}: the last event kind must be failed: {events}"
+        );
+
+        let cancelled_response = provider.request(&json!({
+            "op": "runs_cancel",
+            "run_id": run.get["run_id"].clone(),
+            "runtime_binding": run.get["runtime_binding"].clone()
+        }));
+        assert_eq!(
+            cancelled_response["status"], "ok",
+            "{case}: runs_cancel must answer: {cancelled_response}"
+        );
+        assert_eq!(
+            &cancelled_response["data"], created,
+            "{case}: a terminal runs_cancel must return the stored run"
+        );
+        assert_eq!(
+            tree_snapshot(&storage.root),
+            after_create,
+            "{case}: runs_events and a terminal runs_cancel must not write"
+        );
+
+        let listed = provider.request(&json!({ "op": "offers_list" }));
+        assert_eq!(
+            listed["status"], "ok",
+            "{case}: offers_list must answer: {listed}"
+        );
+        provider.shutdown();
+    }
+
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
+
     let storage = Storage::prepare("terminal-read");
     let run = HostedRun::new("request:terminal-read");
+    let provider = Provider::start(Launch::Confined(&storage));
+    assert_terminal_page_and_cancel("oracle", provider, &storage, &run);
 
-    let mut provider = Provider::start(Launch::Confined(&storage));
-    assert_serving(&provider.ok(&init_request(&storage, None)));
-    let created = provider.ok(&run.create);
-    assert_eq!(
-        created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
-        "the binary must refuse hosted dispatch before any socket: {created}"
+    let storage = Storage::prepare("terminal-read-standin");
+    let run = HostedRun::new("request:terminal-read-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
+        panic!("generated: the file passed to Launch::Profile must be readable: {err}")
+    });
+    assert!(
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "generated: the file passed to Launch::Profile has no line that starts with ;;: {launched}"
     );
-    let after_create = tree_snapshot(&storage.root);
-
-    let events = provider.ok(&json!({
-        "op": "runs_events",
-        "run_id": run.get["run_id"].clone(),
-        "after_sequence": 0,
-        "runtime_binding": run.get["runtime_binding"].clone()
-    }));
+    let mut launched_lines = collect_allow_lines(&launched);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("generated: the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    launched_lines.sort();
+    oracle_lines.sort();
     assert_eq!(
-        events["schema"], "elastos.model.run-events/v1",
-        "runs_events must use the run-events schema: {events}"
+        launched_lines, oracle_lines,
+        "generated: the stand-in file's allow lines must equal the oracle's"
     );
-    assert_eq!(
-        events["run_id"], created["run_id"],
-        "runs_events must name the stored run: {events}"
-    );
-    assert_eq!(
-        events["has_more"], false,
-        "the terminal page must not continue: {events}"
-    );
-    let last = events["events"]
-        .as_array()
-        .and_then(|page| page.last())
-        .expect("the stored run must keep a last event");
-    assert_eq!(
-        last["kind"], "failed",
-        "the last event kind must be failed: {events}"
-    );
-
-    let cancelled = provider.ok(&json!({
-        "op": "runs_cancel",
-        "run_id": run.get["run_id"].clone(),
-        "runtime_binding": run.get["runtime_binding"].clone()
-    }));
-    assert_eq!(
-        cancelled, created,
-        "a terminal runs_cancel must return the stored run"
-    );
-    assert_eq!(
-        tree_snapshot(&storage.root),
-        after_create,
-        "runs_events and a terminal runs_cancel must not write"
-    );
-
-    provider.ok(&json!({ "op": "offers_list" }));
-    provider.shutdown();
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_terminal_page_and_cancel("generated", provider, &storage, &run);
 }
 
 /// The outside-create fixture's one rule: metadata, never content, of the
@@ -2628,6 +2777,80 @@ fn generated_profile_refuses_an_unbound_copy() {
     assert!(after == before, "the copy must keep its mode and bytes");
 }
 
+/// The stand-in file serves the copy bound as `PROVIDER_EXECUTABLE`.
+///
+/// The oracle launch stays `model_bound_copy_serves_under_profile`, which
+/// starts the copy under `PROFILE_PATH`. `standin_profile` builds the text,
+/// `write_standin_profile` writes it under the storage base, and the written
+/// file has no `;;` line. Its sorted allow lines equal the oracle's. The
+/// copy is bound as `PROVIDER_EXECUTABLE` and started. `init` passes
+/// `assert_serving`, `runs/` exists under `STORAGE_ROOT`, and `shutdown`
+/// exits cleanly. After `start`, the recorded profile path is the stand-in
+/// file. The evidence is for the lab launcher. It makes no claim that the
+/// Runtime enforced the profile or that B3 is complete, and it does not
+/// count toward B1. When `sandbox-exec` is missing on a host OS other than
+/// macOS it prints a skip reason and returns. On macOS a missing
+/// `sandbox-exec` fails the test.
+///
+/// A plant that points this launch at the committed oracle still answers
+/// `init`, so this test has no falsifier. F-cc46a already scores that
+/// substitution on `generated_profile_refuses_an_unbound_copy`.
+#[test]
+fn generated_profile_bound_copy_serves() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare("bound-copy-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let written = stored.storage.base.join("standin.sb");
+    write_standin_profile(&written, &generated);
+    let written_text = fs::read_to_string(&written)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the launched file has no ;; line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+
+    let mut provider = Provider::start(Launch::Program {
+        storage: &stored.storage,
+        executable: &stored.copy,
+        program: &stored.copy,
+        profile: &written,
+        bound_digest: None,
+    });
+    assert_eq!(
+        applied_profile(),
+        written,
+        "the recorded path must be the stand-in file"
+    );
+
+    assert_serving(&provider.ok(&init_request(&stored.storage, None)));
+    assert!(
+        stored.storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT beside the copy"
+    );
+    provider.shutdown();
+}
+
 /// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
 /// the profile's exec refusal. The profile binds PROVIDER_EXECUTABLE by path.
 ///
@@ -3205,6 +3428,79 @@ fn standin_refuses_a_start_it_cannot_apply() {
         },
         &storage,
         "expecting ')'",
+    );
+}
+
+/// A generated profile with `STORAGE_ROOT` unbound never starts the provider.
+///
+/// `standin_profile` builds the text from the approved declared rights.
+/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`,
+/// outside `STORAGE_PARENT`. The written file has no `;;` line, and its
+/// sorted allow lines equal the oracle's. The bindings are
+/// `canonical_bindings` with the `STORAGE_ROOT` pair removed, so
+/// `PROVIDER_EXECUTABLE` stays the real binary and `STORAGE_PARENT` stays.
+/// `assert_startup_is_refused` reads exit 65 and the marker
+/// `invalid data type of path filter`. The launch records the profile path
+/// it applies, and that path is the stand-in file. This evidence is for the
+/// lab launcher.
+///
+/// Falsifier: F-cc47a makes this launch use the committed oracle instead of
+/// the stand-in file. Both files exit 65. The recorded path is the oracle,
+/// so this test fails.
+#[test]
+fn generated_profile_refuses_an_unbound_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let storage = Storage::prepare("standin-unbound-root");
+    let unbound_root_profile = storage.base.join("standin.sb");
+    write_standin_profile(&unbound_root_profile, &generated);
+    let written_text = fs::read_to_string(&unbound_root_profile)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in file has no comment line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(&storage, &binary);
+    let without_root: Vec<(&'static str, PathBuf)> = canonical
+        .iter()
+        .filter(|(name, _)| *name != "STORAGE_ROOT")
+        .cloned()
+        .collect();
+    assert_startup_is_refused(
+        "the generated profile names an unbound parameter",
+        Launch::Profile {
+            profile: &unbound_root_profile,
+            bindings: &without_root,
+        },
+        &storage,
+        "invalid data type of path filter",
+    );
+    assert_eq!(
+        applied_profile(),
+        unbound_root_profile,
+        "the launch must apply the stand-in file"
     );
 }
 

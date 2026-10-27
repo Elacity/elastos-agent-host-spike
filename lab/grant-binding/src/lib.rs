@@ -460,6 +460,31 @@ fn model_extended_identity_is_refused() {
 }
 
 #[test]
+fn model_case_different_identity_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .host_set_identity(instance, "Agent-1")
+        .expect("set identity");
+    let refusal = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect_err("case-different identity");
+    assert_eq!(refusal, Refuse::Identity);
+    assert_eq!(refusal.to_string(), "identity does not match the grant");
+    verifier
+        .host_set_identity(instance, "agent-1")
+        .expect("restore identity");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("the stored identity still matches");
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_extended_session_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -882,6 +907,26 @@ fn model_forged_overwrite_does_not_widen_the_use_path() {
     let refusal = verifier
         .use_path(&call, &request, "UsersAI/agent-1/other")
         .expect_err("forged overwrite does not widen the use path");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_widen_the_use_path() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let refusal = verifier
+        .use_path(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("forged child journal does not widen the use path");
     assert_eq!(refusal, Refuse::OutsideRoot);
     assert_eq!(refusal.to_string(), "use path leaves the owned root");
 }

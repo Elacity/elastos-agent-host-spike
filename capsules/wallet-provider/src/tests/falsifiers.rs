@@ -167,8 +167,22 @@ use std::process::Command;
 /// on a denied case the widened grant permits, and WP117 writes the generated
 /// profile but starts under the committed `confine.sb`, so
 /// `standin_start_runs_under_the_generated_profile_not_the_committed_file`
-/// fails because the start is then Started.
-const EXPECTED_FALSIFIERS: usize = 118;
+/// fails because the start is then Started. Task 097's WP118 removes the tool
+/// check, so did's case (c2) is Started; WP119 removes the binary-file check,
+/// so did's case (c3) panics in `resolved`; and WP120 returns `Ok(provider)`
+/// for an `init` answer that is not `ok`, so did's case (f) is Started.
+/// Task 098's WP121 removes the planted-key push, so
+/// `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
+/// naming the missing case; WP122 drops the refusal `code`, so
+/// `suite_entry_keeps_the_refusal_code` fails; and WP123 records every bound
+/// result as `Ok`, so `wallet_suite_entry_records_an_inner_refusal_as_refused`
+/// fails. Task 096's WP124 makes the stand-in use wallet's root layout for did,
+/// so `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+/// fails because the did start is refused at its first `init`. Task 099's
+/// WP125 makes the absent-tool check never fire, so did's case (c) is answered
+/// by the wrong-tool reason and lacks `is absent`; and WP126 drops the OS from
+/// the wrong-tool reason, so did's case (c2) lacks `macos`.
+const EXPECTED_FALSIFIERS: usize = 124;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
