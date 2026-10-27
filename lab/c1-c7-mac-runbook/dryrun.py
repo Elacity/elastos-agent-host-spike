@@ -157,6 +157,8 @@ def evidence_text(kind: str) -> str:
         extras.append("wallet/confined_outside_write_is_denied: FAIL")
         failed = 1
         passed = 31
+    elif kind == "lookalike":
+        extras.append("wallet/conf\u0456ned_outside_write_is_denied: FAIL")
     lines = ["C1-C7 mac sandbox-exec", f"pin: {PIN_C17}"]
     lines.extend(f"{row}: {statuses[row]}" for row in ROWS if row in statuses)
     lines.extend(extras)
@@ -167,6 +169,33 @@ def evidence_text(kind: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def probe_text(kind: str) -> str:
+    if kind == "probe-duplicate":
+        return "SBPL_PROBE: DENIED\nSBPL_PROBE: ALLOWED\n"
+    if kind == "probe-invalid":
+        return "SBPL_PROBE: MAYBE\n"
+    if kind == "probe-non-ascii":
+        return "SBPL_PROBE: DENIED\n# lookalike \u0399\n"
+    return "SBPL_PROBE: DENIED\n"
+
+
+def probe_write_sh(kind: str) -> str:
+    if kind == "probe-missing":
+        return ""
+    if kind == "probe-symlink":
+        return (
+            "mkdir -p -- \"$lane/probe\"\n"
+            "cat > \"$HOME/planted-sbpl.out\" <<'EOF'\n"
+            "SBPL_PROBE: DENIED\n"
+            "EOF\n"
+            "ln -s -- \"$HOME/planted-sbpl.out\" \"$lane/probe/sbpl.out\"\n"
+        )
+    return (
+        "mkdir -p -- \"$lane/probe\"\n"
+        f"cat > \"$lane/probe/sbpl.out\" <<'EOF'\n{probe_text(kind)}EOF\n"
+    )
+
+
 def write_run_sh(run: Path, kind: str) -> None:
     header = "#!/usr/bin/env bash\nset -euo pipefail\nlane=$(cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
     happy = evidence_text("happy")
@@ -175,20 +204,107 @@ def write_run_sh(run: Path, kind: str) -> None:
         body = (
             header
             + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
             + "(\n"
             + "  sleep 8\n"
             + f"  cat > \"$lane/evidence.txt\" <<'EOF'\n{fail}EOF\n"
             + ") &\n"
         )
     elif kind == "elastos":
-        body = header + "mkdir -p -- \"$HOME/.elastos\"\n" + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        body = (
+            header
+            + "mkdir -p -- \"$HOME/.elastos\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+        )
     elif kind == "exit1":
-        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n" + "exit 1\n"
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + "exit 1\n"
+        )
     elif kind == "survived":
-        body = header + "printf 'F-C17 SURVIVED\\n'\n" + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        body = (
+            header
+            + "printf 'F-C17 SURVIVED\\n'\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+        )
+    elif kind in ("setsid", "python-double-fork"):
+        fail = evidence_text("fail")
+        helper = (
+            "cat > \"$lane/rewrite-later.py\" <<'PY'\n"
+            "import pathlib, sys, time\n"
+            "time.sleep(12)\n"
+            "pathlib.Path(sys.argv[1]).write_bytes(pathlib.Path(sys.argv[2]).read_bytes())\n"
+            "PY\n"
+            f"cat > \"$lane/rewrite-later.txt\" <<'EOF'\n{fail}EOF\n"
+        )
+        if kind == "setsid":
+            launch = (
+                "setsid python3 -I \"$lane/rewrite-later.py\" "
+                "\"$lane/evidence.txt\" \"$lane/rewrite-later.txt\" &\n"
+            )
+        else:
+            launch = (
+                "cat > \"$lane/double-fork.py\" <<'PY'\n"
+                "import os, sys\n"
+                "script, ev, src = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+                "if os.fork() > 0:\n"
+                "    raise SystemExit(0)\n"
+                "os.setsid()\n"
+                "if os.fork() > 0:\n"
+                "    os._exit(0)\n"
+                "os.execv(sys.executable, [sys.executable, '-I', script, ev, src])\n"
+                "PY\n"
+                "python3 -I \"$lane/double-fork.py\" "
+                "\"$lane/rewrite-later.py\" \"$lane/evidence.txt\" \"$lane/rewrite-later.txt\"\n"
+            )
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + helper
+            + launch
+        )
+    elif kind == "symlink":
+        body = (
+            header
+            + f"cat > \"$HOME/planted-evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "ln -s -- \"$HOME/planted-evidence.txt\" \"$lane/evidence.txt\"\n"
+            + probe_write_sh(kind)
+        )
+    elif kind == "home-redirect":
+        body = (
+            header
+            + "c17_login=$(eval echo ~$(id -un))\n"
+            + "mkdir -p -- \"$c17_login/.elastos\"\n"
+            + "printf 'planted\\n' > \"$c17_login/.elastos/c17-home-redirect\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+        )
+    elif kind == "existing-elastos-write":
+        body = (
+            header
+            + "mkdir -p -- \"$HOME/.elastos\"\n"
+            + "printf 'planted\\n' > \"$HOME/.elastos/c17-existing-write\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+        )
+    elif kind == "cr-row":
+        planted = happy.replace(
+            "wallet/confined_outside_write_is_denied: PASS",
+            "wallet/confined_outside_write_is_denied: FAIL\rwallet/confined_outside_write_is_denied: PASS",
+        )
+        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{planted}EOF\n" + probe_write_sh(kind)
     else:
-        ev_kind = kind if kind in ("fail", "missing-test", "duplicate-row", "ignored-count", "pass-then-fail") else "happy"
-        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{evidence_text(ev_kind)}EOF\n"
+        ev_kind = (
+            kind
+            if kind in ("fail", "missing-test", "duplicate-row", "ignored-count", "pass-then-fail", "lookalike")
+            else "happy"
+        )
+        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{evidence_text(ev_kind)}EOF\n" + probe_write_sh(kind)
     run.write_text(body, encoding="utf-8")
     run.chmod(0o755)
 
@@ -243,6 +359,11 @@ def write_fixture(root: Path, kind: str, *, include_pin: bool = True) -> Path:
     return repo
 
 
+def login_home_path() -> Path:
+    out = subprocess.check_output(["bash", "-c", "eval echo ~$(id -un)"], text=True)
+    return Path(out.strip())
+
+
 def hide_tool(path: str, name: str) -> str:
     kept = []
     for part in path.split(":"):
@@ -263,10 +384,14 @@ def run_block(
     include_pin: bool = True,
     fake_home: bool = False,
     stale_summary: bool = False,
+    existing_elastos: bool = False,
 ) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix=f"c17-mac-dryrun-{kind}-"))
     started = time.time()
-    timeout = 180 if kind == "late-rewrite" else 120
+    timeout = 180
+    login_elastos = login_home_path() / ".elastos"
+    login_existed = login_elastos.exists()
+    planted_login = login_elastos / "c17-home-redirect"
     try:
         shim_dir = tmp / "shims"
         if shim:
@@ -298,6 +423,10 @@ def run_block(
                 env["RUSTUP_HOME"] = str(rustup_home)
             if cargo_home.is_dir():
                 env["CARGO_HOME"] = str(cargo_home)
+            if existing_elastos:
+                elastos = home / ".elastos"
+                elastos.mkdir()
+                (elastos / "pre-existing").write_text("before\n", encoding="utf-8")
         if hide is None:
             remote = write_fixture(tmp, kind, include_pin=include_pin)
             env["C17_REMOTE"] = str(remote)
@@ -316,6 +445,7 @@ def run_block(
         output = (done.stdout or "") + (done.stderr or "")
         last = ""
         reason = ""
+        probe = ""
         if summary.is_file():
             lines = summary.read_text(encoding="utf-8").splitlines()
             if lines:
@@ -323,12 +453,15 @@ def run_block(
             for line in lines:
                 if line.startswith("reason: "):
                     reason = line[len("reason: ") :]
+                if line.startswith("SBPL_PROBE:"):
+                    probe = line
         return {
             "kind": kind,
             "exit": done.returncode,
             "seconds": round(time.time() - started, 3),
             "last": last,
             "reason": reason,
+            "probe": probe,
             "output": output,
             "summary": str(summary) if summary.is_file() else "",
             "workdir": str(work),
@@ -341,11 +474,17 @@ def run_block(
             "seconds": round(time.time() - started, 3),
             "last": "",
             "reason": f"TIMEOUT after {error.timeout}s",
+            "probe": "",
             "output": (error.stdout or "") + (error.stderr or ""),
             "summary": "",
             "workdir": str(tmp / "work"),
             "tmp": str(tmp),
         }
+    finally:
+        if planted_login.exists():
+            planted_login.unlink()
+        if kind == "home-redirect" and not login_existed and login_elastos.exists():
+            shutil.rmtree(login_elastos, ignore_errors=True)
 
 
 def caught(ok: bool) -> str:
@@ -401,36 +540,69 @@ def main() -> int:
     static("exact", "--exact" in run_text)
     static("probe", r"#\; x (allow file*)" in run_text)
     static("ignored-fixture-excluded", "ignored_falsifier_fixture" not in text and "ignored_falsifier_fixture" not in run_text)
+    static("argv-wait", '["ps", "-ax", "-o", "pid,command"]' in text)
+    static("lsof-quiet", "lsof" in text and "sleep 15" in text)
+    static("login-home", "eval echo ~$(id -un)" in text)
+    static("probe-file", "probe/sbpl.out" in text and "probe/sbpl.out" in run_text)
 
     cases = [
-        ("happy", run_block(block, kind="happy", shim=True), "C1-C7: PASS.", None),
-        ("missing-test", run_block(block, kind="missing-test", shim=True), "C1-C7: NOT RUN.", "model_outside_write_denied"),
-        ("duplicate-row", run_block(block, kind="duplicate-row", shim=True), "C1-C7: FAIL.", None),
-        ("ignored-count", run_block(block, kind="ignored-count", shim=True), "C1-C7: FAIL.", "ignored"),
-        ("exit1-with-pass", run_block(block, kind="exit1", shim=True), "C1-C7: FAIL.", "run.sh exited"),
-        ("late-rewrite", run_block(block, kind="late-rewrite", shim=True), "C1-C7: FAIL.", None),
-        ("stale-summary", run_block(block, kind="stale-summary", shim=True, stale_summary=True), "C1-C7: NOT RUN.", "summary"),
-        ("missing-pin", run_block(block, kind="happy", shim=True, include_pin=False), "C1-C7: NOT RUN.", "ea25c4d6"),
-        ("planted-fail", run_block(block, kind="fail", shim=True), "C1-C7: FAIL.", "FAIL"),
-        ("elastos-created", run_block(block, kind="elastos", shim=True, fake_home=True), "C1-C7: FAIL.", ".elastos"),
-        ("missing-sandbox-exec", run_block(block, kind="missing-sandbox-exec", shim=True, hide="sandbox-exec"), "C1-C7: NOT RUN.", "sandbox-exec"),
-        ("pass-then-fail", run_block(block, kind="pass-then-fail", shim=True), "C1-C7: FAIL.", None),
+        ("happy", run_block(block, kind="happy", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: DENIED"),
+        ("missing-test", run_block(block, kind="missing-test", shim=True), "C1-C7: NOT RUN.", "model_outside_write_denied", None),
+        ("duplicate-row", run_block(block, kind="duplicate-row", shim=True), "C1-C7: FAIL.", None, None),
+        ("ignored-count", run_block(block, kind="ignored-count", shim=True), "C1-C7: FAIL.", "ignored", None),
+        ("exit1-with-pass", run_block(block, kind="exit1", shim=True), "C1-C7: FAIL.", "run.sh exited", None),
+        ("late-rewrite", run_block(block, kind="late-rewrite", shim=True), "C1-C7: FAIL.", None, None),
+        ("stale-summary", run_block(block, kind="stale-summary", shim=True, stale_summary=True), "C1-C7: NOT RUN.", "summary", None),
+        ("missing-pin", run_block(block, kind="happy", shim=True, include_pin=False), "C1-C7: NOT RUN.", "ea25c4d6", None),
+        ("planted-fail", run_block(block, kind="fail", shim=True), "C1-C7: FAIL.", "FAIL", None),
+        ("elastos-created", run_block(block, kind="elastos", shim=True, fake_home=True), "C1-C7: FAIL.", ".elastos", None),
+        ("missing-sandbox-exec", run_block(block, kind="missing-sandbox-exec", shim=True, hide="sandbox-exec"), "C1-C7: NOT RUN.", "sandbox-exec", None),
+        ("pass-then-fail", run_block(block, kind="pass-then-fail", shim=True), "C1-C7: FAIL.", None, None),
+        ("setsid-rewrite", run_block(block, kind="setsid", shim=True), "C1-C7: FAIL.", None, None),
+        ("python-double-fork", run_block(block, kind="python-double-fork", shim=True), "C1-C7: FAIL.", None, None),
+        ("evidence-symlink", run_block(block, kind="symlink", shim=True, fake_home=True), "C1-C7: FAIL.", "evidence.txt", None),
+        ("lookalike-row", run_block(block, kind="lookalike", shim=True), "C1-C7: FAIL.", "non-ASCII", None),
+        ("cr-row", run_block(block, kind="cr-row", shim=True), "C1-C7: FAIL.", "CR", None),
+        ("home-redirect", run_block(block, kind="home-redirect", shim=True, fake_home=True), "C1-C7: FAIL.", ".elastos", None),
+        (
+            "existing-elastos-write",
+            run_block(
+                block,
+                kind="existing-elastos-write",
+                shim=True,
+                fake_home=True,
+                existing_elastos=True,
+            ),
+            "C1-C7: FAIL.",
+            ".elastos",
+            None,
+        ),
+        ("probe-symlink", run_block(block, kind="probe-symlink", shim=True, fake_home=True), "C1-C7: FAIL.", "SBPL probe", None),
+        ("probe-non-ascii", run_block(block, kind="probe-non-ascii", shim=True), "C1-C7: FAIL.", "non-ASCII", None),
+        ("probe-missing", run_block(block, kind="probe-missing", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: NOT RUN"),
+        ("probe-duplicate", run_block(block, kind="probe-duplicate", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: NOT RUN"),
+        ("probe-invalid", run_block(block, kind="probe-invalid", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: NOT RUN"),
     ]
 
     missed = 0 if static_ok else 1
-    for name, result, want_last, want_reason in cases:
+    for name, result, want_last, want_reason, want_probe in cases:
         last_ok = result["last"] == want_last
         reason_ok = True
         if want_reason:
             blob = result["reason"] + "\n" + result["output"]
             reason_ok = want_reason in blob
-        ok = last_ok and reason_ok
+        probe_ok = True
+        if want_probe:
+            probe_ok = result["probe"] == want_probe
+        ok = last_ok and reason_ok and probe_ok
         tag = caught(ok)
         if not ok:
             missed += 1
         print(f"{name}: last={result['last']!r} exit={result['exit']} {tag}")
         if result["reason"]:
             print(f"  reason: {result['reason']}")
+        if result["probe"]:
+            print(f"  probe: {result['probe']}")
         if not ok:
             tail = "\n".join(result["output"].splitlines()[-40:])
             print(tail)

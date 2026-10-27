@@ -71,6 +71,8 @@ c17_write_evidence() {
       printf 'SBPL_PROBE_DETAIL: %s\n' "$c17_probe_detail"
     fi
   } > "$evidence"
+  mkdir -p -- "$probe_dir"
+  printf 'SBPL_PROBE: %s\n' "${c17_probe:-NOT MEASURED}" > "$probe_dir/sbpl.out"
 }
 
 c17_list_names() {

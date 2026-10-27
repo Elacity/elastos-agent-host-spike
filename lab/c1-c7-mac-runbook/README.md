@@ -10,15 +10,18 @@ other lab lanes, or any 0.8.0 runtime code.
 
 Linux already booked the lab-check half of C1-C7. The 32 sandbox-exec
 tests stay **NOT RUN ON MAC** until this paste's `summary.txt` ends
-with `C1-C7: PASS.` The probe line is a measured fact (`ALLOWED` or
-`DENIED`). It does not write that last line.
+with `C1-C7: PASS.` The probe line comes from `probe/sbpl.out` after the same
+regular-file, ASCII, and once-written checks as `evidence.txt`.
+Exactly one `SBPL_PROBE` line with `ALLOWED` or `DENIED` is a
+measured fact. Any other probe file is `SBPL_PROBE: NOT RUN`.
+That line does not write the last booking line.
 
 ## Paste block
 
 The only ` ```bash ` fence in this file:
 
-- sha256: 215ef8230e48789747e5610fc0998d6dafd96690452495d1645ae47b3011a1a7
-- bytes: 16959
+- sha256: 2e1aa417b4a6586990554907fd1a34e540cfd887ceb59ee3be9aeef87079f59b
+- bytes: 27168
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
@@ -47,6 +50,18 @@ confine suites. It plants these cases:
 | created `~/.elastos` | `C1-C7: FAIL.` | `run.sh` creates `$HOME/.elastos` |
 | missing sandbox-exec | `C1-C7: NOT RUN.` | Darwin shim without `sandbox-exec` |
 | PASS then FAIL | `C1-C7: FAIL.` | same row `PASS` then `FAIL` |
+| `setsid` rewrite | `C1-C7: FAIL.` | `setsid` daemon sleeps 12s, then writes FAIL |
+| Python double-fork | `C1-C7: FAIL.` | `os.setsid` plus double fork, then writes FAIL |
+| evidence symlink | `C1-C7: FAIL.` | `evidence.txt` is a symlink outside the clone |
+| lookalike row | `C1-C7: FAIL.` | non-ASCII lookalike FAIL plus a real PASS |
+| CR in a row | `C1-C7: FAIL.` | CR splits FAIL and PASS on one physical line |
+| `HOME` redirect | `C1-C7: FAIL.` | dummy `HOME`; `run.sh` creates the login-home `~/.elastos` |
+| existing `~/.elastos` write | `C1-C7: FAIL.` | `run.sh` writes into a pre-existing `~/.elastos` |
+| probe symlink | `C1-C7: FAIL.` | `probe/sbpl.out` is a symlink outside the clone |
+| probe non-ASCII | `C1-C7: FAIL.` | probe file holds a non-ASCII byte |
+| missing probe file | `C1-C7: PASS.` | 32 PASS rows and no `probe/sbpl.out`; probe is NOT RUN |
+| duplicate probe line | `C1-C7: PASS.` | two `SBPL_PROBE` lines; probe is NOT RUN |
+| invalid probe value | `C1-C7: PASS.` | `SBPL_PROBE: MAYBE`; probe is NOT RUN |
 
 Recorded on this Linux x86_64 host, zsh 5.9, with the macOS shim.
 C1-C7 on macOS is **NOT RUN ON MAC** until Sash pastes the block on
@@ -66,6 +81,18 @@ Apple Silicon and that run's `summary.txt` ends with `C1-C7: PASS.`
 | created `~/.elastos` | `C1-C7: FAIL.` | `run.sh` creates `$HOME/.elastos` | CAUGHT |
 | missing sandbox-exec | `C1-C7: NOT RUN.` | Darwin shim without `sandbox-exec` | CAUGHT |
 | PASS then FAIL | `C1-C7: FAIL.` | same row `PASS` then `FAIL` | CAUGHT |
+| `setsid` rewrite | `C1-C7: FAIL.` | `setsid` daemon sleeps 12s, then writes FAIL | CAUGHT |
+| Python double-fork | `C1-C7: FAIL.` | `os.setsid` plus double fork, then writes FAIL | CAUGHT |
+| evidence symlink | `C1-C7: FAIL.` | `evidence.txt` is a symlink outside the clone | CAUGHT |
+| lookalike row | `C1-C7: FAIL.` | non-ASCII lookalike FAIL plus a real PASS | CAUGHT |
+| CR in a row | `C1-C7: FAIL.` | CR splits FAIL and PASS on one physical line | CAUGHT |
+| `HOME` redirect | `C1-C7: FAIL.` | dummy `HOME`; login-home `~/.elastos` created | CAUGHT |
+| existing `~/.elastos` write | `C1-C7: FAIL.` | write into a pre-existing `~/.elastos` | CAUGHT |
+| probe symlink | `C1-C7: FAIL.` | `probe/sbpl.out` is a symlink outside the clone | CAUGHT |
+| probe non-ASCII | `C1-C7: FAIL.` | probe file holds a non-ASCII byte | CAUGHT |
+| missing probe file | `C1-C7: PASS.` | no `probe/sbpl.out`; `SBPL_PROBE: NOT RUN` | CAUGHT |
+| duplicate probe line | `C1-C7: PASS.` | two `SBPL_PROBE` lines; `SBPL_PROBE: NOT RUN` | CAUGHT |
+| invalid probe value | `C1-C7: PASS.` | `SBPL_PROBE: MAYBE`; `SBPL_PROBE: NOT RUN` | CAUGHT |
 
 ## Before Sash pastes
 
@@ -75,6 +102,7 @@ Apple Silicon and that run's `summary.txt` ends with `C1-C7: PASS.`
 - `rustup --version` already works. The paste skips
   `toolchain install` when 1.91.0 is present. It never curls rustup.rs.
 - `/usr/bin/sandbox-exec` is present (macOS seatbelt).
+- `lsof` is on PATH. Apple Silicon Terminal already has it.
 - Do not clone first. The paste uses `mktemp` and a trap.
 - About 20 GiB free on the `/tmp` volume. First real run compiles the
   wallet, model, and did confine suites. Keep the Mac awake.
@@ -82,7 +110,8 @@ Apple Silicon and that run's `summary.txt` ends with `C1-C7: PASS.`
   password, Ctrl-C and paste again with
   `C17_REMOTE=git@github.com:Elacity/elastos-agent-host-spike.git`.
 - The paste never runs `elastos serve`, never writes Sash's real
-  Home, and refuses if it creates `~/.elastos`.
+  Home, and refuses if it creates or changes `~/.elastos` under
+  `$HOME` or the login home.
 
 Book the macOS half of C1-C7 only on `C1-C7: PASS.` from that Mac
 `summary.txt`. Send the `SBPL_PROBE` line with it. `ALLOWED` or
@@ -100,6 +129,7 @@ The paste does not install these, and it does not run `sudo`.
   Otherwise go to <https://rustup.rs> and run the install command on
   that page. Then close Terminal and open it again.
 - About 20 GiB free on the disk that holds `/tmp`.
+- `lsof` on PATH. Apple Silicon Terminal already has it.
 - Your usual GitHub sign-in. This repository is private.
 
 Do not clone first. The paste makes a fresh `mktemp` directory and
@@ -124,7 +154,11 @@ set -euo pipefail
 c17_finished=0
 c17_workdir=""
 c17_summary=""
-c17_elastos_before=""
+c17_login_home=""
+c17_elastos_home_before=""
+c17_elastos_login_before=""
+c17_elastos_home_snap=""
+c17_elastos_login_snap=""
 c17_row_lines=""
 c17_pin_c17=ea25c4d6d58f1dc08d29173b45349bfeb80903f3
 
@@ -182,6 +216,103 @@ c17_hash_file() {
   else
     shasum -a 256 -- "$1" | awk '{ print $1 }'
   fi
+}
+
+c17_snapshot_tree() {
+  python3 -I -c '
+import os
+import sys
+
+root = sys.argv[1]
+if not os.path.exists(root):
+    raise SystemExit(0)
+rows = []
+
+def add(kind, path, rel):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return
+    mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
+    rows.append("%s\t%d\t%d\t%s" % (kind, mtime, st.st_size, rel))
+
+if os.path.isdir(root) and not os.path.islink(root):
+    add("d", root, ".")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        filenames.sort()
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            add("d", path, os.path.relpath(path, root))
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            kind = "l" if os.path.islink(path) else "f"
+            add(kind, path, os.path.relpath(path, root))
+else:
+    kind = "l" if os.path.islink(root) else "f"
+    add(kind, root, ".")
+rows.sort(key=lambda line: line.split("\t")[-1])
+sys.stdout.write("\n".join(rows) + ("\n" if rows else ""))
+' "$1"
+}
+
+c17_same_path() {
+  python3 -I -c '
+import os, sys
+raise SystemExit(0 if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else 1)
+' "$1" "$2"
+}
+
+c17_lsof_writers() {
+  python3 -I -c '
+import os
+import subprocess
+import sys
+
+directory, evidence = sys.argv[1], sys.argv[2]
+self_pid = os.getpid()
+parent_pid = os.getppid()
+lines = []
+cmds = []
+if os.path.isdir(directory):
+    cmds.append(["lsof", "+D", directory])
+if os.path.exists(evidence):
+    cmds.append(["lsof", evidence])
+if not cmds:
+    raise SystemExit(0)
+for cmd in cmds:
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        sys.stdout.write("lsof-missing\n")
+        raise SystemExit(0)
+    for line in (done.stdout or "").splitlines():
+        if not line or line.startswith("COMMAND"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        if pid in (self_pid, parent_pid) or parts[0] == "lsof":
+            continue
+        lines.append(line)
+sys.stdout.write("\n".join(lines) + ("\n" if lines else ""))
+' "$1" "$2"
+}
+
+c17_regular_inside() {
+  python3 -I -c '
+import os, sys
+path, root = sys.argv[1], sys.argv[2]
+if os.path.islink(path) or not os.path.isfile(path):
+    raise SystemExit(1)
+resolved = os.path.realpath(path)
+base = os.path.realpath(root)
+raise SystemExit(0 if resolved.startswith(base + os.sep) else 1)
+' "$1" "$2"
 }
 
 if [ -n "${C17_SUMMARY:-}" ] && [ -e "$C17_SUMMARY" ]; then
@@ -266,6 +397,7 @@ c17_need_cmd rustup
 c17_need_cmd rustc
 c17_need_cmd cargo
 c17_need_cmd bash
+c17_need_cmd lsof
 
 if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
   c17_add_missing "neither sha256sum nor shasum is on PATH"
@@ -292,10 +424,34 @@ if [ -n "$c17_missing" ]; then
   c17_finish "NOT RUN" "$c17_missing"
 fi
 
+c17_login_home=$(eval echo ~$(id -un))
+case $c17_login_home in
+  ''|"~$(id -un)")
+    if command -v dscl >/dev/null 2>&1; then
+      c17_login_home=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{ print $2 }')
+    fi
+    ;;
+esac
+if [ -z "$c17_login_home" ]; then
+  c17_login_home=$HOME
+fi
+c17_elastos_home_snap="$c17_workdir/elastos-home.snap"
+c17_elastos_login_snap="$c17_workdir/elastos-login.snap"
 if [ -e "$HOME/.elastos" ]; then
-  c17_elastos_before=PRESENT
+  c17_elastos_home_before=PRESENT
+  c17_snapshot_tree "$HOME/.elastos" > "$c17_elastos_home_snap"
 else
-  c17_elastos_before=ABSENT
+  c17_elastos_home_before=ABSENT
+fi
+if [ -e "$c17_login_home/.elastos" ]; then
+  c17_elastos_login_before=PRESENT
+  if [ -n "$HOME" ] && c17_same_path "$HOME/.elastos" "$c17_login_home/.elastos"; then
+    cp -- "$c17_elastos_home_snap" "$c17_elastos_login_snap"
+  else
+    c17_snapshot_tree "$c17_login_home/.elastos" > "$c17_elastos_login_snap"
+  fi
+else
+  c17_elastos_login_before=ABSENT
 fi
 
 # 3. rustup skip-if-present. The paste never curls rustup.rs.
@@ -410,6 +566,37 @@ def alive(pid):
         return False
 
 
+def argv_mentions(needle):
+    found = []
+    try:
+        out = subprocess.check_output(["ps", "-ax", "-o", "pid,command"], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    self_pid = os.getpid()
+    for line in out.splitlines():
+        if needle not in line:
+            continue
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == self_pid:
+            continue
+        found.append(pid)
+    return found
+
+
+workdir = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.getcwd()
+clone = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.getcwd()
+lane = os.path.abspath("lab/c1-c7-mac-runbook")
+needles = []
+for item in (workdir, clone, lane, "lab/c1-c7-mac-runbook"):
+    if item not in needles:
+        needles.append(item)
+
 child = os.fork()
 if child == 0:
     try:
@@ -426,8 +613,16 @@ while time.time() < deadline:
     if live is None:
         sys.stderr.write("cannot list run.sh process group\n")
         raise SystemExit(1)
+    named = []
+    for needle in needles:
+        extra = argv_mentions(needle)
+        if extra is None:
+            sys.stderr.write("cannot list processes that name the temp clone dir\n")
+            raise SystemExit(1)
+        named.extend(extra)
     still = [pid for pid in live if pid != child and alive(pid)]
-    if not still:
+    named = [pid for pid in named if pid != child and alive(pid)]
+    if not still and not named:
         empty += 1
         if empty >= 2:
             raise SystemExit(rc)
@@ -438,23 +633,89 @@ sys.stderr.write("run.sh or one of its children was still running after 7200s\n"
 raise SystemExit(1)
 C17WAIT
 set +e
-python3 -I "$c17_wait_py" > "$c17_journey_out" 2>&1
+python3 -I "$c17_wait_py" "$c17_workdir" "$c17_clone" > "$c17_journey_out" 2>&1
 c17_journey_rc=$?
 set -e
 cat "$c17_journey_out"
 printf 'JOURNEY run.sh -> %s\n' "$c17_journey_rc"
 
 c17_evidence="$c17_clone/lab/c1-c7-mac-runbook/evidence.txt"
+c17_evidence_dir="$c17_clone/lab/c1-c7-mac-runbook"
+c17_probe_out="$c17_clone/lab/c1-c7-mac-runbook/probe/sbpl.out"
 c17_evidence_snap="$c17_workdir/evidence.snap"
+c17_probe_snap="$c17_workdir/sbpl.snap"
 c17_score_path=$c17_evidence
 c17_evidence_hash=""
-if [ -f "$c17_evidence" ]; then
-  cp -- "$c17_evidence" "$c17_evidence_snap"
-  c17_evidence_hash=$(c17_hash_file "$c17_evidence")
-  if [ "$(c17_hash_file "$c17_evidence_snap")" != "$c17_evidence_hash" ]; then
-    c17_finish "FAIL" "evidence snapshot did not match the live file"
+c17_probe_hash=""
+if [ -L "$c17_evidence" ] || [ -e "$c17_evidence" ]; then
+  if [ -L "$c17_evidence" ] || [ ! -f "$c17_evidence" ] || ! c17_regular_inside "$c17_evidence" "$c17_clone"; then
+    if [ -L "$c17_evidence" ] || [ ! -f "$c17_evidence" ]; then
+      c17_finish "FAIL" "evidence.txt is not a regular file in the clone"
+    fi
+    c17_finish "FAIL" "evidence.txt resolves outside the temp clone"
   fi
-  c17_score_path=$c17_evidence_snap
+fi
+if [ -L "$c17_probe_out" ] || [ -e "$c17_probe_out" ]; then
+  if [ -L "$c17_probe_out" ] || [ ! -f "$c17_probe_out" ] || ! c17_regular_inside "$c17_probe_out" "$c17_clone"; then
+    if [ -L "$c17_probe_out" ] || [ ! -f "$c17_probe_out" ]; then
+      c17_finish "FAIL" "SBPL probe output is not a regular file in the clone"
+    fi
+    c17_finish "FAIL" "SBPL probe output resolves outside the temp clone"
+  fi
+fi
+if [ -f "$c17_evidence" ] || [ -f "$c17_probe_out" ]; then
+  c17_writers=$(c17_lsof_writers "$c17_evidence_dir" "$c17_evidence")
+  if [ -n "$c17_writers" ]; then
+    c17_finish "FAIL" "evidence still has a live writer before the quiet period"
+  fi
+  if [ -e "$c17_probe_out" ]; then
+    c17_probe_writers=$(c17_lsof_writers "$c17_evidence_dir/probe" "$c17_probe_out")
+    if [ -n "$c17_probe_writers" ]; then
+      c17_finish "FAIL" "SBPL probe output still has a live writer before the quiet period"
+    fi
+  fi
+  c17_quiet_hash=""
+  c17_probe_quiet=""
+  if [ -f "$c17_evidence" ]; then
+    c17_quiet_hash=$(c17_hash_file "$c17_evidence")
+  fi
+  if [ -f "$c17_probe_out" ]; then
+    c17_probe_quiet=$(c17_hash_file "$c17_probe_out")
+  fi
+  sleep 15
+  c17_writers=$(c17_lsof_writers "$c17_evidence_dir" "$c17_evidence")
+  if [ -n "$c17_writers" ]; then
+    c17_finish "FAIL" "evidence still has a live writer after the quiet period"
+  fi
+  if [ -e "$c17_probe_out" ]; then
+    c17_probe_writers=$(c17_lsof_writers "$c17_evidence_dir/probe" "$c17_probe_out")
+    if [ -n "$c17_probe_writers" ]; then
+      c17_finish "FAIL" "SBPL probe output still has a live writer after the quiet period"
+    fi
+  fi
+  if [ -n "$c17_quiet_hash" ] && [ "$(c17_hash_file "$c17_evidence")" != "$c17_quiet_hash" ]; then
+    c17_finish "FAIL" "evidence.txt changed during the quiet period; C1-C7 cannot PASS on a moving file"
+  fi
+  if [ -n "$c17_probe_quiet" ]; then
+    if [ ! -f "$c17_probe_out" ] || [ "$(c17_hash_file "$c17_probe_out")" != "$c17_probe_quiet" ]; then
+      c17_finish "FAIL" "SBPL probe output changed during the quiet period; C1-C7 cannot PASS on a moving file"
+    fi
+  fi
+  if [ -f "$c17_evidence" ]; then
+    cp -- "$c17_evidence" "$c17_evidence_snap"
+    c17_evidence_hash=$(c17_hash_file "$c17_evidence")
+    if [ "$(c17_hash_file "$c17_evidence_snap")" != "$c17_evidence_hash" ]; then
+      c17_finish "FAIL" "evidence snapshot did not match the live file"
+    fi
+    c17_score_path=$c17_evidence_snap
+  fi
+  if [ -f "$c17_probe_out" ]; then
+    cp -- "$c17_probe_out" "$c17_probe_snap"
+    c17_probe_hash=$(c17_hash_file "$c17_probe_out")
+    if [ "$(c17_hash_file "$c17_probe_snap")" != "$c17_probe_hash" ]; then
+      c17_finish "FAIL" "SBPL probe snapshot did not match the live file"
+    fi
+  fi
 fi
 
 c17_score=$(python3 -I - "$c17_score_path" <<'PY'
@@ -501,13 +762,18 @@ if not evidence.is_file():
     print("run.sh wrote no evidence.txt")
     print("")
     raise SystemExit(0)
+raw = evidence.read_bytes()
+if b"\r" in raw or any(byte > 127 for byte in raw):
+    print("FAIL")
+    print("evidence rows contain a CR or non-ASCII byte")
+    print("")
+    raise SystemExit(0)
 rows = {}
 conflict = False
 ignored_count = None
 failed_count = None
 passed_count = None
-probe = None
-for line in evidence.read_text(encoding="utf-8", errors="replace").splitlines():
+for line in raw.decode("ascii").splitlines():
     if line.startswith("ignored:"):
         ignored_count = line.split(":", 1)[1].strip()
         continue
@@ -518,7 +784,6 @@ for line in evidence.read_text(encoding="utf-8", errors="replace").splitlines():
         passed_count = line.split(":", 1)[1].strip()
         continue
     if line.startswith("SBPL_PROBE:"):
-        probe = line.split(":", 1)[1].strip()
         continue
     for name in rows_order:
         prefix = name + ": "
@@ -538,8 +803,6 @@ for line in evidence.read_text(encoding="utf-8", errors="replace").splitlines():
                 conflict = True
             rows[name] = result
 body = "\n".join(f"{name}: {rows.get(name, 'MISSING')}" for name in rows_order)
-if probe:
-    body = body + "\nSBPL_PROBE: " + probe
 if conflict:
     print("FAIL")
     print("evidence has duplicate or disagreeing rows")
@@ -599,6 +862,48 @@ c17_verdict=$(printf '%s\n' "$c17_score" | awk 'NR==1 { print; exit }')
 c17_reason=$(printf '%s\n' "$c17_score" | awk 'NR==2 { print; exit }')
 c17_row_lines=$(printf '%s\n' "$c17_score" | awk 'NR>=3 { print }')
 
+c17_probe_src=""
+if [ -n "$c17_probe_hash" ] && [ -f "$c17_probe_snap" ]; then
+  c17_probe_src=$c17_probe_snap
+fi
+c17_probe_score=$(python3 -I - "$c17_probe_src" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not sys.argv[1] or not path.is_file():
+    print("SBPL_PROBE: NOT RUN")
+    raise SystemExit(0)
+raw = path.read_bytes()
+if b"\r" in raw or any(byte > 127 for byte in raw):
+    print("FAIL")
+    raise SystemExit(0)
+try:
+    text = raw.decode("ascii")
+except UnicodeDecodeError:
+    print("FAIL")
+    raise SystemExit(0)
+lines = [line for line in text.splitlines() if line.startswith("SBPL_PROBE:")]
+if len(lines) != 1:
+    print("SBPL_PROBE: NOT RUN")
+    raise SystemExit(0)
+value = lines[0].split(":", 1)[1].strip()
+if value in ("ALLOWED", "DENIED"):
+    print("SBPL_PROBE: " + value)
+else:
+    print("SBPL_PROBE: NOT RUN")
+PY
+)
+if [ "$c17_probe_score" = FAIL ]; then
+  c17_finish "FAIL" "SBPL probe output contains a CR or non-ASCII byte"
+fi
+if [ -n "$c17_row_lines" ]; then
+  c17_row_lines="${c17_row_lines}
+${c17_probe_score}"
+else
+  c17_row_lines=$c17_probe_score
+fi
+
 if [ -n "$c17_evidence_hash" ]; then
   if [ ! -f "$c17_evidence" ] || [ "$(c17_hash_file "$c17_evidence")" != "$c17_evidence_hash" ]; then
     c17_finish "FAIL" "evidence.txt changed after the snapshot; C1-C7 cannot PASS on a moving file"
@@ -607,8 +912,31 @@ if [ -n "$c17_evidence_hash" ]; then
     c17_finish "FAIL" "evidence snapshot was altered after it was taken"
   fi
 fi
-if [ "$c17_elastos_before" = ABSENT ] && [ -e "$HOME/.elastos" ]; then
+if [ -n "$c17_probe_hash" ]; then
+  if [ ! -f "$c17_probe_out" ] || [ "$(c17_hash_file "$c17_probe_out")" != "$c17_probe_hash" ]; then
+    c17_finish "FAIL" "SBPL probe output changed after the snapshot; C1-C7 cannot PASS on a moving file"
+  fi
+  if [ "$(c17_hash_file "$c17_probe_snap")" != "$c17_probe_hash" ]; then
+    c17_finish "FAIL" "SBPL probe snapshot was altered after it was taken"
+  fi
+fi
+if [ "$c17_elastos_home_before" = ABSENT ] && [ -e "$HOME/.elastos" ]; then
   c17_finish "FAIL" "this run created $HOME/.elastos; C1-C7 must stay inside the temp workdir"
+fi
+if [ "$c17_elastos_login_before" = ABSENT ] && [ -e "$c17_login_home/.elastos" ]; then
+  c17_finish "FAIL" "this run created $c17_login_home/.elastos; C1-C7 must stay inside the temp workdir"
+fi
+if [ "$c17_elastos_home_before" = PRESENT ]; then
+  c17_snapshot_tree "$HOME/.elastos" > "$c17_workdir/elastos-home.after"
+  if ! cmp -s "$c17_elastos_home_snap" "$c17_workdir/elastos-home.after"; then
+    c17_finish "FAIL" "this run changed $HOME/.elastos; C1-C7 must stay inside the temp workdir"
+  fi
+fi
+if [ "$c17_elastos_login_before" = PRESENT ]; then
+  c17_snapshot_tree "$c17_login_home/.elastos" > "$c17_workdir/elastos-login.after"
+  if ! cmp -s "$c17_elastos_login_snap" "$c17_workdir/elastos-login.after"; then
+    c17_finish "FAIL" "this run changed $c17_login_home/.elastos; C1-C7 must stay inside the temp workdir"
+  fi
 fi
 if [ "$c17_verdict" != "PASS" ] && [ "$c17_verdict" != "FAIL" ] && [ "$c17_verdict" != "NOT RUN" ]; then
   c17_finish "NOT RUN" "scorer printed no verdict"
@@ -641,28 +969,40 @@ applies only off macOS). The runner still passes `--exact
 
 The SBPL probe writes a deny-default profile that also holds
 `#\; x (allow file*)`, then asks `sandbox-exec` to `touch` a file
-under the temp folder. `SBPL_PROBE: ALLOWED` means the write landed.
-`SBPL_PROBE: DENIED` means the file stayed absent. That line is a
-measured fact. It does not write `C1-C7: PASS.`
+under the temp folder. `run.sh` writes one `SBPL_PROBE` line to
+`probe/sbpl.out`. The paste checks that file the same way as
+`evidence.txt`: regular file inside the temp clone, ASCII without
+CR, no live writer, and a 15s quiet re-hash. `SBPL_PROBE: ALLOWED`
+means the write landed. `SBPL_PROBE: DENIED` means the file stayed
+absent. Missing, duplicate, or any other value is
+`SBPL_PROBE: NOT RUN`. That line is a measured fact. It does not
+write `C1-C7: PASS.`
 
 ## What the last line means
 
 | Last line | Meaning |
 | --- | --- |
-| `C1-C7: PASS.` | Each of the 32 named tests appears exactly once as a **computed** PASS, `failed` and `ignored` are 0, and `run.sh` and its children exited 0. |
-| `C1-C7: FAIL.` | A test failed, a name appeared twice, `ignored` was greater than 0, `run.sh` exited nonzero, `evidence.txt` moved after the snapshot, or the run wrote outside the temp folder. |
+| `C1-C7: PASS.` | Each of the 32 named tests appears exactly once as a **computed** PASS, `failed` and `ignored` are 0, `run.sh` and any process that still names the temp clone dir exited 0, `evidence.txt` is a regular file inside the temp clone with no CR or non-ASCII byte, `lsof` showed no writer, and a 15s quiet re-hash stayed still. |
+| `C1-C7: FAIL.` | A test failed, a name appeared twice, `ignored` was greater than 0, `run.sh` exited nonzero, `evidence.txt` or the probe file was a symlink or lived outside the clone, a quiet-period hash moved, a live writer remained, a CR or non-ASCII byte appeared, or the run created or changed `~/.elastos` under `$HOME` or the login home. |
 | `C1-C7: NOT RUN.` | A named prerequisite was missing, the clone is not a descendant of `ea25c4d6`, `cargo --list` did not name all 32, a row was skipped, or a stale summary was reused. C1-C7 is not booked. |
 
 This paste does not print `C1-C7: PASS.` unless it parsed the 32
 rows from a snapshot of `lab/c1-c7-mac-runbook/evidence.txt` taken
-after `run.sh` and its children exited.
+after `run.sh`, any process that still names the temp clone dir, and
+a 15s quiet re-hash. The `SBPL_PROBE` line comes from
+`probe/sbpl.out` after the same checks. Exactly one `ALLOWED` or
+`DENIED` line is a measured fact. Anything else is
+`SBPL_PROBE: NOT RUN` and does not write the booking line.
 
 ## What this paste does not do
 
 - It does not run `elastos serve`.
 - It does not use Sash's real Home. `XDG_*` points at the temp folder.
   `HOME` stays your login home so rustup and cargo keep working. The
-  paste refuses if it creates `~/.elastos`.
+  paste watches both `$HOME/.elastos` and the login-home `~/.elastos`
+  (`eval echo ~$(id -un)`, or `dscl` on a Mac). It refuses if it
+  creates either path, and it refuses if an already-present tree
+  changes.
 - It does not run `sudo`, `xcode-select --install`, or the rustup.rs
   installer, and it does not pipe `curl` to `sh`.
 - It does not delete `/Users/sash/code/wt-agent-host` or any other
