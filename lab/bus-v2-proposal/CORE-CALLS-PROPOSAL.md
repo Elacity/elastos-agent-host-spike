@@ -1841,6 +1841,9 @@ Section 1 shows the guest names `Users/self`. local_person_principal_id builds `
 
 Is the agent DID the person principal (person:local:), or a separate DID? Does the owned journal root stay on the launching person's Users/self path, or move to the agent principal's UsersAI path?
 
+propose: the agent DID is a separate DID, not the person principal person:local:. Name: agent principal. Inputs: the verified agent identity. Refusal: an identity that is not the bound agent principal. Owner: Runtime. A3 stays open.
+propose: the owned journal root moves to that agent principal's UsersAI path. Name: owned journal root. Inputs: the agent principal. Refusal: a root that is not under that principal. Owner: Runtime. A3 stays open.
+
 Section 3 shows the cited functions return the token string as the grant id. grant-id is a string. Those functions do not show a separate handle table.
 
 `lab/grant-binding/src/lib.rs:23` says an opaque grant handle. The guest holds only this. `lab/grant-binding/src/lib.rs:25` is the struct. Handle is an opaque value and the guest holds only that.
@@ -1895,9 +1898,13 @@ Section 3 shows the cited functions return the token string as the grant id. gra
 
 Is the Bus v2 host-side handle the token string, or an opaque handle whose binding the guest does not read?
 
+propose: the Bus v2 host-side handle is an opaque handle, and the guest does not read its binding. Name: grant handle. Inputs: the verified agent identity, the session, the capsule instance, and the owned storage root. Refusal: an unknown handle. Owner: Runtime. A5 stays open.
+
 Section 4 keeps the hosted-effect path apart from the direct URL path and leaves A4 open. The names in that section are propose_hosted, effect_request, runtime_hosted_socket, MODEL_OPERATIONS, handle, and forward. The five strings section 4 lists are `offers_list`, `runs_create`, `runs_get`, `runs_events`, and `runs_cancel`.
 
 Which path does the model operation use: the hosted-effect socket, or the five model operations on the remote model service?
+
+propose: the model operation uses the hosted-effect socket, and the five model operations stay on the remote model service behind that socket. Name: hosted model call. Inputs: the granted effect request. Refusal: a call the Runtime did not grant. Owner: Runtime model service. A4 stays open.
 
 Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
 
@@ -1986,6 +1993,8 @@ reserve, model_reserve_over_the_ceiling_is_refused, and model_reported_usage_doe
 
 What unit does the Runtime reserve before each dispatch, and does a cancellation or an uncertain outcome release that hold?
 
+propose: the Runtime reserves one bounded usage amount before each dispatch, a cancellation releases the unused hold, and an uncertain outcome keeps the hold until a measured settle or a verifier deadline. Name: usage reservation. Inputs: the admitted ceiling and the dispatch. Refusal: a reserve above the ceiling. Owner: Runtime. A7 stays open.
+
 `lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:249` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:234` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:295` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
 
 `lab/grant-binding/src/ledger.rs::admit` sets the ledger ceiling and leaves outstanding holds as they are. The fn line is `pub fn admit(&self, ceiling: u64) {`. The doc line is `Sets the allowance ceiling. Outstanding holds stay as they are.` The assignment is `.ceiling = ceiling`. The function returns no refusal. `lab/grant-binding/src/ledger.rs::model_reserve_before_admit_is_refused` reserves 1 before any admit. The fn line is `fn model_reserve_before_admit_is_refused() {`. The expect_err line is `expect_err("reserve before admit")`. The refusal is OverCeiling with ceiling 0, held 0, and asked 1. The fields are `ReserveRefuse::OverCeiling { ceiling: 0, held: 0, asked: 1 }`. The text is `reservation exceeds the ceiling`. The held total stays 0 and the open set stays empty. The assert is `assert!(after_refusal.open.is_empty());`. admit of 1 then lets a reserve of 1 succeed, and the held total is 1. The admit line is `verifier.admit(1);`. The expect line is `expect("admit opens the ceiling")`. The held assert is `assert_eq!(books(&verifier).held, 1);`. `lab/grant-binding/src/ledger.rs::model_lower_ceiling_leaves_the_hold` admits 10, reserves 8, then admits 4. The fn line is `fn model_lower_ceiling_leaves_the_hold() {`. The admit line is `verifier.admit(10);`. The reserve of 8 is `verifier.reserve(&call, &guest(handle), 8).expect("reserve");`. The later admit is `verifier.admit(4);`. The held total stays 8. The assert is `assert_eq!(after.held, 8);`. A further reserve of 1 is refused with OverCeiling ceiling 4, held 8, and asked 1, and the held total stays 8. The expect_err line is `expect_err("lower ceiling")`. The fields are `ReserveRefuse::OverCeiling { ceiling: 4, held: 8, asked: 1 }`. The text is `reservation exceeds the ceiling`. This citation is design input for A7. These admit functions are the lab reference model, and the lab model is not the Runtime. A reserve before admit meets a ceiling of zero. A later admit leaves an outstanding hold in place. This paragraph does not answer the budget question. A7 stays open.
@@ -2060,4 +2069,8 @@ The Operation enum names Append, Overwrite, and ChildJournal. None of those vari
 
 Which typed operation names does the contract use for run, for child, for init, for hosted, and for journal-append?
 
+propose: the contract names are run, child, init, hosted, and journal-append. Name: typed operation. Inputs: the granted ask. Refusal: an ask the grant does not carry. Owner: the contract. B2 stays open.
+
 This section asks these questions and does not answer them.
+
+A propose line is a proposal for Anders. It is not a citation. It does not close A3, A4, A5, A7, or B2.
