@@ -36,6 +36,8 @@ and does not launch.
 """
 
 import ast
+import contextlib
+import inspect
 import os
 import re
 import shutil
@@ -259,6 +261,8 @@ FULL_ALLOW = slave_line(3, 0, 1, 0, 1, 0, 1, 0, 4, 0, 1, 0)
 PARTIAL_ALLOW = slave_line(3, 0, 1, 0, 1, 0, 1, 0, -1, 1, -1, 0)
 DENY_LINES = (OPEN_FAIL, PTS_DENY)
 ALLOW_LINES = (FULL_ALLOW, PARTIAL_ALLOW)
+# Synthetic scenarios start here. Live profile bytes are not a base.
+CLEAN_PROFILE = "(version 1)\n(deny default)\n(deny network*)\n"
 
 
 class NotDenied(AssertionError):
@@ -675,6 +679,60 @@ def injected_stdout(text):
         if line in text:
             return PARTIAL_ALLOW
     return PTS_DENY
+
+
+def synthetic_profile(added_lines=""):
+    """One scenario profile. The clean fixture is the only base.
+
+    Live profile bytes are not an input, so a planted file cannot be
+    copied and then given another setup line. Each of the three grants
+    occurs at most once. A second copy is its own harness error.
+    """
+    text = CLEAN_PROFILE + added_lines
+    for line in (FILE_GRANT, IOCTL_LINE, PLANT):
+        count = text.count(line)
+        if count > 1:
+            raise HarnessError(
+                "scenario profile holds "
+                + repr(line)
+                + f" {count} times, not zero or one"
+            )
+    return text
+
+
+def scenario_texts(allowed, added_lines):
+    """Text for one synthetic scenario. Profiles not in ``allowed`` stay clean.
+
+    This does not read a profile file. ``added_lines`` is appended to the
+    clean fixture, never to bytes already on disk.
+    """
+    texts = {}
+    for profile in PROFILES:
+        added = added_lines if profile["name"] in allowed else ""
+        texts[profile["name"]] = synthetic_profile(added)
+    return texts
+
+
+def suite_scenarios():
+    """The injected suite. The first group is the plant. The rest force an allow."""
+    allowed_profiles = (
+        (),
+        ("wallet",),
+        ("did",),
+        ("model",),
+        ("wallet", "did", "model"),
+    )
+    scenarios = [
+        (allowed, FILE_GRANT + IOCTL_LINE + PLANT, None)
+        for allowed in allowed_profiles
+    ]
+    scenarios.extend(
+        (allowed, added, stdout)
+        for allowed in allowed_profiles[1:]
+        for added in ("", FILE_GRANT, IOCTL_LINE, FILE_GRANT + IOCTL_LINE)
+        for stdout in (PARTIAL_ALLOW, FULL_ALLOW)
+    )
+    return tuple(scenarios)
 
 
 def write_copy(directory, name, text):
@@ -2381,204 +2439,369 @@ class SlaveRules(unittest.TestCase):
                     )
         self.launch_guard.assert_not_called()
 
+    @contextlib.contextmanager
+    def _injected_probe_class(self, texts, observations):
+        """Run ``SlaveProbe`` on ``texts``. A grant line may occur once.
+
+        ``observations`` forces the stdout of that profile. Other launches
+        use ``injected_stdout``. This does not read a live profile.
+        """
+        for name, text in texts.items():
+            for line in (FILE_GRANT, IOCTL_LINE, PLANT):
+                count = text.count(line)
+                if count > 1:
+                    raise HarnessError(
+                        f"{name} scenario profile holds "
+                        + repr(line)
+                        + f" {count} times, not zero or one"
+                    )
+        with tempfile.TemporaryDirectory(prefix="ccrt-slave-suite-") as tmp:
+            repo = Path(tmp).resolve()
+            profiles = []
+            source_copies = {}
+            path_observations = {}
+            for original in PROFILES:
+                if original["name"] not in texts:
+                    raise HarnessError(f"scenario omits {original['name']}")
+                profile = dict(original)
+                profile["path"] = repo / profile["rel"]
+                profile["path"].parent.mkdir(parents=True, exist_ok=True)
+                text = texts[profile["name"]]
+                profile["path"].write_text(text, encoding="utf-8")
+                source_copies[profile["path"]] = text
+                if profile["name"] in observations:
+                    path_observations[profile["path"].resolve()] = observations[
+                        profile["name"]
+                    ]
+                profiles.append(profile)
+
+            def injected_compile(parent, root, source_text):
+                if not source_text:
+                    raise HarnessError(
+                        f"{CC} failed with exit 1: empty source "
+                        "-- a harness error, not a skip and not a deny"
+                    )
+                source = Path(parent, "ptyslave.c")
+                with open(source, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(source_text)
+                binary = Path(root, BINARY_NAME)
+                binary.write_text(
+                    "injected executable; never launched\n", encoding="utf-8",
+                )
+                return str(binary)
+
+            def injected_control(binary):
+                return sbx.Result(
+                    exit_code=0,
+                    stdout=FULL_ALLOW,
+                    stderr="",
+                    argv=[binary],
+                )
+
+            launched = []
+
+            def injected_sandbox(**kwargs):
+                launched.append(os.fspath(kwargs["profile"]))
+                self.assertEqual(kwargs["pinned_exe"], kwargs["launch_exe"])
+                self.assertEqual(kwargs["timeout"], 5)
+                self.assertEqual(tuple(kwargs["args"]), ())
+                text = Path(kwargs["profile"]).read_text(encoding="utf-8")
+                stdout = path_observations.get(
+                    Path(kwargs["profile"]).resolve(), injected_stdout(text),
+                )
+                return sbx.Result(
+                    exit_code=0,
+                    stdout=stdout,
+                    stderr="",
+                    argv=[
+                        sbx.SANDBOX_EXEC, "-D",
+                        f"PROVIDER_EXECUTABLE={kwargs['pinned_exe']}",
+                        "-f", os.fspath(kwargs["profile"]),
+                        kwargs["launch_exe"], *kwargs["args"],
+                    ],
+                )
+
+            with patch(__name__ + ".ROOT", repo), patch(
+                __name__ + ".PROFILES", tuple(profiles)
+            ), patch.dict(
+                START_SHA, {}, clear=True
+            ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
+                sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
+            ), patch.object(os.path, "isfile", return_value=True), patch(
+                __name__ + ".compile_slave", side_effect=injected_compile
+            ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
+                sbx, "run", side_effect=injected_sandbox
+            ), patch(__name__ + ".last_change", return_value="a" * 40), patch(
+                __name__ + ".pr_label", return_value="PR fixture"
+            ), patch.multiple(
+                SlaveProbe, binary=None, root=None, parent=None,
+                skip_reason=None, recorded_allows={},
+            ):
+                result = unittest.TestResult()
+                unittest.TestLoader().loadTestsFromTestCase(SlaveProbe).run(result)
+                yield {
+                    "result": result,
+                    "launched": launched,
+                    "profiles": profiles,
+                    "repo": repo,
+                    "source_copies": source_copies,
+                }
+
+    def _assert_complete_suite(self, probe, allowed, observed_stdout, method_names):
+        """The injected ``SlaveProbe`` class stayed green for ``allowed``."""
+        result = probe["result"]
+        launched = probe["launched"]
+        profiles = probe["profiles"]
+        repo = probe["repo"]
+        self.assertEqual(result.testsRun, len(method_names))
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.unexpectedSuccesses, [])
+        self.assertEqual(result.skipped, [])
+        self.assertIsNone(skip_reason())
+        self.assertEqual(len(result.expectedFailures), len(allowed))
+        self.assertEqual(
+            {case._testMethodName for case, _error in result.expectedFailures},
+            {f"test_{name}_slave_is_denied" for name in allowed},
+        )
+        self.assertEqual(
+            sorted(
+                os.path.basename(path)
+                for path in launched
+                if path.endswith("-allow.sb")
+            ),
+            ["did-allow.sb", "model-allow.sb", "wallet-allow.sb"],
+        )
+        for name, _line in STILL_DENY_EDITS:
+            self.assertTrue(
+                any(path.endswith(os.sep + name + ".sb") for path in launched),
+                name,
+            )
+        for name, _line in FULL_EDITS + PARTIAL_EDITS:
+            self.assertTrue(
+                any(path.endswith(os.sep + name + ".sb") for path in launched),
+                name,
+            )
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(
+            SlaveProbe.recorded_allows,
+            {name: FINDINGS[name] for name in allowed},
+        )
+        for name in allowed:
+            body = (repo / FINDINGS[name]).read_text(encoding="utf-8")
+            profile = next(item for item in profiles if item["name"] == name)
+            self.assertIn(f"profile: {profile['rel']}", body)
+            self.assertIn(sha256_file(profile["path"]), body)
+            self.assertIn("a" * 40, body)
+            self.assertIn("PR fixture", body)
+            if observed_stdout == PARTIAL_ALLOW:
+                self.assertIn("observed: pts " + PARTIAL_ALLOW.strip(), body)
+            else:
+                self.assertIn("observed: pts and slave ", body)
+            self.assertIn("helper: ", body)
+            self.assertIn(
+                body,
+                (repo / "lab/redteam/CRITICAL.md").read_text(encoding="utf-8"),
+            )
+        if not allowed:
+            self.assertFalse((repo / "lab/redteam/CRITICAL.md").exists())
+            for rel in set(FINDINGS.values()):
+                self.assertFalse((repo / rel).exists())
+
+    def _assert_plant_only_copy(self, probe):
+        """The plant without either setup line is the open-fail deny."""
+        profiles = probe["profiles"]
+        hold = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-slave-hold-"))
+        self.addCleanup(shutil.rmtree, hold, ignore_errors=True)
+        binary = os.path.join(hold, BINARY_NAME)
+        descriptor = os.open(binary, os.O_CREAT | os.O_WRONLY, 0o755)
+        os.close(descriptor)
+        SlaveProbe.binary = binary
+        SlaveProbe.root = hold
+        SlaveProbe.parent = hold
+        plant_only = os.path.join(hold, "wallet-plant-only.sb")
+        plant_text = "(version 1)\n(deny default)\n" + PLANT
+        with open(plant_only, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(plant_text)
+        self.assertNotIn(FILE_GRANT, plant_text)
+        self.assertNotIn(IOCTL_LINE, plant_text)
+        self.assertNotEqual(
+            plant_text, profiles[0]["path"].read_text(encoding="utf-8")
+        )
+        self.assertNotEqual(
+            os.path.realpath(plant_only),
+            os.path.realpath(profiles[0]["path"]),
+        )
+        denied = require_denied(plant_only)
+        self.assertEqual(denied.stdout, OPEN_FAIL)
+        self.assertEqual(denied.stderr, "")
+        self.assertEqual(denied.exit_code, 0)
+        self.assertEqual(classify(denied), "deny")
+        for path, text in probe["source_copies"].items():
+            self.assertEqual(path.read_text(encoding="utf-8"), text)
+
+    def _run_suite_scenario(self, allowed, added_lines, observed_stdout, method_names):
+        """One clean-fixture scenario. The profile file is not an input."""
+        texts = scenario_texts(allowed, added_lines)
+        observations = {}
+        if observed_stdout is not None:
+            for name in allowed:
+                observations[name] = observed_stdout
+        with self._injected_probe_class(texts, observations) as probe:
+            self._assert_complete_suite(
+                probe, allowed, observed_stdout, method_names,
+            )
+            self._assert_plant_only_copy(probe)
+        self.launch_guard.assert_not_called()
+
     def test_recorded_allow_keeps_complete_probe_suite_green(self):
         """Run every probe with injected tools and profile text.
 
-        No added lines, and the file-grant line, the ioctl line, and the
-        plant together on each profile, keep the suite green. Partial and
-        full allows from unchanged source text, or with either or both setup
-        lines, also keep the suite green. Only the deny test of a profile
-        whose result allows is an expected failure. One wallet copy that
-        contains the plant and neither setup line prints the open-fail line,
-        the deny check passes, and that copy
-        is not the injected module text. The plant still runs, nothing
-        skips, and the result is successful.
+        Scenarios use a clean fixture, not the live profile bytes. No added
+        lines, and the file-grant line, the ioctl line, and the plant
+        together on each profile, keep the suite green. Partial and full
+        allows from that clean fixture, or with either or both setup lines,
+        also keep the suite green. Only the deny test of a profile whose
+        result allows is an expected failure. One wallet copy that contains
+        the plant and neither setup line prints the open-fail line, the
+        deny check passes, and that copy is not the injected module text.
+        The plant still runs, nothing skips, and the result is successful.
         """
-        method_names = unittest.defaultTestLoader.getTestCaseNames(SlaveProbe)
-        source_texts = {
-            profile["name"]: profile["path"].read_text(encoding="utf-8")
-            for profile in PROFILES
-        }
-        allowed_profiles = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
-        scenarios = [
-            (allowed, FILE_GRANT + IOCTL_LINE + PLANT, None)
-            for allowed in allowed_profiles
-        ] + [
-            (allowed, setup, stdout)
-            for allowed in allowed_profiles[1:]
-            for setup in ("", FILE_GRANT, IOCTL_LINE, FILE_GRANT + IOCTL_LINE)
-            for stdout in (PARTIAL_ALLOW, FULL_ALLOW)
-        ]
-        for allowed, added_lines, observed_stdout in scenarios:
+        method_names = unittest.TestLoader().getTestCaseNames(SlaveProbe)
+        for allowed, added_lines, observed_stdout in suite_scenarios():
             with self.subTest(
                 allowed=allowed, added_lines=added_lines, stdout=observed_stdout
-            ), tempfile.TemporaryDirectory(
-                prefix="ccrt-slave-suite-"
-            ) as tmp:
-                repo = Path(tmp).resolve()
-                profiles = []
-                observations = {}
-                source_copies = {}
-                for original in PROFILES:
-                    profile = dict(original)
-                    profile["path"] = repo / profile["rel"]
-                    profile["path"].parent.mkdir(parents=True, exist_ok=True)
-                    text = "(version 1)\n(deny default)\n(deny network*)\n"
-                    if observed_stdout is not None:
-                        text = source_texts[profile["name"]]
-                    if profile["name"] in allowed:
-                        text += added_lines
-                        if observed_stdout is not None:
-                            observations[profile["path"]] = observed_stdout
-                    profile["path"].write_text(text, encoding="utf-8")
-                    source_copies[profile["path"]] = text
-                    profiles.append(profile)
+            ):
+                self._run_suite_scenario(
+                    allowed, added_lines, observed_stdout, method_names,
+                )
 
-                def injected_compile(parent, root, source_text):
-                    if not source_text:
-                        raise HarnessError(
-                            f"{CC} failed with exit 1: empty source "
-                            "-- a harness error, not a skip and not a deny"
-                        )
-                    source = Path(parent, "ptyslave.c")
-                    with open(source, "w", encoding="utf-8", newline="\n") as handle:
-                        handle.write(source_text)
-                    binary = Path(root, BINARY_NAME)
-                    binary.write_text("injected executable; never launched\n", encoding="utf-8")
-                    return str(binary)
+    def test_already_planted_profile_keeps_both_classes_green(self):
+        """Both classes stay green when each grant line is already present once.
 
-                def injected_control(binary):
-                    return sbx.Result(
-                        exit_code=0,
-                        stdout=FULL_ALLOW,
-                        stderr="",
-                        argv=[binary],
-                    )
+        A recorded allow whose file holds the file-grant line, the ioctl
+        line, and the plant is not an ordinary failure. Copying that file
+        and appending the file-grant line again makes ``_assert_source_counts``
+        raise ``2 != 1``. Synthetic scenarios do not do that. They start
+        from a clean fixture. ``SlaveProbe`` runs on the planted bytes.
+        ``SlaveRules`` runs the suite scenarios while those planted files
+        are installed, and the scenarios do not read them.
+        """
+        planted = synthetic_profile(FILE_GRANT + IOCTL_LINE + PLANT)
+        self.assertEqual(planted.count(FILE_GRANT), 1)
+        self.assertEqual(planted.count(IOCTL_LINE), 1)
+        self.assertEqual(planted.count(PLANT), 1)
+        self.assertEqual(planted.count(DENY_DEFAULT), 1)
+        doubled = planted + FILE_GRANT
+        self.assertEqual(doubled.count(FILE_GRANT), 2)
+        self.assertEqual(doubled.count(IOCTL_LINE), 1)
+        self.assertEqual(doubled.count(PLANT), 1)
 
-                launched = []
+        class Counted(SlaveProbe):
+            recorded_allows = {"wallet": FINDINGS["wallet"]}
 
-                def injected_sandbox(**kwargs):
-                    launched.append(os.fspath(kwargs["profile"]))
-                    self.assertEqual(kwargs["pinned_exe"], kwargs["launch_exe"])
-                    self.assertEqual(kwargs["timeout"], 5)
-                    self.assertEqual(tuple(kwargs["args"]), ())
-                    text = Path(kwargs["profile"]).read_text(encoding="utf-8")
-                    stdout = observations.get(
-                        Path(kwargs["profile"]), injected_stdout(text)
-                    )
-                    return sbx.Result(
-                        exit_code=0,
-                        stdout=stdout,
-                        stderr="",
-                        argv=[
-                            sbx.SANDBOX_EXEC, "-D",
-                            f"PROVIDER_EXECUTABLE={kwargs['pinned_exe']}",
-                            "-f", os.fspath(kwargs["profile"]),
-                            kwargs["launch_exe"], *kwargs["args"],
-                        ],
-                    )
+        counted = Counted("test_falsifier_allow_slave_is_caught")
+        counted._assert_source_counts("wallet", planted)
+        with self.assertRaises(AssertionError) as caught:
+            counted._assert_source_counts("wallet", doubled)
+        self.assertEqual(str(caught.exception), "2 != 1")
+        with self.assertRaises(HarnessError) as repeated:
+            synthetic_profile(FILE_GRANT + FILE_GRANT)
+        repeated_reason = str(repeated.exception)
+        self.assertIn(FILE_GRANT.strip(), repeated_reason)
+        self.assertIn("2 times, not zero or one", repeated_reason)
+        with self.assertRaises(HarnessError) as runner_doubled:
+            with self._injected_probe_class({"wallet": doubled}, {}):
+                self.fail("doubled grants launched a probe")
+        runner_reason = str(runner_doubled.exception)
+        self.assertIn("wallet", runner_reason)
+        self.assertIn(FILE_GRANT.strip(), runner_reason)
+        self.assertIn("2 times, not zero or one", runner_reason)
 
-                with patch(__name__ + ".ROOT", repo), patch(
-                    __name__ + ".PROFILES", tuple(profiles)
-                ), patch.dict(
-                    START_SHA, {}, clear=True
-                ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
-                    sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
-                ), patch.object(os.path, "isfile", return_value=True), patch(
-                    __name__ + ".compile_slave", side_effect=injected_compile
-                ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
-                    sbx, "run", side_effect=injected_sandbox
-                ), patch(__name__ + ".last_change", return_value="a" * 40), patch(
-                    __name__ + ".pr_label", return_value="PR fixture"
-                ), patch.multiple(
-                    SlaveProbe, binary=None, root=None, parent=None,
-                    skip_reason=None, recorded_allows={},
-                ):
-                    result = unittest.TestResult()
-                    unittest.defaultTestLoader.loadTestsFromTestCase(SlaveProbe).run(result)
-                    self.assertEqual(result.testsRun, len(method_names))
-                    self.assertEqual(result.errors, [])
-                    self.assertEqual(result.failures, [])
-                    self.assertEqual(result.unexpectedSuccesses, [])
-                    self.assertEqual(result.skipped, [])
-                    self.assertIsNone(skip_reason())
-                    self.assertEqual(len(result.expectedFailures), len(allowed))
-                    self.assertEqual(
-                        {case._testMethodName for case, _error in result.expectedFailures},
-                        {f"test_{name}_slave_is_denied" for name in allowed},
+        suite_source = inspect.getsource(
+            SlaveRules.test_recorded_allow_keeps_complete_probe_suite_green
+        )
+        runner_source = inspect.getsource(SlaveRules._run_suite_scenario)
+        self.assertIn("_run_suite_scenario(", suite_source)
+        self.assertNotIn("source_texts", suite_source)
+        self.assertNotIn("read_text", suite_source)
+        self.assertIn("scenario_texts(", runner_source)
+        self.assertNotIn("read_text", runner_source)
+
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-slave-planted-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        planted_profiles = []
+        for original in PROFILES:
+            profile = dict(original)
+            profile["path"] = Path(directory) / profile["rel"]
+            profile["path"].parent.mkdir(parents=True, exist_ok=True)
+            profile["path"].write_text(planted, encoding="utf-8")
+            planted_profiles.append(profile)
+        planted_profiles = tuple(planted_profiles)
+        planted_paths = {profile["path"].resolve() for profile in planted_profiles}
+        file_texts = {
+            profile["name"]: profile["path"].read_text(encoding="utf-8")
+            for profile in planted_profiles
+        }
+        self.assertEqual(file_texts["wallet"], planted)
+        self.assertEqual(file_texts["did"], planted)
+        self.assertEqual(file_texts["model"], planted)
+        method_names = unittest.TestLoader().getTestCaseNames(SlaveProbe)
+        live = tuple(PROFILES)
+        real_read = Path.read_text
+
+        def guarded_read(path_obj, *args, **kwargs):
+            if path_obj.resolve() in planted_paths:
+                raise AssertionError(
+                    "scenario read a planted profile: " + os.fspath(path_obj)
+                )
+            return real_read(path_obj, *args, **kwargs)
+
+        try:
+            with patch(__name__ + ".PROFILES", planted_profiles), patch.object(
+                Path, "read_text", guarded_read
+            ):
+                with self._injected_probe_class(file_texts, {}) as probe:
+                    self._assert_complete_suite(
+                        probe, ("wallet", "did", "model"), None, method_names,
                     )
-                    self.assertEqual(
-                        sorted(
-                            os.path.basename(path)
-                            for path in launched
-                            if path.endswith("-allow.sb")
-                        ),
-                        ["did-allow.sb", "model-allow.sb", "wallet-allow.sb"],
-                    )
-                    for name, _line in STILL_DENY_EDITS:
-                        self.assertTrue(
-                            any(path.endswith(os.sep + name + ".sb") for path in launched),
-                            name,
-                        )
-                    for name, _line in FULL_EDITS + PARTIAL_EDITS:
-                        self.assertTrue(
-                            any(path.endswith(os.sep + name + ".sb") for path in launched),
-                            name,
-                        )
-                    self.assertTrue(result.wasSuccessful())
-                    self.assertEqual(
-                        SlaveProbe.recorded_allows,
-                        {name: FINDINGS[name] for name in allowed},
-                    )
-                    for name in allowed:
-                        body = (repo / FINDINGS[name]).read_text(encoding="utf-8")
-                        profile = next(item for item in profiles if item["name"] == name)
-                        self.assertIn(f"profile: {profile['rel']}", body)
-                        self.assertIn(sha256_file(profile["path"]), body)
-                        self.assertIn("a" * 40, body)
-                        self.assertIn("PR fixture", body)
-                        if observed_stdout == PARTIAL_ALLOW:
-                            self.assertIn("observed: pts " + PARTIAL_ALLOW.strip(), body)
-                        else:
-                            self.assertIn("observed: pts and slave ", body)
-                        self.assertIn("helper: ", body)
-                        self.assertIn(
-                            body,
-                            (repo / "lab/redteam/CRITICAL.md").read_text(encoding="utf-8"),
-                        )
-                    if not allowed:
-                        self.assertFalse((repo / "lab/redteam/CRITICAL.md").exists())
-                        for rel in set(FINDINGS.values()):
-                            self.assertFalse((repo / rel).exists())
-                    hold = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-slave-hold-"))
-                    self.addCleanup(shutil.rmtree, hold, ignore_errors=True)
-                    binary = os.path.join(hold, BINARY_NAME)
-                    descriptor = os.open(binary, os.O_CREAT | os.O_WRONLY, 0o755)
-                    os.close(descriptor)
-                    SlaveProbe.binary = binary
-                    SlaveProbe.root = hold
-                    SlaveProbe.parent = hold
-                    plant_only = os.path.join(hold, "wallet-plant-only.sb")
-                    plant_text = "(version 1)\n(deny default)\n" + PLANT
-                    with open(plant_only, "w", encoding="utf-8", newline="\n") as handle:
-                        handle.write(plant_text)
-                    self.assertNotIn(FILE_GRANT, plant_text)
-                    self.assertNotIn(IOCTL_LINE, plant_text)
-                    self.assertNotEqual(
-                        plant_text, profiles[0]["path"].read_text(encoding="utf-8")
-                    )
-                    self.assertNotEqual(
-                        os.path.realpath(plant_only),
-                        os.path.realpath(profiles[0]["path"]),
-                    )
-                    denied = require_denied(plant_only)
-                    self.assertEqual(denied.stdout, OPEN_FAIL)
-                    self.assertEqual(denied.stderr, "")
-                    self.assertEqual(denied.exit_code, 0)
-                    self.assertEqual(classify(denied), "deny")
-                    for path, text in source_copies.items():
-                        self.assertEqual(path.read_text(encoding="utf-8"), text)
-                self.launch_guard.assert_not_called()
+                    self._assert_plant_only_copy(probe)
+                for allowed, added, _stdout in suite_scenarios():
+                    texts = scenario_texts(allowed, added)
+                    for profile in planted_profiles:
+                        added_for = added if profile["name"] in allowed else ""
+                        built = texts[profile["name"]]
+                        self.assertEqual(built, synthetic_profile(added_for))
+                        self.assertLessEqual(built.count(FILE_GRANT), 1)
+                        self.assertLessEqual(built.count(IOCTL_LINE), 1)
+                        self.assertLessEqual(built.count(PLANT), 1)
+                        self.assertNotEqual(built, planted + added)
+                self._run_suite_scenario(
+                    ("wallet",), FILE_GRANT, FULL_ALLOW, method_names,
+                )
+                self._run_suite_scenario(
+                    ("wallet",), IOCTL_LINE, PARTIAL_ALLOW, method_names,
+                )
+                self._run_suite_scenario(
+                    ("wallet", "did", "model"),
+                    FILE_GRANT + IOCTL_LINE + PLANT,
+                    None,
+                    method_names,
+                )
+                self._run_suite_scenario(
+                    ("did",), "", FULL_ALLOW, method_names,
+                )
+        finally:
+            self.assertEqual(tuple(PROFILES), live)
+        for profile in planted_profiles:
+            self.assertEqual(
+                profile["path"].read_text(encoding="utf-8"), planted
+            )
+        for profile in live:
+            changed(
+                profile["rel"], START_SHA[profile["rel"]], sha256_file(profile["path"]),
+            )
+        self.launch_guard.assert_not_called()
 
     def test_harness_error_stays_error(self):
         """An injected harness error stays an error. It is not a deny, an allow, or a skip."""
