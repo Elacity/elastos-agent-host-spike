@@ -877,30 +877,44 @@ impl StandinHost {
             unavailable: Some(primitive),
         }
     }
+
+    /// A simulated host on `os` whose report leaves `primitive` unavailable.
+    fn missing(os: &'static str, primitive: StandinPrimitive) -> Self {
+        Self {
+            os,
+            unavailable: Some(primitive),
+        }
+    }
 }
 
 /// The one rule that decides whether the stand-in can confine `host`.
 ///
+/// A host that reports a primitive unavailable is refused first, on every OS,
+/// so the report reaches this rule before the `DECLARED_CONFINED_OS` lookup and
+/// an OS in that list cannot pass a start with a missing primitive. That
+/// early refusal is the one host check (P10).
+///
 /// `DECLARED_CONFINED_OS` is the only list of OSes where the stand-in applies
 /// confinement. Each refusal starts `{name} start on {os} is refused:` and then
-/// carries only its own case's words: an OS with no confinement design names
-/// that OS and the list; a simulated Linux host that reports a primitive
-/// unavailable carries the design's exact words for that primitive; a simulated
-/// Linux host that reports nothing missing says Linux is designed, not
-/// enforced, in this lab, so `linux` is not in `DECLARED_CONFINED_OS`.
+/// carries only its own case's words: a host that reports a primitive
+/// unavailable carries the design's exact words for that primitive; an OS with
+/// no confinement design names that OS and the list; a simulated Linux host
+/// that reports nothing missing says Linux is designed, not enforced, in this
+/// lab, so `linux` is not in `DECLARED_CONFINED_OS`.
 fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    if let Some(primitive) = host.unavailable {
+        let reason = primitive.design_refusal();
+        return Err(format!("{name} start on {} is refused: {reason}", host.os));
+    }
     if DECLARED_CONFINED_OS.contains(&host.os) {
         return Ok(());
     }
-    let confined_os = DECLARED_CONFINED_OS.join(", ");
     let reason = if host.os == "linux" {
-        match host.unavailable {
-            Some(primitive) => primitive.design_refusal().to_string(),
-            None => format!(
-                "linux is designed, not enforced, in this lab, so linux is not in \
-                 DECLARED_CONFINED_OS ({confined_os})"
-            ),
-        }
+        format!(
+            "linux is designed, not enforced, in this lab, so linux is not in \
+             DECLARED_CONFINED_OS ({confined_os})"
+        )
     } else {
         format!(
             "{os} has no confinement design, and the lab stand-in applies confinement only on \
@@ -924,11 +938,12 @@ fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
 ///
 /// 1. a host that `standin_host_refusal` refuses, with that one reason, before
 ///    any tool, binary or profile check, so a refused host writes no profile
-///    and creates no storage root. The reason starts
-///    `{name} start on {os} is refused:` and holds the words of its own case for
-///    an OS with no confinement design, for a simulated Linux host that reports
-///    a primitive unavailable, and for a simulated Linux host that reports
-///    nothing missing;
+///    and creates no storage root. A host that reports a missing primitive is
+///    refused whatever its OS. The reason starts
+///    `{name} start on {os} is refused:` and holds the words of its own case
+///    for a host that reports a primitive unavailable, for an OS with no
+///    confinement design, and for a simulated Linux host that reports nothing
+///    missing;
 /// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
 /// 3. a present `sandbox_exec` that is not `SANDBOX_EXEC`, with a reason that
 ///    names the OS, the given path and `SANDBOX_EXEC`, so the tool the stand-in
@@ -3587,9 +3602,14 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// design's exact words for that primitive. Case (b4) is a simulated Linux
 /// host that reports nothing missing; it refuses with a reason that says Linux
 /// is designed, not enforced, in this lab, so `linux` is not in
-/// `DECLARED_CONFINED_OS`. Each host reason starts `{name} start on {os} is
-/// refused:` and carries only its own case's words. Case (c) `macos` with the
-/// absent `tests/absent-sandbox-exec` refuses with a reason that names the OS,
+/// `DECLARED_CONFINED_OS`. Case (b5) is a simulated `macos` host, an OS in
+/// `DECLARED_CONFINED_OS`, whose report leaves Landlock unavailable; it
+/// refuses with that primitive's design words and `on macos`, and its tool is
+/// the real `SANDBOX_EXEC` path, so without the missing-primitive-first rule
+/// the stand-in would go on to the tool checks and start. Each host reason
+/// starts `{name} start on {os} is refused:` and carries only its own case's
+/// words. Case (c) `macos` with the absent
+/// `tests/absent-sandbox-exec` refuses with a reason that names the OS,
 /// the path and `is absent`, and carries no `SANDBOX_EXEC` path, so the absent
 /// check answers it and not the later wrong-tool check. Case (c2) `macos` with
 /// the test executable as the tool refuses with a reason that names the OS,
@@ -3622,7 +3642,12 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// loses `on macos`. WP131 starts the binary bare on a simulated Linux host
 /// that reports a primitive unavailable, so (b1) returns Started; WP132
 /// returns one fixed reason that names no primitive, so (b1) loses the
-/// design's Landlock words.
+/// design's Landlock words. WP135 moves the `DECLARED_CONFINED_OS` lookup back
+/// above the missing-primitive check, so (b5) returns Started where
+/// `sandbox-exec` exists; WP136 prefixes the missing-primitive reason with
+/// `linux has no confinement design; `, so (b1) carries the forbidden words;
+/// WP137 drops the `{name} start on {os} is refused: ` prefix from the final
+/// `Err`, so (a) lacks it.
 fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let present = std::env::current_exe().expect("the test executable path must be available");
     let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
@@ -3638,7 +3663,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let missing_user_namespaces = "linux confinement refused: user namespaces are turned off";
     let missing_seccomp = "linux confinement refused: the seccomp filter cannot be installed";
     let designed_not_enforced = "linux is designed, not enforced";
-    let cases: [(&str, StandinHost, &Path, Vec<&str>, Vec<&str>); 7] = [
+    let cases: [(&str, StandinHost, &Path, Vec<&str>, Vec<&str>); 8] = [
         (
             "(a) a forced unsupported OS",
             StandinHost::reporting("plan9"),
@@ -3660,6 +3685,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
                 missing_user_namespaces,
                 missing_seccomp,
                 designed_not_enforced,
+                "has no confinement design",
             ],
         ),
         (
@@ -3667,7 +3693,12 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             StandinHost::linux_missing(StandinPrimitive::UserNamespaces),
             present.as_path(),
             vec![missing_user_namespaces],
-            vec![missing_landlock, missing_seccomp, designed_not_enforced],
+            vec![
+                missing_landlock,
+                missing_seccomp,
+                designed_not_enforced,
+                "has no confinement design",
+            ],
         ),
         (
             "(b3) linux without the seccomp filter",
@@ -3678,6 +3709,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
                 missing_landlock,
                 missing_user_namespaces,
                 designed_not_enforced,
+                "has no confinement design",
             ],
         ),
         (
@@ -3685,7 +3717,24 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             StandinHost::reporting("linux"),
             present.as_path(),
             vec![designed_not_enforced, "not in DECLARED_CONFINED_OS"],
-            vec![missing_landlock, missing_user_namespaces, missing_seccomp],
+            vec![
+                missing_landlock,
+                missing_user_namespaces,
+                missing_seccomp,
+                "has no confinement design",
+            ],
+        ),
+        (
+            "(b5) macos whose report leaves Landlock unavailable",
+            StandinHost::missing("macos", StandinPrimitive::Landlock),
+            Path::new(SANDBOX_EXEC),
+            vec![missing_landlock, "on macos"],
+            vec![
+                missing_user_namespaces,
+                missing_seccomp,
+                designed_not_enforced,
+                "has no confinement design",
+            ],
         ),
         (
             "(c) macos without the tool",
@@ -3718,6 +3767,11 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         )
         .err()
         .unwrap_or_else(|| panic!("{case}: a start on {} must be refused", host.os));
+        let prefix = format!("{name} start on {} is refused: ", host.os);
+        assert!(
+            refusal.starts_with(&prefix),
+            "{case}: the refusal must start with {prefix:?}: {refusal}"
+        );
         for expected in named {
             assert!(
                 refusal.contains(expected),
@@ -4070,9 +4124,11 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// binary. `standin_confined_journey` runs the macOS leg first, so a stand-in
 /// that starts a provider bare fails at the outside write. Then
 /// `standin_refusals_for` runs every host and process refusal, including the
-/// three simulated Linux host reports that each name one missing primitive and
-/// the simulated Linux host that reports nothing missing; every refused case
-/// returns no provider, writes no profile and creates no storage root. The did
+/// three simulated Linux host reports that each name one missing primitive, a
+/// simulated `macos` host that reports Landlock unavailable, and the simulated
+/// Linux host that reports nothing missing; a reported missing primitive is
+/// refused whatever its OS. Every refused case returns no provider, writes no
+/// profile and creates no storage root. The did
 /// binary comes from `did_provider_binary`; the wallet binary comes from
 /// `CARGO_BIN_EXE_wallet-provider`. Linux stays a design plus a simulated
 /// refusal: nothing here probes a real kernel or claims Linux enforcement. The
@@ -4093,7 +4149,12 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// macos`. WP131 starts the binary bare on a simulated Linux host that reports
 /// a primitive unavailable, so did's Landlock row returns Started. WP132
 /// returns one fixed reason that names no primitive, so did's Landlock row
-/// loses the design's words.
+/// loses the design's words. WP135 moves the `DECLARED_CONFINED_OS` lookup
+/// back above the missing-primitive check, so did's new `macos` Landlock row
+/// returns Started; WP136 prefixes the missing-primitive reason with
+/// `linux has no confinement design; `, so did's Landlock row carries the
+/// forbidden words; WP137 drops the `{name} start on {os} is refused: `
+/// prefix from the final `Err`, so did's first host row, plan9, lacks it.
 #[test]
 fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
     let providers: [(&str, &Path, Value); 2] = [
