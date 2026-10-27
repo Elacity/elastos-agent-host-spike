@@ -73,9 +73,8 @@ TEST_PROFILE = {method: name for name, method in DENY_TESTS.items()}
 START_SHA = {}
 START_FINDINGS = {}
 ALLOWS = set()
-# .gitkeep is the directory anchor. grant-binding-002.md is an older finding.
-# A previous probe may already have removed the worktree copy. This module
-# compares those bytes to the snapshot from setUpModule.
+# .gitkeep is the directory anchor. grant-binding-002.md is required evidence.
+# Both must exist before this module snapshots their bytes.
 PRESERVED = (".gitkeep", "grant-binding-002.md")
 
 
@@ -429,14 +428,17 @@ def note_signal(repo, name, outcome):
     return FINDINGS[name]
 
 
-def findings_snapshot():
+def findings_snapshot(repo=ROOT):
     """Bytes of ``lab/redteam/findings`` plus ``CRITICAL.md``, if that file exists."""
-    directory = ROOT / "lab" / "redteam" / "findings"
+    directory = Path(repo) / "lab" / "redteam" / "findings"
     found = {}
     for path in directory.iterdir():
         if path.is_file():
             found[path.name] = path.read_bytes()
-    critical = ROOT / "lab" / "redteam" / "CRITICAL.md"
+    missing = [name for name in PRESERVED if name not in found]
+    if missing:
+        raise HarnessError("missing preserved findings: " + ", ".join(missing))
+    critical = Path(repo) / "lab" / "redteam" / "CRITICAL.md"
     found["/CRITICAL.md"] = critical.read_bytes() if critical.is_file() else None
     return found
 
@@ -535,6 +537,15 @@ class SignalProbe(unittest.TestCase):
         # Raising it here keeps exit 65 a unittest error.
         preview = signal_under(by_name(self.profile_name)["path"], self.pid)
         self.preview_outcome = classify(preview, self.pid)
+        self.signal_failure = None
+        try:
+            self.signal_result = require_signal_denied(
+                by_name(self.profile_name)["path"], self.pid
+            )
+        except NotDenied as error:
+            # Only a validated allow belongs in the expected-failure body.
+            # All launch and classification errors escape from setUp.
+            self.signal_failure = error
 
     def test_kill_and_sandbox_present_or_skip(self):
         """Both binaries exist, or this class skips with the missing path."""
@@ -576,7 +587,10 @@ class SignalProbe(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, unittest.SkipTest)
 
     def _expect_real(self, name):
-        result = require_signal_denied(by_name(name)["path"], self.pid)
+        self.assertEqual(self.profile_name, name)
+        if self.signal_failure is not None:
+            raise self.signal_failure
+        result = self.signal_result
         self.assertEqual(self.preview_outcome, "deny")
         self.assertEqual(result.exit_code, 1)
         self.assertEqual(result.stdout, "")
@@ -871,7 +885,7 @@ class SignalRules(unittest.TestCase):
 
             extra = getattr(case_cls, "test_falsifier_allow_signal_is_caught")
             extra_flag = getattr(extra, "__unittest_expecting_failure__", False)
-            extra.__unittest_expecting_failure__ = True
+            extra.__unittest_expecting_failure__ = not extra_flag
             self.assertIn(
                 "overbroad test_falsifier_allow_signal_is_caught",
                 marker_problems(case_cls, "wallet", baseline),
@@ -889,7 +903,7 @@ class SignalRules(unittest.TestCase):
             restore_marks(case_cls, baseline)
             self.assertEqual(leaked_markers(case_cls, baseline), [])
             wallet_method = getattr(case_cls, wallet_name)
-            wallet_method.__unittest_expecting_failure__ = True
+            wallet_method.__unittest_expecting_failure__ = not baseline[wallet_name][1]
             self.assertIn(wallet_name, leaked_markers(case_cls, baseline))
             restore_marks(case_cls, baseline)
             self.assertEqual(leaked_markers(case_cls, baseline), [])
@@ -928,6 +942,9 @@ class SignalRules(unittest.TestCase):
         try:
             apply_allow(directory, "wallet")
             self.assertEqual(marker_problems(SignalProbe, "wallet", baseline), [])
+            # The marker falsifiers must also work after a real allow has
+            # already marked the wallet test before this injection starts.
+            self.test_recorded_allow_is_expected_failure()
             globals()["signal_under"] = injected
             result = unittest.TestResult()
             SignalProbe("test_wallet_signal_is_denied").run(result)
@@ -961,11 +978,11 @@ class SignalRules(unittest.TestCase):
             self.assertFalse((ROOT / FINDINGS["wallet"]).exists())
 
     def test_harness_error_is_not_expected_failure(self):
-        """Exit 65 on the marked wallet test is a unittest error.
+        """Exit 65 on either launch of each marked deny test is a unittest error.
 
-        The result is injected into the test's ``setUp``. A classifier call
-        alone does not run that path. ``expectedFailure`` would hide the same
-        exception in the test body.
+        Exercise the preview and the actual probe, including a successful
+        preview followed by an error. A classifier call alone cannot prove
+        that ``expectedFailure`` leaves these errors visible.
         """
         baseline = mark_snapshot(SignalProbe)
         live = findings_snapshot()
@@ -977,28 +994,50 @@ class SignalRules(unittest.TestCase):
             stderr=f"kill: {pid}: Operation not permitted\n",
             argv=[sbx.SANDBOX_EXEC, "-f", "confine.sb", KILL, "-0", pid],
         )
+        allow = sbx.Result(exit_code=0, stdout="", stderr="", argv=[KILL, "-0", pid])
+        deny = sbx.Result(
+            exit_code=1,
+            stdout="",
+            stderr=f"kill: {pid}: Operation not permitted\n",
+            argv=[sbx.SANDBOX_EXEC, "-f", "confine.sb", KILL, "-0", pid],
+        )
         saved = signal_under
 
         def injected(_profile, _pid):
-            return injected_result
+            calls.append((_profile, _pid))
+            return next(launches)
 
         try:
-            apply_allow(directory, "wallet")
-            method = getattr(SignalProbe, "test_wallet_signal_is_denied")
-            self.assertTrue(getattr(method, "__unittest_expecting_failure__", False))
-            self.assertIn(FINDINGS["wallet"], method.__doc__)
-            globals()["signal_under"] = injected
-            result = unittest.TestResult()
-            SignalProbe("test_wallet_signal_is_denied").run(result)
-            self.assertEqual(result.expectedFailures, [])
-            self.assertEqual(result.failures, [])
-            self.assertEqual(result.unexpectedSuccesses, [])
-            self.assertEqual(result.skipped, [])
-            self.assertEqual(len(result.errors), 1)
-            message = result.errors[0][1]
-            self.assertIn("not a deny", message)
-            self.assertIn("65", message)
-            self.assertIn(sbx.profile_error(injected_result), message)
+            for name, method_name in DENY_TESTS.items():
+                restore_marks(SignalProbe, baseline)
+                apply_allow(directory, name)
+                method = getattr(SignalProbe, method_name)
+                self.assertTrue(getattr(method, "__unittest_expecting_failure__", False))
+                self.assertIn(FINDINGS[name], method.__doc__)
+                for label, results in (
+                    ("preview error", [injected_result]),
+                    ("allow then error", [allow, injected_result]),
+                    ("deny then error", [deny, injected_result]),
+                ):
+                    with self.subTest(profile=name, launch=label):
+                        calls = []
+                        launches = iter(results)
+                        globals()["signal_under"] = injected
+                        result = unittest.TestResult()
+                        SignalProbe(method_name).run(result)
+                        self.assertEqual(result.expectedFailures, [])
+                        self.assertEqual(result.failures, [])
+                        self.assertEqual(result.unexpectedSuccesses, [])
+                        self.assertEqual(result.skipped, [])
+                        self.assertEqual(len(result.errors), 1)
+                        self.assertFalse(result.wasSuccessful())
+                        message = result.errors[0][1]
+                        self.assertIn("not a deny", message)
+                        self.assertIn("65", message)
+                        self.assertIn(sbx.profile_error(injected_result), message)
+                        self.assertEqual(
+                            calls, [(by_name(name)["path"], int(pid))] * len(results)
+                        )
         finally:
             globals()["signal_under"] = saved
             if getattr(SignalProbe, "__unittest_expecting_failure__", False):
@@ -1053,9 +1092,9 @@ class SignalRules(unittest.TestCase):
     def test_removed_existing_finding_is_caught(self):
         """Dropping ``grant-binding-002.md`` from a snapshot is a deny change.
 
-        A pair that never had that file is unchanged. Adding it, or editing
-        its bytes, is the same change. This does not write the live directory.
-        ``tearDownModule`` uses the same check.
+        Snapshot capture requires each preserved file at startup. Comparing
+        snapshots also catches additions and edits. This test writes only a
+        temporary directory. ``tearDownModule`` uses the same checks.
         """
         self.assertIn("grant-binding-002.md", PRESERVED)
         self.assertIn("unchanged_findings(", inspect.getsource(tearDownModule))
@@ -1097,13 +1136,35 @@ class SignalRules(unittest.TestCase):
             str(caught.exception),
             "deny changed lab/redteam/findings: .gitkeep, grant-binding-002.md",
         )
+        with tempfile.TemporaryDirectory(prefix="ccrt-sig-preserved-") as repo:
+            directory = Path(repo) / "lab" / "redteam" / "findings"
+            directory.mkdir(parents=True)
+            for name, blob in kept.items():
+                (directory / name).write_bytes(blob)
+            self.assertEqual(preserved_view(findings_snapshot(repo)), kept)
+            for name in PRESERVED:
+                with self.subTest(missing=name):
+                    path = directory / name
+                    path.unlink()
+                    with self.assertRaises(HarnessError) as caught:
+                        findings_snapshot(repo)
+                    self.assertEqual(
+                        str(caught.exception), "missing preserved findings: " + name
+                    )
+                    path.write_bytes(kept[name])
+            for name in PRESERVED:
+                (directory / name).unlink()
+            with self.assertRaises(HarnessError) as caught:
+                findings_snapshot(repo)
+            self.assertEqual(
+                str(caught.exception),
+                "missing preserved findings: .gitkeep, grant-binding-002.md",
+            )
 
     def test_deny_leaves_findings_unchanged(self):
         """A deny creates neither 044 finding. Existing finding bytes stay put.
 
-        ``grant-binding-002.md`` matches the module-start bytes when that file
-        was already there, and stays absent when it was not. A deny does not
-        create it.
+        ``grant-binding-002.md`` exists and matches the module-start bytes.
         """
         end = findings_snapshot()
         self.assertIn(".gitkeep", end)
