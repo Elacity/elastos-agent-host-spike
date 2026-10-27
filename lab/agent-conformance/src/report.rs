@@ -241,6 +241,12 @@ impl Evidence {
             if name == "killed_worker_settlement_recorded_without_retry" {
                 text.push_str(" | kill-worker settlement, lab half of A11 (A12 census); orphan settled by the fixture (AC-027-ORPHAN)");
             }
+            if matches!(
+                name.as_str(),
+                "grant_refused_from_another_session" | "grant_refused_from_a_new_session"
+            ) {
+                text.push_str(" | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit");
+            }
             text.push('\n');
         }
         (text, passed)
@@ -268,6 +274,8 @@ impl Evidence {
             self.failures
                 .push("missing localhost-provider SHA-256".into());
         }
+        // A skipped probe row does not waive this. A per-effect miss keeps
+        // its own reason below and does not replace it.
         if self.identities.launched.is_empty() {
             self.failures.push("missing launched probe identity".into());
         }
@@ -279,7 +287,11 @@ impl Evidence {
             if result.starts_with("BLOCKED") || result.starts_with("SKIPPED") {
                 continue;
             }
-            for effect in required_effects(name) {
+            let effects = required_effects(name);
+            if effects.is_empty() {
+                continue;
+            }
+            for effect in effects {
                 if !self.identities.launched.contains_key(*effect) {
                     self.failures
                         .push(format!("missing launched probe identity: {effect}"));
