@@ -1,6 +1,6 @@
 Slice:        lab/redteam-fix r6 pin gaps
 Branch / PR:  cursor/redteam-fix-4bfb  https://github.com/Elacity/elastos-agent-host-spike/pull/323
-Commit:       (this report commit)   parent eb2e52f25e09f63c2d5a673014dee44e50afa70a
+Commit:       ace4814a583ea44779998a31b1717e59ad23329e   parent eb2e52f25e09f63c2d5a673014dee44e50afa70a
 Develop:      private spike only; Elacity untouched
 Machine:      Linux x86_64, rustc 1.91.0 (f8297e351 2025-10-28)
 Changed:      capsules/wallet-provider/tests/confine.rs - plant each r6 SURVIVED arm on its named owner test; collect `;` into a hash token
