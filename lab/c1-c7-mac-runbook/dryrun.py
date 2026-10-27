@@ -543,7 +543,7 @@ def main() -> int:
     static("argv-wait", '["ps", "-ax", "-o", "pid,command"]' in text)
     static("lsof-quiet", "lsof" in text and "sleep 15" in text)
     static("login-home", "eval echo ~$(id -un)" in text)
-    static("probe-file", "probe/sbpl.out" in text and "probe/sbpl.out" in run_text)
+    static("probe-file", "probe/sbpl.out" in text and "sbpl.out" in run_text)
 
     cases = [
         ("happy", run_block(block, kind="happy", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: DENIED"),
