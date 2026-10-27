@@ -1,16 +1,21 @@
 //! This test code stands in for the Runtime's launch by CID, which does not exist yet.
 //! PH6 packs, resolves and loads passive content. It starts no component.
 
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use capsule_bundle::testing::unseal;
 use capsule_bundle::{
-    bind_content_stand_in, load, pack, resolve_requires, validate_content_stand_in, Entry,
-    Installed, Loaded, Refusal,
+    admit_staged_for_stand_in, bind_content_stand_in, effective_policy, load, pack,
+    resolve_requires, sign, validate_content_stand_in, Claim, Entry, Installed, Loaded,
+    LocalConfig, PolicyFloor, PublisherEntry, Refusal, ReleasePolicy, SignedClaim, TrustPolicy,
 };
+use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+const NOW: u64 = 1_800_000_000;
 
 const FILES: [&str; 4] = [
     "capsule.json",
@@ -45,6 +50,47 @@ impl World {
             );
         }
         source
+    }
+
+    fn staged_content(&self) -> Loaded {
+        let source = self.content();
+        let packed = self.path("packed");
+        let (cid, _) = pack(&source, &packed, &[]).unwrap();
+        let store = self.path("store");
+        std::fs::create_dir(&store).unwrap();
+        let staged = store.join(&cid);
+        std::fs::rename(&packed, &staged).unwrap();
+        for path in FILES {
+            std::fs::set_permissions(staged.join(path), std::fs::Permissions::from_mode(0o444))
+                .unwrap();
+        }
+        for path in [staged.join("images"), staged] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        load(&store, &cid).unwrap()
+    }
+
+    fn policy(&self, publisher: &SigningKey, role: &str) -> TrustPolicy {
+        let release_root = sign::generate();
+        let release = ReleasePolicy {
+            sequence: 1,
+            expires_at: NOW + 3600,
+            publishers: vec![PublisherEntry {
+                did: sign::did(publisher),
+                roles: vec![role.into()],
+                names: None,
+            }],
+            revoked_dids: vec![],
+            revoked_cids: vec![],
+        };
+        effective_policy(
+            &release.sign(&release_root),
+            &sign::did(&release_root),
+            &LocalConfig::default(),
+            NOW,
+            &PolicyFloor::at(self.path(&format!("floor-{role}"))),
+        )
+        .unwrap()
     }
 
     // Two real closure identities per name; these bytes are packing inputs,
@@ -188,6 +234,80 @@ fn stand_in_load_keeps_the_bytes_it_hashed() {
     std::fs::write(&image, b"changed staged image").unwrap();
     std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o444)).unwrap();
     assert_ne!(std::fs::read(&image).unwrap(), snapshot["images/01.png"]);
+    assert_eq!(loaded.bytes, snapshot);
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn stand_in_refuses_a_staged_capsule_without_a_claim() {
+    let world = World::new();
+    let loaded = world.staged_content();
+    let publisher = sign::generate();
+    let policy = world.policy(&publisher, "content");
+    let mut claims = BTreeMap::new();
+    let store = world.path("store");
+    let check = |claims: &BTreeMap<String, SignedClaim>| {
+        let refusal =
+            admit_staged_for_stand_in(&loaded, claims, &policy, &[], &store, NOW).unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::ClaimMissing {
+                cid: loaded.cid.clone()
+            }
+        );
+        assert_eq!(refusal.code(), "claim_missing");
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "claim_missing: Content {} has no admission claim; admit the signed capsule first.",
+                loaded.cid
+            )
+        );
+    };
+    check(&claims);
+    check(&claims);
+
+    let claim = Claim {
+        cid: loaded.cid.clone(),
+        name: "stand-in-photo-set".into(),
+        version: "0.1.0".into(),
+        role: "content".into(),
+        publisher_did: sign::did(&publisher),
+    }
+    .sign(&publisher);
+    let other_cid = capsule_bundle::cid_v1_raw_sha256(b"another stand-in content");
+    assert_ne!(other_cid, loaded.cid);
+    claims.insert(other_cid, claim);
+    check(&claims);
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn stand_in_admits_staged_content_when_its_claim_is_present() {
+    let world = World::new();
+    let loaded = world.staged_content();
+    let snapshot = loaded.bytes.clone();
+    let publisher = sign::generate();
+    let claim = Claim {
+        cid: loaded.cid.clone(),
+        name: "stand-in-photo-set".into(),
+        version: "0.1.0".into(),
+        role: "content".into(),
+        publisher_did: sign::did(&publisher),
+    }
+    .sign(&publisher);
+    let claims = [(loaded.cid.clone(), claim)].into_iter().collect();
+    let policy = world.policy(&publisher, "content");
+    let store = world.path("store");
+    let admitted = admit_staged_for_stand_in(&loaded, &claims, &policy, &[], &store, NOW).unwrap();
+    assert_eq!(admitted.cid, loaded.cid);
+    assert_eq!(admitted.role, "content");
+    assert_eq!(loaded.bytes, snapshot);
+
+    let app_policy = world.policy(&publisher, "app");
+    let refusal =
+        admit_staged_for_stand_in(&loaded, &claims, &app_policy, &[], &store, NOW).unwrap_err();
+    assert_eq!(refusal.code(), "publisher_role_refused");
     assert_eq!(loaded.bytes, snapshot);
 }
 

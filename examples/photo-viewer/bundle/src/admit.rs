@@ -200,6 +200,24 @@ pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
     })
 }
 
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Re-admit staged content with its detached claim and the current policy.
+pub fn admit_staged_for_stand_in(
+    loaded: &Loaded,
+    claims: &BTreeMap<String, SignedClaim>,
+    policy: &TrustPolicy,
+    installed: &[Installed],
+    store: &Path,
+    now: u64,
+) -> Result<Admitted, Refusal> {
+    let Some(claim) = claims.get(&loaded.cid) else {
+        return Err(Refusal::ClaimMissing {
+            cid: loaded.cid.clone(),
+        });
+    };
+    admit(&loaded.path, claim, policy, installed, store, now)
+}
+
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
 // Compile the kit's URI owner directly: this slice adds no dependency or copied rule.
 #[path = "../../../capsule-kit/guest/src/uri.rs"]

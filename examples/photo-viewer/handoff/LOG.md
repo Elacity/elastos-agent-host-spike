@@ -54,3 +54,4 @@ One line per slice: date, slice, branch, last commit, result.
 - 2026-10-27 task 030: the container component hash is recorded in `recorded-hashes.txt`, and this Mac does not rebuild it.
 - 2026-10-28 task 032: load names an absent CID and keeps the bytes it hashed; it does not launch.
 - 2026-10-28 task 034: the stand-in binds the bytes load checked; it does not launch.
+- 2026-10-28 task 035: the stand-in admits staged content only when its claim is present; it does not launch.

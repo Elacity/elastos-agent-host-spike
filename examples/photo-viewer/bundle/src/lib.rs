@@ -27,7 +27,10 @@ pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
-pub use admit::{bind_content_stand_in, validate_content_stand_in, StandInResolveManifest};
+pub use admit::{
+    admit_staged_for_stand_in, bind_content_stand_in, validate_content_stand_in,
+    StandInResolveManifest,
+};
 pub use cid::cid_v1_raw_sha256;
 pub use claim::{Claim, SignedClaim, CLAIM_SCHEMA};
 pub use listing::{
@@ -127,6 +130,9 @@ pub enum Refusal {
     /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
     /// The content CID is absent from the staged store.
     StagedMissing { cid: String },
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// The staged content has no detached admission claim.
+    ClaimMissing { cid: String },
     /// The staged copy does not hash to its CID.
     StagedMismatch { cid: String, computed: String },
     /// The staged copy has a writable file or directory.
@@ -189,6 +195,7 @@ impl Refusal {
             Refusal::VersionDowngrade { .. } => "version_downgrade",
             Refusal::VersionConflict { .. } => "version_conflict",
             Refusal::StagedMissing { .. } => "staged_missing",
+            Refusal::ClaimMissing { .. } => "claim_missing",
             Refusal::StagedMismatch { .. } => "staged_mismatch",
             Refusal::StagedNotReadOnly(_) => "staged_not_read_only",
             Refusal::CoreUnpinned(_) => "core_unpinned",
@@ -211,6 +218,8 @@ impl std::fmt::Display for Refusal {
             // This test code stands in for the Runtime's launch by CID, which does not exist yet.
             Refusal::StagedMissing { cid } => write!(f,
                 "staged_missing: Content CID {cid} is absent from the staged store; admit that exact capsule first."),
+            Refusal::ClaimMissing { cid } => write!(f,
+                "claim_missing: Content {cid} has no admission claim; admit the signed capsule first."),
             Refusal::ContentCoreUnpinned(cid) => write!(f,
                 "core_unpinned: Content {cid} must pin its viewer with viewer.cid; a name alone cannot select it."),
             Refusal::ContentBindingInvalid { cid, detail } => write!(f,

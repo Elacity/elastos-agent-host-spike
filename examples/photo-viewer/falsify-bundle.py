@@ -23,6 +23,10 @@ BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 # (name, file under bundle/src, [(exact old text, new text)], tests that must fail)
 CASES = [
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    ("stand-in F9 staged content admits without its claim", "admit.rs",
+     [("        return Err(Refusal::ClaimMissing {\n            cid: loaded.cid.clone(),\n        });",
+       "        return Ok(Admitted { cid: loaded.cid.clone(), name: String::new(), version: String::new(), role: String::new(), publisher_did: String::new(), path: loaded.path.clone() });")],
+     ["stand_in_refuses_a_staged_capsule_without_a_claim"]),
     ("stand-in F20 binding reads staged files again", "admit.rs",
      [("loaded.bytes.get(path).cloned()", "std::fs::read(loaded.path.join(path)).ok()")],
      ["stand_in_binds_verified_content_bytes"]),
