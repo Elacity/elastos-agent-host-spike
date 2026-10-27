@@ -8,7 +8,7 @@ provider binary. This probe is the stock-binary check: ``/usr/bin/nc``
 connects to a TCP listener the test opens on ``127.0.0.1``.
 
 Pins (guard a), re-measured on HEAD
-``3fee89ff88d0d42f1c201e2ff2fa92923301190d`` with
+``95ab22afb58226163a11286748acb372507662db`` with
 ``git log -1 --format='%H %s' HEAD -- <file>`` and ``shasum -a 256``.
 The profile commits and digests match the pins below.
 
@@ -20,9 +20,9 @@ The profile commits and digests match the pins below.
   same commit and PR as wallet,
   sha256 ``79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950``
 - model ``capsules/model-provider/confine.sb``
-  ``58ab45897e666f4315b33212e2d7140367db4290``, merge PR #196
-  ``8050faa2c328f837d72fdddd0d6d96a6ddf917e4`` (cc-model-confine 020),
-  sha256 ``bc9c821dcbf30adafb63e0374ce8b71d395a37318d0da14a2ae1171cb6bcb6b5``
+  ``e324708ce42235d816821f9e5b0570d8999f4b80``, merge PR #542
+  ``c66ab9b682841c7debf674adb43cda011bbf08cd`` (cc-model-confine 054),
+  sha256 ``399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17``
 
 A clean run says only that these probes did not break the network deny on
 those pinned commits. An allow on a real profile is CRITICAL. Wallet or did:
@@ -81,10 +81,10 @@ PROFILES = (
         "name": "model",
         "provider": "model-provider",
         "path": sbx.REPO_ROOT / "capsules" / "model-provider" / "confine.sb",
-        "sha256": "bc9c821dcbf30adafb63e0374ce8b71d395a37318d0da14a2ae1171cb6bcb6b5",
-        "commit": "58ab45897e666f4315b33212e2d7140367db4290",
-        "merge": "8050faa2c328f837d72fdddd0d6d96a6ddf917e4",
-        "pr": 196,
+        "sha256": "399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17",
+        "commit": "e324708ce42235d816821f9e5b0570d8999f4b80",
+        "merge": "c66ab9b682841c7debf674adb43cda011bbf08cd",
+        "pr": 542,
     },
 )
 
