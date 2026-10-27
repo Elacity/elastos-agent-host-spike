@@ -1,0 +1,24 @@
+mac-pack probe at 5547edeacab167bd822e90a6af7258c5d55f2ce1
+uname=Linux
+
+== /tmp/pr343-r6/lab/a6-a12-evidence-fix/run.sh ==
+11:  rm -rf "$PACK_TMP"
+9:PACK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/a6-a12-pack.XXXXXX")
+11:  rm -rf "$PACK_TMP"
+14:printf 'a6-a12-evidence-fix isolation\n' > "$PACK_TMP/.a6-a12-isolation"
+15:export ELASTOS_TMP_ISOLATION="$PACK_TMP"
+16:export ELASTOS_TMP_ROOT="$PACK_TMP"
+36:  ELASTOS_TMP_ROOT="$PACK_TMP" ELASTOS_TMP_ISOLATION="$PACK_TMP" \
+39:  ELASTOS_TMP_ROOT="$PACK_TMP" ELASTOS_TMP_ISOLATION="$PACK_TMP" \
+42:  ELASTOS_TMP_ROOT="$PACK_TMP" ELASTOS_TMP_ISOLATION="$PACK_TMP" \
+quoted rm -rf of pack var: OK
+
+== /tmp/pr343-r6/lab/a6-a12-evidence-fix/mac-pack.sh ==
+12:  rm -rf "$PACK_TMP"
+10:PACK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/a6-a12-pack.XXXXXX")
+12:  rm -rf "$PACK_TMP"
+15:printf 'a6-a12-evidence-fix isolation\n' > "$PACK_TMP/.a6-a12-isolation"
+16:export ELASTOS_TMP_ISOLATION="$PACK_TMP"
+17:export ELASTOS_TMP_ROOT="$PACK_TMP"
+quoted rm -rf of pack var: OK
+Mac owner journeys: NOT RUN (need macOS)

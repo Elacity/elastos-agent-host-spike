@@ -28,3 +28,6 @@ named plants, reapplies the r5 survivor mutants, and runs the new r6
 hunts against the author's NOT COVERED list and beyond.
 
 Findings: `REVIEW.md`.
+
+Verdict on this machine: A12 Linux lab half **FIX**. A6 **BLOCKED
+(RA-6)**. Mac owner commands stay **NOT RUN**.

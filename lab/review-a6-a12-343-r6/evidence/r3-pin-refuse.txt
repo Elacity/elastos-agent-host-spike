@@ -1,0 +1,4 @@
+lab/review-a6-a12-343-r3/run.sh PIN=['87b974a1631efcf48e103f84d028eb5b1a2a3c7f']
+subject HEAD=5547edeacab167bd822e90a6af7258c5d55f2ce1
+REFUSE
+r3 runner absent on this head; pin checked from origin/cursor/review-a6-a12-343-r3-c383

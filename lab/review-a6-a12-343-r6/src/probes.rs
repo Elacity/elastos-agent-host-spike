@@ -4,7 +4,6 @@ use std::fs;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -306,7 +305,7 @@ fn r6_hardlink_copied_out_then_deleted() {
 fn r6_home_cache_while_xdg_cache_home_set() {
     let _lock = a12::lock_real_root();
     let pid = std::process::id();
-    let sandbox = a12::isolation_root().join(format!("r6-home-cache-{pid}-{}", stamp()));
+    let sandbox = PathBuf::from("/home/ubuntu").join(format!("r6-home-cache-{pid}-{}", stamp()));
     let xdg = sandbox.join("xdg-cache");
     let home_cache = sandbox.join(".cache");
     fs::create_dir_all(&xdg).unwrap();
@@ -322,7 +321,7 @@ fn r6_home_cache_while_xdg_cache_home_set() {
         Err(reason) => {
             restore_env("HOME", prev_home);
             restore_env("XDG_CACHE_HOME", prev_cache);
-            a12::remove_isolated(&sandbox);
+            let _ = fs::remove_dir_all(&sandbox);
             hunt("r6-home-cache", "INCONCLUSIVE", &reason);
             return;
         }
@@ -333,7 +332,7 @@ fn r6_home_cache_while_xdg_cache_home_set() {
     let saw = leftovers_contain(&leftovers, &secret);
     restore_env("HOME", prev_home);
     restore_env("XDG_CACHE_HOME", prev_cache);
-    a12::remove_isolated(&sandbox);
+    let _ = fs::remove_dir_all(&sandbox);
     if watches_home_cache && saw {
         hunt(
             "r6-home-cache",
@@ -357,7 +356,7 @@ fn r6_home_cache_while_xdg_cache_home_set() {
 fn r6_inotify_queue_overflow_fail_closed() {
     let _lock = a12::lock_real_root();
     let pid = std::process::id();
-    let dir = PathBuf::from("/var/tmp").join(format!("r6-overflow-{pid}-{}", stamp()));
+    let dir = a12::isolation_root().join(format!("r6-overflow-{pid}-{}", stamp()));
     let _ = fs::create_dir_all(&dir);
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
@@ -378,8 +377,9 @@ fn r6_inotify_queue_overflow_fail_closed() {
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(16384);
     let n = queued + 2048;
+    let watched = a12::isolation_root();
     for i in 0..n {
-        let path = dir.join(format!("e{i}"));
+        let path = watched.join(format!("r6-ovf-{pid}-{i}"));
         let _ = fs::write(&path, b"x");
         let _ = fs::remove_file(&path);
     }
