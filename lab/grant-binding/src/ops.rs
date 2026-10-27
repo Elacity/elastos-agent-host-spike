@@ -465,6 +465,142 @@ fn model_child_journal_returns_its_own_handle() {
 }
 
 #[test]
+fn model_forged_rights_do_not_widen_the_child_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        forged_overwrite: true,
+        ..guest(parent)
+    };
+    assert!(request.forged_append);
+    assert!(request.forged_overwrite);
+    let child = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(
+        child_decision.rights,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        }
+    );
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+}
+
+#[test]
+fn model_refused_child_journal_stores_no_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/other")
+        .expect_err("path outside the owned root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    let leaked = verifier
+        .use_grant(call, &guest(Handle(2)))
+        .expect_err("a refused create stores no grant");
+    assert_eq!(leaked, Refuse::UnknownHandle);
+    assert_eq!(leaked.to_string(), "unknown handle");
+    let child = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_eq!(child, Handle(2));
+    let parent_decision = verifier
+        .use_grant(call, &guest(parent))
+        .expect("parent grant");
+    assert_eq!(parent_decision.owned_root, "UsersAI/agent-1/journal");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_remove_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    verifier
+        .operate(&call, &request, Operation::ChildJournal)
+        .expect("guest claim does not remove the child-journal right");
+}
+
+#[test]
+fn model_forged_append_does_not_remove_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    verifier
+        .operate(&call, &request, Operation::Append)
+        .expect("guest claim does not remove the append right");
+}
+
+#[test]
+fn model_forged_overwrite_does_not_remove_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    verifier
+        .operate(&call, &request, Operation::Overwrite)
+        .expect("guest claim does not remove the overwrite right");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");

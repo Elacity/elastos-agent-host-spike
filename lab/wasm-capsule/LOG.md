@@ -903,3 +903,114 @@
   `tools/Cargo.toml`, `capsule/`, `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo
   root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
   lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 039 (M1 A12 lab half, step 1 of 2: the run folder is removed after every engine start; base
+  `dc80a2935`). `tools/src/run.rs`: `run_engine` is now steps 1 and 2, then `make_run_dir` (step 3, unchanged
+  rule), `write_and_start` (steps 4 and 5, unchanged lines) and `finish_run`, which reads the outcome (the engine has
+  exited, or never started) and then calls `remove_run_dir` on every outcome after the folder was made:
+  `fs::remove_file` on `module.wasm` unless the writer refused to create it (`module_made`), then `fs::remove_dir`
+  on the folder, never `remove_dir_all`, so an entry someone else put there stays and the removal fails. After a
+  success a failed removal is refused with the new `Reason::RunDirNotRemoved(io::Error)`, text `the run folder cannot
+  be removed after the engine exited: <OS error>`, at the path it stopped at; after a refusal the first refusal stays
+  the answer and a failed removal is not reported (known limit, README). A killed runner leaves its folder (known
+  limit; 040's census covers a killed engine, not a killed runner). `tests/run.rs`: one shared shell snippet,
+  `RECORD_RUN_FOLDER` beside `MODULE_ARGUMENT`, records a stand-in's run folder during its run beside its own `$0`
+  (outside the work root): the module copy, the folder's mode (`/usr/bin/stat -f %Lp`) and its entries; `CAT_MODULE`,
+  `counting` and `recording` use it (no new stand-in helper). The tests that read the run folder after a run now read
+  those records and also assert the folder is gone; the second-run case of `run_directory_is_private_and_new` now
+  runs and makes a new `0o700` folder; the planted-folder case stays refused and the planted folder is not removed.
+  New tests `run_engine_removes_its_run_folder_after_every_outcome` (both engines: success, `FAILING`, a missing
+  absolute program), `run_leaves_an_empty_work_root` (two-engine pass, and wasmer failing) and
+  `run_folder_that_cannot_be_removed_is_refused` (extra file: `Directory not empty (os error 66)` at the run
+  folder, the extra file stays, the module file is gone; a folder at the module path: os error 1 at that path; extra
+  file then a failure: the failure is the answer). Three new falsifiers, runner-caught: F-WC5-RUN-DIR-KEPT,
+  F-WC5-RUN-DIR-KEPT-ON-FAILURE, F-WC5-REMOVAL-ERROR-DROPPED. F-WC5-DISK-REREAD's planted line now finds the bundle
+  with `run_dir.with_file_name("bundle")` (the write moved into `write_and_start`, which has no work root), anchor
+  unchanged, same bug; F-WC-README-COUNT re-anchored to 173. Before the edits every existing anchor in
+  `falsifiers.json` was found exactly once, and still is. Canonical runner, from the repo root, `python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json <63 ids>` (every entry that edits
+  `tools/src/run.rs`, every entry naming a test whose body or stand-in helper changed, F-WC-README-COUNT, and the three
+  new): "baseline: 37 named tests pass without an edit, 0 do not", "summary: 63 CAUGHT of 63", exit 0, no
+  `*.falsify-original` backup left. Both engines were on PATH, so F-WC5-BOTH-ARGS ran. Real engines
+  (`/opt/homebrew/bin` wasmtime 45.0.1, wasmer 7.5.0): `real_receipt_names_both_installed_engines`, the three wasmtime
+  cap tests, `zero_grants_zero_imports_runs_on_both_real_engines` and the other real runs print PASS, assertions on
+  output, status and receipt unchanged. README: the run section (step 6, which answer wins, the new reason), the
+  test list, totals 173 (three task 039) and 109 runner-caught, a task 039 section; ADOPTION gets one task 039
+  paragraph. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked`
+  (106 passed, 2 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0.
+  No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/`, `tools/build`, engine argv, receipt
+  text, lab CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 040 (M1 A12 lab half, step 2 of 2: cleanup census after normal, trapped and killed runs). Base
+  `ad885d9d2`. `tests/run.rs` only, plus docs and `falsifiers.json`; no `tools/src/` change. New helpers: `real_wasmer`
+  and `real_engines` beside `real_wasmtime` (SKIPPED, never PASS, when an engine is missing); one census,
+  `census(work_root) -> Vec<String>` (P10), with `census_tool` (absolute path; a tool that does not start fails the
+  test with its path), `live_processes` (`/usr/bin/pgrep -f <work root>`) and `live_argv` (`/bin/ps -o args= -p
+  <pid>`); `digest_module` (hand-written bytes in `grow_module`'s style, no memory, no import; the root package has
+  no `wat` dev-dependency, and none was added) with `TRAP_BODY` (`unreachable`) and `LOOP_BODY` (`loop br 0 end`);
+  `argv_faults` for the live argv. Measured on this Mac: `/usr/sbin/lsof +D` exits 1 even when it lists an open file
+  (the first self-test run read the test's own open handle as `census failed: ... (exit status: 1): stdout "COMMAND
+  ... left.txt"`), so a listing with exit 0 or 1 is read as open files; exit 1 with nothing printed is still the only
+  "none", and any stderr or other exit is a census failure. `/bin/sleep` refuses a path argument (`sleep: invalid
+  time interval`), so the self-test's sleeper carries the work-root path as its `argv[0]`. Results (engines
+  `/opt/homebrew/bin` wasmtime 45.0.1, wasmer 7.5.0): `census_reports_each_kind_of_leftover` PASS (one `entry:
+  left.txt`, one `process: <pid> <work>/sleeper 30`, one `open file:` line naming the test process and the file;
+  empty after cleanup); `normal_run_leaves_nothing_under_the_scratch_root` PASS (both print `FIXED_OUTPUT`, census
+  empty); `trapped_run_leaves_nothing_under_the_scratch_root` PASS (wasmtime `exit status: 134`, ``wasm trap: wasm
+  `unreachable` instruction executed``; wasmer `exit status: 1`, `error: RuntimeError: unreachable`; census empty on
+  each); `killed_run_leaves_nothing_under_the_scratch_root` PASS (one engine process each, SIGKILL, signal 9, census
+  empty on each; live argv `/opt/homebrew/bin/wasmtime run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work>/wasmtime/module.wasm 1592590337` and
+  `/opt/homebrew/bin/wasmer run --invoke digest <work>/wasmer/module.wasm 1592590337`, no preopen, env or network
+  flag). The census found no real leftover. New falsifier F-WC-A12-TEMP-LEAK (`run_engine` makes `<work
+  root>/<engine>.scratch` before its run folder, never removed; anchor `let run_dir = make_run_dir(work_root,
+  engine)?;`, found once, on a line no other entry anchors; every existing anchor unchanged); F-WC-README-COUNT
+  re-anchored to 174. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-A12-TEMP-LEAK F-WC-README-COUNT`: "baseline: 4 named tests pass without an
+  edit, 0 do not", "summary: 2 CAUGHT of 2", exit 0, no `*.falsify-original` left. With the same mutation applied
+  through `falsify.Mutation`, all three run tests failed at `assert_census_empty` ("the census found leftovers",
+  `entry: wasmtime.scratch`, and for the normal run `entry: wasmer.scratch` too). README: new section "Cleanup census
+  (M1 A12)", the four tests in "Named tests", totals 174 (one task 040) and 110 runner-caught, a task 040 section;
+  ADOPTION one line. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test
+  --locked` (110 passed, 2 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check`
+  exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `tools/src/`, `capsule/`, `tools/build`, lab
+  CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 041 (M1 A8 lab half: host secrets never reach either engine or the capsule output). Base
+  `571741989`. `tests/run.rs` and `tests/common/grants.rs` only, plus docs and `falsifiers.json`; no `tools/src/`
+  change. `tests/common/grants.rs`: the one module builder is now `importing(module, name)`; `importing_env` calls
+  it and `IMPORTING_MODULE` stays byte for byte (`importing("env", "f") == IMPORTING_MODULE` is asserted). New in
+  `tests/run.rs`: `HostSecretCase` (one case-folder layout for both halves), `host_secret_shim` (`#!/bin/sh`: writes
+  `"$@"` one per line and `/usr/bin/env` into `records/<engine>.<version|run>.<argv|env>`, then `exec`s the real
+  engine by its absolute path), and three tests. `host_secret_fixture_never_reaches_either_real_engine` (outer)
+  builds the capsule, writes `<tmp>/home/keys/host-secret` holding `host-secret-marker <fresh test key's DID>`, and
+  starts this test binary (`--exact host_secret_fixture_run_inside_the_child --ignored --nocapture`) with
+  `HOME=<tmp>/home` and `WASM_CAPSULE_LAB_A8_CASE=<tmp>`; it passes only on child exit 0 and `test result: ok. 1
+  passed;`. `host_secret_fixture_run_inside_the_child` (`#[ignore]`, fails at once on another `HOME`: run by hand
+  it panicked "WASM_CAPSULE_LAB_A8_CASE is not set", and with the variable set under the real `HOME`, "HOME is not
+  the fixture home"). `host_secret_probe_imports_are_refused_before_any_engine_starts`. Results (engines
+  `/opt/homebrew/bin`, `wasmtime 45.0.1 (83166ba31 2026-06-05)`, `wasmer 7.5.0`): outer PASS (child PASS);
+  recorded module run argv wasmtime `run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work>/wasmtime/module.wasm 1592590337`, wasmer
+  `run --invoke digest <work>/wasmer/module.wasm 1592590337`; each `--version` argv `--version` alone; every
+  recorded environment (both engines, both starts) `PWD=<lane dir>`, `SHLVL=1`, `_=/usr/bin/env`, the shim shell's
+  own (`env -i /bin/sh -c /usr/bin/env` prints the same three), no `HOME`, no home folder, fixture path or marker;
+  both stdouts `FIXED_OUTPUT` and a newline. Probe test PASS: `path_open`, `fd_read`, `fd_prestat_get`,
+  `environ_get`, `environ_sizes_get` from `wasi_snapshot_preview1`, each refused with no grant as `undeclared import
+  wasi_snapshot_preview1.<name>` (`Audit(Undeclared)`) and with a `call` grant as `no typed lab operation for import
+  wasi_snapshot_preview1.<name>` (`UntypedImport`), no run folder, no `--version` and no module run. No leak found.
+  New falsifier F-WC-A8-HOME-PREOPEN (`start_engine` adds `.arg(format!("--dir={}",
+  std::env::var("HOME").unwrap_or_default()))` after the `memory_cap_args` line; that anchor is found once in
+  `tools/src/run.rs`, which this task does not change, so every existing anchor is unchanged); F-WC-README-COUNT
+  re-anchored to 175. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-A8-HOME-PREOPEN F-WC-README-COUNT`: "baseline: 2 named tests pass without an
+  edit, 0 do not", "F-WC-README-COUNT CAUGHT", "F-WC-A8-HOME-PREOPEN CAUGHT", "summary: 2 CAUGHT of 2", exit 0, no
+  `*.falsify-original` left. With the same mutation applied through `falsify.Mutation`, the real wasmtime took the
+  preopen and ran; the outer test failed at "the child host_secret_fixture_run_inside_the_child did not pass (exit
+  status: 101)", and the child at its `argv_faults` assertion: "wasmtime: the module run's argv [..., "--dir=<tmp>/home",
+  ...]: a preopen, env or network flag: --dir=<tmp>/home". README: new section "Host secrets denied (M1 A8 lab
+  half)", the three tests in "Named tests", totals 175 (one task 041) and 111 runner-caught, a task 041 section;
+  ADOPTION one line. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test
+  --locked` (112 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check`
+  exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `tools/src/`, `capsule/`, `tools/build`, lab
+  CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

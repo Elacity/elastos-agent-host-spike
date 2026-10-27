@@ -31,7 +31,7 @@ mod common;
 use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
-use common::grants::{env_f, grants_file, importing_env, IMPORTING_MODULE};
+use common::grants::{env_f, grants_file, importing, importing_env, IMPORTING_MODULE};
 use common::wasm_shape;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -71,9 +71,33 @@ macro_rules! module_argument {
 }
 const MODULE_ARGUMENT: &str = module_argument!();
 
+/// The shell lines, after [`MODULE_ARGUMENT`], with which a stand-in records
+/// its run folder as it saw it during its run (task 039: the runner removes
+/// the folder once the engine exits). Each record sits beside the stand-in's
+/// own path, `$0`, in the test's own stand-in folder, outside the work root:
+/// a copy of the module in `$0.module`, the folder's mode in `$0.mode` and
+/// its entries in `$0.entries`. A later run of the same stand-in writes over
+/// them. Every command is named by its absolute path (the engine has no
+/// environment).
+macro_rules! record_run_folder {
+    () => {
+        concat!(
+            "/bin/cp \"$module\" \"$0.module\"\n",
+            "/usr/bin/stat -f %Lp \"${module%/*}\" > \"$0.mode\"\n",
+            "/bin/ls -A \"${module%/*}\" > \"$0.entries\"\n",
+        )
+    };
+}
+const RECORD_RUN_FOLDER: &str = record_run_folder!();
+
 /// A stand-in engine that prints the bytes of the module it was given (its
-/// second-to-last argument).
-const CAT_MODULE: &str = concat!("#!/bin/sh\n", module_argument!(), "cat \"$module\"\n");
+/// second-to-last argument), after recording its run folder.
+const CAT_MODULE: &str = concat!(
+    "#!/bin/sh\n",
+    module_argument!(),
+    record_run_folder!(),
+    "cat \"$module\"\n"
+);
 
 /// A stand-in engine that prints each argument on its own line.
 const PRINT_ARGS: &str = "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n";
@@ -169,6 +193,13 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
+/// What the stand-in at `program` recorded as `kind` (`module`, `mode` or
+/// `entries`) through [`RECORD_RUN_FOLDER`] during its last run.
+fn recorded(program: &Path, kind: &str) -> Vec<u8> {
+    let record = PathBuf::from(format!("{}.{kind}", program.display()));
+    fs::read(&record).unwrap_or_else(|error| panic!("read {}: {error}", record.display()))
+}
+
 /// A run's stdout; it exited 0, the only status `run_engine` returns.
 fn ran(result: Result<EngineRun, Refusal>) -> Vec<u8> {
     let run = result.unwrap_or_else(|refusal| panic!("the runner refused: {refusal}"));
@@ -214,16 +245,18 @@ fn run_writes_only_the_verified_entrypoint_bytes() {
         stdout, MODULE,
         "the engine did not get the verified entrypoint bytes"
     );
-    let run_dir = root.join("wasmtime");
-    assert_eq!(names(&run_dir), ["module.wasm"], "the run folder");
+    // As the engine saw its run folder: exactly the module file, holding the
+    // verified bytes. Task 039: once it exited, the folder was removed.
     assert_eq!(
-        fs::read(run_dir.join("module.wasm")).expect("read the module"),
-        MODULE
+        recorded(&engine, "entries"),
+        b"module.wasm\n",
+        "the run folder"
     );
+    assert_eq!(recorded(&engine, "module"), MODULE);
     assert_eq!(
         names(&root),
-        ["bundle", "wasmtime"],
-        "something was written outside the run folder"
+        ["bundle"],
+        "something was written outside the run folder, or the run folder was left"
     );
     assert_eq!(names(&bundle), ["capsule.json", "capsule.wasm"]);
 }
@@ -319,38 +352,43 @@ fn run_directory_is_private_and_new() {
     let tmp = TempDir::new("run-private");
     let root = canonical(&tmp);
 
-    ran(run_engine(&value, Engine::Wasmtime, &cat, &root));
-    let mode = fs::metadata(root.join("wasmtime"))
-        .expect("the run folder")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o700, "the run folder is not private");
+    // The run folder's mode as the engine saw it, during its run. Task 039: a
+    // second run in the same root finds no folder (the first was removed) and
+    // makes a new one, private too; each leaves the root empty.
+    for run in ["first", "second"] {
+        assert_eq!(
+            ran(run_engine(&value, Engine::Wasmtime, &cat, &root)),
+            MODULE,
+            "{run} run"
+        );
+        assert_eq!(
+            recorded(&cat, "mode"),
+            b"700\n",
+            "{run} run: the run folder is not private"
+        );
+        assert!(
+            names(&root).is_empty(),
+            "{run} run: the run folder was left"
+        );
+    }
 
-    // A second run in the same root, and a folder planted at a run folder's
-    // name: each is refused, the folder is never reused, no engine starts.
+    // A folder planted at a run folder's name is refused, never reused or
+    // removed, and no engine starts.
     let marker = engines.join("started");
     let engine = marking(&engines, &marker);
     let planted = root.join("wasmer");
     fs::create_dir(&planted).expect("plant a folder");
-    for (engine_kind, run_dir) in [
-        (Engine::Wasmtime, root.join("wasmtime")),
-        (Engine::Wasmer, planted.clone()),
-    ] {
-        let before = names(&run_dir);
-        let refusal = refused(run_engine(&value, engine_kind, &engine, &root));
-        assert!(
-            matches!(refusal.reason, Reason::RunDirExists),
-            "{engine_kind}: {refusal}"
-        );
-        assert_eq!(
-            refusal.to_string(),
-            format!(
-                "{}: the run folder already exists: the runner makes a new one and never reuses it",
-                run_dir.display()
-            )
-        );
-        assert_eq!(names(&run_dir), before, "{engine_kind}: the folder changed");
-    }
+    let refusal = refused(run_engine(&value, Engine::Wasmer, &engine, &root));
+    assert!(matches!(refusal.reason, Reason::RunDirExists), "{refusal}");
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: the run folder already exists: the runner makes a new one and never reuses it",
+            planted.display()
+        )
+    );
+    assert_eq!(names(&root), ["wasmer"], "the planted folder was removed");
+    assert!(names(&planted).is_empty(), "the planted folder changed");
     assert!(!marker.exists(), "an engine was started");
 }
 
@@ -549,6 +587,10 @@ fn runner_passes_no_directory_env_or_network_flags() {
                 "{engine_kind}: the argv carries {flag}"
             );
         }
+        assert!(
+            names(&root).is_empty(),
+            "{engine_kind}: the run folder was left"
+        );
     }
 }
 
@@ -643,6 +685,164 @@ fn engine_failures_keep_their_cause() {
                 missing.display()
             )
         );
+    }
+}
+
+/// Task 039: `run_engine` removes its module file and its run folder once
+/// the engine has exited, on every outcome after the folder was made: a
+/// success, an engine that fails (`FAILING`, the shell `FAILING_BODY`) and an
+/// absolute engine path that does not exist (the folder is made before the
+/// start). Each leaves the work root empty, and each outcome's own result or
+/// reason is unchanged.
+#[test]
+fn run_engine_removes_its_run_folder_after_every_outcome() {
+    let (_bundle, value) = fixture();
+    let engines = TempDir::new("run039-every-engines");
+    let engines = canonical(&engines);
+    let cat = stand_in(&engines, "cat", CAT_MODULE);
+    let failing = stand_in(&engines, "failing", FAILING);
+    assert!(FAILING.ends_with(FAILING_BODY), "FAILING runs FAILING_BODY");
+    let missing = engines.join("no-such-engine");
+
+    for engine_kind in ENGINES {
+        let tmp = TempDir::new("run039-every");
+        let root = canonical(&tmp);
+
+        assert_eq!(
+            ran(run_engine(&value, engine_kind, &cat, &root)),
+            MODULE,
+            "{engine_kind}: the success"
+        );
+        assert_eq!(
+            recorded(&cat, "entries"),
+            b"module.wasm\n",
+            "{engine_kind}: the engine did not run in its run folder"
+        );
+        assert!(
+            names(&root).is_empty(),
+            "{engine_kind}: a success left {:?}",
+            names(&root)
+        );
+
+        let refusal = refused(run_engine(&value, engine_kind, &failing, &root));
+        match &refusal.reason {
+            Reason::EngineFailed {
+                engine,
+                status,
+                stderr,
+            } => {
+                assert_eq!(*engine, engine_kind);
+                assert_eq!(status.code(), Some(3));
+                assert_eq!(stderr, "boom: bad module\n");
+            }
+            _ => panic!("{engine_kind}: {refusal}"),
+        }
+        assert_eq!(refusal.path, failing);
+        assert!(
+            names(&root).is_empty(),
+            "{engine_kind}: a failed engine left {:?}",
+            names(&root)
+        );
+
+        let refusal = refused(run_engine(&value, engine_kind, &missing, &root));
+        match &refusal.reason {
+            Reason::EngineDidNotStart { engine, error } => {
+                assert_eq!(*engine, engine_kind);
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            }
+            _ => panic!("{engine_kind}: {refusal}"),
+        }
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "{}: {engine_kind} did not start: {NOT_FOUND}",
+                missing.display()
+            )
+        );
+        assert!(
+            names(&root).is_empty(),
+            "{engine_kind}: an engine that did not start left {:?}",
+            names(&root)
+        );
+    }
+}
+
+/// Task 039: a stand-in that, during its run, writes one extra file into its
+/// own run folder. After a success the run is refused with the removal reason
+/// and the run folder's path; only the runner's own module file is deleted,
+/// and the extra file and the folder stay. A stand-in that puts a folder at
+/// the module file's path is refused at that path, and the folder it put
+/// there stays. After an engine failure the failure stays the answer and the
+/// failed removal is not reported (README's known limit).
+#[test]
+fn run_folder_that_cannot_be_removed_is_refused() {
+    let (_bundle, value) = fixture();
+    let engines = TempDir::new("run039-kept-engines");
+    let engines = canonical(&engines);
+    let extra = stand_in(
+        &engines,
+        "extra",
+        &format!("#!/bin/sh\n{MODULE_ARGUMENT}: > \"${{module%/*}}/extra\"\nprintf same\n"),
+    );
+    let swapped = stand_in(
+        &engines,
+        "swapped",
+        &format!("#!/bin/sh\n{MODULE_ARGUMENT}/bin/rm \"$module\"\n/bin/mkdir \"$module\"\nprintf same\n"),
+    );
+    let extra_failing = stand_in(
+        &engines,
+        "extra-failing",
+        &format!("#!/bin/sh\n{MODULE_ARGUMENT}: > \"${{module%/*}}/extra\"\n{FAILING_BODY}"),
+    );
+
+    for engine_kind in ENGINES {
+        let tmp = TempDir::new("run039-kept");
+        let root = canonical(&tmp);
+        let run_dir = root.join(engine_kind.name());
+        let refusal = refused(run_engine(&value, engine_kind, &extra, &root));
+        match &refusal.reason {
+            Reason::RunDirNotRemoved(error) => assert_eq!(error.raw_os_error(), Some(66)),
+            _ => panic!("{engine_kind}: not the removal reason: {refusal}"),
+        }
+        assert_eq!(refusal.path, run_dir, "{engine_kind}");
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "{}: the run folder cannot be removed after the engine exited: Directory not empty (os error 66)",
+                run_dir.display()
+            )
+        );
+        assert_eq!(
+            names(&run_dir),
+            ["extra"],
+            "{engine_kind}: the extra file was deleted, or the module file was left"
+        );
+        assert_eq!(names(&root), [engine_kind.name()], "{engine_kind}");
+
+        let tmp = TempDir::new("run039-swapped");
+        let root = canonical(&tmp);
+        let module = root.join(engine_kind.name()).join("module.wasm");
+        let refusal = refused(run_engine(&value, engine_kind, &swapped, &root));
+        match &refusal.reason {
+            Reason::RunDirNotRemoved(error) => assert_eq!(error.raw_os_error(), Some(1)),
+            _ => panic!("{engine_kind}: not the removal reason: {refusal}"),
+        }
+        assert_eq!(refusal.path, module, "{engine_kind}");
+        assert!(
+            module.is_dir() && names(&module).is_empty(),
+            "{engine_kind}: the folder at the module file's path was not left as it was"
+        );
+
+        let tmp = TempDir::new("run039-kept-failing");
+        let root = canonical(&tmp);
+        let run_dir = root.join(engine_kind.name());
+        let refusal = refused(run_engine(&value, engine_kind, &extra_failing, &root));
+        assert!(
+            matches!(refusal.reason, Reason::EngineFailed { .. }),
+            "{engine_kind}: the failure is not the answer: {refusal}"
+        );
+        assert_eq!(refusal.path, extra_failing, "{engine_kind}");
+        assert_eq!(names(&run_dir), ["extra"], "{engine_kind}");
     }
 }
 
@@ -891,9 +1091,10 @@ const FAILING_BODY: &str = "printf 'boom: bad module\\n' >&2\nexit 3\n";
 /// A stand-in engine `name` that, asked `--version`, records `version <name>`
 /// in `log`; started for a module run, it writes every argument it was given,
 /// one per line, to `<name>.argv` in `folder` (see [`logged_argv`]), records
-/// in `log` that it started, with the module path it was given, waits,
-/// records that it ended, then prints `output`. Two engines that overlap leave
-/// their lines interleaved in `log`.
+/// its run folder ([`RECORD_RUN_FOLDER`]), records in `log` that it started,
+/// with the module path it was given, waits, records that it ended, then
+/// prints `output`. Two engines that overlap leave their lines interleaved in
+/// `log`.
 fn recording(folder: &Path, name: &str, log: &Path, output: &str) -> PathBuf {
     let version = format!(
         "printf 'version {name}\\n' >> '{log}'\nprintf '%s\\n' '{version}'\n",
@@ -901,7 +1102,7 @@ fn recording(folder: &Path, name: &str, log: &Path, output: &str) -> PathBuf {
         version = stand_in_version(name)
     );
     let body = format!(
-        "printf '%s\\n' \"$@\" > '{argv}'\n{MODULE_ARGUMENT}printf 'start {name} %s\\n' \"$module\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
+        "printf '%s\\n' \"$@\" > '{argv}'\n{MODULE_ARGUMENT}{RECORD_RUN_FOLDER}printf 'start {name} %s\\n' \"$module\" >> '{log}'\n/bin/sleep 0.5\nprintf 'end {name}\\n' >> '{log}'\nprintf '{output}'\n",
         argv = folder.join(format!("{name}.argv")).display(),
         log = log.display()
     );
@@ -986,7 +1187,11 @@ fn same_name_same_output_on_wasmtime_and_wasmer() {
         name,
         "the run does not hold the verified name"
     );
-    assert_eq!(names(&work), ["wasmer", "wasmtime"]);
+    assert!(
+        names(&work).is_empty(),
+        "task 039: the run folders were left: {:?}",
+        names(&work)
+    );
     eprintln!("PASS: wasmtime and wasmer both printed {FIXED_OUTPUT} for {FIXED_INPUT}, {name}");
 }
 
@@ -1083,7 +1288,7 @@ fn differing_engine_outputs_are_reported_as_a_failure() {
             }
             other => panic!("{case}: {other}"),
         }
-        assert_eq!(names(&work), ["wasmer", "wasmtime"], "{case}");
+        assert!(names(&work).is_empty(), "{case}: a run folder was left");
     }
 }
 
@@ -1130,7 +1335,7 @@ fn matching_engine_failures_are_refused() {
         !started(&engines, "wasmer"),
         "wasmer was started after wasmtime failed"
     );
-    assert_eq!(names(&work), ["wasmtime"]);
+    assert!(names(&work).is_empty(), "a run folder was left");
 }
 
 #[test]
@@ -1189,14 +1394,13 @@ fn runner_preserves_engine_refusals() {
                 !started(&engines, "wasmer"),
                 "{case}: wasmer was started after wasmtime was refused"
             );
-            assert_eq!(names(&work), ["wasmtime"], "{case}");
         } else {
             assert!(
                 started(&engines, "wasmtime"),
                 "{case}: wasmtime did not run"
             );
-            assert_eq!(names(&work), ["wasmer", "wasmtime"], "{case}");
         }
+        assert!(names(&work).is_empty(), "{case}: a run folder was left");
     }
 
     // A run folder already at wasmer's name: wasmtime runs, then 014's
@@ -1224,6 +1428,11 @@ fn runner_preserves_engine_refusals() {
     assert!(started(&engines, "wasmtime"), "wasmtime did not run");
     assert!(!started(&engines, "wasmer"), "wasmer was started");
     assert!(names(&planted).is_empty(), "the planted folder was used");
+    assert_eq!(
+        names(&work),
+        ["wasmer"],
+        "wasmtime's run folder was left, or the planted folder was removed"
+    );
 }
 
 #[test]
@@ -1252,12 +1461,54 @@ fn runner_calls_engines_in_order() {
     );
     assert_eq!(passed.wasmtime(), b"same");
     assert_eq!(passed.wasmer(), b"same");
-    assert_eq!(names(&work), ["wasmer", "wasmtime"]);
-    for engine_kind in ENGINES {
+    // Each run folder as its engine saw it; task 039: both are removed.
+    for (engine_kind, program) in [(Engine::Wasmtime, &wasmtime), (Engine::Wasmer, &wasmer)] {
         assert_eq!(
-            fs::read(work.join(engine_kind.name()).join("module.wasm")).expect("read a module"),
+            recorded(program, "module"),
             MODULE,
-            "{engine_kind}: the run folder does not hold the verified bytes"
+            "{engine_kind}: the run folder did not hold the verified bytes"
+        );
+    }
+    assert!(names(&work).is_empty(), "a run folder was left");
+}
+
+/// Task 039: a two-engine `run` on stand-ins that succeeds, and one refused
+/// because `wasmer` fails after `wasmtime` ran, each leave the work root
+/// empty: both engines ran in their own run folder, and neither folder is
+/// left.
+#[test]
+fn run_leaves_an_empty_work_root() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run039-empty-root");
+    let root = canonical(&tmp);
+    for (case, wasmer_body) in [("passes", "printf same\n"), ("wasmer-fails", FAILING_BODY)] {
+        let engines = work_root(&root, &format!("engines-{case}"));
+        let wasmtime = marked(&engines, "wasmtime", "printf same\n");
+        let wasmer = marked(&engines, "wasmer", wasmer_body);
+        let work = work_root(&root, &format!("work-{case}"));
+
+        let result = run(&input(&signed, &wasmtime, &wasmer, &work));
+        match (case, &result) {
+            ("passes", Ok(passed)) => assert_eq!(passed.stdout(Engine::Wasmer), b"same"),
+            (
+                "wasmer-fails",
+                Err(TwoEngineRefusal::Engine(Refusal {
+                    reason: Reason::EngineFailed { engine, .. },
+                    ..
+                })),
+            ) => assert_eq!(*engine, Engine::Wasmer),
+            _ => panic!("{case}: not the expected answer: {result:?}"),
+        }
+        for engine_kind in ENGINES {
+            assert!(
+                started(&engines, engine_kind.name()),
+                "{case}: {engine_kind} did not run"
+            );
+        }
+        assert!(
+            names(&work).is_empty(),
+            "{case}: the work root holds {:?}",
+            names(&work)
         );
     }
 }
@@ -1300,7 +1551,8 @@ fn run_returns_the_verified_name_and_both_outputs() {
 /// A stand-in engine `name` that records each start in `<its own path>.starts`,
 /// found from its own `$0`, never from an environment variable (the engine
 /// runs with none): `version` for a `--version` query, which prints a version,
-/// and `module <module path>` for a module run, which prints `same`.
+/// and `module <module path>` for a module run, which records its run folder
+/// ([`RECORD_RUN_FOLDER`]) and prints `same`.
 fn counting(folder: &Path, name: &str) -> PathBuf {
     engine(
         folder,
@@ -1309,7 +1561,7 @@ fn counting(folder: &Path, name: &str) -> PathBuf {
             "printf 'version\\n' >> \"$0.starts\"\nprintf '%s\\n' '{}'\n",
             stand_in_version(name)
         ),
-        &format!("{MODULE_ARGUMENT}printf 'module %s\\n' \"$module\" >> \"$0.starts\"\nprintf 'same\\n'\n"),
+        &format!("{MODULE_ARGUMENT}{RECORD_RUN_FOLDER}printf 'module %s\\n' \"$module\" >> \"$0.starts\"\nprintf 'same\\n'\n"),
     )
 }
 
@@ -1968,7 +2220,7 @@ fn zero_grants_zero_imports_runs() {
         passed.unused_grants()
     );
     assert_engine_starts(&ran, 1, "zero");
-    assert_eq!(names(&ran.work), ["wasmer", "wasmtime"]);
+    assert!(names(&ran.work).is_empty(), "a run folder was left");
 }
 
 /// wc-009a, the real-engine variant of `zero_grants_zero_imports_runs`: the
@@ -2090,13 +2342,18 @@ fn granted_import_is_linked() {
     assert_eq!(passed.linked(), [env_f()], "the linked imports");
     assert!(passed.unused_grants().is_empty());
     assert_engine_starts(&ran, 1, "linked");
-    for engine_kind in ENGINES {
+    // Each run folder as its engine saw it; task 039: both are removed.
+    for (engine_kind, program) in [
+        (Engine::Wasmtime, &ran.wasmtime),
+        (Engine::Wasmer, &ran.wasmer),
+    ] {
         assert_eq!(
-            fs::read(ran.work.join(engine_kind.name()).join("module.wasm")).expect("read a module"),
+            recorded(program, "module"),
             IMPORTING_MODULE,
             "{engine_kind}: not the verified importing module"
         );
     }
+    assert!(names(&ran.work).is_empty(), "a run folder was left");
 }
 
 /// Task 031: the signed module that imports `env.g`, which has no typed lab
@@ -2860,7 +3117,7 @@ fn run_refuses_a_rejected_memory_cap_without_retrying_it() {
         !started(&engines, "wasmer"),
         "wasmer was started after wasmtime rejected its cap"
     );
-    assert_eq!(names(&work), ["wasmtime"]);
+    assert!(names(&work).is_empty(), "a run folder was left");
 
     // Other failures stay EngineFailed: other stderr with the measured
     // status, the measured line with another status, an `error: ` line that
@@ -2920,5 +3177,739 @@ fn run_refuses_a_rejected_memory_cap_without_retrying_it() {
             }
             other => panic!("{case}: not EngineFailed: {other}"),
         }
+    }
+}
+
+/// The real `wasmer` on PATH, by an absolute path, or `None` after a SKIPPED
+/// line: an engine not found gives no result, never a PASS.
+fn real_wasmer(test: &str) -> Option<PathBuf> {
+    let program = find_engine(Engine::Wasmer.name());
+    if program.is_none() {
+        eprintln!("SKIPPED: wasmer not found on PATH; {test} needs it (no result, not a PASS)");
+    }
+    program
+}
+
+/// Both real engines, in [`ENGINES`] order, or `None` after a SKIPPED line for
+/// each one not found.
+fn real_engines(test: &str) -> Option<[PathBuf; 2]> {
+    match (real_wasmtime(test), real_wasmer(test)) {
+        (Some(wasmtime), Some(wasmer)) => Some([wasmtime, wasmer]),
+        _ => None,
+    }
+}
+
+/// Task 040: the census tools, each started by its absolute path. A tool that
+/// does not start fails the test with its path; the census never skips.
+const PGREP: &str = "/usr/bin/pgrep";
+const LSOF: &str = "/usr/sbin/lsof";
+const PS: &str = "/bin/ps";
+const KILL: &str = "/bin/kill";
+const SLEEP: &str = "/bin/sleep";
+
+/// Run a census `tool` with `args`. Exit 1 with nothing on stdout or stderr is
+/// "found nothing", an empty list. An exit in `found` with stdout and nothing
+/// on stderr is "found something": its stdout lines. Any other exit or any
+/// stderr is an `Err` with that text, never "found nothing".
+fn census_tool(
+    tool: &str,
+    args: &[&std::ffi::OsStr],
+    found: &[i32],
+) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new(tool)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("the census tool {tool} did not start: {error}"));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    match output.status.code() {
+        Some(1) if stdout.is_empty() && stderr.is_empty() => Ok(Vec::new()),
+        Some(code) if found.contains(&code) && stderr.is_empty() && !stdout.is_empty() => {
+            Ok(stdout.lines().map(str::to_owned).collect())
+        }
+        _ => Err(format!(
+            "{tool} {args:?} ({}): stdout {stdout:?}, stderr {stderr:?}",
+            output.status
+        )),
+    }
+}
+
+/// The pids of the live processes with `work_root` in their argv:
+/// `pgrep -f <work_root>`, which exits 0 when it lists one.
+fn live_processes(work_root: &Path) -> Result<Vec<String>, String> {
+    census_tool(PGREP, &["-f".as_ref(), work_root.as_os_str()], &[0])
+}
+
+/// The argv of the live process `pid`, as one line: `ps -o args= -p <pid>`.
+fn live_argv(pid: &str) -> Result<String, String> {
+    let lines = census_tool(
+        PS,
+        &["-o".as_ref(), "args=".as_ref(), "-p".as_ref(), pid.as_ref()],
+        &[0],
+    )?;
+    match lines.as_slice() {
+        [line] => Ok(line.trim_end().to_owned()),
+        _ => Err(format!("{PS}: pid {pid} gave {lines:?}, not one line")),
+    }
+}
+
+/// Task 040 (M1 A12 lab half): every leftover under `work_root`, each with its
+/// kind, or an empty list only when all three hold: `work_root` has no entry
+/// (`entry: <name>`); no live process has `work_root` in its argv (`process:
+/// <pid> <argv>`, from `pgrep -f`); and no process holds a file open under it
+/// (`open file: <lsof line>`, from `lsof +D`). A census tool that answers in
+/// any other way is a leftover too (`census failed: ...`), never a pass. The
+/// one census; every cleanup test asserts its result empty.
+fn census(work_root: &Path) -> Vec<String> {
+    let mut leftovers: Vec<String> = names(work_root)
+        .into_iter()
+        .map(|name| format!("entry: {name}"))
+        .collect();
+    match live_processes(work_root) {
+        Ok(pids) => leftovers.extend(pids.iter().map(|pid| match live_argv(pid) {
+            Ok(argv) => format!("process: {pid} {argv}"),
+            Err(error) => format!("process: {pid} (argv not read: {error})"),
+        })),
+        Err(error) => leftovers.push(format!("census failed: {error}")),
+    }
+    // This Mac's lsof exits 1 even when it lists an open file under `+D`
+    // (measured, LOG task 040), so a listing with exit 0 or 1 is read; exit 1
+    // with nothing printed is still the only "none".
+    match census_tool(LSOF, &["+D".as_ref(), work_root.as_os_str()], &[0, 1]) {
+        // lsof's first line is its column header.
+        Ok(lines) => leftovers.extend(
+            lines
+                .iter()
+                .skip(1)
+                .map(|line| format!("open file: {line}")),
+        ),
+        Err(error) => leftovers.push(format!("census failed: {error}")),
+    }
+    leftovers
+}
+
+/// Assert `census(work_root)` is empty, printing every leftover.
+fn assert_census_empty(work_root: &Path, case: &str) {
+    let leftovers = census(work_root);
+    assert!(
+        leftovers.is_empty(),
+        "{case}: the census found leftovers under {}:\n{}",
+        work_root.display(),
+        leftovers.join("\n")
+    );
+    eprintln!("PASS: {case}: the census found nothing under the scratch root");
+}
+
+/// A core module whose one export, `digest (i32) -> i32`, the runner's
+/// [`DIGEST_EXPORT`], runs the hand-written `body` (no locals), in
+/// [`grow_module`]'s style: no import and no memory.
+fn digest_module(body: &[u8]) -> Vec<u8> {
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    // Type section: one type, (i32) -> (i32).
+    module.extend_from_slice(&[0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    // Function section: one function, of type 0.
+    module.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);
+    // Export section: "digest", function 0.
+    module.extend_from_slice(&[0x07, 0x0a, 0x01, 0x06]);
+    module.extend_from_slice(b"digest");
+    module.extend_from_slice(&[0x00, 0x00]);
+    // Code section: one body, its size, no locals, then `body`.
+    let size = u8::try_from(body.len() + 1).expect("a short body");
+    module.extend_from_slice(&[0x0a, size + 2, 0x01, size, 0x00]);
+    module.extend_from_slice(body);
+    module
+}
+
+/// `unreachable; end`: `digest` traps.
+const TRAP_BODY: &[u8] = &[0x00, 0x0b];
+
+/// `loop br 0 end; unreachable; end`: `digest` loops forever.
+const LOOP_BODY: &[u8] = &[0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00, 0x0b];
+
+/// The engine flags that would give the guest a host folder, environment or
+/// network; none may be in a live engine's argv (task 014's fixed argv).
+const PREOPEN_FLAGS: [&str; 5] = ["--dir", "--mapdir", "--env", "--net", "-S"];
+
+/// What is wrong with a live engine's `argv` (one `ps` line): a preopen, env
+/// or network flag, or a path under `work_root` other than `module`; or
+/// `module` not there exactly once.
+fn argv_faults(argv: &str, work_root: &Path, module: &Path) -> Vec<String> {
+    let root = work_root.to_string_lossy();
+    let module = module.to_string_lossy();
+    let words: Vec<&str> = argv.split(' ').collect();
+    let mut faults = Vec::new();
+    for word in &words {
+        // A prefix match: `--dir=x`, `--env=K=V` and `-Sinherit-network` too.
+        if PREOPEN_FLAGS.iter().any(|flag| word.starts_with(flag)) {
+            faults.push(format!("a preopen, env or network flag: {word}"));
+        }
+        if word.contains(root.as_ref()) && *word != module.as_ref() {
+            faults.push(format!(
+                "a scratch-root path that is not the module: {word}"
+            ));
+        }
+    }
+    let module_words = words
+        .iter()
+        .filter(|word| **word == module.as_ref())
+        .count();
+    if module_words != 1 {
+        faults.push(format!(
+            "the module path is there {module_words} times, not once"
+        ));
+    }
+    faults
+}
+
+/// Task 040, census self-test, no engine: a file left in a work root, a live
+/// `/bin/sleep` whose argv holds a path under it (its `argv[0]`: `sleep` takes
+/// only time intervals) and a file handle open under it are each reported by
+/// kind; once the file is removed, the process stopped and the handle closed,
+/// the census is empty.
+#[test]
+fn census_reports_each_kind_of_leftover() {
+    use std::os::unix::process::CommandExt;
+    let tmp = TempDir::new("run40-census");
+    let work = work_root(&canonical(&tmp), "work");
+    assert_census_empty(&work, "an empty work root");
+
+    let left = work.join("left.txt");
+    fs::write(&left, b"left").expect("leave a file");
+    let open = fs::File::open(&left).expect("open the left file");
+    let mut sleeper = std::process::Command::new(SLEEP)
+        .arg0(work.join("sleeper"))
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("{SLEEP} did not start: {error}"));
+
+    let leftovers = census(&work);
+    sleeper.kill().expect("stop the sleeper");
+    sleeper.wait().expect("reap the sleeper");
+    let count = |kind: &str| {
+        leftovers
+            .iter()
+            .filter(|line| line.starts_with(kind))
+            .count()
+    };
+    let all = leftovers.join("\n");
+    assert_eq!(count("entry: "), 1, "the left file:\n{all}");
+    assert!(
+        leftovers.contains(&"entry: left.txt".to_owned()),
+        "the left file by name:\n{all}"
+    );
+    assert_eq!(count("process: "), 1, "the live sleeper:\n{all}");
+    assert!(
+        leftovers.contains(&format!(
+            "process: {} {} 30",
+            sleeper.id(),
+            work.join("sleeper").display()
+        )),
+        "the sleeper by pid and argv:\n{all}"
+    );
+    assert_eq!(count("open file: "), 1, "the open handle:\n{all}");
+    let open_line = leftovers
+        .iter()
+        .find(|line| line.starts_with("open file: "))
+        .expect("an open file line");
+    assert!(
+        open_line.contains(&format!(" {} ", std::process::id()))
+            && open_line.ends_with(&left.display().to_string()),
+        "the open handle by this process and path: {open_line}"
+    );
+    assert_eq!(count("census failed: "), 0, "a census tool failed:\n{all}");
+    assert_eq!(leftovers.len(), 3, "only the three leftovers:\n{all}");
+
+    drop(open);
+    fs::remove_file(&left).expect("remove the left file");
+    assert_census_empty(&work, "after the file, the process and the handle are gone");
+}
+
+/// Task 040, normal run: one two-engine `run` of the signed capsule
+/// `tools/build` makes, on both real engines; both print `FIXED_OUTPUT`, and
+/// then the census finds nothing under the work root.
+#[test]
+fn normal_run_leaves_nothing_under_the_scratch_root() {
+    let Some([wasmtime, wasmer]) = real_engines("the normal-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run40-normal");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(&root, "bundle", &built, &key);
+    let accepted = [did(&key)];
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &[],
+        wasmtime: &wasmtime,
+        wasmer: &wasmer,
+        work_root: &work,
+    }));
+    let expected = format!("{FIXED_OUTPUT}\n");
+    assert_eq!(passed.wasmtime(), passed.wasmer(), "the outputs differ");
+    assert_eq!(passed.wasmtime(), expected.as_bytes(), "not FIXED_OUTPUT");
+    assert_census_empty(&work, "normal run on wasmtime and wasmer");
+}
+
+/// Task 040, trapped run: on each real engine, `run_engine` on a module whose
+/// `digest` runs `unreachable` is refused as `EngineFailed` with a nonzero
+/// exit status and the trap on stderr; then the census finds nothing under
+/// that run's work root.
+#[test]
+fn trapped_run_leaves_nothing_under_the_scratch_root() {
+    let Some(programs) = real_engines("the trapped-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run40-trapped");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &digest_module(TRAP_BODY));
+
+    for (engine_kind, program) in ENGINES.into_iter().zip(&programs) {
+        let work = work_root(&root, &format!("work-{engine_kind}"));
+        let refusal = refused(run_engine(&value, engine_kind, program, &work));
+        match &refusal.reason {
+            Reason::EngineFailed {
+                engine,
+                status,
+                stderr,
+            } => {
+                assert_eq!(*engine, engine_kind);
+                assert!(
+                    status.code().is_some_and(|code| code != 0),
+                    "{engine_kind}: not a nonzero exit status: {status}"
+                );
+                assert!(
+                    stderr.to_lowercase().contains("unreachable"),
+                    "{engine_kind}: no trap on stderr: {stderr:?}"
+                );
+                eprintln!(
+                    "PASS: {engine_kind} trapped ({status}): {}",
+                    stderr
+                        .lines()
+                        .find(|line| line.to_lowercase().contains("unreachable"))
+                        .unwrap_or("")
+                );
+            }
+            _ => panic!("{engine_kind}: not EngineFailed: {refusal}"),
+        }
+        assert_eq!(refusal.path, *program, "{engine_kind}");
+        assert_census_empty(&work, &format!("trapped run on {engine_kind}"));
+    }
+}
+
+/// Task 040, killed run: on each real engine, `run_engine` runs on a thread on
+/// a module whose `digest` loops forever. The test waits (at most 10 s,
+/// polling `pgrep -f <work root>`) for the one engine process, reads its argv,
+/// kills it with `SIGKILL`, and joins the thread: the run is refused as
+/// `EngineFailed`, stopped by signal 9. The live argv held no preopen, env or
+/// network flag and no scratch-root path but the module file; then the census
+/// finds nothing under that run's work root. Every check waits until the
+/// engine is killed, so a failed check never leaves an engine looping.
+#[test]
+fn killed_run_leaves_nothing_under_the_scratch_root() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    let Some(programs) = real_engines("the killed-run census") else {
+        return;
+    };
+    let tmp = TempDir::new("run40-killed");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &digest_module(LOOP_BODY));
+
+    for (engine_kind, program) in ENGINES.into_iter().zip(programs) {
+        let work = work_root(&root, &format!("work-{engine_kind}"));
+        let module = work.join(engine_kind.name()).join("module.wasm");
+        let runner = {
+            let (value, program, work) = (value.clone(), program.clone(), work.clone());
+            std::thread::spawn(move || run_engine(&value, engine_kind, &program, &work))
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pids = loop {
+            match live_processes(&work) {
+                Ok(pids) if !pids.is_empty() => break Ok(pids),
+                Ok(_) if Instant::now() < deadline && !runner.is_finished() => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Ok(_) => {
+                    break Err(
+                        "no engine process showed up within 10 s, or the run ended first"
+                            .to_owned(),
+                    )
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let pids = pids.unwrap_or_else(|error| panic!("{engine_kind}: {error}"));
+        let argv: Vec<Result<String, String>> = pids.iter().map(|pid| live_argv(pid)).collect();
+        let killed = std::process::Command::new(KILL)
+            .args(["-KILL"])
+            .args(&pids)
+            .status()
+            .unwrap_or_else(|error| panic!("{KILL} did not start: {error}"));
+        let result = runner.join().expect("the runner thread panicked");
+
+        assert!(
+            killed.success(),
+            "{engine_kind}: {KILL} -KILL {pids:?}: {killed}"
+        );
+        assert_eq!(
+            pids.len(),
+            1,
+            "{engine_kind}: not one engine process: {argv:?}"
+        );
+        let argv = argv[0]
+            .clone()
+            .unwrap_or_else(|error| panic!("{engine_kind}: {error}"));
+        assert!(
+            argv.starts_with(&format!(
+                "{} run --invoke {DIGEST_EXPORT} ",
+                program.display()
+            )),
+            "{engine_kind}: not the engine's module run: {argv}"
+        );
+        let faults = argv_faults(&argv, &work, &module);
+        assert!(
+            faults.is_empty(),
+            "{engine_kind}: the live argv {argv:?}:\n{}",
+            faults.join("\n")
+        );
+        eprintln!("PASS: {engine_kind}'s live argv held no preopen, env or network flag: {argv}");
+
+        let refusal = refused(result);
+        match &refusal.reason {
+            Reason::EngineFailed { engine, status, .. } => {
+                assert_eq!(*engine, engine_kind);
+                assert_eq!(
+                    status.signal(),
+                    Some(9),
+                    "{engine_kind}: not stopped by SIGKILL: {status}"
+                );
+            }
+            _ => panic!("{engine_kind}: not EngineFailed: {refusal}"),
+        }
+        assert_census_empty(&work, &format!("killed run on {engine_kind}"));
+    }
+}
+
+/// Task 041 (M1 A8 lab half): the variable naming the case folder the outer
+/// test gives its child, the inner test.
+const A8_CASE: &str = "WASM_CAPSULE_LAB_A8_CASE";
+
+/// The inner test the outer test starts in a child with the fixture `HOME`.
+const A8_INNER: &str = "host_secret_fixture_run_inside_the_child";
+
+/// One task 041 case folder, laid out once for the outer and the inner test.
+/// Nothing in it is inside the lane tree: it is a test temp dir.
+struct HostSecretCase {
+    root: PathBuf,
+}
+
+impl HostSecretCase {
+    /// The throwaway `HOME` the child gets.
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    /// The host secret: `<home>/keys/host-secret`.
+    fn fixture(&self) -> PathBuf {
+        self.home().join("keys").join("host-secret")
+    }
+
+    /// The capsule `tools/build` made, built by the outer test.
+    fn capsule(&self) -> PathBuf {
+        self.root.join("out").join("capsule.wasm")
+    }
+
+    /// The recording shim in front of the real `engine`.
+    fn shim(&self, engine: Engine) -> PathBuf {
+        self.root.join("shims").join(engine.name())
+    }
+
+    /// What the shim of `engine` recorded as `what` (`argv` or `env`) when
+    /// started for `kind` (`version` or `run`).
+    fn record(&self, engine: Engine, kind: &str, what: &str) -> PathBuf {
+        self.root
+            .join("records")
+            .join(format!("{}.{kind}.{what}", engine.name()))
+    }
+
+    /// The work root of the run, apart from `HOME`, the shims and the records.
+    fn work(&self) -> PathBuf {
+        self.root.join("work")
+    }
+
+    /// The recorded `argv` or `env` lines of `engine`'s `kind` start.
+    fn recorded_lines(&self, engine: Engine, kind: &str, what: &str) -> Vec<String> {
+        let path = self.record(engine, kind, what);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// A recording shim for `engine` at `case.shim(engine)`: started for
+/// `--version` or for a module run, it writes its arguments, one per line, and
+/// the environment it was given (`/usr/bin/env`, which inherits the shim
+/// shell's exported environment, the one `exec` passes on) into the case's
+/// records, then `exec`s the real engine at the absolute path `real` with the
+/// same arguments. No engine runs inside an engine: the shim is replaced by it.
+fn host_secret_shim(case: &HostSecretCase, engine: Engine, real: &Path) -> PathBuf {
+    let records = |kind: &str, what: &str| case.record(engine, kind, what).display().to_string();
+    let script = format!(
+        concat!(
+            "#!/bin/sh\n",
+            "if [ \"$1\" = --version ]; then\n",
+            "printf '%s\\n' \"$@\" > '{version_argv}'\n",
+            "/usr/bin/env > '{version_env}'\n",
+            "else\n",
+            "printf '%s\\n' \"$@\" > '{run_argv}'\n",
+            "/usr/bin/env > '{run_env}'\n",
+            "fi\n",
+            "exec '{real}' \"$@\"\n",
+        ),
+        version_argv = records("version", "argv"),
+        version_env = records("version", "env"),
+        run_argv = records("run", "argv"),
+        run_env = records("run", "env"),
+        real = real.display(),
+    );
+    let shims = case.root.join("shims");
+    fs::create_dir_all(&shims).expect("create the shim folder");
+    stand_in(&shims, engine.name(), &script)
+}
+
+/// Task 041, M1 A8 lab half, the outer test: a throwaway `HOME` holding
+/// `keys/host-secret`, a marker made fresh from a fresh test key's DID, is
+/// given only to a child, this test binary run as `--exact` [`A8_INNER`], so
+/// no process-wide state changes here. The capsule is built first (cargo and
+/// rustup read `HOME`), and a recording shim is put in front of each real
+/// engine. The child's stdout and stderr are printed when it fails. If either
+/// real engine is not on PATH, it prints SKIPPED and starts no child.
+#[test]
+fn host_secret_fixture_never_reaches_either_real_engine() {
+    let Some(programs) = real_engines("the host-secret run") else {
+        return;
+    };
+    let tmp = TempDir::new("run41-a8");
+    let case = HostSecretCase {
+        root: canonical(&tmp),
+    };
+    built_capsule(&case.root);
+    fs::create_dir_all(case.fixture().parent().expect("the keys folder"))
+        .expect("create <home>/keys");
+    let marker = format!("host-secret-marker {}", did(&fresh_key()));
+    fs::write(case.fixture(), &marker).expect("write the host secret fixture");
+    fs::create_dir(case.root.join("records")).expect("create the records folder");
+    for (engine_kind, real) in ENGINES.into_iter().zip(&programs) {
+        host_secret_shim(&case, engine_kind, real);
+    }
+
+    let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", A8_INNER, "--ignored", "--nocapture"])
+        .env("HOME", case.home())
+        .env(A8_CASE, &case.root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("start the child test");
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        child.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "the child {A8_INNER} did not pass ({}):\n--- stdout\n{stdout}\n--- stderr\n{stderr}",
+        child.status
+    );
+    eprint!("{stderr}");
+    eprintln!("PASS: the host secret reached neither real engine nor either output");
+}
+
+/// Task 041, the inner test, run only by
+/// `host_secret_fixture_never_reaches_either_real_engine` in a child whose
+/// `HOME` is the fixture home; it fails at once under any other `HOME`. It
+/// signs the built capsule with a fresh key, reads an empty grants file and
+/// calls `run` with both recording shims. For each engine: the module run's
+/// argv has no preopen, env or network flag ([`argv_faults`]) and no argument
+/// holding the `HOME` folder; neither start's environment has `HOME` or a value
+/// holding the `HOME` folder or the marker; its stdout is `FIXED_OUTPUT` and a
+/// newline, holding neither.
+#[test]
+#[ignore = "run only as the child of host_secret_fixture_never_reaches_either_real_engine, which sets HOME to its fixture"]
+fn host_secret_fixture_run_inside_the_child() {
+    let root = std::env::var_os(A8_CASE).unwrap_or_else(|| {
+        panic!("{A8_CASE} is not set: run host_secret_fixture_never_reaches_either_real_engine")
+    });
+    let case = HostSecretCase {
+        root: PathBuf::from(root),
+    };
+    assert_eq!(
+        std::env::var_os("HOME"),
+        Some(case.home().into_os_string()),
+        "HOME is not the fixture home"
+    );
+    let marker = fs::read_to_string(case.fixture()).expect("read the fixture's marker");
+    assert!(!marker.is_empty(), "an empty marker proves nothing");
+    let home = case.home().display().to_string();
+    let fixture = case.fixture().display().to_string();
+    assert!(
+        !case.root.display().to_string().contains(' '),
+        "argv_faults splits on spaces, so the case folder must hold none"
+    );
+
+    let key = fresh_key();
+    let capsule = fs::read(case.capsule()).expect("read the built capsule");
+    let (bundle, sig) = signed_bundle(&case.root, "bundle", &capsule, &key);
+    let accepted = [did(&key)];
+    let grants = grants_file(&case.root, "grants.json", &[]);
+    let granted = read_grants(&grants).expect("read the empty grants file");
+    let work = work_root(&case.root, "work");
+    assert_eq!(work, case.work());
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &granted,
+        wasmtime: &case.shim(Engine::Wasmtime),
+        wasmer: &case.shim(Engine::Wasmer),
+        work_root: &work,
+    }));
+
+    let expected = format!("{FIXED_OUTPUT}\n");
+    for engine_kind in ENGINES {
+        let module = work.join(engine_kind.name()).join("module.wasm");
+        let argv = case.recorded_lines(engine_kind, "run", "argv");
+        let faults = argv_faults(&argv.join(" "), &work, &module);
+        assert!(
+            faults.is_empty(),
+            "{engine_kind}: the module run's argv {argv:?}:\n{}",
+            faults.join("\n")
+        );
+        for arg in &argv {
+            assert!(
+                !arg.contains(&home),
+                "{engine_kind}: an argument holds the HOME folder {home}: {arg}"
+            );
+        }
+        assert_eq!(
+            case.recorded_lines(engine_kind, "version", "argv"),
+            ["--version"],
+            "{engine_kind}: the version query's argv"
+        );
+        for kind in ["version", "run"] {
+            let env = case.recorded_lines(engine_kind, kind, "env");
+            for line in &env {
+                assert!(
+                    !line.starts_with("HOME="),
+                    "{engine_kind} {kind}: the environment has HOME: {line}"
+                );
+                assert!(
+                    !line.contains(&home) && !line.contains(&fixture),
+                    "{engine_kind} {kind}: an environment value holds the HOME folder: {line}"
+                );
+                assert!(
+                    !line.contains(&marker),
+                    "{engine_kind} {kind}: an environment value holds the marker: {line}"
+                );
+            }
+            eprintln!("{engine_kind} {kind} environment: {env:?}");
+        }
+        let stdout = passed.stdout(engine_kind);
+        assert_eq!(stdout, expected.as_bytes(), "{engine_kind}: the stdout");
+        let stdout = String::from_utf8_lossy(stdout);
+        assert!(
+            !stdout.contains(&marker) && !stdout.contains(&fixture),
+            "{engine_kind}: the stdout holds the marker or the fixture path"
+        );
+        eprintln!(
+            "{engine_kind} ({}) module run argv: {argv:?}",
+            String::from_utf8_lossy(passed.version(engine_kind))
+        );
+    }
+    eprintln!("PASS: neither engine got the HOME folder, HOME or the marker");
+}
+
+/// The `wasi_snapshot_preview1` file and environment imports task 041 probes.
+const HOST_SECRET_PROBES: [&str; 5] = [
+    "path_open",
+    "fd_read",
+    "fd_prestat_get",
+    "environ_get",
+    "environ_sizes_get",
+];
+
+/// The module the probe imports come from.
+const WASI_PREVIEW1: &str = "wasi_snapshot_preview1";
+
+/// Task 041, M1 A8 lab half: a signed module importing each of
+/// [`HOST_SECRET_PROBES`] from `wasi_snapshot_preview1` is refused by `run`:
+/// with no grant as undeclared, with a `call` grant as an import with no typed
+/// lab operation, each by its exact text and variant. No run folder is made and
+/// no engine is asked anything, not even `--version`.
+#[test]
+fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
+    let tmp = TempDir::new("run41-probes");
+    let root = canonical(&tmp);
+    assert_eq!(
+        importing("env", "f"),
+        IMPORTING_MODULE,
+        "the one module builder"
+    );
+
+    for name in HOST_SECRET_PROBES {
+        let module = importing(WASI_PREVIEW1, name);
+        let import = (WASI_PREVIEW1.to_owned(), name.to_owned());
+
+        let case = format!("{name}-not-granted");
+        let (result, ran) = run_with_grants(&root, &case, &module, &[]);
+        let refusal = two_refused(result);
+        assert_eq!(
+            refusal.to_string(),
+            format!("undeclared import {WASI_PREVIEW1}.{name}"),
+            "{case}"
+        );
+        match refusal {
+            TwoEngineRefusal::Verify(reason) => assert_eq!(
+                reason,
+                VerifyRefusal::Audit(AuditRefusal::Undeclared {
+                    module: import.0.clone(),
+                    name: import.1.clone(),
+                }),
+                "{case}"
+            ),
+            other => panic!("{case}: not a verifier refusal: {other}"),
+        }
+        assert!(names(&ran.work).is_empty(), "{case}: a run folder was made");
+        assert_engine_starts(&ran, 0, &case);
+
+        let case = format!("{name}-granted");
+        let (result, ran) =
+            run_with_grants(&root, &case, &module, &[(WASI_PREVIEW1, name, "call")]);
+        let refusal = two_refused(result);
+        assert_eq!(
+            refusal.to_string(),
+            format!("no typed lab operation for import {WASI_PREVIEW1}.{name}"),
+            "{case}"
+        );
+        match refusal {
+            TwoEngineRefusal::Verify(reason) => assert_eq!(
+                reason,
+                VerifyRefusal::UntypedImport {
+                    module: import.0,
+                    name: import.1,
+                },
+                "{case}"
+            ),
+            other => panic!("{case}: not a verifier refusal: {other}"),
+        }
+        assert!(names(&ran.work).is_empty(), "{case}: a run folder was made");
+        assert_engine_starts(&ran, 0, &case);
+        eprintln!("PASS: {WASI_PREVIEW1}.{name} refused, granted or not, before any engine");
     }
 }

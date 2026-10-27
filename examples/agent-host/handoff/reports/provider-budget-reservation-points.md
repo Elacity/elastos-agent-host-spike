@@ -5,9 +5,10 @@ this report changes no code and books no M1 check.
 Base commit: `3818e38ca91d2a3123ae25382a9643f195235baf` from
 `git rev-parse HEAD`, which includes task 037's fix of
 `execution::tests::local_llama_deadline_holds_capacity_until_worker_stops`.
-Every line below was re-read at this base. Of the files cited by line, only
-`execution.rs` moved between the reviewed report base `2c664d3a8` and this one;
-its test line numbers below are the new ones. The planner's grep base
+Every line below was re-read at this base. Of the files cited by line,
+`execution.rs` and `provider-a4-deepseek-turn-gaps.md` moved between the
+reviewed report base `2c664d3a8` and this one; their line numbers below are the
+ones at this base. The planner's grep base
 `04f1e93b4` is an ancestor of this commit. Some planner line numbers moved
 with merged work: `AdapterConfig` is at
 `capsules/model-provider/src/config.rs:286-324` at this commit, and the
@@ -53,7 +54,7 @@ limit. No row has a budget check.
 | 2 | OpenAI-compatible text | `capsules/model-provider/src/adapters.rs:1995` | hosted transport, or by URL | `capsules/model-provider/src/adapters.rs:1994`; dispatch at `:1292-1293`; admission at `state.rs:608-624` | Concurrency (`state.rs:608-609`), input bytes (`state.rs:570`), output cap from `inline_output_bytes_limit / 4` (`adapters.rs:2389`, body at `:2363`), run deadline from `runtime_ms_limit` (`config.rs:444-450`). |
 | 3 | OpenAI Responses text | `capsules/model-provider/src/adapters.rs:1995` | hosted transport, or by URL | `capsules/model-provider/src/adapters.rs:1994`; dispatch at `:1292-1293`; admission at `state.rs:608-624` | Same as row 2; the output field is `max_output_tokens` (`adapters.rs:2385`). |
 | 4 | Local llama input-token count | `capsules/model-provider/src/adapters.rs:1912` | local engine socket | `capsules/model-provider/src/adapters.rs:1911`; after engine admission at `capsules/model-provider/src/local_llama.rs:200` | Concurrency (`state.rs:608-609`), input bytes (`state.rs:570`) before dispatch. The context check runs after the count (`adapters.rs:1943`). No token cap. |
-| 5 | Local llama text | `capsules/model-provider/src/adapters.rs:1995` | local engine socket | `capsules/model-provider/src/adapters.rs:1994`; engine slot at `local_llama.rs:187`, `:200` | Context window (`adapters.rs:1943`), `max_tokens` from the request or the local limit (`adapters.rs:1876`; `config.rs:727-731`), offer concurrency (`state.rs:608-609`). |
+| 5 | Local llama text | `capsules/model-provider/src/adapters.rs:1995` | local engine socket | `capsules/model-provider/src/adapters.rs:1994`; engine slot at `local_llama.rs:184`, `:200` | Context window (`adapters.rs:1943`), `max_tokens` from the request or the local limit (`adapters.rs:1876`; `config.rs:727-731`), offer concurrency (`state.rs:608-609`). |
 | 6 | Artifact job create | `capsules/model-provider/src/adapters.rs:1675` | hosted transport, or by URL | `capsules/model-provider/src/adapters.rs:1674`; dispatch at `:1179` | Concurrency (`state.rs:608-609`), input bytes (`state.rs:570`). No token cap. |
 | 7 | Artifact job status read | `capsules/model-provider/src/adapters.rs:1748` | hosted transport, or by URL | `capsules/model-provider/src/adapters.rs:1747`; scheduled at `:2915` | Cancel settlement deadline (`adapters.rs:1720-1726`). No token cap. |
 | 8 | Artifact job cancel | `capsules/model-provider/src/adapters.rs:3020` | hosted transport, or by URL | `capsules/model-provider/src/adapters.rs:3019`; sent only when `allow_send` is true (`:2962-2978`) | Cancel settlement deadline (`adapters.rs:2956-2961`). No token cap. |
@@ -84,7 +85,7 @@ amount. `active_run_count` (`capsules/model-provider/src/journal.rs:406`) is
 read after the prepared run is stored (`state.rs:606-609`). A count above the
 offer limit fails the new run with `rate_limited`/`model_busy`
 (`state.rs:609-623`). The local engine adds one execution slot
-(`local_llama.rs:187`, `:200`), so concurrent local runs queue.
+(`local_llama.rs:184`, `:200`), so concurrent local runs queue.
 
 ## The four cases
 
@@ -96,7 +97,7 @@ event and the terminal outcome (`capsules/model-provider/src/contract.rs:166-173
 transition with no report records `unknown` (`state.rs:1352-1355`). A local
 run that supplies a report is refused (`state.rs:1356-1361`). The Runtime
 streams the response bytes and keeps no usage record
-(`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1584-1660`).
+(`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1584-1652`).
 
 ### Case 1: two concurrent runs
 
@@ -122,11 +123,11 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 | `conflicting_retry_reuses_run_id_and_fails_by_stable_request_fingerprint` | `capsules/model-provider/src/state.rs:4898` | Three retries with changed input, operation or offer hit the same run id and fail `invalid_request` (`:4973`). No dispatch happens. | None. No run terminal is produced. |
 | `create_retry_after_session_and_grant_rotation_returns_same_run_without_redispatch` | `capsules/model-provider/src/state.rs:4978` | The rotated retry returns the same run id (`:5025`), dispatch ran once (`:5026`), and the stored binding keeps the original session and grant (`:5031-5032`). | The offer from `offer("local-text")` is hosted (`state.rs:1861`, `:1877`), so the completed terminal stores `BackendReport::unknown()` (`state.rs:1354`, `contract.rs:212-218`). The test does not assert that field. |
 | `responses_terminal_failures_are_generic_and_not_retried` | `capsules/model-provider/src/execution.rs:4731` | Each of three terminal stream failures gives `backend_failed` with a generic message (`:4763-4770`), records an unknown backend report (`:4772-4775`), and makes exactly one request per run (`:4777`). | Hosted report with `usage` = unknown (`contract.rs:204-209`; `state.rs:1354`), asserted at `execution.rs:4772-4775`. |
-| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1157` | On macOS, the first `runs_create` returns the contract run id and stays open; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
+| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1391` | On macOS, the first `runs_create` returns the contract run id and stays open with status `prepared` or `running`; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. The connection count is now proven by `MP26`, which removes both stops for one run: the open-run return (`src/state.rs:518-531`, return at `:530`) and the local text worker refusal (`src/adapters.rs:768-774`). | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
 
 A same-fingerprint retry of a still-open run is pinned by
 `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect`
-(`capsules/model-provider/tests/process.rs:1157`) on the hosted path. The
+(`capsules/model-provider/tests/process.rs:1391`) on the hosted path. The
 retry returns at `state.rs:530` after `refresh_run_if_needed` (`state.rs:526-528`),
 which can settle a prepared run to `settlement_unknown` before the replay; the
 test holds the hosted answer back, so the replay is observed while the run is
@@ -167,7 +168,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 | `prepared_run_becomes_settlement_unknown_after_restart` | `capsules/model-provider/src/state.rs:3210` | A prepared run with no backend state reads as `settlement_unknown` (`:3239`) through `refresh_run_if_needed` (`:953-971`). | The offer from `offer("local-text")` is hosted (`state.rs:1861`, `:1877`), so the unknown terminal stores `BackendReport::unknown()` (`state.rs:1354`). The test does not assert that field. |
 | `cancel_deadline_settles_unknown_on_later_read` | `capsules/model-provider/src/state.rs:5514` | A reconciling run past its cancel deadline reads as `settlement_unknown` (`:5546`). | The offer from `offer("local-text")` is hosted (`state.rs:1861`, `:1877`), so the unknown terminal stores `BackendReport::unknown()` (`state.rs:1354`). The test does not assert that field. |
 | `responses_and_chat_cancel_with_active_backend_settle_unknown` | `capsules/model-provider/src/execution.rs:4937` | Both hosted adapters cancel to `reconciling` (`:4961`), then settle `settlement_unknown` (`:4967`), keep one terminal event (`:4971-4980`), keep the request active (`:4965`, `:5002`) and make one request (`:4966`, `:5004`). | Hosted report with `usage` = unknown (`state.rs:1354`). The test does not assert that field. |
-| `local_llama_cancel_with_active_backend_settles_unknown_without_redispatch` | `capsules/model-provider/src/execution.rs:3708` | The retained unknown run returns the same run id and `settlement_unknown` (`:3838-3842`), and the journal bytes and engine events stay unchanged (`:3844`), so no new inference starts. | None. A local run has no backend report. |
+| `local_llama_cancel_with_active_backend_settles_unknown_without_redispatch` | `capsules/model-provider/src/execution.rs:3708` | The retained unknown run returns the same run id and `settlement_unknown` (`:3838-3842`), and the journal bytes and engine events stay unchanged (`:3844`, `:3845-3849`), so no new inference starts. | None. A local run has no backend report. |
+| `hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage` | `capsules/model-provider/tests/process.rs:1573` | On macOS, the stand-in writes the Runtime's accepted head and one chunk that holds `ready`, then closes with no `0\r\n\r\n` and no usage event. The run settles `failed`/`transport_interrupted`, not `settlement_unknown`, with no output; the stand-in saw one connection and one request, `POST /v1/hosted-effect HTTP/1.1`, with no `authorization` header. Result: `test hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage ... ok`. Off macOS it prints one `SKIP` line and returns. | All three facts are `unknown` (`state.rs:1352-1354`, `contract.rs:212-219`), although the cut stream named `resolved-model` and the backend did work. |
 
 ```
 test state::tests::prepared_run_becomes_settlement_unknown_after_restart ... ok
@@ -178,7 +180,15 @@ test execution::tests::responses_and_chat_cancel_with_active_backend_settle_unkn
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 0.14s
 test execution::tests::local_llama_cancel_with_active_backend_settles_unknown_without_redispatch ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; finished in 1.16s
+test hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 1.43s
 ```
+
+Note: the unflushed `ready` delta is dropped on the fault. The chunk error
+returns from the worker at `capsules/model-provider/src/adapters.rs:2027`
+before the flush arm (`:2021-2023`) runs again, and the delta stays in
+`stream_state.delta_buffer` (`:2004`) until it goes out of scope. The test
+asserts nothing about `text_delta` events for this reason.
 
 Cases 1, 3 and 4 are pinned for today's behaviour. In case 2 the conflicting
 retries, the completed-run retry and the same-fingerprint retry of a still-open
@@ -202,10 +212,13 @@ proposes a Runtime design; each names what is missing.
    `:641-657`.
 2. **Settle the reservation from the reported outcome.** Runtime-side
    (Anders). The Runtime forwards the response and keeps no usage. The send is
-   `egress.rs:1584`; the stream copy loop runs at `egress.rs:1626-1660`.
+   `egress.rs:1584`; the stream copy loop runs at `egress.rs:1626-1652`.
    `bridge.rs:1021-1032` lowers only a `pending` count and raises an `accepted`
    flag. `HostedRunBinding` has no amount
-   (`bridge.rs:573-583`).
+   (`bridge.rs:573-583`). For a stream the Runtime cuts, the provider records
+   no usage at all (case 4), so the Runtime's account cannot come from the
+   provider's usage; this is Runtime-side (Anders) and this report proposes no
+   design.
 3. **Release on cancel.** Runtime-side (Anders). A cancel is one more effect
    through the same forward (`egress.rs:1513-1583`); the binding is removed
    when a terminal response arrives (`bridge.rs:1034-1059`). No amount is
@@ -217,7 +230,7 @@ proposes a Runtime design; each names what is missing.
    corresponding hold.
 5. **One account across concurrent and retried calls.** Runtime-side
    (Anders). Retries join one binding by the run id, and concurrent runs each
-   add to `pending` (`bridge.rs:985-1006`); the binding cap is 4096
+   add to `pending` (`bridge.rs:995`, `:1009`); the binding cap is 4096
    (`bridge.rs:45`, `:997`). That accounting covers run identity and pending
    effects, and has no spend field that concurrent and retried calls share.
    It exists only on macOS: `HostedRunBinding` (`bridge.rs:572-583`),
@@ -235,7 +248,9 @@ These tests would pin the reservation rules. They sit in
 the account they check is Runtime-side. Each needs the Runtime reservation
 contract first, so none can pass today. The matching Runtime-side test files
 are `elastos/crates/elastos-runtime/src/provider/bridge.rs` (`mod tests` at
-`:1857`, macOS only) and
+`:1857`, which compiles for every tested target; the macOS-only items are
+`HostedRunBinding` (`:572-583`), `record_confined_model_run` (`:925-1018`) and
+`settle_confined_model_run` (`:1020-1032`)) and
 `elastos/crates/elastos-server/src/api/model_provider_egress.rs` (`mod tests`
 at `:1883`).
 
@@ -243,12 +258,13 @@ at `:1883`).
    `capsules/model-provider/tests/process.rs`. It asserts one reservation
    exists before the first hosted effect. It needs no `src` change, because
    the hosted socket is an existing test seam
-   (`examples/agent-host/handoff/reports/provider-a4-deepseek-turn-gaps.md:112-121`).
+   (`examples/agent-host/handoff/reports/provider-a4-deepseek-turn-gaps.md:37-43`).
 2. `hosted_concurrent_runs_share_one_reserved_ceiling` in the same file. It
    asserts two concurrent hosted runs draw on one account and the second stops
    at the ceiling. The account is Runtime-side:
-   `elastos/crates/elastos-runtime/src/provider/bridge.rs:1857` (`mod tests`,
-   macOS only); the provider-side test sees only a Runtime it talks to.
+   `elastos/crates/elastos-runtime/src/provider/bridge.rs:1857` (`mod tests`;
+   the binding functions are macOS only); the provider-side test sees only a
+   Runtime it talks to.
 3. `hosted_usage_settles_the_reservation_and_cancel_releases_it` in the same
    file. It asserts reported usage settles the reservation and a cancel
    releases the unused part. The account is Runtime-side:
@@ -258,22 +274,25 @@ at `:1883`).
 4. `settlement_unknown_holds_the_reservation` in the same file. It asserts the
    account stays held while the outcome is unknown. The account is
    Runtime-side: `elastos/crates/elastos-runtime/src/provider/bridge.rs:1857`
-   (`mod tests`, macOS only); the provider-side test sees only a Runtime it
-   talks to.
+   (`mod tests`; the binding functions are macOS only); the provider-side test
+   sees only a Runtime it talks to.
 
 ## Next task
 
-`a_same_fingerprint_retry_of_an_open_run_returns_after_refresh` (test-only,
-this lane): add the test named in case 2 to
-`capsules/model-provider/src/state.rs`. It pins today's replay path and needs
-no Runtime reservation. The four Runtime-side reservation tests above cannot
-pass until Anders's Runtime reservation exists; writing them now would test an
+The same-fingerprint retry of an open hosted run is pinned in case 2 by
+`hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect`
+(`capsules/model-provider/tests/process.rs:1391`). Task 043 proves the
+no-second-send half with `MP26`, which removes both stops for one run
+(`src/state.rs:530`, `src/adapters.rs:768-774`). The four Runtime-side
+reservation tests above cannot pass until Anders's Runtime reservation exists;
+writing them now would test an
 absence, and the lane's rule keeps provider behaviour unchanged.
 
 ## What this report did not check
 
-- The 13 named tests were re-run at this base; no Runtime test was run.
-- No network call, no model call, no key, no hosted effect.
+- The 14 named tests were re-run at this base; no Runtime test was run.
+- No network call, no model call, no key; a hosted effect reached only the
+  Runtime socket stand-in.
 - No test ran with `SPARKS_MODEL_URL` or `ELASTOS_MODEL_EVAL_ROOT` set.
 - No Runtime build and no installed Runtime or provider.
 - No `capsules/*/src` change, so no Sasha note is needed.

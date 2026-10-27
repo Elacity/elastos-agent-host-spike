@@ -1,0 +1,23 @@
+id: F-A5-bindmiss
+file: src/lib.rs
+test: model_bind_unknown_instance_is_refused
+--- old
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+--- new
+        let fallback = self.registry.values().next().map(|record| InstanceRecord {
+            identity: record.identity.clone(),
+            session: record.session.clone(),
+        });
+        let record = self
+            .registry
+            .get(&instance)
+            .map(|record| InstanceRecord {
+                identity: record.identity.clone(),
+                session: record.session.clone(),
+            })
+            .or(fallback)
+            .ok_or(Refuse::UnknownInstance)?;
+--- end

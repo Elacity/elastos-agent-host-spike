@@ -432,6 +432,31 @@ fn model_different_identity_is_refused() {
 }
 
 #[test]
+fn model_extended_identity_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .host_set_identity(instance, "agent-10")
+        .expect("set identity");
+    let refusal = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect_err("extended identity");
+    assert_eq!(refusal, Refuse::Identity);
+    assert_eq!(refusal.to_string(), "identity does not match the grant");
+    verifier
+        .host_set_identity(instance, "agent-1")
+        .expect("restore identity");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("the stored identity still matches");
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_new_session_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -509,6 +534,26 @@ fn model_unknown_instance_is_refused() {
     let decision = verifier
         .use_grant(verifier.open_call(instance), &request)
         .expect("the registered instance still uses the grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_bind_unknown_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(instance, InstanceId(0));
+    let refusal = verifier
+        .bind_grant(InstanceId(0), "UsersAI/agent-1/notes", rights())
+        .expect_err("unknown instance");
+    assert_eq!(refusal, Refuse::UnknownInstance);
+    assert_eq!(refusal.to_string(), "unknown instance");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("a registered instance still binds");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("grant");
     assert_eq!(decision.instance, instance);
     assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
 }

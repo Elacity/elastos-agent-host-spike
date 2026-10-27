@@ -471,7 +471,24 @@ is returned) and its stdout. In order, the first refusal is the answer:
    (`1592590337` is `FIXED_INPUT`, `0x5EED_0001`), with stdin null and an
    empty environment (`engine_command`, the one place these two rules are
    set, which task 016's version query uses too). The module argument is absolute, so it is never read as
-   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag.
+   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag;
+6. task 039: once the engine has exited (its outcome is read first), the run
+   folder and its module file are removed, on every outcome after step 3: a
+   refused module write, an engine that did not start, failed or succeeded
+   (`finish_run`, then `remove_run_dir`). The module file is removed only if
+   this run made it (not after a refused create), then the folder with
+   `fs::remove_dir`, never `remove_dir_all`, so an entry someone else put in
+   the folder is never deleted: the folder then stays and the removal fails.
+
+**Which answer wins (task 039).** After a success, a failed removal refuses the
+run with `the run folder cannot be removed after the engine exited: <OS error>`
+and the path it stopped at (the module file or the run folder). After a
+refusal, the first refusal stays the answer (the runner's rule), and a failed
+removal is not reported: a known limit. A runner process that is itself killed
+leaves its folder: a known limit (task 040's census covers a killed engine, not
+a killed runner). A run folder name is still never reused while it exists
+(`RunDirExists`); a second run in the same work root finds no folder and makes
+a new one.
 
 That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
 `wasmer` 7.5.0 (task 006's LOG); both engines take it unchanged.
@@ -493,7 +510,9 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
 - `<engine> did not start: <OS error>` (for example a missing program);
 - `<engine> rejected the memory cap argument -W <argument> (exit status: <n>): <its stderr>; the module is not run without its cap`
   (task 038, below);
-- `<engine> failed (exit status: <n>): <its stderr>`.
+- `<engine> failed (exit status: <n>): <its stderr>`;
+- `the run folder cannot be removed after the engine exited: <OS error>`
+  (task 039, after a success only).
 
 **A rejected cap argument (task 038).** A module run that was given a memory
 cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
@@ -515,7 +534,8 @@ sections), so `run_engine`'s one start per call holds.
 `entrypoint()`, never from a second read of the bundle on disk: the verified
 `cid()` is the name, and the bytes written are exactly the bytes that name
 covers. The runner reads no environment variable and no file, parses no
-manifest or module, and writes nothing outside the new folder. The engine gets
+manifest or module, writes nothing outside the new folder, and (task 039)
+leaves nothing it made in the work root once `run_engine` returns. The engine gets
 no folder, env or network flag, and an empty environment. This is a behaviour
 proof on one core module, not the Component ABI. `wasmtime` and `wasmer` are
 test-only host engines, not endorsed.
@@ -1340,6 +1360,181 @@ hosting cannot be claimed for wasmer.
   is the only result they share. wc-009b's wasmer hosting test must report
   SKIPPED with this reason, never PASS.
 
+## Cleanup census (M1 A12)
+
+Task 040, the lab half of M1 A12, step 2 of 2 (task 039 is step 1: `run_engine`
+removes its run folder on every outcome). After a normal, a trapped and a
+killed run, on each real engine, one census in `tests/run.rs`, `census(work_root)`,
+lists everything the lab runner started or made that is still under the work
+root it was given, each line with its kind. It returns an empty list only when
+all its counts are zero. Every census tool is started by its absolute path; a
+tool that does not start fails the test with that path, it never skips.
+
+The four counts, and how each is read:
+
+- Entries (`entry: <name>`): `fs::read_dir` of the work root. None is zero
+  entries.
+- Processes (`process: <pid> <argv>`): `/usr/bin/pgrep -f <work root>`, so any
+  live process whose argv holds the work root, which an engine's does through
+  its module path. None is exit 1 with nothing on stdout or stderr. Exit 0
+  lists pids; `/bin/ps -o args= -p <pid>` gives each one's argv for the line.
+  The pattern is a regular expression, so a `.` in the path matches any
+  character: it can only match more, never less.
+- Open files (`open file: <lsof line>`): `/usr/sbin/lsof +D <work root>`. None
+  is exit 1 with nothing on stdout or stderr. This Mac's `lsof` exits 1 even
+  when it lists an open file (measured by `census_reports_each_kind_of_leftover`,
+  LOG.md, task 040), so a listing with exit 0 or 1 is read as open files.
+- Preopened folders: checked on the live engine in the killed run, from its own
+  argv (`/bin/ps -o args= -p <pid>`): no `--dir`, `--mapdir`, `--env`, `--net`
+  or `-S` flag (a prefix match, so `--dir=x` or `-Sinherit-network` too), no
+  path under the work root but the module file, and the module file exactly
+  once. The argv is fixed (task 014); this records what a real process got.
+
+Any other answer from a census tool (another exit status, or anything on
+stderr) is a leftover line, `census failed: <tool, args, status, stdout,
+stderr>`, never a pass.
+
+The three runs, each on wasmtime 45.0.1 and wasmer 7.5.0 (`/opt/homebrew/bin`,
+the pinned versions, task 038), each followed by an empty census:
+
+- Normal (`normal_run_leaves_nothing_under_the_scratch_root`): one two-engine
+  `run` of the signed capsule `tools/build` makes; both engines print
+  `FIXED_OUTPUT`, equal.
+- Trapped (`trapped_run_leaves_nothing_under_the_scratch_root`): `run_engine`
+  per engine on a hand-written module whose `digest` runs `unreachable`.
+  Refused as `EngineFailed`: wasmtime with exit status 134 and ``wasm trap:
+  wasm `unreachable` instruction executed`` on stderr, wasmer with exit status
+  1 and `error: RuntimeError: unreachable`.
+- Killed (`killed_run_leaves_nothing_under_the_scratch_root`): `run_engine` per
+  engine on a thread, on a module whose `digest` loops forever. The test polls
+  `pgrep -f <work root>` (at most 10 s) until the one engine process is up,
+  reads its argv, sends it `SIGKILL` with `/bin/kill -KILL <pid>` and joins the
+  thread: refused as `EngineFailed`, stopped by signal 9. Every check waits
+  until the engine is killed, so a failed check never leaves an engine looping.
+  The argv seen: `<wasmtime> run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
+  root>/wasmtime/module.wasm 1592590337` and `<wasmer> run --invoke digest
+  <work root>/wasmer/module.wasm 1592590337`.
+
+`census_reports_each_kind_of_leftover` proves the census sees what it counts,
+with no engine: a file left in a work root, a live `/bin/sleep 30` whose
+`argv[0]` is a path under it (`sleep` takes only time intervals) and a file
+handle this test process holds open under it are each reported once, by kind;
+once the handle is closed, the process stopped and the file removed, the
+census is empty.
+
+Falsifier F-WC-A12-TEMP-LEAK (runner-caught, "## Falsifiers"): `run_engine`
+makes one extra folder `<work root>/<engine>.scratch` before its run folder and
+never removes it; all three run tests fail at their census assertion.
+
+Limits, not claimed:
+
+- A runner process that is itself killed is not covered: the run folder it
+  made stays (task 039's known limit). Only a killed engine is tested.
+- The census sees only the scratch root. An engine's own caches or files
+  elsewhere (for example wasmtime's compile cache, or anything an engine keeps
+  under the user's home folder) are outside it and are not counted.
+- A process is seen only through its argv or an open file under the scratch
+  root; a process an engine started with neither would not be seen. Neither
+  engine was seen to start one (the killed run found exactly one process).
+- The census is a snapshot taken after `run` or `run_engine` returned, on this
+  one Mac.
+
+## Host secrets denied (M1 A8 lab half)
+
+Task 041. A host secret in the user's home folder does not reach a lab run on
+either pinned engine, and a module that asks for a file or the environment is
+refused before any engine is asked anything. No `tools/src/` code changed for
+this; the tests show what the runner already does.
+
+The fixture: a throwaway home folder `<tmp>/home` holding
+`keys/host-secret`, whose content is a marker made fresh in the test from a
+fresh test key's DID (`host-secret-marker did:key:...`). It is never a real
+key and is never written inside the lane tree.
+
+Why a child process: no test may change process-wide state, and every test
+in `tests/run.rs` shares one process. So `HOME` is never set in the test
+process. The outer test, `host_secret_fixture_never_reaches_either_real_engine`,
+builds the capsule first (cargo and rustup read `HOME`), writes the fixture
+and the shims, then starts this test binary itself (`current_exe()`, `--exact
+host_secret_fixture_run_inside_the_child --ignored --nocapture`) with `HOME`
+set to `<tmp>/home` and `WASM_CAPSULE_LAB_A8_CASE` naming the case folder. The
+inner test is `#[ignore]` with a reason naming the outer test, and fails at
+once if `HOME` is not the fixture home or the case variable is unset. The
+outer test passes only when the child exits 0 and its libtest line reads
+`test result: ok. 1 passed;`; otherwise it prints the child's stdout and
+stderr. If either real engine is not on PATH it prints `SKIPPED: ... (no
+result, not a PASS)` and starts no child.
+
+How the engines are seen: a recording shell shim stands in front of each real
+engine (`#!/bin/sh`: write `"$@"` one per line and `/usr/bin/env`'s output to
+files in the case folder, then `exec` the real engine by its absolute path
+with the same arguments). The shim is replaced by the engine, so there is no
+engine inside an engine. The `--version` query goes through the shim too, so
+the pin check (task 038) still reads the real engine's line.
+
+What each engine got, on this Mac (`/opt/homebrew/bin`, `wasmtime 45.0.1
+(83166ba31 2026-06-05)` and `wasmer 7.5.0`, as each printed it), with the
+inner test's `run` of the signed built capsule and an empty grants file:
+
+- wasmtime's module run argv: `run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
+  root>/wasmtime/module.wasm 1592590337`.
+- wasmer's module run argv: `run --invoke digest <work
+  root>/wasmer/module.wasm 1592590337`.
+- Each `--version` query's argv: `--version` alone.
+- The environment, for both engines and both starts: `PWD=<the test's
+  working folder>`, `SHLVL=1` and `_=/usr/bin/env`. These three are the shim
+  shell's own (`/bin/sh` sets them even when started with an empty
+  environment); the runner starts every engine with an empty environment
+  (`engine_command`, held by `engine_starts_with_an_empty_environment`). No
+  `HOME`, and no value holding the home folder, the fixture path or the
+  marker.
+- Both stdouts: `FIXED_OUTPUT` and a newline, holding neither the marker nor
+  the fixture path.
+
+The inner test asserts each of these for each engine: the module run's argv
+passes task 040's `argv_faults` (no `--dir`, `--mapdir`, `--env`, `--net` or
+`-S` flag, no work-root path but the module, the module path once) and no
+argument holds the home folder; no recorded environment line starts with
+`HOME=` or holds the home folder, the fixture path or the marker; and the
+stdout is exactly `FIXED_OUTPUT` and a newline.
+
+The five probe imports (`host_secret_probe_imports_are_refused_before_any_engine_starts`),
+each a signed module with one `() -> ()` import from `wasi_snapshot_preview1`,
+built by the one module builder `importing(module, name)` in
+`tests/common/grants.rs` (`importing("env", "f")` is `IMPORTING_MODULE` byte
+for byte): `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` and
+`environ_sizes_get`. Each goes through `run` (`run_with_grants`, counting
+stand-ins) twice:
+
+- with no grant, refused as `undeclared import wasi_snapshot_preview1.<name>`
+  (`VerifyRefusal::Audit(Undeclared)`);
+- with a `call` grant, refused as `no typed lab operation for import
+  wasi_snapshot_preview1.<name>` (`VerifyRefusal::UntypedImport`).
+
+Either way no run folder is made and neither engine is asked `--version` or
+started for a module run. This rule is the verifier's, already held by
+F-WC-B4-UNTYPED-LINKED and the audit's undeclared refusal (F-WC9-LINK-ALL), so
+it gets no new falsifier.
+
+Falsifier F-WC-A8-HOME-PREOPEN (runner-caught, "## Falsifiers"):
+`start_engine` adds `--dir=<HOME>` after the memory cap arguments, a preopen
+of the runner's home folder. The real wasmtime took it and ran; the inner test
+failed at its `argv_faults` assertion ("a preopen, env or network flag:
+--dir=<tmp>/home"), so the outer test failed at "the child ... did not pass".
+
+Limits, not claimed:
+
+- It covers this runner's argv and environment, and the verifier's import
+  refusal, on this one Mac. It does not cover what an engine reads for itself
+  outside the guest (for example a compile cache, or engine config under the
+  real home folder); the child's engines saw no `HOME` at all.
+- The environment is recorded by the shim's `/usr/bin/env`, the environment
+  the shim's `exec` passes on; the engine process's own environment is not
+  read from the kernel.
+- It is lab tooling, not the Runtime: no Runtime claim is made.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -1510,17 +1705,22 @@ puts it under the `/var` link):
 
 - `run_writes_only_the_verified_entrypoint_bytes` — the bundle's
   `capsule.wasm` is changed on disk after verification; a stand-in that prints
-  the file it was given prints the verified bytes, the run folder holds exactly
-  `module.wasm`, and the work root holds only the bundle and the run folder.
+  the file it was given prints the verified bytes. Task 039: the stand-in
+  records its run folder during its run (`RECORD_RUN_FOLDER`, one shared shell
+  snippet beside `MODULE_ARGUMENT`, writing beside the stand-in's own `$0`,
+  outside the work root): the folder held exactly `module.wasm`, with the
+  verified bytes; after the run the work root holds only the bundle.
 - `engine_path_must_be_absolute` — `./wasmtime`, `wasmtime` and
   `engines/wasmtime` are refused with their own reason; nothing is written.
 - `work_root_must_be_absolute_and_canonical` — `work`, `--env=X` and `./work`
   (relative), and a root through a folder link, a link plus `.`, a `..` and a
   trailing `/` (not canonical) are each refused with their own reason; nothing
   is written and no engine starts.
-- `run_directory_is_private_and_new` — the run folder's mode is `0o700`; a
-  second run in the same root and a planted folder at a run folder's name are
-  each refused, the folder is unchanged, and no engine starts.
+- `run_directory_is_private_and_new` — the run folder's mode, recorded by the
+  stand-in during its run, is `0o700`; task 039: a second run in the same root
+  finds no folder, makes a new one (`0o700` too) and runs, and each run leaves
+  the root empty; a planted folder at a run folder's name is refused, stays
+  unchanged and is not removed, and no engine starts.
 - `runner_io_refusals_keep_path_and_cause` — a missing root (`NotFound`), a
   root that is a file, and a root the user may not write (`PermissionDenied`
   on the run folder) each keep their path and cause; the shared writer's
@@ -1533,12 +1733,27 @@ puts it under the `/var` link):
   027 `wasmtime`'s argv also has `-W` and
   `max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y` (this capsule's declared 64
   MB) before the module path; `wasmer`'s is unchanged. Stand-ins that read the
-  module path take their second-to-last argument.
+  module path take their second-to-last argument. Task 039: after each run the
+  work root is empty.
 - `engine_starts_with_an_empty_environment` — a stand-in sees no `HOME`,
   which the test process has.
 - `engine_failures_keep_their_cause` — a stand-in that exits 3 with a stderr
   line gives the engine, the status and that line; a missing program gives the
   OS error. Two different reasons, for each engine, through `run_engine`.
+- `run_engine_removes_its_run_folder_after_every_outcome` (task 039) — for
+  each engine, a success (`CAT_MODULE`, which ran in its run folder), an engine
+  that fails (`FAILING`, the shell `FAILING_BODY`) and an absolute engine path
+  that does not exist (`EngineDidNotStart`; the folder is made before the
+  start): after each the work root is empty, and each outcome's own result or
+  reason is unchanged.
+- `run_folder_that_cannot_be_removed_is_refused` (task 039) — for each engine,
+  a stand-in that writes an extra file into its own run folder during a
+  successful run: the run is refused with `RunDirNotRemoved` (`Directory not
+  empty (os error 66)`, exact text) at the run folder's path, the module file
+  is gone and the extra file stays. A stand-in that puts a folder at the module
+  file's path: refused at that path (`os error 1`), and its folder stays. A
+  stand-in that writes the extra file and then fails: the failure stays the
+  answer, and the folder with the extra file stays (the known limit).
 - `each_engine_prints_the_fixed_output` — the capsule `tools/build` makes,
   bundled, signed and verified, run on the real `wasmtime` and `wasmer` found
   on PATH: each prints `230101071268130872` (`FIXED_OUTPUT`) for `1592590337`.
@@ -1563,8 +1778,9 @@ query and another for a module run):
   makes, bundled, signed and run through `run` on the real `wasmtime` and
   `wasmer` found on PATH: both stdouts are exactly `230101071268130872\n`
   (`FIXED_OUTPUT` for `FIXED_INPUT`), the returned `cid()` is the bundle's lab
-  CID, and the work root holds the two run folders. If either engine is not
-  found it prints `SKIPPED` and gives no result, never a PASS.
+  CID, and (task 039) the work root is empty: both run folders were removed.
+  If either engine is not found it prints `SKIPPED` and gives no result, never
+  a PASS.
 - `runner_refuses_an_unverified_bundle` — an unsigned bundle and a bundle
   signed by a key not on the accepted list: each is refused with exactly the
   verifier's own refusal and text, the work root stays empty, and marking
@@ -1578,14 +1794,19 @@ query and another for a module run):
 - `runner_preserves_engine_refusals` — `wasmtime`'s module run fails,
   `wasmer`'s fails, and a folder planted at `wasmer`'s run folder name: each
   comes back as `run_engine`'s refusal, unchanged, and nothing starts after it.
+  Task 039: each leaves no run folder; the planted one stays, unused.
   A missing program is now refused at its version query, before any module
   run (`version_query_failures_keep_their_cause`, task 016).
 - `runner_calls_engines_in_order` — recording stand-ins log their version
   query, and their start (with the module path they were given), wait, and log
   their end: the log is both version queries, `wasmtime` then `wasmer`, then
   `wasmtime` start and end, then `wasmer` start and end, each with its own
-  `<work root>/<engine>/module.wasm`, and both run folders hold the verified
-  bytes.
+  `<work root>/<engine>/module.wasm`; each run folder held the verified bytes
+  (recorded by the stand-in during its run), and (task 039) the work root is
+  empty after the run.
+- `run_leaves_an_empty_work_root` (task 039) — a two-engine `run` on marking
+  stand-ins that passes, and one refused because `wasmer` fails after
+  `wasmtime` ran: both engines ran, and each run leaves the work root empty.
 - `run_returns_the_verified_name_and_both_outputs` — the `wasmtime` stand-in
   changes the bundle's `capsule.wasm` while it runs; `run` still returns the
   lab CID it verified, not the changed folder's, and both raw outputs.
@@ -1662,7 +1883,9 @@ is zero of both:
   `unused_grants()` is exactly `[env.f]`.
 - `granted_import_is_linked` — the module that imports `env.f`, grants
   `[env.f]` (right `call`): it passes verification, `linked()` is exactly
-  `[env.f]`, each engine once, and both run folders hold the verified module.
+  `[env.f]`, each engine once, each run folder held the verified module
+  (recorded by the stand-in during its run), and (task 039) the work root is
+  empty after the run.
 - `module_import_with_no_typed_operation_is_refused` (task 031) — the module
   that imports `env.g` (no typed lab operation), granted `env.g`: refused as
   `TwoEngineRefusal::Verify(VerifyRefusal::UntypedImport { module: "env", name:
@@ -1782,25 +2005,62 @@ it apart from the real lines.
 `built_capsule_runs_under_the_declared_cap_on_wasmtime` pass on this Mac's
 pinned engines with no change to their assertions.
 
+Task 040, the cleanup census (`tests/run.rs`; README "Cleanup census (M1
+A12)"). Each run test needs both real engines; if either is not on PATH it
+prints `SKIPPED` and gives no result, never a PASS.
+
+- `census_reports_each_kind_of_leftover` — no engine: a left file, a live
+  `/bin/sleep` with a work-root path as its `argv[0]` and an open handle are
+  each reported once by kind (`entry: left.txt`, `process: <pid> <argv>`, an
+  `open file:` line naming this process and the file); after they are removed,
+  stopped and closed, the census is empty.
+- `normal_run_leaves_nothing_under_the_scratch_root` — one two-engine `run` of
+  the signed built capsule: both outputs equal `FIXED_OUTPUT`, then the census
+  is empty.
+- `trapped_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
+  that runs `unreachable`: `EngineFailed` with a nonzero exit status and
+  `unreachable` on stderr, then the census is empty.
+- `killed_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
+  that loops forever, killed with `SIGKILL` once `pgrep` sees it: its live argv
+  held no preopen, env or network flag and no work-root path but the module
+  file; `EngineFailed` stopped by signal 9; then the census is empty.
+
+Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
+(M1 A8 lab half)"):
+
+- `host_secret_fixture_never_reaches_either_real_engine` — the outer test:
+  both real engines behind recording shims, a fixture home with
+  `keys/host-secret`, and a child test process with that `HOME`; it passes
+  only when the child passes (SKIPPED, no result, when an engine is missing).
+- `host_secret_fixture_run_inside_the_child` — `#[ignore]`, run only as that
+  child: per engine, the module run's argv passes `argv_faults` and holds no
+  home-folder path; no recorded environment has `HOME`, the home folder, the
+  fixture path or the marker; both stdouts are `FIXED_OUTPUT` and a newline.
+- `host_secret_probe_imports_are_refused_before_any_engine_starts` — five
+  `wasi_snapshot_preview1` file and environment imports, each refused by
+  `run` as undeclared with no grant and as untyped with a `call` grant (exact
+  text and variant), with no run folder and no engine start.
+
 ## Falsifiers
 
-`falsifiers.json` holds 170 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 175 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032, one task 035, three task 036 and five task 038.
+031, two task 032, one task 035, three task 036, five task 038, three task
+039, one task 040 and one task 041.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 106, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 111, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036 and 038: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7 + 2 + 2 +
-2 + 2 + 1 + 3 + 5), each run by the canonical runner with its summary line
-quoted.
+029, 031, 032, 035, 036, 038, 039, 040 and 041: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1), each run by the canonical runner with its summary
+line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -2360,3 +2620,59 @@ Task 038 also re-runs F-WC5-HARDCODED-VERSIONS (still caught: the stand-ins'
 ` (stand-in)` tail and the receipt test's made-up tails keep each line apart
 from this Mac's real lines) and re-anchors F-WC-README-COUNT to the new total,
 the same bug as before.
+
+Task 039's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 039). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC5-RUN-DIR-KEPT — `remove_run_dir` returns at its first line, so every
+  run leaves its run folder and module file
+  (`run_engine_removes_its_run_folder_after_every_outcome`, at its success
+  case; `run_leaves_an_empty_work_root`, at its empty-root assertion).
+- F-WC5-RUN-DIR-KEPT-ON-FAILURE — `finish_run` calls the removal only after a
+  success, so a failed engine or one that did not start leaves its folder
+  (`run_engine_removes_its_run_folder_after_every_outcome`, at its
+  failed-engine case).
+- F-WC5-REMOVAL-ERROR-DROPPED — a failed removal after a success is ignored,
+  so the run passes and its folder stays
+  (`run_folder_that_cannot_be_removed_is_refused`, at its refusal).
+
+Task 039 also re-runs, in one canonical runner run with its three (LOG.md,
+task 039, has the summary line), the 60 existing entries that edit
+`tools/src/run.rs` or name a test whose body or stand-in helper (`CAT_MODULE`,
+`counting`, `recording`) it changed; each is still caught. It changes F-WC5-DISK-REREAD's planted line to find the bundle beside the run
+folder (`run_dir.with_file_name("bundle")`, since the write now sits in
+`write_and_start`, which has no work root), the same bug as before with its
+anchor unchanged, and re-anchors F-WC-README-COUNT to the new total, the same
+bug as before. Each keeps its own evidence label above.
+
+Task 040's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 040). Its anchor is `run_engine`'s `make_run_dir` line in
+`tools/src/run.rs`, a recovery target, on a line no other entry anchors; each
+named test fails at its census assertion:
+
+- F-WC-A12-TEMP-LEAK — `run_engine` makes one extra folder `<work
+  root>/<engine>.scratch` before its run folder and never removes it
+  (`normal_run_leaves_nothing_under_the_scratch_root`,
+  `trapped_run_leaves_nothing_under_the_scratch_root` and
+  `killed_run_leaves_nothing_under_the_scratch_root`, each at "the census
+  found leftovers", naming `entry: <engine>.scratch`).
+
+Task 040 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 041's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 041). Its anchor is `start_engine`'s `memory_cap_args` line in
+`tools/src/run.rs`, a recovery target (F-WC10-CAP-IGNORED anchors the same
+line; each falsifier is applied alone), and its named test fails at its
+assertion:
+
+- F-WC-A8-HOME-PREOPEN — `start_engine` adds `--dir=<HOME>` after the memory
+  cap arguments, a preopen of the runner's home folder
+  (`host_secret_fixture_never_reaches_either_real_engine`, at "the child
+  host_secret_fixture_run_inside_the_child did not pass"; the child failed at
+  its `argv_faults` assertion, "a preopen, env or network flag:
+  --dir=<tmp>/home", on wasmtime's module run).
+
+Task 041 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
