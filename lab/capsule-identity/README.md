@@ -291,6 +291,39 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | It runs isolated | `readme_python_recomputes_every_lab_cid_pin` | F-CI19i (no `-I`) |
 | It runs from a fresh, empty folder | `readme_python_recomputes_every_lab_cid_pin` | F-CI19j (the lane folder) |
 
+**Kubo cross-check (task 050, run by hand on 2026-10-28).** Two tests in
+`tests/cross_implementation.rs` run Kubo itself: an offline, hash-only import
+(`add` with `--offline`, `--only-hash=true` and every flag of the release
+script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
+`KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
+`init --empty-repo`, with the provider's two HAMT config values set. No daemon
+runs and nothing is written outside the temp folders.
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 14 pinned
+bundles above into a temp folder, and Kubo's root, the pin and
+`encode_entries` must be one value. `kubo_profile_reproduces_the_admitted_model_package_cid`
+is the control that the flags are the Runtime's: Kubo must print
+`bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky`, the package CID
+the Runtime admitted on this Mac for the SmolLM2 model package (in
+`model-catalog.json`), and the lab must still refuse that folder with
+`FileOverLeafLimit` for `weights.gguf` (553 leaves, a known limit). Both are
+`#[ignore]`: the gate's `cargo test` lists them as ignored and never runs
+them. Each panics with its reason if a variable is unset or Kubo is not
+v0.40.1. The command, from this folder:
+
+```sh
+LAB_KUBO="/Users/sash/Library/Application Support/elastos/bin/kubo" \
+LAB_ADMITTED_MODEL_DIR="/Users/sash/Library/Application Support/elastos/model-preparation/admitted-913d4376794b52b08b521a858386178522b685fb70e08c6e4c4eb89f01caf4a4" \
+cargo test --offline --locked --test cross_implementation -- --ignored
+```
+
+That Kubo is the one ElastOS installed (not on `PATH`), `version --number`
+`0.40.1`, `shasum -a 256`
+`6c55b0ca7eea68854d82d90498a1dbda513f6bc5e5078ba0db346317a98bb79a`. On
+2026-10-28 both passed (`test result: ok. 2 passed`). One limit: dropping
+`--raw-leaves=true` from the list changes no root here (this Kubo uses raw
+leaves for CID version 1 without the flag), so these tests do not show that
+flag is needed; `--raw-leaves=false` fails both.
+
 Task 020 runs README's two digest blocks the same way (Anders's Q2: the
 record encoding and the signature domain under cross-implementation tests):
 the block under "Pinned message digest" in
@@ -1671,21 +1704,27 @@ second identity scheme sits beside it (task 018, the carry of blocked task
 One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0
 (f8297e351 2025-10-28). The swap tests make each change happen at a chosen
 moment through the observer; they do not prove the walk against every timing
-on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and
-Kubo itself (none is installed on this Mac). The outside check is the
+on every filesystem. Not checked here: Linux and the Runtime's IPFS CID.
+Kubo itself is checked only by hand, not by the gate (see the "Kubo
+cross-check" paragraph under
+[the cross-implementation check](#the-cross-implementation-check)). The
+committed outside check is the
 README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
 value for the same files. The tests pin the non-sharded subset of the
 profile only, with files of up to one tree level (one raw leaf, or since task
 048 a balanced file root over 2 to 174 raw leaves). The file root's bytes are
-the lab's reading of the profile, and Kubo has not checked them either.
+the lab's reading of the profile; the hand-run Kubo printed both file-root
+pins too.
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
-No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
-flags, hash-only import, no network). Until one prints the same value as a
-committed pin, the lab CID is not called equal to the Runtime's CID or to
-Kubo's output. The Runtime's CID names a release archive, not the bundle's
+One offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile
+flags was run by hand on this Mac (task 050) and printed every committed pin,
+and the claim words stay "Kubo v0.40.1 profile, computed by the lab" until
+Rong or Flint changes them. A hand run on one Mac is not a gate, so the lab
+CID is still not called equal to the Runtime's CID or to Kubo's output in
+general. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section

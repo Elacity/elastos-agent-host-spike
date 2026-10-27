@@ -950,6 +950,11 @@ checks (`lab/capsule-identity/README.md:1200` `a delivery check of those archive
 No Kubo computed any pin: each comes from the lab code and README's Python rule, which a committed test runs with
 `python3 -I`
 (`lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`).
+Added by task 050, on 2026-10-28: an offline Kubo v0.40.1 hash-only import with the Runtime's profile flags, run by
+hand on this Mac, printed every committed pin (all 14), and the same flags printed the package CID the Runtime
+admitted here for the SmolLM2 model package; the tests are `kubo_hash_only_import_prints_every_lab_cid_pin` and
+`kubo_profile_reproduces_the_admitted_model_package_cid` in `lab/capsule-identity/tests/cross_implementation.rs`,
+both `#[ignore]` and not in the gate. The claim words stay "Kubo v0.40.1 profile, computed by the lab".
 
 Records and bindings live outside the bundle
 (`lab/capsule-identity/README.md:786` `` `PackageRecord` is that record, in the lab. It stays outside the bundle. ``

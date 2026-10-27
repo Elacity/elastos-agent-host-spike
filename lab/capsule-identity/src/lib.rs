@@ -18,11 +18,12 @@
 //! `capsules/ipfs-provider/src/directory_hash.rs` sends them: CIDv1, sha2-256,
 //! raw leaves, chunker `size-262144`, no inline, no HAMT shard below its
 //! threshold. The lab CID follows the
-//! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,
-//! so until an offline Kubo cross-check prints the same value as a committed
-//! pin, it is not called equal to the Runtime's CID or to Kubo's output.
-//! This crate runs no Kubo and pins only the non-sharded subset of that
-//! profile, with files of up to one tree level:
+//! Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1
+//! hash-only cross-check with the Runtime's profile flags was run by hand on
+//! this Mac (task 050) and printed every committed pin, and the claim stays
+//! these words until Rong or Flint changes them. This crate runs no Kubo
+//! and pins only the non-sharded subset of that profile, with files of up to
+//! one tree level:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
 //!    leaf: its block is the file's bytes (an empty file is an empty block),

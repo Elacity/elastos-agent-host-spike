@@ -3525,8 +3525,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "//! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,\n",
-          "new": "//! Kubo v0.40.1 profile: no Kubo has computed any pin,\n"
+          "old": "//! Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1\n",
+          "new": "//! Kubo v0.40.1 profile: one offline Kubo v0.40.1\n"
         }
       ],
       "tests": [
