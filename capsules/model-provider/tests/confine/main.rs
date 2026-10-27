@@ -2845,6 +2845,67 @@ fn standin_refuses_a_start_it_cannot_apply() {
     );
 }
 
+/// The stand-in text denies the hosted connect.
+///
+/// `Launch::Profile` applies the text `standin_profile` builds. The one
+/// Runtime socket stand-in counts zero connections. The run settles
+/// `transport_interrupted`: `status` `failed`, and `terminal.error` is
+/// `class` `transport_interrupted`, `code` `transport_interrupted`,
+/// `message` `model backend transport was interrupted`. `offers_list`
+/// answers and `shutdown` exits cleanly. This is the stand-in's count,
+/// and this is not the Runtime's refusal.
+///
+/// Falsifier: F-cc44a makes `standin_profile` emit `(allow network*)`
+/// instead of `(deny network*)`. The stand-in then counts a connection,
+/// and the generated head's third line is `(allow network*)`.
+#[test]
+fn generated_profile_denies_the_hosted_connect() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let declared: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&declared).expect("declared rights build a profile");
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let fixture = HostedTransport::prepare("standin-hosted-connect");
+    let profile = fixture.storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&fixture.storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&fixture.request));
+
+    provider.ok(&fixture.run.create);
+    let settled = fixture.run.settle(&mut provider);
+    assert_eq!(
+        fixture.socket.observe().connections,
+        0,
+        "the profile must refuse the connect, so no connection reaches the Runtime socket"
+    );
+    assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "transport_interrupted",
+            "code": "transport_interrupted",
+            "message": "model backend transport was interrupted"
+        }),
+        "the refused connect must fail the run closed"
+    );
+
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
+}
+
 fn collect_allow_lines(profile: &str) -> Vec<&str> {
     fn allow_at(line: &str) -> Option<usize> {
         let bytes = line.as_bytes();
