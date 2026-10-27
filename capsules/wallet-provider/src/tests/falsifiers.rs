@@ -167,8 +167,14 @@ use std::process::Command;
 /// on a denied case the widened grant permits, and WP117 writes the generated
 /// profile but starts under the committed `confine.sb`, so
 /// `standin_start_runs_under_the_generated_profile_not_the_committed_file`
-/// fails because the start is then Started.
-const EXPECTED_FALSIFIERS: usize = 118;
+/// fails because the start is then Started. Task 098's WP121 removes the
+/// planted-key push, so
+/// `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
+/// naming the missing case; WP122 drops the refusal `code`, so
+/// `suite_entry_keeps_the_refusal_code` fails; and WP123 records every bound
+/// result as `Ok`, so `wallet_suite_entry_records_an_inner_refusal_as_refused`
+/// fails.
+const EXPECTED_FALSIFIERS: usize = 121;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
