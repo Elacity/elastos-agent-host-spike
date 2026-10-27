@@ -29,7 +29,8 @@ lab/redteam/ or any owner tree.
 Task 008 places every copy at <prefix>/lab/wasm-capsule and links
 lab/capsule-identity and elastos beside it, so the lane's path dependencies
 resolve. Those two trees are symlinks, not copies. A plant is refused when
-its path resolves outside the wasm-capsule copy.
+its path resolves outside the wasm-capsule copy. lay_copy is that copy and
+those links. build_copy calls it, then plants, then runs tools/build.
 
 The lane's guards a-e live in its BACKLOG (and in lab/redteam/README.md once
 task 005 lands it). The ones this probe touches:
@@ -90,7 +91,7 @@ BUILD_OUTPUTS = ("target", "capsule.wasm", "receipt.txt")
 # Where each copy of the lane sits in its own temp dir: <prefix>/lab/wasm-capsule.
 # The prefixes differ in depth, length and a space (`a`, and `copy b/with a
 # space`), so an absolute build path embedded in the artifact makes the two
-# builds differ (the owner's own falsifier F-WC1 is such a bug). build_copy
+# builds differ (the owner's own falsifier F-WC1 is such a bug). lay_copy
 # links lab/capsule-identity and elastos beside the copy; it does not copy them.
 COPY_PATHS = (
     "a/lab/wasm-capsule",
@@ -292,13 +293,35 @@ def _run_tools_build(root, source):
     return Build(source, out, command)
 
 
-def build_copy(root, copy_path, plant, *, links=True, copy=True):
-    """Copy the lane to root/copy_path, link its path deps, plant, and build.
+def lay_copy(root, copy_path, *, links=True):
+    """Copy the lane to root/copy_path and link its path deps.
 
-    The copy is <root>/<prefix>/lab/wasm-capsule. <prefix> is everything in
-    copy_path before `lab/wasm-capsule` (`a`, or `copy b/with a space`).
+    Returns the wasm-capsule directory. The copy is
+    <root>/<prefix>/lab/wasm-capsule. <prefix> is everything in copy_path
+    before `lab/wasm-capsule` (`a`, or `copy b/with a space`).
     <root>/<prefix>/lab/capsule-identity and <root>/<prefix>/elastos are
-    symlinks to the repo trees. `links=False` omits both symlinks, so
+    symlinks to the repo trees. `links=False` omits both symlinks. An
+    absolute copy_path is refused before anything is copied.
+    """
+    relative = Path(copy_path)
+    if relative.is_absolute():
+        raise ValueError(f"copy path must be relative: {copy_path}")
+    source = Path(root) / relative
+    identity, elastos = linked_deps(source)
+    shutil.copytree(LANE_DIR, source, ignore=shutil.ignore_patterns(*BUILD_OUTPUTS))
+    if links:
+        identity.symlink_to(
+            (REPO_ROOT / "lab" / "capsule-identity").resolve(), target_is_directory=True
+        )
+        elastos.symlink_to((REPO_ROOT / "elastos").resolve(), target_is_directory=True)
+    return source
+
+
+def build_copy(root, copy_path, plant, *, links=True, copy=True):
+    """Copy the lane, link its path deps, plant, and build.
+
+    lay_copy places the copy and the symlinks. This function then applies
+    `plant` and runs tools/build. `links=False` omits both symlinks, so
     tools/build fails closed. `copy=False` builds the real lane with this
     same driver and applies no plant.
     """
@@ -309,17 +332,7 @@ def build_copy(root, copy_path, plant, *, links=True, copy=True):
             raise ValueError("omitting links applies to a copy, not the real lane")
         return _run_tools_build(root, LANE_DIR)
 
-    relative = Path(copy_path)
-    if relative.is_absolute():
-        raise ValueError(f"copy path must be relative: {copy_path}")
-    source = root / relative
-    identity, elastos = linked_deps(source)
-    shutil.copytree(LANE_DIR, source, ignore=shutil.ignore_patterns(*BUILD_OUTPUTS))
-    if links:
-        identity.symlink_to(
-            (REPO_ROOT / "lab" / "capsule-identity").resolve(), target_is_directory=True
-        )
-        elastos.symlink_to((REPO_ROOT / "elastos").resolve(), target_is_directory=True)
+    source = lay_copy(root, copy_path, links=links)
     for edit in plant:
         edit.apply(source)
     return _run_tools_build(root, source)

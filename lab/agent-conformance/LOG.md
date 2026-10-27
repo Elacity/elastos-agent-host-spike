@@ -6198,3 +6198,60 @@ instance_writes_only_under_own_storage_root | BLOCKED (AC-039-OWNED-ROOT)
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/common/grants.rs:1010` writes through the existing provider route. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:1056` fails while the sibling request is pending. F-a5-root-gap-row and F-a3-label fail when planted. |
 | 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:966` keeps the owned root bound to identity and session. A granted write does not close the row. |
+
+## 040 — Launch does not compare bytes with the signed record
+
+040: `launch_refuses_bytes_unlike_signed_record` is BLOCKED (AC-040-RECORD-LAUNCH). `elastos run` finds an installed release capsule by name and does not compare the launched bytes with that capsule's signed record.
+
+`verify_capsule_signature` (`elastos/crates/elastos-server/src/runtime.rs:351-408`) is the launch check, called from `run_local_with_principal` (`runtime.rs:282`) on the component path (`run_cmd.rs:264-267`). For an installed signed release, an unsigned capsule calls `verify_installed_release_capsule` (`setup.rs:1596-1625`). That function looks up `manifest.name` (`setup.rs:1606`), checks the install path (`setup.rs:1613-1617`), and checks sidecar install state (`setup.rs:1771-1785`). It does not hash the launched directory. `CapsuleRecords::admit` (`capsule_record.rs:84-98`) compares `record.sha256` and `record.cid` with the release row at setup and update (`setup.rs:739`, `update.rs:1192`), not from `run_local`. A signed manifest hashes the entrypoint file only (`runtime.rs:389-404`). Records stay optional (`capsule_record.rs:18`). The lane does not copy the release signing format, so it does not build that Home. The live pair stays out. Anders owns the record-to-launch repair (https://github.com/Elacity/elastos-runtime/issues/274).
+
+`GAPS.md` "Launch by bundle CID (025)" cites this result as BLOCKED (AC-040-RECORD-LAUNCH). The `capsule_named_by_hash` ID cell stays `AC-025-CID`. `RUNBOOK.md` has one line for the new row. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+### Measured launch
+
+A refusal before any record check; not B1. For one command only, `fixtures/operator-config.toml` was `dev_mode = false` with the same loopback Carrier bind. The file was restored afterward. `git diff` shows no fixture change. A temporary test, removed before the gates, started the operator with `Operator::start`, staged `identity::MANIFEST` through `identity::stage_probe`, and launched `elastos run` on that directory. The copied config contained `dev_mode = false`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime measure_unsigned_refusal_before_record_check -- --exact --nocapture --test-threads=1
+```
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Exit 0 for the test harness, real 23.16 seconds. Libtest: `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 10.08s`. The Runtime exit status was 1. Stderr:
+
+```text
+INFO elastos_server::runtime: Capsule signatures enforced with 0 trusted key(s)
+INFO elastos_server::runtime: Loading capsule 'agent-conformance-probe' (Wasm)
+Error: Component capsule failed: Invalid manifest: Capsule 'agent-conformance-probe' is unsigned; only a source or development Home with dev_mode = true runs unsigned capsules
+```
+
+That info line is the refused-unsigned arm (`runtime.rs:220-223`), not the installed-release arm (`runtime.rs:215-218`). The error is `runtime.rs:374-377`, before `verify_installed_release_capsule` (`runtime.rs:365-372`). Stderr had no `differs from the signed release` and no `Component capsule 'agent-conformance-probe' exited`. The cleanup line was `cleanup census: root checks PASS; processes:0 paths:[] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)`.
+
+### Grader
+
+The new row's ID cell was `AC-040-RECORD-LAUNCHX`, then restored to `AC-040-RECORD-LAUNCH`. `./run.sh` from the repository root. No census flake, so no rerun.
+
+| Step | Exit | Seconds | Row |
+| --- | --- | --- | --- |
+| Planted | 1 | 322.70 | `launch_refuses_bytes_unlike_signed_record \| FAIL \| GAPS.md: launch_refuses_bytes_unlike_signed_record: missing blocker IDs: [AC-040-RECORD-LAUNCH]; extra blocker IDs: [AC-040-RECORD-LAUNCHX]` |
+| Restored | 0 | 271.51 | `launch_refuses_bytes_unlike_signed_record \| BLOCKED (AC-040-RECORD-LAUNCH)` |
+
+On the planted run, `versions_receipt (A14) | FAIL` used the same GAPS sentence. On the restored run it was `versions_receipt (A14) | PASS`. `capsule_named_by_hash` stayed `BLOCKED (AC-025-CID)`. The restored run is the acceptance run: exit 0, real 271.51 seconds, no FAIL row.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun. The volume had about 32 GiB free.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.12 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 278.68 seconds. The target summaries sum to 111 passed, 0 failed, 14 ignored. The effects target passed 57 tests, with 12 ignored, in 220.24 seconds. The runtime target passed 10 tests, with 2 ignored, in 14.07 seconds. The report target passed 23 tests.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/runtime.rs:154` names the missing comparison with the record `sha256` or `cid`. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/runtime.rs:151` leaves the journey ignored. The probe source is unchanged. |
+| 3. A second path or a second copy of one rule? | No | `GAPS.md:1016` keeps the release signing format out of the lane. |
+| 4. Runtime core grows? | No | The edit is `GAPS.md`, `RUNBOOK.md` and `tests/runtime.rs:151`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/runtime.rs:155` stops the journey and names the missing byte comparison. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The probe source is unchanged. `GAPS.md:1024` says a valid record gives no grant. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/runtime.rs:151` is the ignored row. The planted ID cell above fails in `./run.sh`. There is no new list id. |
+| 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:179` keeps record-to-launch apart from the CID row. `GAPS.md:1023` says an unsigned refusal is not this row. |

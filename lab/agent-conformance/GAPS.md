@@ -176,7 +176,7 @@ because provider shutdown keeps shared Kubo alive
 reaching the same activation as the directory launch. Identity, admission,
 resource grants and resource budgets remain separate decisions. A valid CID
 gives no grant (Flint's 10:40 note, lane backlog). Signed-bundle admission
-stays its own decision.
+stays its own decision. Record-to-launch is BLOCKED (AC-040-RECORD-LAUNCH): `elastos run` finds an installed release capsule by name and does not compare the launched bytes with that capsule's signed record.
 
 Item 15's census must include the materialized `elastos-capsule-*` directory:
 Runtime creates it under TMPDIR and returns `temp_dir.keep()` after writing
@@ -964,3 +964,65 @@ operator is left with no pending request. This row is never a pass.
 | Ignored test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
 | `instance_writes_only_under_own_storage_root` | AC-039-OWNED-ROOT | Anders: the Runtime gives each instance an owned storage root bound to its verified identity and session, and refuses a sibling's request for it (https://github.com/Elacity/elastos-runtime/issues/464). |
+
+## Record-to-launch (040)
+
+`launch_refuses_bytes_unlike_signed_record` is
+`#[ignore = "blocked: AC-040-RECORD-LAUNCH"]`. For a component,
+`elastos run <dir>` reaches `run_local`
+(`elastos/crates/elastos-server/src/run_cmd.rs:51-60,264-267`).
+`run_local_with_principal` calls `verify_capsule_signature` before it
+validates or starts the component
+(`elastos/crates/elastos-server/src/runtime.rs:281-283`).
+
+In a Home with an installed signed release, `configure_capsule_admission`
+selects `UnsignedCapsules::InstalledRelease` when
+`installed_release_source` returns a source
+(`runtime.rs:188-209`; `setup.rs:905-922`). An unsigned capsule then calls
+`verify_installed_release_capsule` (`runtime.rs:365-372`;
+`setup.rs:1596-1625`). That function finds the components row by
+`manifest.name` (`setup.rs:1606`), checks that the launch directory is the
+install path (`setup.rs:1613-1617`), and checks install state
+(`setup.rs:1618-1624`). For a directory, install state compares the sidecar
+files `.elastos-cid` and the sha receipt with the components row
+(`setup.rs:1771-1785`; `setup.rs:2580-2603` through `setup.rs:2657-2663`).
+It also checks that `capsule.json` uses that name and that the entrypoint
+file exists (`setup.rs:1874-1901`). A file install path can hash that one
+file against `platform_info.checksum` (`setup.rs:2707-2714`). None of these
+steps hash the launched directory and compare that digest with the capsule
+record's `sha256` or `cid`.
+
+A manifest that already has `signature` does not call
+`verify_installed_release_capsule`. It hashes the entrypoint file only and
+checks that signature (`runtime.rs:389-404`).
+
+`CapsuleRecords::admit` compares `record.sha256`, size and `record.cid` with
+the release row (`elastos/crates/elastos-server/src/capsule_record.rs:84-98`).
+`admit_release` does that when a release is admitted
+(`capsule_record.rs:354-377`), from setup (`setup.rs:739`) and from release
+acquisition (`setup.rs:1321`). Update verifies each record before download
+(`elastos/crates/elastos-server/src/update.rs:1192`). `run_local` does not
+call `admit`. Records stay optional (`capsule_record.rs:18`).
+`read_signed_components` checks that `components.json` matches the signed
+release descriptor
+(`elastos/crates/elastos-server/src/installed_release.rs:166-212`). That
+check names the components file, not the launched directory.
+
+The lane Home sets `dev_mode = true`
+(`fixtures/operator-config.toml:1`), so this operator selects
+`UnsignedCapsules::Allowed` and skips the installed-release function. An
+installed signed release needs a publisher-signed envelope
+(`installed_release.rs:181-212`). This lane does not copy that format and
+does not create a key. The launch check would still not compare launched
+bytes with the record, so the live pair stays out.
+
+Anders owns the repair: record-to-launch
+(https://github.com/Elacity/elastos-runtime/issues/274). At `elastos run`,
+compare the launched directory's bytes with that capsule's signed record
+`sha256` or `cid`, and refuse when they differ. A refusal before that
+comparison, including an unsigned capsule, is not this row. A valid record
+gives no grant.
+
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `launch_refuses_bytes_unlike_signed_record` | AC-040-RECORD-LAUNCH | Anders: record-to-launch (https://github.com/Elacity/elastos-runtime/issues/274). At `elastos run`, compare the launched directory's bytes with that capsule's signed record `sha256` or `cid` and refuse a difference. Today `verify_installed_release_capsule` (`setup.rs:1596-1625`) finds the capsule by `manifest.name` (`setup.rs:1606`) and checks the install path (`setup.rs:1613-1617`) and sidecar install state (`setup.rs:1771-1785`). `CapsuleRecords::admit` (`capsule_record.rs:84-98`) compares the record with the release row at setup and update (`setup.rs:739`, `update.rs:1192`), not from `run_local` (`runtime.rs:282`). |

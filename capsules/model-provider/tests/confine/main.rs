@@ -881,6 +881,116 @@ fn operations_section_cites_existing_tests() {
     assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
 }
 
+/// The Id cells in `section` are the same set as `ids`.
+///
+/// An Id cell is the trimmed first cell of a line that starts with `| F-cc`.
+/// `Ok` means those cells and `ids` name the same ids. Otherwise one error
+/// names each id that is only in the table with `falsifier id is not in the
+/// list`, and each id that is only in the list with `falsifier id is not in
+/// the table`.
+fn falsifier_section_ids_match(section: &str, ids: &[String]) -> Result<(), String> {
+    let table: std::collections::BTreeSet<String> = section
+        .lines()
+        .filter(|line| line.starts_with("| F-cc"))
+        .map(|line| line.split('|').nth(1).unwrap_or("").trim().to_string())
+        .collect();
+    let registered: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut problems = Vec::new();
+    for id in &table {
+        if !registered.contains(id.as_str()) {
+            problems.push(format!("{id} falsifier id is not in the list"));
+        }
+    }
+    for id in &registered {
+        if !table.contains(*id) {
+            problems.push(format!("{id} falsifier id is not in the table"));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// The `## Falsifiers` Id column names each id in `confine-falsifiers.json`.
+///
+/// The section runs from the heading `## Falsifiers` to the next heading line
+/// that starts with `## `, or to the end of the file. The file's Id cells must
+/// match the list. A copy of that section that replaces `| F-cc39a |` with
+/// `| F-cc-missing |` must report both ids. This test starts no process and
+/// needs no sandbox.
+///
+/// Falsifier: F-cc40a makes `falsifier_section_ids_match` return `Ok` before
+/// it compares, so a table that drops `F-cc39a` is accepted.
+#[test]
+fn falsifier_section_names_every_list_id() {
+    fn falsifiers_section(doc: &str) -> String {
+        let lines: Vec<&str> = doc.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "## Falsifiers")
+            .expect("CONFINEMENT.md must hold the heading ## Falsifiers");
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(lines.len());
+        lines[start..end].join("\n")
+    }
+
+    let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
+    let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
+        panic!(
+            "CONFINEMENT.md must be readable ({}): {err}",
+            doc_path.display()
+        )
+    });
+    let list_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine-falsifiers.json");
+    let list_text = fs::read_to_string(&list_path).unwrap_or_else(|err| {
+        panic!(
+            "confine-falsifiers.json must be readable ({}): {err}",
+            list_path.display()
+        )
+    });
+    let list: Value = serde_json::from_str(&list_text)
+        .unwrap_or_else(|err| panic!("confine-falsifiers.json must parse: {err}"));
+    let entries = list["falsifiers"]
+        .as_array()
+        .expect("confine-falsifiers.json must hold a falsifiers array");
+    let ids: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .expect("each falsifier must name an id")
+                .to_string()
+        })
+        .collect();
+    let section = falsifiers_section(&doc);
+    falsifier_section_ids_match(&section, &ids).expect("the Id column must match the list");
+    assert_eq!(
+        section.matches("| F-cc39a |").count(),
+        1,
+        "the section must hold one | F-cc39a | cell"
+    );
+    let dropped = section.replacen("| F-cc39a |", "| F-cc-missing |", 1);
+    let reason = falsifier_section_ids_match(&dropped, &ids)
+        .expect_err("a table that drops F-cc39a must be refused");
+    assert!(reason.contains("F-cc39a"), "{reason}");
+    assert!(reason.contains("F-cc-missing"), "{reason}");
+    assert!(
+        reason.contains("falsifier id is not in the list"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("falsifier id is not in the table"),
+        "{reason}"
+    );
+    assert!(doc.contains("| F-cc39a |"), "{doc_path:?}");
+    assert!(!doc.contains("F-cc-missing"), "{doc_path:?}");
+}
+
 /// The confined provider serves `init`, `status` and `offers_list`, and
 /// `init` creates the journal root with `runs/` under `STORAGE_ROOT`.
 ///
@@ -2195,6 +2305,38 @@ fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, 
     );
 }
 
+/// Joins this provider's profile text from the approved declared rights.
+///
+/// The text is `(version 1)`, then `(deny default)`, then `(deny network*)`,
+/// then each rule of each rights entry, then each rule of each
+/// platform-baseline entry. It reads no file and checks no right id.
+fn standin_profile(declared: &Value) -> Result<String, String> {
+    let Some(rights) = declared.get("rights").and_then(Value::as_array) else {
+        return Err("model-provider declared rights must hold a rights list".to_string());
+    };
+    let Some(baseline) = declared
+        .get("platform_baseline")
+        .and_then(|baseline| baseline.get("rules"))
+        .and_then(Value::as_array)
+    else {
+        return Err("model-provider platform baseline must hold a rules list".to_string());
+    };
+    let mut profile = String::from("(version 1)\n(deny default)\n(deny network*)\n");
+    for entry in rights.iter().chain(baseline) {
+        let Some(rules) = entry.get("rules").and_then(Value::as_array) else {
+            return Err("model-provider declares an entry without a rules list".to_string());
+        };
+        for rule in rules {
+            let Some(rule) = rule.as_str() else {
+                return Err("model-provider declares a rule that is not a string".to_string());
+            };
+            profile.push_str(rule);
+            profile.push('\n');
+        }
+    }
+    Ok(profile)
+}
+
 /// A launch whose profile cannot be applied never starts the provider.
 ///
 /// The one launcher starts the real binary three ways: a profile path under
@@ -2265,6 +2407,125 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
         },
         &storage,
         "invalid data type of path filter",
+    );
+}
+
+/// The lab stand-in builds this provider's profile from the approved declared
+/// rights, and that text's head and allow lines match the oracle.
+///
+/// The first three non-comment lines are `(version 1)`, `(deny default)` and
+/// `(deny network*)`. The sorted allow lines equal the oracle. A changed
+/// `bound-executable` rule is reflected. A declared value with no rights
+/// list, a platform baseline with no rules list, an entry with no rules list,
+/// and a rule that is not a string are each refused with their reason. The
+/// test starts no process and needs no sandbox.
+///
+/// Falsifier: F-cc41a makes `standin_profile` return the oracle file and
+/// ignore the declared value, so a changed declared rule still matches the
+/// oracle.
+#[test]
+fn generated_model_profile_matches_the_oracle() {
+    fn non_comment_head(profile: &str) -> Vec<&str> {
+        profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .take(3)
+            .collect()
+    }
+
+    let head = vec!["(version 1)", "(deny default)", "(deny network*)"];
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    assert_eq!(non_comment_head(&generated), head);
+    assert_eq!(non_comment_head(&oracle), head);
+    let mut generated_lines = collect_allow_lines(&generated);
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    generated_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(generated_lines, oracle_lines);
+    assert!(
+        generated.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in profile emits no comment line"
+    );
+
+    let original_exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    let stub_exec = "(allow process-exec (literal \"/tmp/cc-standin-stub\"))";
+    let mut changed = fixture.clone();
+    let rights = changed
+        .get_mut("rights")
+        .and_then(Value::as_array_mut)
+        .expect("declared rights must hold a rights list");
+    let mut replaced = false;
+    for entry in rights {
+        if entry.get("id").and_then(Value::as_str) != Some("bound-executable") {
+            continue;
+        }
+        let rules = entry
+            .get_mut("rules")
+            .and_then(Value::as_array_mut)
+            .expect("bound-executable holds a rules list");
+        for rule in rules {
+            if rule.as_str() == Some(original_exec) {
+                *rule = json!(stub_exec);
+                replaced = true;
+            }
+        }
+    }
+    assert!(replaced, "the bound-executable rule is replaced in memory");
+    let changed_profile =
+        standin_profile(&changed).expect("the changed declared value builds a profile");
+    let changed_lines = collect_allow_lines(&changed_profile);
+    assert_eq!(
+        changed_lines
+            .iter()
+            .filter(|line| **line == stub_exec)
+            .count(),
+        1,
+        "the stub exec rule is present once"
+    );
+    assert!(
+        changed_lines.iter().all(|line| *line != original_exec),
+        "the original exec rule is absent"
+    );
+
+    let mut rights_not_a_list = fixture.clone();
+    rights_not_a_list["rights"] = json!("not-a-list");
+    assert_eq!(
+        standin_profile(&rights_not_a_list).expect_err("rights that are not a list are refused"),
+        "model-provider declared rights must hold a rights list"
+    );
+    let mut baseline_not_a_list = fixture.clone();
+    baseline_not_a_list["platform_baseline"]["rules"] = json!("not-a-list");
+    assert_eq!(
+        standin_profile(&baseline_not_a_list)
+            .expect_err("a platform baseline that is not a rules list is refused"),
+        "model-provider platform baseline must hold a rules list"
+    );
+    let mut entry_without_rules = fixture.clone();
+    entry_without_rules["rights"][0]
+        .as_object_mut()
+        .expect("a rights entry is an object")
+        .remove("rules");
+    assert_eq!(
+        standin_profile(&entry_without_rules)
+            .expect_err("an entry without a rules list is refused"),
+        "model-provider declares an entry without a rules list"
+    );
+    let mut rule_not_a_string = fixture.clone();
+    rule_not_a_string["rights"][0]["rules"][0] = json!(1);
+    assert_eq!(
+        standin_profile(&rule_not_a_string).expect_err("a rule that is not a string is refused"),
+        "model-provider declares a rule that is not a string"
     );
 }
 
