@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -156,6 +157,29 @@ def write_macos_shims(shim_dir: Path, *, sandbox: bool = True) -> None:
         encoding="utf-8",
     )
     paths.append(chflags)
+    real_rustup = shutil.which("rustup")
+    rustup = shim_dir / "rustup"
+    if real_rustup:
+        rustup.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"toolchain\" ] && [ \"$2\" = \"list\" ]; then\n"
+            "  printf '1.91.0 (dryrun)\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f"exec {shlex.quote(real_rustup)} \"$@\"\n",
+            encoding="utf-8",
+        )
+    else:
+        rustup.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"toolchain\" ] && [ \"$2\" = \"list\" ]; then\n"
+            "  printf '1.91.0 (dryrun)\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+    paths.append(rustup)
     for path in paths:
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -745,7 +769,7 @@ def main() -> int:
     static("readlink-f", "readlink -f" not in text and "readlink -f" not in run_text)
     static("gnu-stat", "stat -c" not in text and "stat --printf" not in text and "stat -f" not in text)
     static("rustup-skip", "already present; skip" in text)
-    static("rustup-no-install", "rustup toolchain install" not in text)
+    static("rustup-no-install", re.search(r"(?m)^[ \t]*rustup toolchain install\b", text) is None)
     static("mktemp-trap", "mktemp -d" in text and "trap c17_on_exit EXIT" in text)
     static("no-single-branch", "--single-branch" not in text)
     static("pin", PIN_C17 in text and PIN_C17 in run_text)

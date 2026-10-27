@@ -20,8 +20,8 @@ That line does not write the last booking line.
 
 The only ` ```bash ` fence in this file:
 
-- sha256: ab478dd15e01a3599aaf11c6e597b30faada94b62c9da4f8fd4dc92425c7c7ba
-- bytes: 31264
+- sha256: 856674730193e8898dc40a2320725db205969c42ce49cf363c491765069a1fc6
+- bytes: 31262
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
@@ -573,7 +573,7 @@ else
 fi
 
 # 3. rustup skip-if-present. The paste never curls rustup.rs
-#    and never runs rustup toolchain install.
+#    and never installs a rustup toolchain.
 c17_tc=$(rustup toolchain list 2>/dev/null || true)
 case $c17_tc in
   *1.91.0*)
