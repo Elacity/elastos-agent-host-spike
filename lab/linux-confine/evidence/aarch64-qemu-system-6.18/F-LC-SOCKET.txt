@@ -1,7 +1,7 @@
 
 running 1 test
 test did_profile_permits_its_operations_and_refuses_the_rest ... 
-thread 'did_profile_permits_its_operations_and_refuses_the_rest' (871) panicked at tests/confine.rs:254:5:
+thread 'did_profile_permits_its_operations_and_refuses_the_rest' (873) panicked at tests/confine.rs:254:5:
 socket denial did not hold: enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
 op=in-memory result=ok reason=no file and no socket
 op=storage-write result=ok reason=wrote under STORAGE_ROOT
@@ -48,11 +48,11 @@ stack backtrace:
    1: core::panicking::panic_fmt
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:75:14
    2: confine::prove
-             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:254:5
+             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/confine.rs:254:5
    3: confine::did_profile_permits_its_operations_and_refuses_the_rest
-             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:372:5
+             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/confine.rs:372:5
    4: confine::did_profile_permits_its_operations_and_refuses_the_rest::{{closure}}
-             at ./tmp/lc-wt-c9-r2/lab/linux-confine/tests/confine.rs:371:61
+             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/confine.rs:371:61
    5: core::ops::function::FnOnce::call_once
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
    6: core::ops::function::FnOnce::call_once
@@ -65,5 +65,5 @@ failures:
 failures:
     did_profile_permits_its_operations_and_refuses_the_rest
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.59s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.62s
 

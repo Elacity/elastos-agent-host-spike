@@ -161,5 +161,5 @@ test withheld_storage_rights_are_landlock_eacces ... NOT PROVEN: unconfined make
 NOT PROVEN: unconfined make-block is EPERM (no CAP_MKNOD in the initial user namespace; a user namespace also refuses char/block mknod). No same-test unconfined success on this machine.
 ok
 
-test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.38s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.95s
 

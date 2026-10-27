@@ -1,7 +1,7 @@
-# /tmp worktree rerun after C9 r2 host-checker hardening.
-# repo=/tmp/lc-wt-c9-r2
-# head=e4003ae0d552030dad13a57834419b44ecf793fe
-# helper_dir=/tmp/lc-wt-c9-r2/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+# /tmp worktree rerun after C9 r3 leftover checker fixes.
+# repo=/tmp/lc-wt-c9-r3
+# head=05a7195b6e21b0b1edda0b49bd00730fac5de5da
+# helper_dir=/tmp/lc-wt-c9-r3/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-baad48e38b48b3e4/out
 # worktree_under_tmp=1
 # tmp_mount=tmpfs+baked
 # guest_nics=dummy0 eth0 lo
@@ -9,24 +9,27 @@
 # env_has_nonce=0
 # evidence_nonce_during_run=0
 # tester_nonce_readable=0
+# host_preboot=/tmp/lc-c9-r3-work/host-preboot.txt (written before qemu)
+# nonce_sha256=4635bf47e49963f5dcdd8bae381fbf282b65732fb07f87d1a62d08cc067e0d56
 # qemu_timeout_sec=600
 # qemu_exit=0
-# nonce=eacadb6e483a5b755c3fa8fa2394b96c
+# nonce=b2f657486859b29d6f4395c8215e68ac
 # host_exit=0
-# checker_unit_tests=28 passed
+# checker_unit_tests=34 passed (original 28 plus leftover tests and M9-M11)
 # fail_closed_exit=1 (required)
+# label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
 
 # Live rust last lines:
-# elf 6 passed; 0 failed; 0 ignored in 0.61s
-# aarch64 2 passed; 0 failed; 1 ignored in 0.05s
-# confine 25 passed; 0 failed; 0 ignored in 3.38s
-# providers 4 passed; 0 failed; 0 ignored in 13.91s
+# elf 6 passed; 0 failed; 0 ignored in 0.50s
+# aarch64 2 passed; 0 failed; 1 ignored in 0.04s
+# confine 25 passed; 0 failed; 0 ignored in 2.95s
+# providers 4 passed; 0 failed; 0 ignored in 12.54s
 
 # GENERATED RESULTS from that guest run follow.
 
 # GENERATED from this guest run. Not a hand write-up.
-# nonce=eacadb6e483a5b755c3fa8fa2394b96c
-# source=/tmp/lc-wt-c9-r2/lab/linux-confine/evidence/aarch64-qemu-system-6.18
+# nonce=b2f657486859b29d6f4395c8215e68ac
+# source=/tmp/lc-wt-c9-r3/lab/linux-confine/evidence/aarch64-qemu-system-6.18
 # mode=full
 
 C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
@@ -60,7 +63,7 @@ Never native aarch64. Never Jetson.
 
 ## Guest markers
 
-nonce=eacadb6e483a5b755c3fa8fa2394b96c
+nonce=b2f657486859b29d6f4395c8215e68ac
 guest_exit=0
 qemu_exit=0
 
