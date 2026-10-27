@@ -16,6 +16,9 @@
 //! profile's exec rule alone decides whether that program runs. Before
 //! `spawn`, a launch that binds `PROVIDER_EXECUTABLE` records that file's
 //! sha256 and refuses to start when the file no longer has that digest.
+//! The profile binds PROVIDER_EXECUTABLE by path. That refusal is a lab
+//! stand-in for the Runtime's launch-by-hash check, not the Runtime's check.
+//! This stand-in counts toward no M1 check.
 //! `Unconfined` and `Idle` do not bind the parameter. Its profile launch
 //! starts the real provider binary under a given profile path with exactly
 //! the bindings it is given. Its idle launch starts `/bin/sleep` on
@@ -1982,7 +1985,7 @@ fn model_bound_copy_serves_under_profile() {
 }
 
 /// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
-/// the profile's exec refusal.
+/// the profile's exec refusal. The profile binds PROVIDER_EXECUTABLE by path.
 ///
 /// The copy is made in a temporary directory, never at the real provider
 /// binary's path and never in the directory that holds that binary. Its last
@@ -2100,7 +2103,9 @@ fn byte_different_file_at_bound_path_starts() {
 /// sha256, and appends one byte. `Launch::Program` passes that recorded
 /// digest and the changed path as both executable and program. The helper
 /// panics before `spawn`. The panic names `PROVIDER_EXECUTABLE digest
-/// mismatch`, the path, and both digests. If `start` returns, the test kills
+/// mismatch`, the path, and both digests. That refusal is a lab stand-in
+/// for the Runtime's launch-by-hash check, not the Runtime's check. This
+/// stand-in counts toward no M1 check. If `start` returns, the test kills
 /// and waits, then fails because the helper started the changed file. The
 /// test does not call `sandbox_available` and does not need `sandbox-exec`.
 ///

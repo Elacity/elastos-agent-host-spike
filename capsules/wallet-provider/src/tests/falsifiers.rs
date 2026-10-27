@@ -150,8 +150,12 @@ use std::process::Command;
 /// keeps its order, the contract checks read only allow forms, and the
 /// comparison's sorted tail then differs, so
 /// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails on
-/// its `differs from its committed oracle` panic.
-const EXPECTED_FALSIFIERS: usize = 107;
+/// its `differs from its committed oracle` panic. Task 093's WP110 names
+/// `generate_profile` in wallet-provider's `src/main.rs`, and WP111 names it
+/// in did-provider's, so `lab_generator_is_named_only_in_test_code` fails
+/// because its walk reads the provider's non-test file and the refusal names
+/// that path.
+const EXPECTED_FALSIFIERS: usize = 109;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

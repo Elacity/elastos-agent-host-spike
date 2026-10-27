@@ -30,9 +30,9 @@ fn the_falsifier_inventory_matches_the_list() {
 }
 
 /// Each mismatch is found on its own, with its own message: a task with
-/// entries that `about` leaves out, a task `about` names with no entry, and a
-/// README count that is not the list's length. The synthetic list with
-/// nothing changed gives no mismatch.
+/// entries that `about` leaves out, a task `about` names with no entry, a
+/// README count that is not the list's length, and `about`'s tasks out of the
+/// list's order. The synthetic list with nothing changed gives no mismatch.
 #[test]
 fn the_falsifier_inventory_finds_each_mismatch() {
     let findings = |about: &str, ids: &[&str], count: usize| {
@@ -69,11 +69,22 @@ fn the_falsifier_inventory_finds_each_mismatch() {
         ]),
         "(c) README's count differs from the number of ids"
     );
+
+    let out_of_order = ABOUT.replace("001, 005 and 027", "001, 027 and 005");
+    assert_eq!(
+        findings(&out_of_order, &IDS, 4),
+        Ok(vec![
+            "`about` names the tasks in the order 001, 027, 005; the list holds them in the order 001, 005, 027"
+                .to_owned()
+        ]),
+        "(d) about names the tasks out of the list's order"
+    );
 }
 
 /// What the check cannot read is refused, each with its own reason, and is
 /// never read as no mismatch: `about` with no "(tasks ...)" list, with two,
-/// or with one never closed; an item that is not three digits; an id not of
+/// or with one never closed; an item that is not three digits; a task named
+/// twice; an id not of
 /// the form `F-CI<n><letters>`; and a README section with no "holds N planted
 /// bugs" sentence, or with two.
 #[test]
@@ -145,5 +156,14 @@ fn the_falsifier_inventory_refuses_what_it_cannot_read() {
         refused(ABOUT, &IDS, &format!("{section}{section}")),
         "README's \"Falsifiers\" says \"holds N planted bugs\" 2 times, not once",
         "two holds N planted bugs sentences"
+    );
+    assert_eq!(
+        refused(
+            &ABOUT.replace("001, 005 and 027", "001, 005, 005 and 027"),
+            &IDS,
+            &section
+        ),
+        "`about` names task 005 more than once",
+        "a task named twice"
     );
 }
