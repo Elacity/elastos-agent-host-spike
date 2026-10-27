@@ -18,8 +18,9 @@ use bitcoin::hashes::Hash as _;
 use elastos_auth::ethereum_signed_message_hash;
 use elastos_wallet_contract::{
     Erc1271ProofEvidenceV1, ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1, PublicNetwork,
-    VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
-    WalletProviderResponseV2, WalletResultV2,
+    ValidatedChainOutcomeBindingV1, ValidatedChainOutcomeV1, VerifiedWalletInvocationContext,
+    WalletProviderOperationV2, WalletProviderRequestV2, WalletProviderResponseV2, WalletResultV2,
+    VALIDATED_CHAIN_OUTCOME_SCHEMA,
 };
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
@@ -1776,6 +1777,286 @@ fn managed_approvals_persist_under_storage_root() {
     provider.shutdown();
 }
 
+/// The external connector address the connector-path test links.
+const CONNECTOR_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
+/// The transaction hash the connector-path test completes with.
+const CONNECTOR_TRANSACTION_HASH: &str =
+    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// The external transaction intent the connector approval carries.
+///
+/// This is request data, not provider logic. It repeats the value
+/// `src/tests/support.rs::transaction_intent_payload` builds, because that
+/// function is crate-private and this integration test is a separate crate,
+/// and adds the `page_url`, `origin` and `network` fields the external
+/// handoff uses.
+fn external_transaction_payload(from: &str) -> Value {
+    json!({
+        "schema": "elastos.chain.unsigned_transaction_intent/v1",
+        "transaction_type": "eip155_legacy",
+        "from": from,
+        "to": "0x0000000000000000000000000000000000000002",
+        "value": "0x0",
+        "data": "0x",
+        "chain_id": 20,
+        "nonce": "0x7",
+        "gas_price": "0x3b9aca00",
+        "gas_limit": "0x5208",
+        "requires_wallet_approval": true,
+        "wallet_intent": "transaction_intent",
+        "page_url": "https://ela.city/cinema/view/test",
+        "origin": "https://ela.city",
+        "network": { "id": "esc-mainnet" }
+    })
+}
+
+/// The external connector's validated Chain outcome for one approval request.
+///
+/// `chain_observation` carries the fields the provider's chain-observation
+/// binding checks: the network, the transaction hash and the originating
+/// account.
+fn external_chain_outcome(
+    request_id: &str,
+    account_id: &str,
+    transaction_hash: &str,
+) -> ValidatedChainOutcomeV1 {
+    ValidatedChainOutcomeV1 {
+        schema: VALIDATED_CHAIN_OUTCOME_SCHEMA.to_string(),
+        approval_request_id: request_id.to_string(),
+        account_id: account_id.to_string(),
+        chain_namespace: "eip155:20".to_string(),
+        network: PublicNetwork::new("esc-mainnet").expect("the fixture network must be valid"),
+        binding: ValidatedChainOutcomeBindingV1::ExternalConnector {
+            connector_id: "wallet".to_string(),
+            originating_address: CONNECTOR_ADDRESS.to_string(),
+        },
+        transaction_hash: transaction_hash.to_string(),
+        chain_observation: json!({
+            "network": "esc-mainnet",
+            "hash": transaction_hash,
+            "transaction": {
+                "hash": transaction_hash,
+                "from": CONNECTOR_ADDRESS,
+                "blockNumber": "0x2a"
+            }
+        }),
+        confirmed_at: now_ts(),
+    }
+}
+
+/// The connector handoff and Chain outcome calls answer under the profile and
+/// persist under `STORAGE_ROOT`.
+///
+/// One provider `init`s a root, links a fixed external address with proof type
+/// `siwe`, so the linked account's `connector_id` is the actor `wallet`, and
+/// sends one `request_approval` with intent `transaction_intent`; its answer
+/// holds a `pending` request. `approve_connector_handoff` answers `approved`
+/// with a handoff of intent `transaction_intent`. Every request carries
+/// principal `person:local:alice`, session `session:confine`, grant
+/// `grant:confine`, launch `launch:confine` and actor `wallet`, the same across
+/// restarts. A fresh confined start on the same root `init`s it, a replayed
+/// `approve_connector_handoff` answers `invalid_request` with "not pending",
+/// `complete_connector_handoff` answers `completed` with the transaction hash
+/// sent in `signed_result`, and `attach_validated_chain_outcome` answers ok
+/// with the outcome in `approval_request.validated_chain_outcome`. After a
+/// second restart, a replayed `complete_connector_handoff` answers
+/// `invalid_request` with "must be approved before completion", the same
+/// outcome attached again answers ok, a substituted outcome answers
+/// `chain_outcome_conflict` with "substitution was rejected", and `read_store`
+/// shows the request `completed` with that outcome under the root's wallet
+/// directory. The payload, the handoff, the transaction hash and the outcome
+/// stay test data in the temporary root, and no assertion message prints a
+/// whole payload, outcome or store.
+///
+/// Falsifier: WP18 removes the `STORAGE_ROOT` subpath grant. One grant covers
+/// every `storage` call, so no profile edit can fail one of these calls and
+/// leave `init` working; no narrower profile falsifier exists, and this test
+/// fails on its first `init`.
+#[test]
+fn connector_handoff_and_chain_outcome_persist_under_storage_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    let mut provider = ConfinedProvider::start(&root);
+
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: format!("proof:eip155:20:{CONNECTOR_ADDRESS}"),
+            chain_namespace: "eip155:20".to_string(),
+            address: CONNECTOR_ADDRESS.to_string(),
+            proof_type: "siwe".to_string(),
+            label: None,
+        }),
+    );
+    assert_eq!(
+        data["account"]["connector_id"], "wallet",
+        "the linked account must carry the request's actor as its connector"
+    );
+    let account_id = data["account"]["account_id"]
+        .as_str()
+        .expect("the linked account must name its id")
+        .to_string();
+
+    let data = ok_data(provider.wallet(WalletProviderOperationV2::RequestApproval {
+        account_id: account_id.clone(),
+        chain_namespace: "eip155:20".to_string(),
+        intent: "transaction_intent".to_string(),
+        resource: "elastos://chain/esc-mainnet/broadcast_transaction".to_string(),
+        reason: "Send EVM transaction".to_string(),
+        payload: external_transaction_payload(CONNECTOR_ADDRESS),
+        expires_at: now_ts().saturating_add(10 * 60),
+    }));
+    let approval = &data["approval_request"];
+    assert_eq!(
+        approval["status"], "pending",
+        "request_approval must answer a pending request"
+    );
+    let request_id = approval["request_id"]
+        .as_str()
+        .expect("an approval request must name its id")
+        .to_string();
+    let payload_hash = approval["payload_hash"]
+        .as_str()
+        .expect("an approval request must name its payload hash")
+        .to_string();
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::ApproveConnectorHandoff {
+            request_id: request_id.clone(),
+            reason: "Approved transaction".to_string(),
+        }),
+    );
+    assert_eq!(
+        data["approval_request"]["status"], "approved",
+        "approve_connector_handoff must answer the approved request"
+    );
+    assert_eq!(
+        data["handoff"]["intent"], "transaction_intent",
+        "the handoff must carry the approval's intent"
+    );
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined re-Init must succeed: {init}"
+    );
+
+    let (code, refusal) = result_error(provider.wallet(
+        WalletProviderOperationV2::ApproveConnectorHandoff {
+            request_id: request_id.clone(),
+            reason: "Approved again".to_string(),
+        },
+    ));
+    assert_eq!(
+        code, "invalid_request",
+        "a replayed approve must be refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("not pending"),
+        "a replay must name the resolved request: {refusal}"
+    );
+
+    let completion = WalletProviderOperationV2::CompleteConnectorHandoff {
+        request_id: request_id.clone(),
+        payload_hash: payload_hash.clone(),
+        signature: None,
+        signature_type: None,
+        public_key: None,
+        signer: CONNECTOR_ADDRESS.to_string(),
+        transaction_hash: Some(CONNECTOR_TRANSACTION_HASH.to_string()),
+    };
+    let data = ok_data(provider.wallet(completion.clone()));
+    assert_eq!(
+        data["approval_request"]["status"], "completed",
+        "complete_connector_handoff must answer the completed request"
+    );
+    assert_eq!(
+        data["approval_request"]["signed_result"]["transaction_hash"], CONNECTOR_TRANSACTION_HASH,
+        "the completion must answer the transaction hash sent"
+    );
+
+    let outcome = external_chain_outcome(&request_id, &account_id, CONNECTOR_TRANSACTION_HASH);
+    let expected_outcome =
+        serde_json::to_value(&outcome).expect("the fixture outcome must serialize");
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::AttachValidatedChainOutcome {
+            outcome: outcome.clone(),
+        }),
+    );
+    assert!(
+        data["approval_request"]["validated_chain_outcome"] == expected_outcome,
+        "the attach answer must carry the stored outcome"
+    );
+    provider.shutdown();
+
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(
+        init["status"], "ok",
+        "confined second re-Init must succeed: {init}"
+    );
+
+    let (code, refusal) = result_error(provider.wallet(completion));
+    assert_eq!(
+        code, "invalid_request",
+        "a replayed completion must be refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("must be approved before completion"),
+        "a replay must name the completed request: {refusal}"
+    );
+
+    let data = ok_data(
+        provider.wallet(WalletProviderOperationV2::AttachValidatedChainOutcome {
+            outcome: outcome.clone(),
+        }),
+    );
+    assert!(
+        data["approval_request"]["validated_chain_outcome"] == expected_outcome,
+        "the same outcome attached again must answer the stored outcome"
+    );
+
+    let mut substituted = outcome.clone();
+    substituted.chain_observation["status"] = json!("substituted");
+    let (code, refusal) = result_error(provider.wallet(
+        WalletProviderOperationV2::AttachValidatedChainOutcome {
+            outcome: substituted,
+        },
+    ));
+    assert_eq!(
+        code, "chain_outcome_conflict",
+        "a substituted outcome must be refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("substitution was rejected"),
+        "the refusal must name the substitution: {refusal}"
+    );
+
+    let store = read_store(&root);
+    let stored = store["approval_requests"]
+        .as_array()
+        .expect("the store under the wallet directory must hold its approvals")
+        .iter()
+        .find(|request| request["request_id"].as_str() == Some(request_id.as_str()))
+        .expect("the store under the wallet directory must hold the request");
+    assert_eq!(
+        stored["status"], "completed",
+        "the store must hold the completed status"
+    );
+    assert!(
+        stored["validated_chain_outcome"] == expected_outcome,
+        "the store must hold the attached outcome"
+    );
+    provider.shutdown();
+}
+
 /// A write outside the wallet directory is denied by the profile, and the
 /// provider reports it and stays in service.
 ///
@@ -2006,8 +2287,10 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// `link_verified_account` calls of task 082, the `bitcoin_challenge` and
 /// `verify_bip322_proof` calls of task 083, the `request_approval`,
 /// `approve_and_sign_managed`, `reject_approval` and `list_approvals` calls of
-/// task 084, and the `create_managed_account` and `list_accounts` calls that
-/// 072 named come last. The array runs before
+/// task 084, the `approve_connector_handoff`, `complete_connector_handoff` and
+/// `attach_validated_chain_outcome` calls of task 085, and the
+/// `create_managed_account` and `list_accounts` calls that 072 named come last.
+/// The array runs before
 /// the `storage_error` check, so a grant on the parent fails this test on one
 /// of those calls rather than only on `init`. `list_accounts` is sent only to
 /// show that the refused `create_managed_account` created nothing. After
@@ -2132,6 +2415,27 @@ fn account_operations_beneath_storage_parent_are_refused() {
         },
         WalletProviderOperationV2::ListApprovals {
             include_resolved: false,
+        },
+        WalletProviderOperationV2::ApproveConnectorHandoff {
+            request_id: "wallet-request:outside".to_string(),
+            reason: "Outside connector approval".to_string(),
+        },
+        WalletProviderOperationV2::CompleteConnectorHandoff {
+            request_id: "wallet-request:outside".to_string(),
+            payload_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+                .to_string(),
+            signature: None,
+            signature_type: None,
+            public_key: None,
+            signer: CONNECTOR_ADDRESS.to_string(),
+            transaction_hash: Some(CONNECTOR_TRANSACTION_HASH.to_string()),
+        },
+        WalletProviderOperationV2::AttachValidatedChainOutcome {
+            outcome: external_chain_outcome(
+                "wallet-request:00000000000000000000000000000000",
+                &format!("wallet:eip155:20:{CONNECTOR_ADDRESS}"),
+                CONNECTOR_TRANSACTION_HASH,
+            ),
         },
         WalletProviderOperationV2::CreateManagedAccount {
             chain_namespace: "eip155:20".to_string(),
