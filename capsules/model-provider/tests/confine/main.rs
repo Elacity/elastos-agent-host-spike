@@ -2777,6 +2777,80 @@ fn generated_profile_refuses_an_unbound_copy() {
     assert!(after == before, "the copy must keep its mode and bytes");
 }
 
+/// The stand-in file serves the copy bound as `PROVIDER_EXECUTABLE`.
+///
+/// The oracle launch stays `model_bound_copy_serves_under_profile`, which
+/// starts the copy under `PROFILE_PATH`. `standin_profile` builds the text,
+/// `write_standin_profile` writes it under the storage base, and the written
+/// file has no `;;` line. Its sorted allow lines equal the oracle's. The
+/// copy is bound as `PROVIDER_EXECUTABLE` and started. `init` passes
+/// `assert_serving`, `runs/` exists under `STORAGE_ROOT`, and `shutdown`
+/// exits cleanly. After `start`, the recorded profile path is the stand-in
+/// file. The evidence is for the lab launcher. It makes no claim that the
+/// Runtime enforced the profile or that B3 is complete, and it does not
+/// count toward B1. When `sandbox-exec` is missing on a host OS other than
+/// macOS it prints a skip reason and returns. On macOS a missing
+/// `sandbox-exec` fails the test.
+///
+/// A plant that points this launch at the committed oracle still answers
+/// `init`, so this test has no falsifier. F-cc46a already scores that
+/// substitution on `generated_profile_refuses_an_unbound_copy`.
+#[test]
+fn generated_profile_bound_copy_serves() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let stored = StoredCopy::prepare("bound-copy-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let written = stored.storage.base.join("standin.sb");
+    write_standin_profile(&written, &generated);
+    let written_text = fs::read_to_string(&written)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the launched file has no ;; line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+
+    let mut provider = Provider::start(Launch::Program {
+        storage: &stored.storage,
+        executable: &stored.copy,
+        program: &stored.copy,
+        profile: &written,
+        bound_digest: None,
+    });
+    assert_eq!(
+        applied_profile(),
+        written,
+        "the recorded path must be the stand-in file"
+    );
+
+    assert_serving(&provider.ok(&init_request(&stored.storage, None)));
+    assert!(
+        stored.storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT beside the copy"
+    );
+    provider.shutdown();
+}
+
 /// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
 /// the profile's exec refusal. The profile binds PROVIDER_EXECUTABLE by path.
 ///
