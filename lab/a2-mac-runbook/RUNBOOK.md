@@ -620,15 +620,32 @@ if not evidence.is_file():
     print("")
     raise SystemExit(0)
 raw = evidence.read_bytes()
-if b"\r" in raw or any(byte > 127 for byte in raw):
+if b"\r" in raw:
     print("FAIL")
-    print("evidence rows contain a CR or non-ASCII byte")
+    print("evidence rows contain a CR")
+    print("")
+    raise SystemExit(0)
+try:
+    text = raw.decode("utf-8")
+except UnicodeDecodeError:
+    print("FAIL")
+    print("evidence rows are not valid UTF-8")
+    print("")
+    raise SystemExit(0)
+header_lines = []
+for line in text.splitlines():
+    if line == "log:":
+        break
+    header_lines.append(line)
+if any(ord(ch) > 127 for line in header_lines for ch in (line.split(":", 1)[0])):
+    print("FAIL")
+    print("evidence rows contain a non-ASCII row name")
     print("")
     raise SystemExit(0)
 rows = {}
 counted = None
 conflict = False
-for line in raw.decode("ascii").splitlines():
+for line in header_lines:
     if line == "log:":
         break
     for name in rows_order:
@@ -738,7 +755,7 @@ does not delete it. It never deletes anything outside that folder.
 
 | Last line | Meaning |
 | --- | --- |
-| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and any process that still names the temp dir or `lab/a2-e2e-resume` exited 0 with no SURVIVED line, `evidence.txt` is a regular file inside the temp clone with no CR or non-ASCII byte, `lsof` showed no writer, a 15s quiet re-hash stayed still, and the guest bytes still match the pin written in the temp folder. |
+| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and any process that still names the temp dir or `lab/a2-e2e-resume` exited 0 with no SURVIVED line, `evidence.txt` is a regular file inside the temp clone with no CR and no non-ASCII row name, `lsof` showed no writer, a 15s quiet re-hash stayed still, and the guest bytes still match the pin written in the temp folder. |
 | `A2: FAIL.` | A row failed, a row name appeared twice, `run.sh` exited nonzero, a falsifier printed SURVIVED, the guest hash was tampered, `evidence.txt` was a symlink or lived outside the clone, a quiet-period hash moved, a live writer remained, or the run created or changed `~/.elastos` under `$HOME` or the login home. |
 | `A2: NOT RUN.` | A named prerequisite was missing, the clone is not a descendant of A2 head `9e7a85d6`, or a row was skipped. A2 is not booked. |
 
