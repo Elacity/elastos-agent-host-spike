@@ -550,6 +550,9 @@ profile does not grant".
   `declared rule matches more than one allow line`. The trace calls
   `allow_form_closes`. An allow form that contains `(allow` and does not
   close fails with `allow form does not close`, before check 2.
+  `collect_allow_lines` takes `(allow` followed by ASCII whitespace, including
+  a tab, and `( allow`. The baseline file scan calls that same function and
+  keeps no second `(allow ` filter.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
