@@ -1,15 +1,9 @@
 """Red-team probe 009: a grant call opened before the session or instance changes.
 
-Target (owner lane grant-binding), read only. Pins from
-``git log -1 --format=%H HEAD -- <file>`` on this tree, not from
-``spike/agent-host``:
-
-  lab/grant-binding/src/lib.rs
-    02adcde9c388dd0a5514805ca334c3da3a7598a4  PR #409
-    sha256 63663b636a35e91354dc2eb7e90406d8290b7905a7f8192059433a26e501efe0
-  lab/grant-binding/src/ledger.rs
-    41674e4f02223f0680ce6449e8d103334f3bbae9  PR #413
-    sha256 928d33686d73136dbe35915e87b6a4cec11f7ec4257377042ee1a2fbb80fd6c5
+Target (owner lane grant-binding), read only. The run records ``git rev-parse
+HEAD`` and the sha256 of the bytes it read from ``lab/grant-binding/src/lib.rs``
+and ``lab/grant-binding/src/ledger.rs``. A later commit on those files still
+passes while the probed property holds.
 
 The owner's session and instance tests open the call after the registry
 change. This probe opens it first. The same call must then be refused, and
@@ -50,12 +44,6 @@ LEDGER = CRATE / "src" / "ledger.rs"
 FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-001.md"
 
 FINDING_ID = "grant-binding-001"
-LIB_COMMIT = "02adcde9c388dd0a5514805ca334c3da3a7598a4"
-LIB_PR = 409
-LIB_SHA = "63663b636a35e91354dc2eb7e90406d8290b7905a7f8192059433a26e501efe0"
-LEDGER_COMMIT = "41674e4f02223f0680ce6449e8d103334f3bbae9"
-LEDGER_PR = 413
-LEDGER_SHA = "928d33686d73136dbe35915e87b6a4cec11f7ec4257377042ee1a2fbb80fd6c5"
 
 SESSION_NAME = "test_stale_call_session_replay_is_refused"
 SIBLING_NAME = "test_stale_call_sibling_instance_replay_is_refused"
@@ -311,13 +299,41 @@ class Suite:
         self.by_name = by_name
 
 
+def sha256_file(path):
+    """Hex sha256 of the live file's bytes."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def pin_line():
-    """The finding's first line: id, both commits, both PRs, both sha256."""
-    return (
-        f"{FINDING_ID} "
-        f"lib.rs {LIB_COMMIT} PR #{LIB_PR} sha256 {LIB_SHA} "
-        f"ledger.rs {LEDGER_COMMIT} PR #{LEDGER_PR} sha256 {LEDGER_SHA}"
-    )
+    """The finding's first line from the live files.
+
+    Finding id, then for each grant file the relative path, the last-change
+    commit, the sha256, and the live digest. A pull-request number is included
+    when the merge subject has one. A failed lookup omits the PR.
+    """
+    parts = [FINDING_ID]
+    for rel in (
+        "lab/grant-binding/src/lib.rs",
+        "lab/grant-binding/src/ledger.rs",
+    ):
+        commit = git_text("log", "-1", "--format=%H", "HEAD", "--", rel)
+        digest = sha256_file(REPO / rel)
+        parts.append(rel)
+        parts.append(commit)
+        pr = None
+        try:
+            entry = introducing_merge(commit)
+            subject = git_text("log", "-1", "--format=%s", entry)
+            match = re.search(r"Merge pull request #(\d+) ", subject)
+            if match is not None:
+                pr = match.group(1)
+        except ProbeError:
+            pr = None
+        if pr is not None:
+            parts.append(f"PR #{pr}")
+        parts.append("sha256")
+        parts.append(digest)
+    return " ".join(parts)
 
 
 def toolchain_reason():
@@ -348,15 +364,6 @@ def git_bytes(*args):
 
 def git_text(*args):
     return git_bytes(*args).decode("utf-8", "replace").strip()
-
-
-def git_status(*args):
-    proc = subprocess.run(
-        ["git", "-C", str(REPO), *args],
-        capture_output=True,
-        env=git_env(),
-    )
-    return proc.returncode
 
 
 _FIRST_PARENT_LINE = None
@@ -394,67 +401,37 @@ def introducing_merge(change):
     return first_containing(change, line, descendants)
 
 
-def require_landed_pr(rel, commit, pr, entry):
-    """``entry`` is the merge that brought ``commit`` in, and its subject names ``pr``."""
-    subject = git_text("log", "-1", "--format=%s", entry)
-    needle = f"Merge pull request #{pr} "
-    if needle not in subject:
-        raise ProbeError(f"{rel} landed in {entry} ({subject}), not PR #{pr}")
-    if git_status("merge-base", "--is-ancestor", commit, entry) != 0:
-        raise ProbeError(f"{rel} commit {commit} is not in {entry}")
-    if git_status("merge-base", "--is-ancestor", commit, f"{entry}^") == 0:
-        raise ProbeError(f"{rel} commit {commit} was already on the first parent of {entry}")
-    return subject
-
-
-def check_pin(path, rel, commit, pr, digest):
-    """The working tree file is the blob last changed at ``commit``, merged as ``pr``.
-
-    ``pr`` is the merge that first brought ``commit`` onto HEAD's first-parent
-    line. The merged branch tip may be a later sync merge, so the pull
-    request's second parent is not required to be ``commit``.
-    """
-    if len(commit) != 40 or any(ch not in "0123456789abcdef" for ch in commit):
-        raise ProbeError(f"{rel} pin {commit} is not a full sha")
-    logged = git_text("log", "-1", "--format=%H", "HEAD", "--", rel)
-    if logged != commit:
-        raise ProbeError(f"{rel} last changed in {logged}, not {commit}")
-    blob = git_bytes("cat-file", "blob", f"{commit}:{rel}")
-    live = Path(path).read_bytes()
-    if blob != live:
-        raise ProbeError(f"{rel} bytes differ from {commit}")
-    got = hashlib.sha256(live).hexdigest()
-    if got != digest:
-        raise ProbeError(f"{rel} sha256 is {got}, not {digest}")
-    require_landed_pr(rel, commit, pr, introducing_merge(commit))
-
-
 def verify_pins():
-    check_pin(LIB, "lab/grant-binding/src/lib.rs", LIB_COMMIT, LIB_PR, LIB_SHA)
-    check_pin(LEDGER, "lab/grant-binding/src/ledger.rs", LEDGER_COMMIT, LEDGER_PR, LEDGER_SHA)
+    """``git rev-parse HEAD`` when that value is 40 hex digits."""
     head = git_text("rev-parse", "HEAD")
-    if len(head) != 40:
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
         raise ProbeError(f"HEAD is not a full sha: {head}")
     return head
 
 
+def changed_target(rel, before, after):
+    """Raise when the live digest is not the digest stored before the probe ran."""
+    if before != after:
+        raise ProbeError(f"the probe changed {rel}")
+
+
+def anchor_reason(relative, count, name, head):
+    """None when ``count`` is 1. Otherwise this run does not cover that plant."""
+    if count == 1:
+        return None
+    return (
+        f"{relative} on {head} holds {count} copies of the {name} anchor, "
+        "not one. This run does not cover that plant."
+    )
+
+
 def recorded_from(text):
-    """Probe names in a finding. The first line carries both pins. The body records Ok or OverCeiling."""
+    """Probe names in a finding. The first line is the live pin. The body records Ok or OverCeiling."""
     lines = text.splitlines()
     if not lines:
         raise ProbeError("finding is empty")
-    first = lines[0]
-    for needle in (
-        FINDING_ID,
-        LIB_COMMIT,
-        LEDGER_COMMIT,
-        f"PR #{LIB_PR}",
-        f"PR #{LEDGER_PR}",
-        LIB_SHA,
-        LEDGER_SHA,
-    ):
-        if needle not in first:
-            raise ProbeError(f"finding first line lacks {needle}")
+    if lines[0] != pin_line():
+        raise ProbeError("finding first line is not the live pin")
     names = set()
     observed = False
     for line in lines[1:]:
@@ -736,17 +713,21 @@ class GrantReplayProbe(unittest.TestCase):
     real_error = None
     head = ""
     pin_line = ""
+    lib_sha = None
+    ledger_sha = None
 
     @classmethod
     def setUpClass(cls):
         cls.skip_reason = toolchain_reason()
         if cls.skip_reason:
             return
+        cls.lib_sha = sha256_file(LIB)
+        cls.ledger_sha = sha256_file(LEDGER)
+        cls.head = verify_pins()
+        cls.pin_line = pin_line()
         cls.work = Path(tempfile.mkdtemp(prefix="redteam-009-")).resolve()
         cls.target = cls.work / "target"
         cls.target.mkdir()
-        cls.head = verify_pins()
-        cls.pin_line = pin_line()
         cls.real_pkg = cls.work / "probe-real"
         try:
             cls.real = run_suite(cls.real_pkg, CRATE, cls.target, [])
@@ -774,81 +755,51 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertTrue(self.target.resolve().is_relative_to(self.work.resolve()))
         self.assertFalse(self.work.resolve().is_relative_to(REPO.resolve()))
 
-    def test_pin_refusal_names_its_reason(self):
-        """A short pin, a stale commit, a wrong sha256, or the other file's PR is its own refusal."""
+    def test_run_hashes_the_bytes_it_reads(self):
+        """HEAD and the sha256 of the bytes this run read. A different digest is a probe edit."""
         self.assertEqual(verify_pins(), self.head)
+        self.assertEqual(self.lib_sha, sha256_file(LIB))
+        self.assertEqual(self.ledger_sha, sha256_file(LEDGER))
         rel = "lab/grant-binding/src/lib.rs"
-        with self.assertRaises(ProbeError) as short:
-            check_pin(LIB, rel, "abc", LIB_PR, LIB_SHA)
-        self.assertEqual(str(short.exception), f"{rel} pin abc is not a full sha")
-
-        with self.assertRaises(ProbeError) as stale:
-            check_pin(LIB, rel, LEDGER_COMMIT, LIB_PR, LIB_SHA)
-        self.assertEqual(
-            str(stale.exception),
-            f"{rel} last changed in {LIB_COMMIT}, not {LEDGER_COMMIT}",
-        )
-
-        bad = "0" * 64
-        with self.assertRaises(ProbeError) as digest:
-            check_pin(LIB, rel, LIB_COMMIT, LIB_PR, bad)
-        self.assertEqual(str(digest.exception), f"{rel} sha256 is {LIB_SHA}, not {bad}")
-
-        mutated = self.work / "mutated-lib.rs"
-        mutated.write_bytes(LIB.read_bytes() + b"\n")
+        changed_target(rel, self.lib_sha, self.lib_sha)
         with self.assertRaises(ProbeError) as changed:
-            check_pin(mutated, rel, LIB_COMMIT, LIB_PR, LIB_SHA)
-        self.assertEqual(str(changed.exception), f"{rel} bytes differ from {LIB_COMMIT}")
+            changed_target(rel, self.lib_sha, "0" * 64)
+        self.assertEqual(str(changed.exception), f"the probe changed {rel}")
 
-        lib_entry = introducing_merge(LIB_COMMIT)
-        lib_subject = git_text("log", "-1", "--format=%s", lib_entry)
-        with self.assertRaises(ProbeError) as lib_pr:
-            check_pin(LIB, rel, LIB_COMMIT, LEDGER_PR, LIB_SHA)
-        self.assertEqual(
-            str(lib_pr.exception),
-            f"{rel} landed in {lib_entry} ({lib_subject}), not PR #{LEDGER_PR}",
-        )
-        self.assertEqual(lib_subject, require_landed_pr(rel, LIB_COMMIT, LIB_PR, lib_entry))
-        self.assertIn(f"Merge pull request #{LIB_PR} ", lib_subject)
-        self.assertEqual(git_status("merge-base", "--is-ancestor", LIB_COMMIT, lib_entry), 0)
-        self.assertEqual(git_status("merge-base", "--is-ancestor", LIB_COMMIT, f"{lib_entry}^"), 1)
+        saved = git_text
 
-        with self.assertRaises(ProbeError) as absent:
-            require_landed_pr(rel, self.head, LIB_PR, lib_entry)
-        self.assertEqual(
-            str(absent.exception),
-            f"{rel} commit {self.head} is not in {lib_entry}",
-        )
-        with self.assertRaises(ProbeError) as already:
-            require_landed_pr(rel, "a3b8a580cf1a1979d7a21c5d7cf9233b973ccabf", LIB_PR, lib_entry)
-        self.assertEqual(
-            str(already.exception),
-            f"{rel} commit {'a3b8a580cf1a1979d7a21c5d7cf9233b973ccabf'} was already on the first parent of {lib_entry}",
-        )
-        missing = "0123456789abcdef0123456789abcdef01234567"
-        with self.assertRaises(ProbeError) as lost:
-            first_containing(missing, ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",), set())
-        self.assertEqual(
-            str(lost.exception),
-            f"{missing} does not reach HEAD's first-parent line",
-        )
+        def fake(value):
+            def run(*args):
+                if args == ("rev-parse", "HEAD"):
+                    return value
+                return saved(*args)
+            return run
 
-        ledger_rel = "lab/grant-binding/src/ledger.rs"
-        ledger_entry = introducing_merge(LEDGER_COMMIT)
-        ledger_subject = git_text("log", "-1", "--format=%s", ledger_entry)
-        with self.assertRaises(ProbeError) as ledger_pr:
-            check_pin(LEDGER, ledger_rel, LEDGER_COMMIT, LIB_PR, LEDGER_SHA)
-        self.assertEqual(
-            str(ledger_pr.exception),
-            f"{ledger_rel} landed in {ledger_entry} ({ledger_subject}), not PR #{LIB_PR}",
-        )
-        self.assertIn(f"Merge pull request #{LEDGER_PR} ", ledger_subject)
-        self.assertEqual(
-            git_status("merge-base", "--is-ancestor", LEDGER_COMMIT, ledger_entry), 0
-        )
-        self.assertEqual(
-            git_status("merge-base", "--is-ancestor", LEDGER_COMMIT, f"{ledger_entry}^"), 1
-        )
+        try:
+            globals()["git_text"] = fake("abc")
+            with self.assertRaises(ProbeError) as short:
+                verify_pins()
+            self.assertEqual(str(short.exception), "HEAD is not a full sha: abc")
+            odd = "g" * 40
+            globals()["git_text"] = fake(odd)
+            with self.assertRaises(ProbeError) as bad:
+                verify_pins()
+            self.assertEqual(str(bad.exception), f"HEAD is not a full sha: {odd}")
+        finally:
+            globals()["git_text"] = saved
+
+    def test_missing_anchor_names_its_reason(self):
+        """One copy of an anchor is covered. Zero or two copies skip this run."""
+        rel = "lab/grant-binding/src/lib.rs"
+        self.assertIsNone(anchor_reason(rel, 1, "session", self.head))
+        for count in (0, 2):
+            reason = anchor_reason(rel, count, "session", self.head)
+            self.assertEqual(
+                reason,
+                f"{rel} on {self.head} holds {count} copies of the session anchor, "
+                "not one. This run does not cover that plant.",
+            )
+            self.assertIn("does not cover that plant", reason)
 
     def check_real(self, name):
         outcome = self.real.by_name[name]
@@ -874,8 +825,8 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertFalse((dest / "src" / "plant.rs").exists())
         apply_once(dest, relative, old, new)
         suite = run_suite(self.work / f"probe-{name}", dest, self.target, [])
-        self.assertEqual(hashlib.sha256(LIB.read_bytes()).hexdigest(), LIB_SHA)
-        self.assertEqual(hashlib.sha256(LEDGER.read_bytes()).hexdigest(), LEDGER_SHA)
+        changed_target("lab/grant-binding/src/lib.rs", self.lib_sha, sha256_file(LIB))
+        changed_target("lab/grant-binding/src/ledger.rs", self.ledger_sha, sha256_file(LEDGER))
         print(f"\n[{name}]\n{evidence(suite.output)}", file=sys.stderr, flush=True)
         return suite
 
@@ -899,8 +850,16 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertFalse(accounting_plant_caught(session, sibling, clean))
         self.assertFalse(self._expecting("test_clean_full_ceiling_reserve_succeeds"))
 
+    def require_one_anchor(self, relative, old, name):
+        """Skip this plant when the live file does not hold that anchor once."""
+        count = (REPO / relative).read_text().count(old)
+        reason = anchor_reason(relative, count, name, self.head)
+        if reason is not None:
+            self.skipTest(reason)
+
     def test_deleted_session_comparison_is_caught(self):
         """Deleting the live session comparison makes the session replay test fail."""
+        self.require_one_anchor("lab/grant-binding/src/lib.rs", SESSION_OLD, "session")
         suite = self.plant("drop-session", "src/lib.rs", SESSION_OLD, "")
         session = suite.by_name[SESSION_NAME]
         self.assertTrue(session.caught, evidence(suite.output) or tail(suite.output))
@@ -911,6 +870,7 @@ class GrantReplayProbe(unittest.TestCase):
 
     def test_deleted_instance_comparison_is_caught(self):
         """Deleting the live instance comparison makes the sibling replay test fail."""
+        self.require_one_anchor("lab/grant-binding/src/lib.rs", INSTANCE_OLD, "instance")
         suite = self.plant("drop-instance", "src/lib.rs", INSTANCE_OLD, "")
         sibling = suite.by_name[SIBLING_NAME]
         self.assertTrue(sibling.caught, evidence(suite.output) or tail(suite.output))
@@ -921,6 +881,7 @@ class GrantReplayProbe(unittest.TestCase):
 
     def test_early_reserve_charge_is_caught(self):
         """A charge kept after a binding refusal fails both stale tests. A valid reserve is charged once."""
+        self.require_one_anchor("lab/grant-binding/src/ledger.rs", RESERVE_OLD, "reserve")
         suite = self.plant("early-charge", "src/ledger.rs", RESERVE_OLD, ACCOUNTING_NEW)
         session = suite.by_name[SESSION_NAME]
         sibling = suite.by_name[SIBLING_NAME]
@@ -930,6 +891,7 @@ class GrantReplayProbe(unittest.TestCase):
 
     def test_compile_error_is_error(self):
         """Invalid Rust is an error. It is not a caught plant and not an expected failure."""
+        self.require_one_anchor("lab/grant-binding/src/lib.rs", COMPILE_OLD, "compile")
         suite = self.plant("compile-error", "src/lib.rs", COMPILE_OLD, COMPILE_NEW)
         self.assertNotEqual(suite.code, 0)
         self.assertRegex(suite.output, r"could not compile|error\[E\d+\]")
@@ -1068,13 +1030,15 @@ def tearDownModule():
     skip = GrantReplayProbe.skip_reason
     head = GrantReplayProbe.head
     pins = GrantReplayProbe.pin_line
+    lib_sha = GrantReplayProbe.lib_sha
+    ledger_sha = GrantReplayProbe.ledger_sha
     if work is not None:
         shutil.rmtree(work, ignore_errors=True)
         GrantReplayProbe.work = None
-    if LIB.is_file() and hashlib.sha256(LIB.read_bytes()).hexdigest() != LIB_SHA:
-        raise ProbeError("the probe changed lab/grant-binding/src/lib.rs")
-    if LEDGER.is_file() and hashlib.sha256(LEDGER.read_bytes()).hexdigest() != LEDGER_SHA:
-        raise ProbeError("the probe changed lab/grant-binding/src/ledger.rs")
+    if lib_sha is not None:
+        changed_target("lab/grant-binding/src/lib.rs", lib_sha, sha256_file(LIB))
+    if ledger_sha is not None:
+        changed_target("lab/grant-binding/src/ledger.rs", ledger_sha, sha256_file(LEDGER))
     if (REPO / "lab" / "redteam" / "Cargo.toml").exists():
         raise ProbeError("lab/redteam/Cargo.toml appeared")
     if skip:

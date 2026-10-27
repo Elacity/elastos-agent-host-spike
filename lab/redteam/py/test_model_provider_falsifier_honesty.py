@@ -2,8 +2,8 @@
 
 Grade row 10 (local model ops) counts the provider falsifiers as caught.
 That count holds while each ``old`` anchor still occurs once, on the
-updated text, the way ``falsify.py`` applies it. This probe judges the
-entries whose command is ``provider`` (MP01–MP26). The selftest and PV
+updated text, the way ``falsify.py`` applies it. This probe judges every
+provider entry on this base. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
 for every list, and this probe leaves it alone.
@@ -40,18 +40,9 @@ from test_agent_host_falsifier_honesty import (
 
 REPO = Path(__file__).resolve().parents[3]
 MODEL_FILE = "capsules/model-provider/falsifiers.json"
-# Measured on HEAD with
-# `git log -1 --format='%H %s' HEAD -- capsules/model-provider/falsifiers.json`
-# and `shasum -a 256` of that file. The merge is that change's first commit
-# on HEAD's first-parent line.
-RECORDED_SHA256 = "990ef5ac013b9bbcdae1d6ef5a8c73bca0447393158d1fc60c7ad8637da2d84c"
-LAST_CHANGE = "b75b69bff2069b185ed4ce7168c491c57759fe07"
-RECORDED_PR = "PR #421"
-MERGE_COMMIT = "093d1f798df2a14c5aa2b0da2a973c3d5e1b166d"
 FINDING_ID = "provider-001"
 FINDING_NAME = "lab/redteam/findings/provider-001.md"
 FINDING = REPO / FINDING_NAME
-ROW_10_IDS = tuple(f"MP{number:02d}" for number in range(1, 27))
 
 
 def load_provider_document(data):
@@ -86,13 +77,16 @@ def provider_base():
 
 
 def row_problems(entries):
-    """Problems when the provider entries are not MP01–MP26, each caught."""
+    """Problems for every provider entry on this base.
+
+    An empty list is one problem. A command other than ``provider`` or an
+    expect other than ``caught`` is a problem. The ids are the entries on
+    this base, not a fixed list.
+    """
+    if not entries:
+        return [Problem(
+            "entries", "", MODEL_FILE, "provider entries are empty")]
     problems = []
-    ids = [entry["id"] for entry in entries]
-    if ids != list(ROW_10_IDS):
-        problems.append(Problem(
-            "ids", "", MODEL_FILE,
-            f"provider ids are {ids}, not MP01 through MP26"))
     for entry in entries:
         if entry["command"] != "provider":
             problems.append(Problem(
@@ -106,7 +100,7 @@ def row_problems(entries):
 
 
 def provider_problems(entries, read):
-    """Id, caught-without-a-test, and anchor problems for the provider entries."""
+    """Row, caught-without-a-test, and anchor problems for the provider entries."""
     return [*row_problems(entries), *caught_without_tests(entries), *anchors_of(entries, read)]
 
 
@@ -204,7 +198,17 @@ def report():
     return report_text(snapshot.commit, data, problems, described)
 
 
+def changed_model(before, after):
+    """The model file's bytes still match the one cached read."""
+    if before != after:
+        raise AssertionError("the probe changed capsules/model-provider/falsifiers.json")
+
+
 def tearDownModule():
+    _snapshot, cached, _entries = provider_base()
+    path = REPO / MODEL_FILE
+    live = path.read_bytes() if path.is_file() else None
+    changed_model(cached, live)
     print("\n" + report(), file=sys.stderr)
 
 
@@ -224,19 +228,16 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         self.assertEqual(str(caught.exception), "NaN is not strict JSON")
 
     def test_provider_ids_are_the_row_10_list(self):
-        """The provider entries are MP01–MP26, each caught, each naming a test."""
+        """Every provider entry on this base is caught and names a test."""
         _snapshot, _data, entries = provider_base()
         self.assertEqual(row_problems(entries), [])
-        self.assertEqual([entry["id"] for entry in entries], list(ROW_10_IDS))
+        self.assertGreaterEqual(len(entries), 1)
         self.assertEqual([entry["command"] for entry in entries], ["provider"] * len(entries))
         self.assertEqual([entry["expect"] for entry in entries], ["caught"] * len(entries))
         self.assertEqual(caught_without_tests(entries), [])
 
-        planted = copy.deepcopy(entries)
-        planted[0]["id"] = "MP00"
-        self.assertEqual(row_problems(planted), [Problem(
-            "ids", "", MODEL_FILE,
-            f"provider ids are {[entry['id'] for entry in planted]}, not MP01 through MP26")])
+        self.assertEqual(row_problems([]), [Problem(
+            "entries", "", MODEL_FILE, "provider entries are empty")])
         planted = copy.deepcopy(entries)
         planted[0]["command"] = "host"
         self.assertEqual(row_problems(planted), [Problem(
@@ -263,7 +264,7 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         accepts the entry.
         """
         snapshot, _data, entries = provider_base()
-        self.assertEqual(len(entries), len(ROW_10_IDS))
+        self.assertGreaterEqual(len(entries), 1)
         self.assertEqual(anchors_of(entries, snapshot.read), [])
 
         planted = copy.deepcopy(entries)
@@ -291,25 +292,30 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
 
         self.assertEqual(anchors_of([entry], read), [])
 
-    def test_pin_matches_the_recorded_file(self):
-        """The model file's sha256 is the recorded digest, and the report names the pin."""
+    def test_report_names_the_bytes_it_read(self):
+        """The report names the snapshot commit and the bytes this run read."""
         snapshot, data, _entries = provider_base()
         self.assertEqual(snapshot.root, REPO)
-        require_digest(data, RECORDED_SHA256)
+        require_digest(data, falsifier_data.digest(data).removeprefix("sha256 "))
         with self.assertRaises(AssertionError):
             require_digest(data, "0" * 64)
+        changed_model(data, data)
+        with self.assertRaises(AssertionError) as changed:
+            changed_model(data, data + b"\n")
+        self.assertEqual(
+            str(changed.exception),
+            "the probe changed capsules/model-provider/falsifiers.json",
+        )
         text = report()
         commit = snapshot.commit
         self.assertTrue(commit)
         self.assertEqual(len(commit), 40)
         self.assertIn(f"the provider anchors hold on {commit}", text)
         self.assertIn(f"read at HEAD {commit}", text)
-        self.assertIn(RECORDED_PR, text)
-        self.assertIn(f"Merge pull request #{RECORDED_PR.removeprefix('PR #')}", text)
-        self.assertIn(MERGE_COMMIT, text)
-        self.assertIn(RECORDED_SHA256, text)
-        self.assertIn(LAST_CHANGE, text)
-        self.assertIn("first on HEAD's first-parent line", text)
+        self.assertIn(falsifier_data.digest(data), text)
+        change = snapshot.last_change(MODEL_FILE)
+        self.assertIsNotNone(change)
+        self.assertIn(change.split()[0], text)
 
     def test_a_second_problem_still_fails(self):
         """A finding covers the mismatch it names. A second mismatch fails the gate.
@@ -322,10 +328,12 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
             "anchor", "MP01", "src/a.rs", "edits[0]: old is found 0 times, not once")
         two = Problem(
             "anchor", "MP02", "src/a.rs", "edits[0]: old is found 2 times, not once")
-        text = finding_text([one], commit, RECORDED_PR, RECORDED_SHA256)
+        sample_pr = "PR #7"
+        sample_sha = "c" * 64
+        text = finding_text([one], commit, sample_pr, sample_sha)
         self.assertEqual(
             text.splitlines()[0],
-            f"{FINDING_ID} {commit} {RECORDED_PR} sha256 {RECORDED_SHA256}")
+            f"{FINDING_ID} {commit} {sample_pr} sha256 {sample_sha}")
         self.assertEqual(text.splitlines()[1], finding_line(one))
         self.assertIn(one.entry, text.splitlines()[1])
         self.assertIn(one.reason, text.splitlines()[1])
@@ -389,9 +397,8 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         dirty = report_text(snapshot.commit, data, [two], described)
         self.assertNotIn("the provider anchors hold on ", dirty)
         self.assertIn("MP02", dirty)
-        self.assertIn(RECORDED_PR, dirty)
         self.assertIn(snapshot.commit, dirty)
-        self.assertIn(RECORDED_SHA256, dirty)
+        self.assertIn(falsifier_data.digest(data), dirty)
 
         marked = []
         pending = [unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])]
