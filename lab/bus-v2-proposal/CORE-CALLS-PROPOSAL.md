@@ -1,5 +1,7 @@
 # Core calls proposal
 
+Pinned commit: 2fb2c25d630cf47a5baa108eca21c1eecc9f83d8
+
 LAB DRAFT for Sash and Anders. This file is the proposal. It stays in the lab. It is design input for M1 checks A3, A5, A7 and B2, and it leaves those checks open.
 
 ## 1. Agent identity
