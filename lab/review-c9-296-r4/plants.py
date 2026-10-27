@@ -36,17 +36,31 @@ NONCE = "abc"
 
 
 def run_check(ev: pathlib.Path, nonce: str, preboot: pathlib.Path | None) -> tuple[int, str]:
-    cmd = [sys.executable, str(CHECK), str(ev), str(EXPECTED), nonce, "full"]
-    if preboot is not None:
-        cmd.append(str(preboot))
-    p = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-    )
-    return p.returncode, (p.stderr or "").strip()
+    cleanup = None
+    if preboot is None:
+        handle, name = tempfile.mkstemp(prefix="lc-r4-preboot-", suffix=".txt")
+        os.close(handle)
+        preboot = pathlib.Path(name)
+        cleanup = preboot
+        write_matching_preboot(preboot, nonce, int(time.time()) - 60)
+        now = int(time.time())
+        if ev.is_dir():
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (now, now))
+    cmd = [sys.executable, str(CHECK), str(ev), str(EXPECTED), nonce, "full", str(preboot)]
+    try:
+        p = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+        )
+        return p.returncode, (p.stderr or "").strip()
+    finally:
+        if cleanup is not None:
+            cleanup.unlink(missing_ok=True)
 
 
 def verdict(name: str, rc: int, want_fail: bool, note: str) -> str:

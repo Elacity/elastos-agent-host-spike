@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/providers.rs (target-build/debug/deps/providers-d8053989e708ce4a)
+
+running 4 tests
+test confined_process_cap_bnd_is_zero ... ok
+test did_provider_binary_under_its_profile ... ok
+test model_provider_binary_under_its_profile ... ok
+test wallet_provider_binary_under_its_profile ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+

@@ -1,0 +1,28 @@
+F-LC-SOCKET CAUGHT
+F-LC-CAPBND CAUGHT
+F-LC-BLOCK CAUGHT
+F-LC-STORAGE CAUGHT
+F-LC-PROVIDER-SOCKET CAUGHT
+F-LC-ANY-ERRNO CAUGHT
+F-LC-WRONG-ARCH-CC CAUGHT
+   Compiling linux-confine v0.0.0 (/tmp/review-c9-296-r4-src/lab/linux-confine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running tests/aarch64.rs (target-build/debug/deps/aarch64-963a233b1d714dd7)
+
+running 1 test
+
+thread 'aarch64_qemu_user_host_kernel' (19776) panicked at tests/aarch64.rs:116:9:
+aarch64 build + qemu-user (host kernel): qemu-aarch64 is absent. NOT RUN. This ignored test must not count as a pass.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test aarch64_qemu_user_host_kernel ... FAILED
+
+failures:
+
+failures:
+    aarch64_qemu_user_host_kernel
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test aarch64`
+
+F-LC-QEMU-USER-LANDLOCK NOT RUN: the standing qemu-user test failed before the edit
