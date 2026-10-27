@@ -860,12 +860,13 @@ fn wait_for_terminal(
 /// `operations_table_cells_stay_lab_claims` runs on that same section after
 /// the real-file missing-test check and returns ok. A data row starts with
 /// `| ` and its first non-empty cell is not `Operation` and not `---`. The
-/// Right cell is the fourth non-empty cell: `storage` or
-/// `no named test shows this`. The Linux cell is the seventh non-empty cell:
-/// `designed, not enforced`. An in-memory row whose Right cell is `network`
-/// panics, and the panic contains `network` and `right`. An in-memory row
-/// whose Linux cell is `enforced` panics, and the panic contains `enforced`
-/// and `Linux`.
+/// Right cell passes when `entry_id` read that id from the fixture's `rights`
+/// array, or the cell is `no named test shows this`. The Linux cell is the
+/// seventh non-empty cell: `designed, not enforced`. An in-memory row whose
+/// Right cell is `network` panics, and the panic contains `network` and
+/// `right`. A `storage` cell whose id list is only `bound-executable` panics
+/// with `storage` and `right`. The enforced panic contains the backticked
+/// cell `` `enforced` ``.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -954,10 +955,12 @@ fn operations_section_cites_existing_tests() {
     }
     // Right is the fourth non-empty cell. Linux is the seventh. Header and
     // separator rows are not data rows, so their cells are not claims.
-    fn operations_table_cells_stay_lab_claims(section: &str) -> Result<(), String> {
+    fn operations_table_cells_stay_lab_claims(
+        section: &str,
+        right_ids: &[&str],
+    ) -> Result<(), String> {
         const RIGHT_PLACE: usize = 4;
         const LINUX_PLACE: usize = 7;
-        const APPROVED_RIGHT: &str = "storage";
         const UNSHOWN_RIGHT: &str = "no named test shows this";
         const LINUX_CLAIM: &str = "designed, not enforced";
         for line in section.lines() {
@@ -976,7 +979,7 @@ fn operations_section_cites_existing_tests() {
                 continue;
             }
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
-            if right != APPROVED_RIGHT && right != UNSHOWN_RIGHT {
+            if !right_ids.contains(&right) && right != UNSHOWN_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
@@ -988,9 +991,9 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
-    fn caught_lab_claim_panic(section: &str) -> String {
+    fn caught_lab_claim_panic(section: &str, right_ids: &[&str]) -> String {
         match catch_unwind(AssertUnwindSafe(|| {
-            if let Err(reason) = operations_table_cells_stay_lab_claims(section) {
+            if let Err(reason) = operations_table_cells_stay_lab_claims(section, right_ids) {
                 panic!("{reason}");
             }
         })) {
@@ -1038,18 +1041,35 @@ fn operations_section_cites_existing_tests() {
     require_cited_tests("`model_`", source_without_the_function);
     require_cited_tests("`generated_`", source_without_the_function);
 
+    let approved_ids = ["storage", "bound-executable"];
     let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
-    let network_panic = caught_lab_claim_panic(network_row);
+    let network_panic = caught_lab_claim_panic(network_row, &approved_ids);
     assert!(
         network_panic.contains("network") && network_panic.contains("right"),
         "{network_panic}"
     );
-    let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
-    let enforced_panic = caught_lab_claim_panic(enforced_row);
+    let storage_row = "| init | in | out | storage | effect | rule | designed, not enforced |";
+    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"]);
     assert!(
-        enforced_panic.contains("enforced") && enforced_panic.contains("Linux"),
-        "{enforced_panic}"
+        storage_panic.contains("storage") && storage_panic.contains("right"),
+        "{storage_panic}"
     );
+    let bound_row =
+        "| init | in | out | bound-executable | effect | rule | designed, not enforced |";
+    assert_eq!(
+        operations_table_cells_stay_lab_claims(bound_row, &approved_ids),
+        Ok(())
+    );
+    let startup_row =
+        "| init | in | out | startup-root-directory | effect | rule | designed, not enforced |";
+    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids);
+    assert!(
+        startup_panic.contains("startup-root-directory") && startup_panic.contains("right"),
+        "{startup_panic}"
+    );
+    let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
+    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids);
+    assert!(enforced_panic.contains("`enforced`"), "{enforced_panic}");
 
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
@@ -1076,7 +1096,21 @@ fn operations_section_cites_existing_tests() {
         "the trace citation must be a required test name"
     );
     require_cited_tests(section, &source);
-    operations_table_cells_stay_lab_claims(section)
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let rights = fixture
+        .get("rights")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("declared rights must be an array"));
+    let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
+    operations_table_cells_stay_lab_claims(section, &right_ids)
         .expect("the real operations section keeps its Right and Linux lab claims");
 }
 
@@ -3598,7 +3632,11 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// rights, and that text's head and allow lines match the oracle.
 ///
 /// The first three non-comment lines are `(version 1)`, `(deny default)` and
-/// `(deny network*)`. The sorted allow lines equal the oracle. A changed
+/// `(deny network*)`. The sorted allow lines equal the oracle. The sorted
+/// non-comment lines equal the oracle. An in-memory extra deny appends
+/// `(deny file-read* (literal "/tmp/cc-extra-deny"))`. Its sorted allow lines
+/// still equal the oracle, and its sorted non-comment lines do not. The extra
+/// side contains `cc-extra-deny`. A changed
 /// `bound-executable` rule is reflected. A declared value with no rights
 /// list, a platform baseline with no rules list, an entry with no rules list,
 /// and a rule that is not a string are each refused with their reason. The
@@ -3613,11 +3651,7 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 #[test]
 fn generated_model_profile_matches_the_oracle() {
     fn non_comment_head(profile: &str) -> Vec<&str> {
-        profile
-            .lines()
-            .filter(|line| !line.starts_with(";;"))
-            .take(3)
-            .collect()
+        non_comment_lines(profile).into_iter().take(3).collect()
     }
 
     let head = vec!["(version 1)", "(deny default)", "(deny network*)"];
@@ -3640,6 +3674,26 @@ fn generated_model_profile_matches_the_oracle() {
     generated_lines.sort();
     oracle_lines.sort();
     assert_eq!(generated_lines, oracle_lines);
+    let mut generated_non_comment = non_comment_lines(&generated);
+    let mut oracle_non_comment = non_comment_lines(&oracle);
+    generated_non_comment.sort();
+    oracle_non_comment.sort();
+    assert_eq!(generated_non_comment, oracle_non_comment);
+
+    let mut extra = generated.clone();
+    extra.push_str("(deny file-read* (literal \"/tmp/cc-extra-deny\"))\n");
+    let mut extra_allow = collect_allow_lines(&extra);
+    extra_allow.sort();
+    assert_eq!(extra_allow, oracle_lines);
+    let mut extra_non_comment = non_comment_lines(&extra);
+    extra_non_comment.sort();
+    assert_ne!(extra_non_comment, oracle_non_comment);
+    assert!(
+        extra_non_comment
+            .iter()
+            .any(|line| line.contains("cc-extra-deny")),
+        "the extra deny stays on the extra side"
+    );
 
     let original_exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
     let stub_exec = "(allow process-exec (literal \"/tmp/cc-standin-stub\"))";
@@ -3714,6 +3768,82 @@ fn generated_model_profile_matches_the_oracle() {
         standin_profile(&rule_not_a_string).expect_err("a rule that is not a string is refused"),
         "model-provider declares a rule that is not a string"
     );
+}
+
+/// The file `Launch::Profile` applies has the oracle's sorted allow lines.
+///
+/// `standin_profile` builds the text from the approved declared rights.
+/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`.
+/// The written file has no `;;` line. Before `Provider::start`, that file's
+/// sorted allow lines equal the oracle's. `Launch::Profile` applies that
+/// file with `canonical_bindings`. Hosted `init` passes `assert_serving` and
+/// creates `runs/`. `applied_profile()` is that path, and the bytes there
+/// have the same sorted allow lines.
+///
+/// Falsifier: F-cc51a appends
+/// `(allow file-read-data (literal "/tmp/cc-launched-extra"))` inside
+/// `sandboxed` after the path is recorded, so
+/// `generated_profile_launch_matches_the_oracle` fails at the post-start
+/// allow-line compare.
+#[test]
+fn generated_profile_launch_matches_the_oracle() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let storage = Storage::prepare("standin-launched-file");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let written = fs::read_to_string(&profile)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in file has no comment line"
+    );
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut written_lines = collect_allow_lines(&written);
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's before start"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    assert!(
+        storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT"
+    );
+    assert_eq!(
+        applied_profile(),
+        profile,
+        "the launch records the stand-in file"
+    );
+    let launched = fs::read_to_string(applied_profile())
+        .unwrap_or_else(|err| panic!("the launched profile must be readable: {err}"));
+    let mut launched_lines = collect_allow_lines(&launched);
+    launched_lines.sort();
+    assert_eq!(
+        launched_lines, oracle_lines,
+        "the launched file's allow lines must equal the oracle's"
+    );
+    provider.shutdown();
 }
 
 /// The profile the stand-in builds is the file `Launch::Profile` applies.
@@ -4074,6 +4204,16 @@ fn standin_launch_uses_the_generated_profile() {
     provider.shutdown();
 }
 
+fn non_comment_lines(profile: &str) -> Vec<&str> {
+    // The oracle's blank line after `(deny network*)` is not a form.
+    profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
 fn collect_allow_lines(profile: &str) -> Vec<&str> {
     fn allow_at(line: &str) -> Option<usize> {
         let bytes = line.as_bytes();
@@ -4186,6 +4326,13 @@ fn allow_form_closes(profile: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn entry_id(entry: &Value) -> &str {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a declared entry has no id"))
+}
+
 /// Every allow rule in `confine.sb` traces to exactly one approved declared
 /// right or one platform-baseline rule in the declared-rights fixture.
 ///
@@ -4201,12 +4348,6 @@ fn allow_form_closes(profile: &str) -> Result<(), String> {
 /// line. F-cc30f repeats the STORAGE_ROOT allow.
 #[test]
 fn allow_rules_trace_to_declared_rights() {
-    fn entry_id(entry: &Value) -> &str {
-        entry
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("a declared entry has no id"))
-    }
     fn rule_strings(entry: &Value) -> Vec<&str> {
         let Some(rules) = entry.get("rules") else {
             return Vec::new();
