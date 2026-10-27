@@ -32,6 +32,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import falsifier_data
 import sbx
 
 # lab/redteam/py/<this> -> parents[3] is the repo root. Same rule as sbx.
@@ -81,7 +82,8 @@ PLANT_OK = False
 UNSANDBOXED_OK = False
 PROFILES = ()
 START_SHA = {}
-_FIRST_PARENT = None
+_SNAPSHOT = None
+PR_UNKNOWN = "PR unknown"
 
 _STDOUT = re.compile(r"kr=(-?\d+) port=(\d+)\npasswd (opened|denied)\n")
 
@@ -114,28 +116,16 @@ def git_text(*args):
     return completed.stdout.decode("utf-8", "replace").strip()
 
 
-def first_parent_line():
-    """HEAD's first-parent line, newest first. Read once per process."""
-    global _FIRST_PARENT
-    if _FIRST_PARENT is None:
-        _FIRST_PARENT = tuple(git_text("rev-list", "--first-parent", "HEAD").split())
-    return _FIRST_PARENT
+def snapshot():
+    """One ``falsifier_data.Snapshot`` of this repo. HEAD is resolved once.
 
-
-def introducing_merge(change):
-    """First commit on HEAD's first-parent line that contains ``change``.
-
-    The file's own last-change commit stays the pin. The merge's subject
-    names the pull request. A later sync merge at the tip does not replace it.
+    Its ``entry_point`` is the lane's one rule for the commit that brought
+    a change onto HEAD's first-parent line. This module does not copy it.
     """
-    line = first_parent_line()
-    if change in line:
-        return change
-    descendants = set(git_text("rev-list", "--ancestry-path", f"{change}..HEAD").split())
-    for item in reversed(line):
-        if item in descendants:
-            return item
-    raise HarnessError(f"{change} does not reach HEAD's first-parent line")
+    global _SNAPSHOT
+    if _SNAPSHOT is None:
+        _SNAPSHOT = falsifier_data.Snapshot(ROOT)
+    return _SNAPSHOT
 
 
 def pull_number(subject):
@@ -167,12 +157,27 @@ def last_change(path):
     return require_sha(commit, relative)
 
 
-def pull_request(commit):
-    subject = git_text("log", "-1", "--format=%s", introducing_merge(commit))
-    number = pull_number(subject)
-    if number is None:
-        raise HarnessError(f"no pull request on the merge that introduced {commit}")
-    return number
+def pull_request(commit, snap=None):
+    """``PR #N`` from the merge that brought ``commit`` onto HEAD, or None.
+
+    A change that arrived through a base sync's second parent enters at the
+    sync merge, whose subject names no pull request. That is None, not an
+    error: only the CRITICAL line needs the PR, and it writes ``PR unknown``.
+    """
+    snap = snapshot() if snap is None else snap
+    entry = snap.entry_point(commit)
+    if entry is None:
+        return None
+    line = snap.commit_line(entry)
+    if line is None:
+        return None
+    return pull_number(line.partition(" ")[2])
+
+
+def pr_label(commit, snap=None):
+    """The PR for a report line. A failed lookup is ``PR unknown``."""
+    number = pull_request(commit, snap)
+    return PR_UNKNOWN if number is None else number
 
 
 def is_ancestor(ancestor, descendant):
@@ -202,7 +207,11 @@ def by_name(name):
 
 
 def load_profiles():
-    """The three live profiles, their commits, and the bytes this run read."""
+    """The three live profiles, their commits, and the bytes this run read.
+
+    No PR is looked up here. The report lines look it up, and a failed
+    lookup there is ``PR unknown``, so a base sync cannot fail the module.
+    """
     profiles = []
     for spec in PROFILE_SPECS:
         path = sbx.REPO_ROOT / "capsules" / spec["provider"] / "confine.sb"
@@ -218,8 +227,6 @@ def load_profiles():
             "sha256": hashlib.sha256(blob).hexdigest(),
             "commit": last_change(path),
         })
-    for profile in profiles:
-        profile["pr"] = pull_request(profile["commit"])
     return tuple(profiles)
 
 
@@ -370,11 +377,15 @@ def classify(result):
 
 
 def require_refused(look, root, parent, profile):
-    """The real-profile check. An allow raises ``NotRefused``."""
+    """The real-profile check. An allow raises ``NotRefused``.
+
+    The named per-profile tests and the plant both call this one check.
+    """
     result = run_sandboxed(look, root, parent, profile)
     if classify(result) != "refuse":
         raise NotRefused(
             "ALLOW: mach-lookup of com.apple.system.logger was not refused.\n"
+            f"  profile: {os.fspath(profile)}\n"
             f"  cmd: {result.command}\n"
             f"  stdout: {result.stdout!r}\n"
             "  observed: kr=0"
@@ -404,10 +415,14 @@ def write_copy(directory, name, text):
     return path
 
 
-def render_block(profile, result):
-    """One CRITICAL record. The first line carries the pin."""
+def render_block(profile, result, snap=None):
+    """One CRITICAL record. The first line carries the pin.
+
+    The PR is looked up here and only here. A failed lookup is ``PR unknown``.
+    """
     return (
-        f"CRITICAL {IDS[profile['name']]} {profile['commit']} {profile['pr']} "
+        f"CRITICAL {IDS[profile['name']]} {profile['commit']} "
+        f"{pr_label(profile['commit'], snap)} "
         f"sha256 {profile['sha256']}\n"
         f"profile: {profile['rel']}\n"
         f"helper: {result.command}\n"
@@ -437,12 +452,15 @@ def write_findings(repo, items):
         path.write_text("".join(groups[rel]), encoding="utf-8")
     critical = Path(repo) / "lab" / "redteam" / "CRITICAL.md"
     existing = critical.read_text(encoding="utf-8") if critical.is_file() else ""
-    lines = [line for line in existing.splitlines() if line]
-    for rel in order:
-        if rel not in lines:
-            lines.append(rel)
-    critical.parent.mkdir(parents=True, exist_ok=True)
-    critical.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    listed = set(existing.splitlines())
+    missing = [rel for rel in order if rel not in listed]
+    if missing:
+        critical.parent.mkdir(parents=True, exist_ok=True)
+        # Append only. Other probes' entries stay byte-for-byte as they were.
+        with open(critical, "a", encoding="utf-8", newline="\n") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write("".join(rel + "\n" for rel in missing))
     return order
 
 
@@ -495,7 +513,7 @@ def pin_line(profile):
     """Live commit and sha256 for one profile. Not part of the clean sentence."""
     return (
         f"{profile['name']} {profile['rel']} {profile['commit']} "
-        f"{profile['pr']} sha256 {profile['sha256']}"
+        f"{pr_label(profile['commit'])} sha256 {profile['sha256']}"
     )
 
 
@@ -586,15 +604,13 @@ class MachLookupProbe(unittest.TestCase):
         self.base = type(self).base
 
     def _refuse_real(self, name):
+        """The named per-profile check. It is ``require_refused``, the same
+        check the plant in ``_plant_one`` is caught by."""
         profile = by_name(name)
-        result = run_sandboxed(self.look, self.root, self.base, profile["path"])
+        result = require_refused(self.look, self.root, self.base, profile["path"])
         self.assertEqual(result.argv[0], sbx.SANDBOX_EXEC)
         self.assertIn(f"PROVIDER_EXECUTABLE={self.look}", result.argv)
         self.assertEqual(result.argv[-1], self.look)
-        if classify(result) == "allow":
-            raise NotRefused(
-                f"ALLOW on {profile['rel']}\n  cmd: {result.command}\n  observed: kr=0"
-            )
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout, REFUSE_STDOUT)
         self.assertEqual(result.stderr, "")
@@ -609,7 +625,7 @@ class MachLookupProbe(unittest.TestCase):
         self.assertTrue(first.startswith("CRITICAL "))
         self.assertIn(IDS[profile["name"]], first)
         self.assertIn(profile["commit"], first)
-        self.assertIn(profile["pr"], first)
+        self.assertIn(pr_label(profile["commit"]), first)
         self.assertIn(profile["sha256"], first)
         self.assertIn(f"profile: {profile['rel']}", text)
         self.assertIn("helper: ", text)
@@ -969,7 +985,9 @@ class MachLookupRules(unittest.TestCase):
         report = success_report()
         self.assertEqual(report.splitlines()[0], line)
         for profile in PROFILES:
-            self.assertRegex(profile["pr"], r"^PR #\d+$")
+            label = pr_label(profile["commit"])
+            self.assertRegex(label, r"^(PR #\d+|PR unknown)$")
+            self.assertIn(f"{profile['commit']} {label} sha256 ", pin_line(profile))
             self.assertIn(profile["commit"], report)
             self.assertIn(profile["sha256"], report)
             self.assertEqual(profile["sha256"], sha256_file(profile["path"]))
@@ -1017,17 +1035,134 @@ class MachLookupRules(unittest.TestCase):
         """
         profile = by_name("wallet")
         commit = profile["commit"]
-        merge = introducing_merge(commit)
-        tip = git_text("rev-parse", "HEAD")
-        self.assertIn(merge, first_parent_line())
+        snap = snapshot()
+        merge = snap.entry_point(commit)
+        tip = snap.commit
+        line = snap.first_parent_line(tip)
+        self.assertEqual(tip, git_text("rev-parse", "HEAD"))
+        self.assertIn(merge, line)
         self.assertTrue(is_ancestor(commit, merge))
         merge_subject = git_text("log", "-1", "--format=%s", merge)
-        self.assertEqual(profile["pr"], pull_number(merge_subject))
-        if commit != tip:
-            self.assertNotEqual(merge, tip)
+        label = pr_label(commit)
+        self.assertEqual(pull_request(commit), pull_number(merge_subject))
+        self.assertEqual(label, pull_number(merge_subject) or PR_UNKNOWN)
+        # The entry is the oldest first-parent commit that holds the change:
+        # the next older one on the line does not contain it.
+        older = line[line.index(merge) + 1:]
+        if older:
+            self.assertFalse(is_ancestor(commit, older[0]))
+        if merge != tip:
             tip_pr = pull_number(git_text("log", "-1", "--format=%s", tip))
             if tip_pr is not None:
-                self.assertNotEqual(profile["pr"], tip_pr)
+                self.assertNotEqual(label, tip_pr)
+
+    def test_change_from_a_base_sync_still_loads(self):
+        """A profile change that came in through a sync's second parent.
+
+        Its entry on the task line is the sync merge, which names no pull
+        request. The PR lookup gives None, the CRITICAL line says ``PR
+        unknown``, and ``load_profiles`` does not look the PR up at all.
+        A later sync at the tip does not replace the first one.
+        """
+        repo = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-mach-sync-"))
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+
+        def git(*args):
+            completed = subprocess.run(
+                [
+                    "git", "-C", repo,
+                    "-c", "user.name=probe", "-c", "user.email=probe@example.invalid",
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                    *args,
+                ],
+                capture_output=True,
+                text=True,
+                env=git_env(),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout.strip()
+
+        def commit_file(name, text, message):
+            Path(repo, name).write_text(text, encoding="utf-8")
+            git("add", name)
+            git("commit", "-q", "-m", message)
+            return git("rev-parse", "HEAD")
+
+        git("init", "-q")
+        git("checkout", "-q", "-b", "base")
+        commit_file("confine.sb", "(deny default)\n", "base profile")
+        git("checkout", "-q", "-b", "task")
+        commit_file("probe.txt", "one\n", "task work")
+        git("checkout", "-q", "base")
+        git("checkout", "-q", "-b", "owner")
+        change = commit_file("confine.sb", "(deny default)\n(deny network*)\n", "owner edit")
+        git("checkout", "-q", "base")
+        git("merge", "-q", "--no-ff", "-m", "Merge pull request #7 from lab/owner", "owner")
+        pr_merge = git("rev-parse", "HEAD")
+        git("checkout", "-q", "task")
+        git(
+            "merge", "-q", "--no-ff", "-m",
+            "Merge remote-tracking branch 'spike/spike/agent-host' into task", "base",
+        )
+        sync = git("rev-parse", "HEAD")
+        sync_snap = falsifier_data.Snapshot(repo)
+        self.assertEqual(sync_snap.commit, sync)
+        self.assertEqual(sync_snap.last_change("confine.sb").split()[0], change)
+        self.assertEqual(sync_snap.entry_point(change), sync)
+        self.assertIsNone(pull_request(change, sync_snap))
+        self.assertEqual(pr_label(change, sync_snap), PR_UNKNOWN)
+
+        commit_file("probe.txt", "two\n", "more task work")
+        git("checkout", "-q", "base")
+        commit_file("other.txt", "x\n", "base moves")
+        git("checkout", "-q", "task")
+        git(
+            "merge", "-q", "--no-ff", "-m",
+            "Merge remote-tracking branch 'spike/spike/agent-host' into task", "base",
+        )
+        later = falsifier_data.Snapshot(repo)
+        self.assertNotEqual(later.commit, sync)
+        self.assertEqual(later.entry_point(change), sync)
+        self.assertEqual(pr_label(change, later), PR_UNKNOWN)
+
+        git("checkout", "-q", "base")
+        on_base = falsifier_data.Snapshot(repo)
+        self.assertEqual(on_base.entry_point(change), pr_merge)
+        self.assertEqual(pull_request(change, on_base), "PR #7")
+
+        profile = {
+            "name": "wallet",
+            "rel": "capsules/wallet-provider/confine.sb",
+            "commit": change,
+            "sha256": "0" * 64,
+        }
+        result = sbx.Result(
+            exit_code=0,
+            stdout="kr=0 port=4\npasswd denied\n",
+            stderr="",
+            argv=[sbx.SANDBOX_EXEC, "/private/look"],
+        )
+        first = render_block(profile, result, sync_snap).splitlines()[0]
+        self.assertEqual(
+            first,
+            f"CRITICAL {IDS['wallet']} {change} {PR_UNKNOWN} sha256 {'0' * 64}",
+        )
+        self.assertIn("PR #7", render_block(profile, result, on_base).splitlines()[0])
+
+        module = globals()
+        original = module["pull_request"]
+
+        def refuse_lookup(*_args, **_kwargs):
+            raise AssertionError("load_profiles looked up a pull request")
+
+        module["pull_request"] = refuse_lookup
+        try:
+            loaded = load_profiles()
+        finally:
+            module["pull_request"] = original
+        self.assertEqual([item["name"] for item in loaded], ["wallet", "did", "model"])
+        for item in loaded:
+            self.assertNotIn("pr", item)
 
     def test_allow_finding_records_commit_pr_and_sha256(self):
         """A CRITICAL allow names the finding id, commit, PR, and sha256.
@@ -1064,7 +1199,7 @@ class MachLookupRules(unittest.TestCase):
                 self.assertTrue(first.startswith("CRITICAL "))
                 self.assertIn(IDS[profile["name"]], body)
                 self.assertIn(profile["commit"], body)
-                self.assertIn(profile["pr"], body)
+                self.assertIn(pr_label(profile["commit"]), body)
                 self.assertIn(profile["sha256"], body)
                 self.assertIn(f"profile: {profile['rel']}", body)
             self.assertIn("helper: ", body)
@@ -1076,7 +1211,7 @@ class MachLookupRules(unittest.TestCase):
             self.assertEqual(model_written, [FINDINGS["model"]])
             model_body = (repo / FINDINGS["model"]).read_text(encoding="utf-8")
             self.assertTrue(model_body.startswith(
-                f"CRITICAL {IDS['model']} {model['commit']} {model['pr']} "
+                f"CRITICAL {IDS['model']} {model['commit']} {pr_label(model['commit'])} "
                 f"sha256 {model['sha256']}\n"
             ))
             self.assertIn("observed: kr=0", model_body)
@@ -1086,6 +1221,21 @@ class MachLookupRules(unittest.TestCase):
             self.assertEqual(again, [FINDINGS["model"]])
             relisted = (repo / "lab" / "redteam" / "CRITICAL.md").read_text(encoding="utf-8")
             self.assertEqual(relisted.splitlines().count(FINDINGS["model"]), 1)
+            self.assertEqual(relisted, listed)
+        with tempfile.TemporaryDirectory(prefix="ccrt-mach-shared-") as tmp:
+            repo = Path(tmp)
+            critical = repo / "lab" / "redteam" / "CRITICAL.md"
+            critical.parent.mkdir(parents=True)
+            other = "# shared list\n\nlab/redteam/findings/CRITICAL-other-001.md\n\nnote"
+            critical.write_text(other, encoding="utf-8")
+            write_findings(repo, [(wallet, result)])
+            shared = critical.read_text(encoding="utf-8")
+            self.assertEqual(shared, other + "\n" + FINDINGS["wallet"] + "\n")
+            write_findings(repo, [(did, result), (model, result)])
+            self.assertEqual(
+                critical.read_text(encoding="utf-8"),
+                shared + FINDINGS["model"] + "\n",
+            )
         after = {
             path: path.read_bytes() if path.is_file() else None for path in live_names
         }
@@ -1154,7 +1304,10 @@ class MachLookupRules(unittest.TestCase):
                 self.assertNotIn(FINDINGS[name], method.__doc__ or "")
 
     def test_live_tree_records_no_finding_without_an_allow(self):
-        """No allow means no finding file and no CRITICAL list."""
+        """No allow means no finding file and no entry of this module's.
+
+        ``CRITICAL.md`` is a shared list. Another probe's entry may be in it.
+        """
         if ALLOWS:
             text = (ROOT / "lab" / "redteam" / "CRITICAL.md").read_text(encoding="utf-8")
             for name in ALLOWS:
@@ -1163,8 +1316,13 @@ class MachLookupRules(unittest.TestCase):
                 self.assertTrue(body.startswith("CRITICAL "))
                 self.assertIn("observed: kr=0", body)
             return
-        for rel in (FINDINGS["wallet"], FINDINGS["model"], "lab/redteam/CRITICAL.md"):
+        for rel in (FINDINGS["wallet"], FINDINGS["model"]):
             self.assertFalse((ROOT / rel).exists(), rel)
+        critical = ROOT / "lab" / "redteam" / "CRITICAL.md"
+        if critical.exists():
+            listed = critical.read_text(encoding="utf-8")
+            for rel in (FINDINGS["wallet"], FINDINGS["model"]):
+                self.assertNotIn(rel, listed)
 
     def test_module_imports_sbx_and_not_the_other_probes(self):
         """This file launches through ``sbx.run`` and does not import the other probes."""
