@@ -48,6 +48,13 @@ impl Verifier {
                 asked: ask.amount,
             });
         }
+        let identity = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .identity
+            .clone();
+        self.stage_admitted_identity(&identity);
         self.admit(ask.amount);
         Ok(ask.amount)
     }

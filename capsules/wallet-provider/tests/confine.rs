@@ -3379,24 +3379,29 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
 /// The one build-output reader returns the executable the build reports, and
 /// refuses output that names no did bin artifact.
 ///
-/// The fixture output holds a `did-provider` lib artifact, another crate's bin
+/// The fixture output holds a `did-provider` non-bin test artifact whose
+/// `executable` is `/fixture/out/deps/did_provider-test`, another crate's bin
 /// artifact and the `did-provider` bin artifact whose `executable` is
-/// `/fixture/out/did-provider`, outside any `target` directory. Output without
-/// a `did-provider` bin artifact gives the reader's refusal, which names
-/// `did-provider` and `executable`. The test starts no process and needs no
-/// sandbox.
+/// `/fixture/out/did-provider`, outside any `target` directory. Only the bin
+/// artifact's executable is read, so the non-bin artifact's executable comes
+/// before it and the kind check skips it. Output without a `did-provider` bin
+/// artifact gives the reader's refusal, which names `did-provider` and
+/// `executable`, and that output still carries the non-bin artifact. The test
+/// starts no process and needs no sandbox.
 ///
 /// Falsifier: WP128 returns
 /// `did_provider_dir().join("target/debug/did-provider")` instead of the
 /// reported `executable`, so this test fails on the fixture path.
 /// `standin_launcher_finds_the_built_did_binary` alone still passes under
-/// WP128, because the guessed file exists after did's build.
+/// WP128, because the guessed file exists after did's build. WP130 disables
+/// the kind check, so this test fails because the non-bin artifact's
+/// executable is read first.
 #[test]
 fn did_binary_is_the_executable_the_build_reports() {
-    let lib = json!({
+    let did_test = json!({
         "reason": "compiler-artifact",
-        "target": { "name": DID_PROVIDER, "kind": ["lib"] },
-        "executable": null,
+        "target": { "name": DID_PROVIDER, "kind": ["test"] },
+        "executable": "/fixture/out/deps/did_provider-test",
     });
     let other_bin = json!({
         "reason": "compiler-artifact",
@@ -3408,7 +3413,7 @@ fn did_binary_is_the_executable_the_build_reports() {
         "target": { "name": DID_PROVIDER, "kind": ["bin"] },
         "executable": "/fixture/out/did-provider",
     });
-    let output = [lib.clone(), other_bin.clone(), did_bin]
+    let output = [did_test.clone(), other_bin.clone(), did_bin]
         .map(|line| line.to_string())
         .join("\n");
     assert_eq!(
@@ -3416,7 +3421,9 @@ fn did_binary_is_the_executable_the_build_reports() {
         PathBuf::from("/fixture/out/did-provider"),
         "the reader must return the executable the build reports"
     );
-    let without_did_bin = [lib, other_bin].map(|line| line.to_string()).join("\n");
+    let without_did_bin = [did_test, other_bin]
+        .map(|line| line.to_string())
+        .join("\n");
     let reason = did_binary_executable(&without_did_bin)
         .expect_err("output without a did-provider bin artifact must be refused");
     assert!(
@@ -3793,7 +3800,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
 /// WP120 returns `Ok(provider)` for an `init` answer that is not `ok`, so did's
 /// case (f) is Started. WP125 makes the absent-tool check never fire, so did's
 /// case (c) reads the wrong-tool reason and lacks `is absent`; WP126 drops the
-/// OS from the wrong-tool reason, so did's case (c2) loses `macos`.
+/// OS from the wrong-tool reason, so did's case (c2) lacks `on macos`.
 #[test]
 fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let providers: [(&str, &Path, Value); 2] = [
@@ -4587,9 +4594,11 @@ fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
 /// stand-in binds `STORAGE_ROOT` to `<root>/ElastOS/SystemServices/Wallet`, so
 /// its `init` cannot write `<root>/did` and the start is Refused. This test
 /// fails at the start and records no case. WP127 appends a write grant on
-/// `STORAGE_PARENT` to the stand-in's generated profile for did, so its sibling
-/// write answers `ok` while the committed profile refuses it, and this test
-/// fails naming that case.
+/// `STORAGE_PARENT` to the stand-in's generated profile for did, so the sibling
+/// write answers `ok`; the stand-in start's suite then fails at its `the
+/// sibling write must be denied` assertion, before the two starts' records are
+/// compared. The unrelated outside write passes before it, and the planted read
+/// runs after it and needs a read grant WP127 does not add.
 #[test]
 fn standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
