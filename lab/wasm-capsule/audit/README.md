@@ -38,7 +38,10 @@ The two retained `skeleton` tests pin the manifest
 and workspace boundary. The nine `component_imports` tests cover exact names
 and versions (including same-major, pre-release and build-metadata versions;
 a declared pre-release or build version does not match the release;
-interface names that differ only in letter case are refused on either side),
+interface names that differ only in letter case are refused on either side;
+a namespace prefix is refused on either side too,
+`my-elastos:bus/runtime@1.0.0` against `elastos:bus/runtime@1.0.0` and the
+reverse),
 more than one import section, section order, unused declarations, core-module
 refusal, full Component validation,
 internal imports, import names with options, and custom-section content in
@@ -120,6 +123,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA17b | Match the module by a declared suffix while the name matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA18a | Match an interface name that ends with a declared interface | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA20a | Drop every memory maximum | `defined_memory_reports_its_page_limits`, `imported_memory_reports_its_page_limits`, `memory64_is_reported`, `shared_memory_is_reported`, `memories_follow_import_then_definition_order` |
+| F-CWA21a | Match an interface when the declared name ends with the import | `a_different_version_of_a_declared_interface_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -135,7 +139,7 @@ and F-CWA0b, and `--test component_imports` for F-CWA2a through F-CWA2g and
 the Component tests of F-CWA3a, F-CWA4d through F-CWA4f, F-CWA5a/F-CWA5b,
 F-CWA6a, F-CWA7a/F-CWA7b, F-CWA8a (`component_refusals_follow_the_documented_order`),
 F-CWA9a/F-CWA9b, F-CWA10a, F-CWA11a, F-CWA13a/F-CWA13b, F-CWA16a/F-CWA16b,
-and F-CWA18a:
+and F-CWA18a/F-CWA21a:
 
 ```sh
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml \
@@ -496,3 +500,24 @@ format check passed before the mutation and after the restore. The locked
 tests passed after the restore: 27 tests (16 `core_imports`, 9
 `component_imports`, 2 `skeleton`) offline under `RUST_TEST_THREADS=2` and
 `CARGO_INCREMENTAL=0`. `audit/Cargo.lock` stayed absent.
+
+The cwa-021 in-tree run first applied F-CWA21a's edit alone to the base; all
+27 tests passed before the new pair, so that edit alone did not catch the gap.
+With the reverse pair added, the clean code returned `UndeclaredInterface`
+naming `elastos:bus/runtime@1.0.0` and the exact string
+`undeclared interface elastos:bus/runtime@1.0.0`. F-CWA21a built and failed
+`a_different_version_of_a_declared_interface_is_refused` at the new pair: the
+panic named declaration `["my-elastos:bus/runtime@1.0.0"]` and import
+`elastos:bus/runtime@1.0.0`, with `audit_component` returning
+`Ok(["elastos:bus/runtime@1.0.0"])`. F-CWA18a still built and failed the same
+test at the older pair: the panic named declaration `["elastos:bus/runtime@1.0.0"]`
+and import `my-elastos:bus/runtime@1.0.0`, with `audit_component` returning
+`Ok(["my-elastos:bus/runtime@1.0.0"])`. Every temporary source edit restored
+byte-identical, SHA-256
+`c90500513ac3b71fb3fb12ddc929900557fe9d60cccb5075abcea39d9978262d`, all 51
+`old` anchors occurred exactly once, and `audit/Cargo.lock` stayed absent. The
+clean format and locked-test checks passed before the first mutation and after
+the catches, with all 27 tests (16 `core_imports`, 9 `component_imports`,
+2 `skeleton`) passing offline under `RUST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0`. The implementation, API document, other tests, audit
+manifest, workspace manifest and workspace lockfile stayed unchanged.

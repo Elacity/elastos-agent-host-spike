@@ -1422,3 +1422,31 @@
   -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `capsule/`, `tools/`, `audit/` or `falsifiers.json`
   change. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
   --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 055 (the engine label plant restores the base bytes and README names its list; Rong's second review of
+  PR #245, P12). Base `73f5fc35f141b9f9a28a07d0d090edda57bdb365`. Task 052's review found two statements not true.
+  (1) README: the sentence on task 026's two `tools/src/run.rs` bugs ended in a colon right before the three ADOPTION
+  bullets. It now comes first, ends with a full stop and says they are listed under "Task 052's three, runner-caught";
+  the ADOPTION sentence follows and ends in the colon that introduces its three bullets. No bullet, id or count changes.
+  (2) F-WC-ENGINE-RUN-MODULE-DOC's plant stopped at `//! endorsed.`, so it mixed the base's line breaks with today's.
+  Its `old` is now today's four lines (`tools/src/run.rs:169-172`, from `//! machine, not the Component ABI.` to `//!
+  are a lab stand-in, not admission.`) and its `new` the base's four (`bf752df1a^1`, lines 70-73); `id`, `title`,
+  `command`, `expect` and `tests` are unchanged, and so is F-WC-ENGINE-RUN-ENUM-DOC. Byte check: the entry's `new`
+  and `old`, each read from `falsifiers.json` with `json.load` and written to a temp file with one closing newline;
+  `cmp` of `new` against `git show bf752df1a^1:lab/wasm-capsule/tools/src/run.rs | sed -n 70,73p` exit 0, `cmp` of
+  `old` against `sed -n 169,172p tools/src/run.rs` exit 0, the whole `old` occurs once in `run.rs` (`str.count` 1),
+  and `grep -c` on its first line as a whole line prints 1. Canonical runner, from the repo root, holding the shared
+  build lease (`fcntl.flock` on the main checkout's `.git/local-ai-heavy-build.lock`, wait bounded at 1500 s, taken
+  after 5 s), `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-ENGINE-RUN-MODULE-DOC F-WC-ENGINE-RUN-ENUM-DOC`: "baseline: 1 named tests pass
+  without an edit, 0 do not", "F-WC-ENGINE-RUN-MODULE-DOC CAUGHT", "F-WC-ENGINE-RUN-ENUM-DOC CAUGHT", "summary: 2
+  CAUGHT of 2", exit 0. The module-doc assertion, quoted by running `cargo test --locked --test docs
+  engines_are_labelled_test_only_not_endorsed` inside the runner's own `falsify.Mutation` (exit 101):
+  `tests/docs.rs:281:5` "tools/src/run.rs's module doc has no line saying "test-only, not endorsed"". After both runs
+  `tools/src/run.rs` sha256 is `40e712f7e31a...` as before, `git diff -- lab/wasm-capsule/tools/src/run.rs` is empty,
+  and `git status --short` listed only `README.md` and `falsifiers.json`. No entry added or removed, so the README
+  total and its "outside the N" figure are unchanged. Older LOG lines (task 052's "the base's two lines") stay as
+  history. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128
+  passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep
+  -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both
+  empty, exit 1.
