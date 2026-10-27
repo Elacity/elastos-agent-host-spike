@@ -853,7 +853,8 @@
       ],
       "tests": [
         "generated_profile_permits_init_and_denies_the_local_offer",
-        "standin_refuses_a_start_it_cannot_apply"
+        "standin_refuses_a_start_it_cannot_apply",
+        "model_outside_write_denied"
       ]
     },
     {
