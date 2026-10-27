@@ -2,8 +2,8 @@
 """Break each rule of the archive viewer, see its test fail, restore it.
 
 Usage: RUST_TEST_THREADS=2 python3 -I falsify.py [--runtime] [--check] [name-part ...]
-       --runtime  also rebuild the component for each runtime falsifier and
-                  run the host-test crate
+       --runtime  run only the component falsifiers, rebuilding the component
+                  for each and running the host-test crate
 
 Each falsifier replaces one exact text (it must occur once), requires the
 mutant to compile, runs every named test, and requires every one to fail.
@@ -887,6 +887,11 @@ def measure_variants():
     build_component()
 
 
+def guest_cases_on(args):
+    """The plain pass owns the guest falsifiers and their isolation check."""
+    return "--runtime" not in args
+
+
 def main():
     args = sys.argv[1:]
     if "--measure" in args:
@@ -897,14 +902,23 @@ def main():
     if check:
         # F36's second file, which a case cannot name.
         kit.check([(F36[0], HERE / PREVIEW, [(COPY_WINDOW, COPY_BYTES)], F36[-1])])
-    total = len(CASES) + len(RUNTIME) + 1
+        if not guest_cases_on(args):
+            kit.check(convert(CASES))
+    groups = []
+    if guest_cases_on(args):
+        groups.append((convert(CASES), build, test_fails, None, True))
+    groups.extend([
+        (convert(RUNTIME), build_component, runtime_test_fails, "--runtime", False),
+        (convert([F36]), prepare_f36, runtime_test_fails, "--runtime", False),
+    ])
+    parts = [arg for arg in args if not arg.startswith("--")]
+    total = sum(
+        1 for cases, _, _, flag, _ in groups if flag is None or flag in args
+        for case in cases if not parts or any(part in case[0] for part in parts)
+    )
     try:
         kit.main(
-            [
-                (convert(CASES), build, test_fails, None, True),
-                (convert(RUNTIME), build_component, runtime_test_fails, "--runtime", False),
-                (convert([F36]), prepare_f36, runtime_test_fails, "--runtime", False),
-            ],
+            groups,
             args,
             done=f"all {total} archive falsifiers caught",
         )
@@ -912,7 +926,8 @@ def main():
         if not check:
             restore_runtime(args)
     if not check:
-        check_isolation(CASES, args, every_test)
+        if guest_cases_on(args):
+            check_isolation(CASES, args, every_test)
         if "--runtime" in args:
             host_tests = host_baseline()
             try:

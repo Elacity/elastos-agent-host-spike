@@ -522,3 +522,5 @@ one renderer, shipped beside the page, and are not copied into it.
 - **Supersedes task 006**, whose page reimplemented the block rules and failed
   review on P10. Nothing of that page remains; the listing and view checks are
   rebuilt here against the shared import.
+
+2026-10-27, task 019: the `--runtime` pass runs the component cases, and the guest cases run on the plain pass.
