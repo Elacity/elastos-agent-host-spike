@@ -1,0 +1,11 @@
+id: R6-4
+file: src/runtime_bridge.rs
+test: copied_host_id_does_not_run_on_a_second_host
+--- old
+        if !token.verify_signature(self.manager.public_key())
+            || token.issuer() != &self.manager.public_key_bytes()
+        {
+            return Err("token was not minted by this host".to_owned());
+        }
+--- new
+--- end

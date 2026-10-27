@@ -1,0 +1,14 @@
+--- a/lab/intent-planner/src/runtime_bridge.rs
++++ b/lab/intent-planner/src/runtime_bridge.rs
+@@ -106,6 +106,12 @@ impl Grants {
+     /// True when the token names `resource` and still has a use left. Does not spend.
+     pub fn journal_write_ready(&self, token_b64: &str, resource: &str) -> Result<(), String> {
+         let token = elastos_runtime::capability::CapabilityToken::from_base64(token_b64)?;
++        if !token.verify_signature(self.manager.public_key())
++            || token.issuer() != &self.manager.public_key_bytes()
++        {
++            return Err("token was not minted by this host".to_owned());
++        }
+         if token.resource().as_str() != resource {
+             return Err(format!(
+                 "wrong resource: expected {}, got {}",

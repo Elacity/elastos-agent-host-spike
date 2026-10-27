@@ -1,0 +1,14 @@
+--- a/lab/intent-planner/src/lib.rs
++++ b/lab/intent-planner/src/lib.rs
+@@ -426,9 +426,9 @@ impl Host {
+             }
+             let grant = grant_that_covers(&review.grants, step)?;
+-            if validated_name(&review.host_id).is_some()
+-                && validated_name(&grant.host_id).is_some()
+-                && grant.host_id != review.host_id
++            if validated_name(&grant.host_id).is_none()
++                || grant.host_id != review.host_id
++                || grant.host_id != self.id
+             {
+                 return Err(Refuse::ForeignHost);
+             }
