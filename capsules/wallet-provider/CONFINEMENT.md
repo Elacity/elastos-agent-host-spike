@@ -145,6 +145,14 @@ stand-in never starts the binary outside `sandbox-exec`.
 `standin_launcher_refuses_a_start_it_cannot_confine` holds the refusals, and
 `standin_launcher_starts_wallet_confined_under_the_generated_profile` holds
 the full wallet journey through the stand-in.
+`standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` runs one
+suite of permitted and denied cases on a provider started under the committed
+`confine.sb` and on one Started by the stand-in, and requires the two records
+to agree entry by entry, and
+`standin_start_runs_under_the_generated_profile_not_the_committed_file`
+requires the stand-in to refuse a start when the generated profile drops the
+wallet-root write. The stand-in's start matches the committed profile on the
+permitted and denied suite.
 
 ## The model provider's inline profile
 
@@ -877,6 +885,14 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Ignore the lab writer's refusal and start under the committed `confine.sb`
   (WP115): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
   (d), which returns Started instead of the unnamed-id reason.
+- Bind the stand-in's `STORAGE_ROOT` to the base instead of the wallet
+  directory (WP116):
+  `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
+  on the first denied case the widened grant permits, such as `<root>/sibling`,
+  because the stand-in record holds `ok` where the committed profile refuses.
+- Write the generated profile but start under the committed `confine.sb`
+  (WP117): `standin_start_runs_under_the_generated_profile_not_the_committed_file`
+  fails because the start is then Started instead of refused.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
