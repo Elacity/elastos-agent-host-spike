@@ -190,7 +190,7 @@ does not edit the r3 runner.
 | M-A12-INODE-REUSE | **CAUGHT** |
 | M-A12-NO-HANDLE | **CAUGHT** |
 | M-A12-HASH-MTIME | **CAUGHT** |
-| M-A12-TOCTOU-FOLLOW | **CAUGHT** |
+| M-A12-TOCTOU-FOLLOW | **CAUGHT** (leaf + parent swap) |
 | M-A12-SIBLING-WATCH | **CAUGHT** |
 | M-A12-NO-SYSTEM-TEMPS | **CAUGHT** |
 | M-A12-NO-LIVE-WATCH | **CAUGHT** |
