@@ -548,7 +548,8 @@ shared clock. Known limits: the `--version` queries have no budget; the budget
 is wall-clock time, not CPU time; a stopped run's partial stdout and stderr are
 dropped; a runner process that is itself killed leaves its engine running, as
 it leaves its folder (task 039). This is lab input for M1 A7, not a Runtime
-admission or launch claim. The refusal receipt is task 044, cancel task 045.
+admission or launch claim. The refusal receipt (task 044) is in "Run receipt
+(wc-005c)"; cancel is task 045.
 
 **A rejected cap argument (task 038).** A module run that was given a memory
 cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
@@ -771,6 +772,43 @@ be created: File exists (os error 17)`); the path before it is the receipt's.
 with both engines test-only and not endorsed; not the Component ABI. The
 receipt is lab text: it is not signed, it is no admission or launch value,
 and its lab CID is not the Runtime's CID.
+
+### The refusal receipt (task 044, M1 A7 lab half)
+
+```rust
+wasm_capsule_tools::receipt::refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engine>)
+wasm_capsule_tools::receipt::render_refused(refusal: &TwoEngineRefusal) -> String
+wasm_capsule_tools::receipt::write_refused_receipt(refusal: &TwoEngineRefusal, path: &Path) -> Result<(), bundle::RunRefusal>
+```
+
+A refused run gets a receipt too, rendered from the `TwoEngineRefusal` that
+`run` returned. `render_refused` gives exactly these lines, in this order:
+
+```
+schema: wc-005.run-refusal/v1
+outcome: refused
+reason: <id>
+engine: <wasmtime|wasmer|none>
+detail: "<the refusal's Display, through escape_ascii>"
+```
+
+`reason` is a stable id per refusal kind, from `refusal_reason`: one
+exhaustive `match` over every `TwoEngineRefusal` variant and every
+`run::Reason` variant, with no wildcard arm, so a new variant without an id
+does not build. The ids are lowercase snake_case and pairwise distinct: one
+per `Reason` variant (for example `budget_exceeded`, `budget_zero`,
+`engine_failed`, `version_not_pinned`), plus `verify_refused` for any verifier
+refusal and `outputs_differ`. A version query's refusal and a module run's
+carry the same `Reason` type, so each `Reason` has one id. So 043's budget
+stop reads `reason: budget_exceeded`, never a generic failure. `engine` is the
+engine the reason names, else `none` (a verifier refusal, `OutputsDiffer`, a
+work-root reason). `detail` is the refusal's own text: a verifier refusal's is
+the verifier's own words. Every value comes from the refusal; nothing is
+configured. There is no lab CID line, since a verifier refusal may have none.
+`write_refused_receipt` writes it through the same `bundle::write_new_file`, so
+an existing file or link at the path is refused with that writer's own reason
+and cause, unchanged. The refusal receipt is lab text: it makes no admission
+decision, and it is not signed. The passed-run receipt above is unchanged.
 
 ## Runtime ABI for a bare capsule (wc-008)
 
@@ -2125,29 +2163,47 @@ canonical runner gives `cargo test` no time limit.
   whole stdout comes back when it exits 0, and its whole stderr in
   `EngineFailed` when it exits 3, under a 5 s budget and the watchdog.
 
+Task 044, the refusal receipt (`tests/run.rs`; README "Run receipt
+(wc-005c)", "The refusal receipt"):
+
+- `budget_refusal_receipt_names_its_reason` — `run` with a pinned stand-in
+  `wasmtime` that `exec`s `/bin/sleep 600` and a `counting` `wasmer`, with a
+  200 ms budget, under the watchdog: the refusal receipt is exactly its five
+  lines, with `reason: budget_exceeded` and `engine: wasmtime`; `wasmer` ran
+  no module and the census is empty.
+- `refusal_receipt_ids_are_distinct_and_named` — one example value per
+  `Reason` and `TwoEngineRefusal` variant, made in the test: every id is
+  snake_case and distinct, `engine:` is the engine the reason names or
+  `none`, `detail:` is the Display through `escape_ascii`; a verifier refusal
+  and `OutputsDiffer` both render `engine: none`.
+- `refusal_receipt_write_refuses_an_existing_path` — a real `run` refusal
+  (zero budget) is written byte for byte; then the receipt just written, a
+  planted file, a live link and a dangling link are each refused with the
+  shared writer's own reason and cause, and nothing changes.
+
 ## Falsifiers
 
-`falsifiers.json` holds 177 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 178 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
-039, one task 040, one task 041 and two task 043.
+039, one task 040, one task 041, two task 043 and one task 044.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 113, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 114, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041 and 043: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043 and 044: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 177 (task 036's
+and two proofs with no `falsifiers.json` entry, outside the 178 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
 stop in `tests/run.rs`; neither file is a recovery target, so a proof that
 edits one is a hand proof), each proved by the repo's break →
@@ -2824,3 +2880,17 @@ unchanged. Task 043 also re-anchors F-WC-README-COUNT to the new total, the
 same bug as before. In the same canonical runner run every other entry that
 edits `tools/src/run.rs` was re-run and is still caught (LOG.md, task 043).
 Each keeps its own evidence label above.
+
+Task 044's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 044). Its anchor is a new line of `tools/src/receipt.rs`, a
+recovery target, found exactly once, and both named tests fail at an
+assertion:
+
+- F-WC-A7-RECEIPT-REASON-GENERIC — `refusal_reason` gives the budget reason
+  the failed-run id, `engine_failed`, so a budget stop reads as a generic
+  engine failure (`budget_refusal_receipt_names_its_reason`, at its five-line
+  receipt; `refusal_receipt_ids_are_distinct_and_named`, at its distinct-id
+  check).
+
+Task 044 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
