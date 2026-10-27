@@ -3277,7 +3277,8 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     });
     // Each case keeps the stable part of `sandbox-exec`'s line that discovery
     // quoted on this host.
-    let cases: [(&str, PathBuf, Vec<(&str, PathBuf)>, String); 3] = [
+    type StartupRefusalCase<'a> = (&'a str, PathBuf, Vec<(&'a str, PathBuf)>, String);
+    let cases: [StartupRefusalCase<'_>; 3] = [
         (
             "(a) the profile file does not exist",
             missing_profile.clone(),
@@ -3669,7 +3670,8 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let missing_user_namespaces = "linux confinement refused: user namespaces are turned off";
     let missing_seccomp = "linux confinement refused: the seccomp filter cannot be installed";
     let designed_not_enforced = "linux is designed, not enforced";
-    let cases: [(&str, StandinHost, &Path, Vec<&str>, Vec<&str>); 8] = [
+    type StandinRefusalCase<'a> = (&'a str, StandinHost, &'a Path, Vec<&'a str>, Vec<&'a str>);
+    let cases: [StandinRefusalCase<'_>; 8] = [
         (
             "(a) a forced unsupported OS",
             StandinHost::reporting("plan9"),
@@ -5169,7 +5171,7 @@ fn unbound_copy_is_refused_under_profile() {
         .collect();
     assert_eq!(
         entries,
-        [stored.copy.clone()],
+        std::slice::from_ref(&stored.copy),
         "STORAGE_ROOT must hold only the copy"
     );
     assert_eq!(
@@ -6003,7 +6005,7 @@ fn read_falsifier_lists(capsules: &Path) -> Result<Vec<FalsifierList>, String> {
                 path.display()
             ));
         };
-        let entries: Vec<Value> = list.iter().cloned().collect();
+        let entries: Vec<Value> = list.to_vec();
         let mut ids = Vec::with_capacity(entries.len());
         for (index, entry) in entries.iter().enumerate() {
             let Some(id) = entry["id"].as_str() else {
@@ -6164,9 +6166,7 @@ fn falsifier_id_tokens(text: &str) -> Vec<&str> {
 
 /// Whether `section` names `id` as a whole token.
 fn names_falsifier_id(section: &str, id: &str) -> bool {
-    falsifier_id_tokens(section)
-        .iter()
-        .any(|token| *token == id)
+    falsifier_id_tokens(section).contains(&id)
 }
 
 /// The section of `document` under its one `heading` line, or every problem
