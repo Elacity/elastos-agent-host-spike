@@ -34,8 +34,11 @@ This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
   `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG
   cache/data/state/runtime dirs, `$HOME/.cache` even when
   `XDG_CACHE_HOME` is set, `/run/user/$UID` when present, and
-  `~/Library/Caches` / `~/Library/Application Support`. Live watches
-  recurse; `watch.add` and `IN_Q_OVERFLOW` fail closed. Vanished
+  `~/Library/Caches` / `~/Library/Application Support`.   Live watches
+  recurse; `watch.add` and `IN_Q_OVERFLOW` fail closed. The fail-closed
+  `return Err` on overflow is pinned. Watch roots freeze at the first
+  snapshot. A leftover FIFO, socket, or device is reported; hashing
+  skips non-regular files so the census does not block. Vanished
   inodes are followed by handle / `(dev,ino)`. Bind mount, pid
   namespace, absent `/run/user/$UID`, watch sysctl write, and a
   setsid write after the census returns are HostPart::NotRun.

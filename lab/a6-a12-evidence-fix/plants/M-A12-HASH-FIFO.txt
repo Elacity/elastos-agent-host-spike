@@ -1,0 +1,17 @@
+id: M-A12-HASH-FIFO
+file: src/a12.rs
+test: tests::a12_fifo_leftover_is_found_in_bounded_time
+--- old
+    if meta.file_type().is_symlink() || meta.is_dir() || !meta.is_file() {
+        return 0;
+    }
+    if let Ok(now) = fs::symlink_metadata(path) {
+        if !now.is_file() {
+            return 0;
+        }
+    }
+--- new
+    if meta.file_type().is_symlink() || meta.is_dir() {
+        return 0;
+    }
+--- end

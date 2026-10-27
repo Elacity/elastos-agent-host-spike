@@ -20,9 +20,13 @@
 //! `XDG_CACHE_HOME` is set, `/run/user/$UID` when that dir exists, and
 //! `~/Library/Caches` / `~/Library/Application Support` (Mac). Live watches
 //! recurse into those trees. `watch.add` failures fail closed. An inotify
-//! watch records create-then-delete, including in a subdirectory. Vanished
-//! inodes are followed by file handle / `(dev,ino)` so a hardlink or rename
-//! out of the watch still lists the dest leftover. Bind mount, pid
+//! watch records create-then-delete, including in a subdirectory. The watch
+//! root list is frozen at the first snapshot, so a TMPDIR change mid-run
+//! does not treat a pre-existing file in the new dir as a leftover. A
+//! leftover FIFO, socket, or device is recorded; hashing skips it
+//! (`symlink_metadata` + `!is_file()`) so `File::open` does not block.
+//! Vanished inodes are followed by file handle / `(dev,ino)` so a hardlink
+//! or rename out of the watch still lists the dest leftover. Bind mount, pid
 //! namespace, `/run/user/$UID` when absent, watch sysctl write, and a
 //! setsid write after the census returns are HostPart::NotRun, never a
 //! clean-window PASS.
@@ -556,8 +560,13 @@ fn inode_ctime(meta: &fs::Metadata) -> i64 {
 }
 
 fn content_hash(path: &Path, meta: &fs::Metadata) -> u64 {
-    if meta.file_type().is_symlink() || meta.is_dir() {
+    if meta.file_type().is_symlink() || meta.is_dir() || !meta.is_file() {
         return 0;
+    }
+    if let Ok(now) = fs::symlink_metadata(path) {
+        if !now.is_file() {
+            return 0;
+        }
     }
     let mut hasher = DefaultHasher::new();
     hash_whole_file_sparse(path, meta, &mut hasher);
@@ -810,6 +819,7 @@ pub fn writable_temp_roots() -> Vec<PathBuf> {
 struct LiveWatch {
     fd: fs::File,
     wds: BTreeMap<i32, PathBuf>,
+    roots: Vec<PathBuf>,
 }
 
 impl LiveWatch {
@@ -825,15 +835,18 @@ impl LiveWatch {
         let mut watch = Self {
             fd,
             wds: BTreeMap::new(),
+            roots: Vec::new(),
         };
         watch.add(&isolation_root())?;
         add_dir_watches_recursive(&mut watch, &isolation_root(), 0)?;
-        for root in writable_temp_roots() {
+        let roots = writable_temp_roots();
+        for root in roots.clone() {
             if root.exists() {
                 watch.add(&root)?;
                 add_dir_watches_recursive(&mut watch, &root, 0)?;
             }
         }
+        watch.roots = roots;
         for root in inotify_only_roots() {
             if root.exists() {
                 watch.add(&root)?;
@@ -961,6 +974,16 @@ fn start_live_watch() -> Result<(), String> {
     Ok(())
 }
 
+/// Roots `writable_temp_roots()` returned when the live watch started.
+/// After-snapshots reuse this list so a later TMPDIR change is not a leftover.
+fn frozen_watch_roots() -> Vec<PathBuf> {
+    let guard = LIVE_WATCH.lock().expect("watch lock");
+    match guard.as_ref() {
+        Some(watch) => watch.roots.clone(),
+        None => writable_temp_roots(),
+    }
+}
+
 fn drain_live_watch() -> Result<Vec<PathBuf>, String> {
     let mut guard = LIVE_WATCH.lock().expect("watch lock");
     match guard.as_mut() {
@@ -989,7 +1012,7 @@ pub fn snapshot_before_runtime(watch: &Path) -> Result<FsSnapshot, String> {
 pub fn snapshot_run_window_unchecked() -> Result<FsSnapshot, String> {
     let mut snap = FsSnapshot::default();
     record_tree(&isolation_root(), &mut snap, true, 0)?;
-    for root in writable_temp_roots() {
+    for root in frozen_watch_roots() {
         if root.exists() {
             record_tree(&root, &mut snap, true, 0)?;
         }

@@ -21,7 +21,10 @@ snapshots `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG
 cache/data/state/runtime dirs, `$HOME/.cache` even when
 `XDG_CACHE_HOME` is set, `/run/user/$UID` when that dir exists, and
 `~/Library/Caches` / `~/Library/Application Support`. Live watches
-recurse those trees; `watch.add` failures fail closed. An inotify watch
+recurse those trees; `watch.add` failures fail closed. The overflow pin
+keeps the `IN_Q_OVERFLOW` if and the fail-closed `return Err`. Watch
+roots freeze at the first snapshot. A leftover FIFO, socket, or device
+is reported; hashing skips non-regular files. An inotify watch
 records create-then-delete, including in a subdirectory. Vanished inodes
 are followed by file handle / `(dev,ino)`, so a hardlink or rename out
 of the watch still lists the dest leftover. Bind mount, pid namespace,
@@ -186,6 +189,10 @@ does not edit the r3 runner.
 | M-A12-PIDNS-PASS | pid-ns HostPart becomes PASS | `tests::a12_pid_namespace_is_not_run` |
 | M-A12-RUN-USER-PASS | `/run/user` HostPart becomes PASS | `tests::a12_run_user_uid_is_not_run` |
 | M-A12-WATCH-SYSCTL-PASS | watch sysctl HostPart becomes PASS | `tests::a12_watch_sysctl_is_not_run` |
+| M-A12-HASH-FIFO | drop the non-regular skip before `File::open` | `tests::a12_fifo_leftover_is_found_in_bounded_time` |
+| M-A12-OVERFLOW-NO-RETURN | keep the `IN_Q_OVERFLOW` if, drop `return Err` | `tests::a12_inotify_overflow_check_is_pinned` |
+| M-A12-NO-FREEZE-ROOTS | after-snapshot re-reads live `writable_temp_roots` | `tests::a12_tmpdir_change_mid_run_is_not_false_fail` |
+| M-A12-DROP-FROZEN-TMPDIR | freeze an empty extra-root list | `tests::a12_new_file_under_original_tmpdir_is_found` |
 
 ## Plants table (r3)
 

@@ -1,0 +1,8 @@
+id: M-A12-NO-FREEZE-ROOTS
+file: src/a12.rs
+test: tests::a12_tmpdir_change_mid_run_is_not_false_fail
+--- old
+    for root in frozen_watch_roots() {
+--- new
+    for root in writable_temp_roots() {
+--- end
