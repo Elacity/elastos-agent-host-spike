@@ -400,11 +400,23 @@ Facts only; nothing here is proposed as a contract.
    (`wc-009.lab-grants/v2`) names a right per grant; a grant naming a right the
    operation does not need, and a module import with no typed entry, are
    refused before any engine starts. It is offered as lab input for Anders's
-   typed-operations model, not as a contract. The lab does not check an
-   import's Wasm type against its entry: the audit's v1 API returns names
-   only. No manifest field is added; the module's own import section stays the
-   declaration (https://github.com/Elacity/elastos-runtime/issues/464). The
-   table and the grants are "lab stand-in, not admission".
+   typed-operations model, not as a contract. An import's Wasm type is not
+   checked against its entry; that gap is item 4. No manifest field is added;
+   the module's own import section stays the declaration
+   (https://github.com/Elacity/elastos-runtime/issues/464). The table and the
+   grants are "lab stand-in, not admission".
+4. **Import Wasm types are not checked.** Task 046 (Rong, 27 Oct), the type
+   half of item 3, as one sentence:
+   Gap: the lab does not check an import's Wasm type against its typed lab operation, so a typed lab operation is not a type check; this blocks the type half of M1 B4 (one permission model).
+   The facts: the audit's v1 API returns each import's module and name only,
+   with no function type, and does not compare the import kind
+   (`audit/INTERFACE.md`, "Rules"). Closing the gap needs each import's
+   function type from the one module reader (cx-wasm-audit's
+   `wasm-capsule-audit` crate) and a check of it against `LAB_OPERATIONS`.
+   Until then, a module whose `env.f` import has another Wasm type than
+   `() -> ()` passes the typed-operation check in `verify_checked`, since that
+   check matches the module and name only. The B4 lab half checks names,
+   rights and effects; its type half stays open.
 
 ## Not yet wired
 
