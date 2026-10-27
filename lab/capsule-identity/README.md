@@ -888,9 +888,9 @@ decisions into Runtime policy is Runtime issue 464,
 https://github.com/Elacity/elastos-runtime/issues/464. So these tests say
 nothing about what the Runtime would decide. They do not run the Runtime, and
 they model no grant. The lab's stand-in launcher, in test code, models only a
-launch route's refusals before launch
-([below](#lab-stand-in-launcher-m1-check-b1)); it is not the Runtime's
-admission, and it grants nothing.
+launch route's refusals before launch and a grant view that a launch leaves
+empty ([below](#lab-stand-in-launcher-m1-check-b1)); it is not the Runtime's
+admission, and a launch there grants nothing.
 
 Claim scope: one Mac, these fixtures, test keys only.
 
@@ -1337,6 +1337,27 @@ signed by a fresh test key whose DID is accepted, launched by CID, listed once
 with the same `id` and `session_id`, and its lab CID and its parent's listing
 unchanged after. Ids and session ids come from a counter.
 
+A valid signature alone yields no grant. The stand-in's grant view,
+`get_capability_list_all_sessions_live` (for #309 RA-1's
+`GET /api/capability/list?scope=all_sessions_live`), answers
+`{"scope": "all_sessions_live", "capabilities": [...]}`, one entry per held
+grant with today's five keys (`request_id`, `resource`, `action`, `duration`,
+`granted_at`) and `session_id`. A launch adds no grant, although the
+`agent-host` manifest asks for one in `capabilities` and its record verifies.
+The one way a grant exists is `seed_grant(session_id, resource, action,
+duration)`, a lab test seam, not a route: it holds one grant with the next
+`request_id` and `granted_at` from a counter. The seed is there only to show
+that the view lists what is held, so the empty view after a launch is not a
+constant. The launch answer and the `get_capsules` entry keep exactly the
+keys above, with no grant or token key.
+`standin_valid_signature_alone_yields_no_grant` launches the signed bundle as
+in the journey above, twice: each launch gives its own session, and after each
+the view lists no entry for that session and none at all.
+`standin_grant_view_lists_a_seeded_grant` seeds one grant for the launched
+session and finds it listed with all six keys and the seeded values. Task 007's
+`valid_signature_grants_nothing_by_itself` shows the library leaves no standing
+approval; this shows the stand-in's launch adds no grant. Both stay.
+
 Each route, field and state, and where it comes from. #309 is draft PR #309,
 `lab/runtime-asks/` at `513988ebd` (branch `cursor/runtime-asks-ad52`);
 `routes.rs` is `elastos/crates/elastos-server/src/api/routes.rs`, read only.
@@ -1351,6 +1372,8 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | list `status` and `cause` | #309 `06-resident-instances-core.md:25` (RI-3) |
 | state "launched" | `routes.rs:102` |
 | state "refused": status 400 and the reason | `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
+| grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list_all_sessions_live`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
+| grant seed `seed_grant` | lab test seam, not a route; #309 and this lab model no shell approval |
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -1361,16 +1384,21 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | (a) `path` is never a fallback | `standin_launches_by_cid_only` | F-CI32e (a body with `path` is looked up by its folder) |
 | A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
 | A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
+| A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
+| The grant view lists every held grant, so it is not a constant | `standin_grant_view_lists_a_seeded_grant` | F-CI33b (the view answers no entries whatever is held) |
+| The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 
 Not shown:
 
 - The real Runtime ran nothing here, and it still launches by path
   (`routes.rs:65-66`, `LaunchRequest { path, ... }`). No sentence here says
-  the Runtime launched, checked or refused anything.
+  the Runtime launched, checked, refused or granted anything. The empty grant
+  view is the stand-in's, not the Runtime's.
 - No code is executed: a launched instance is a record. There is no HTTP
   server, socket, process start or wasm execution.
-- No grant model yet: task 033 adds that a valid signature alone yields no
-  grant.
+- No shell approval is modelled; a grant exists only through the test seam
+  `seed_grant`. There is no pending request, token, revocation, expiry or
+  capability check, and no grant route.
 - `principal_id` and `launch_grant` (`routes.rs:65-71`) are left out.
 
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
@@ -1519,7 +1547,8 @@ tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
-tests/stand_in.rs        the lab stand-in launches by CID after the publisher check
+tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
+                         a valid signature alone yields no grant
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1527,7 +1556,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 251 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 254 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1560,8 +1589,8 @@ F-CI24a to F-CI24e (see
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
 and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
 task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)),
-and task 032's F-CI32a to F-CI32g (see
-[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+and task 032's F-CI32a to F-CI32g and task 033's F-CI33a to F-CI33c (both:
+see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1624,6 +1653,11 @@ F-CI32a and F-CI32f in `post_capsules`, F-CI32b to F-CI32d in
 is a line task 032 added, found exactly once (F-CI32a and F-CI32f share the
 check line, and F-CI32c and F-CI32d the record-check line). Task 032 changed no
 older edit's text.
+Task 033's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, is
+part of F-CI32f's anchor and found exactly once), and F-CI33b and F-CI33c in
+`get_capability_list_all_sessions_live`, each anchor a line task 033 added,
+found exactly once. Task 033 changed no older edit's text.
 
 ### The inventory check
 

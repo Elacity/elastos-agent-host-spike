@@ -1376,11 +1376,19 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// ends in one of two states: "launched", with one new instance, or
 /// "refused", status 400 with the reason and no instance. The one request
 /// field, `cid`, is a lab field, not in #309: today's route takes `path`.
+///
+/// Its grant view is named for #309 RA-1's
+/// `GET /api/capability/list?scope=all_sessions_live`
+/// ([`StandInRuntime::get_capability_list_all_sessions_live`]). A launch adds
+/// no grant: a valid publisher signature alone yields none. No shell approval
+/// is modelled; a grant exists only through the test seam
+/// [`StandInRuntime::seed_grant`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
     instances: Vec<Instance>,
+    grants: Vec<Grant>,
 }
 
 /// One launched instance: a record, never a running program.
@@ -1388,6 +1396,31 @@ struct Instance {
     id: String,
     name: String,
     session_id: String,
+}
+
+/// One grant held for a session: a record, never a token.
+struct Grant {
+    request_id: String,
+    session_id: String,
+    resource: String,
+    action: String,
+    duration: String,
+    granted_at: u64,
+}
+
+impl Grant {
+    /// The grant view's entry: today's `CapabilityOutput` keys
+    /// (`capability.rs:411-418`) and #309 RA-1's `session_id`.
+    fn entry(&self) -> Value {
+        json!({
+            "request_id": self.request_id,
+            "resource": self.resource,
+            "action": self.action,
+            "duration": self.duration,
+            "granted_at": self.granted_at,
+            "session_id": self.session_id,
+        })
+    }
 }
 
 impl StandInRuntime {
@@ -1403,6 +1436,7 @@ impl StandInRuntime {
             records,
             accepted,
             instances: Vec::new(),
+            grants: Vec::new(),
         }
     }
 
@@ -1434,6 +1468,34 @@ impl StandInRuntime {
             })
             .collect();
         json!({ "capsules": capsules })
+    }
+
+    /// `GET /api/capability/list?scope=all_sessions_live`: #309 RA-1's shell
+    /// view of every session's live grants, `{"scope": "all_sessions_live",
+    /// "capabilities": [...]}`, one entry per held grant with `request_id`,
+    /// `resource`, `action`, `duration`, `granted_at` and `session_id`. Only
+    /// [`StandInRuntime::seed_grant`] adds a grant; nothing here expires or is
+    /// revoked, so every held grant is listed.
+    pub fn get_capability_list_all_sessions_live(&self) -> Value {
+        let capabilities: Vec<Value> = self.grants.iter().map(Grant::entry).collect();
+        json!({ "scope": "all_sessions_live", "capabilities": capabilities })
+    }
+
+    /// Lab test seam, not a route: hold one grant of `action` on `resource`
+    /// for `duration` in the session `session_id`, with the next request id
+    /// and `granted_at` from a counter, not a clock. #309 and this lab model
+    /// no shell approval, so this is the only way a grant exists here; a test
+    /// uses it to show that the grant view lists what is held.
+    pub fn seed_grant(&mut self, session_id: &str, resource: &str, action: &str, duration: &str) {
+        let number = self.grants.len() + 1;
+        self.grants.push(Grant {
+            request_id: format!("grant-{number}"),
+            session_id: session_id.to_owned(),
+            resource: resource.to_owned(),
+            action: action.to_owned(),
+            duration: duration.to_owned(),
+            granted_at: number as u64,
+        });
     }
 
     /// The checks of a launch, in this order, each library refusal as its own
