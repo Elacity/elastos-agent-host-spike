@@ -9,8 +9,23 @@ export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" docs-viewer
 
-# The capsule kit's guest crate this guest is built on: its own tests and falsifiers.
-bash "${VIEWER_DIR}/../capsule-kit/guest/verify.sh"
+# Check and restore the gate falsifier before Bash reads the branch below.
+python3 -I "${VIEWER_DIR}/verify_gate_test.py"
+python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
+
+GATE=0
+case "${GATE_LIST:-}" in
+    # run-lane.sh exports the gate commands (the substring is `gates-photo`),
+    # and older forms may carry the name; either way this is the lane gate.
+    *gates-photo* | *photo-gates*) GATE=1 ;;
+esac
+
+# A standalone run owns the kit checks; the lane gate runs them when the kit changes.
+if [[ $GATE -eq 0 ]]; then
+    bash "${VIEWER_DIR}/../capsule-kit/guest/verify.sh"
+else
+    echo "docs-viewer: lane gate leaves kit guest checks to the kit verify"
+fi
 
 # Guest and model: logic and refusals against a fake Runtime.
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check
