@@ -1,6 +1,6 @@
 Slice:        A15 r5 lab fix (PR #448 head 3417741a)
 Branch / PR:  cursor/a15-r4-fail-closed-c89c  https://github.com/Elacity/elastos-agent-host-spike/pull/448
-Commit:       (this commit)   parent 3417741a9d6ca5eccde06eae5f07baa6e7879c03
+Commit:       bce88d4bb099a6d9a113c17b8fa64523a3169952   parent 3417741a9d6ca5eccde06eae5f07baa6e7879c03
 Base:         cursor/a15-r4-fail-closed-c89c at 3417741a9d6ca5eccde06eae5f07baa6e7879c03
 Develop:      not merged this turn (new commit on #448 only; #284 and #469 left unpushed)
 Machine:      Linux x86_64, rustc 1.91.0 (f8297e351 2025-10-28)
