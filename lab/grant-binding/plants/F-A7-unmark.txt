@@ -1,0 +1,14 @@
+id: F-A7-unmark
+file: src/ledger.rs
+test: ledger::model_unknown_from_another_handle_does_not_mark_the_hold
+--- old
+                    if let Some(open) = ledger.open.get_mut(&reservation.id) {
+                        if handles_match(open.handle, request.handle) {
+                            open.uncertain = true;
+                        }
+                    }
+--- new
+                    if let Some(open) = ledger.open.get_mut(&reservation.id) {
+                        open.uncertain = true;
+                    }
+--- end
