@@ -173,7 +173,9 @@ def parse_argv(argv):
 
     This is the front door: it reads no file, runs no test and changes
     nothing. An option it does not know stops the run here with status 2 and
-    its own reason, so a typo can never select work.
+    its own reason, so a typo can never select work. List mode names exactly
+    one file: a bare token there is that file, so a listing never falls back
+    to another file's entries.
     """
     path = DATA
     from_selected = False
@@ -227,6 +229,13 @@ def parse_argv(argv):
         mode = "run"
     if mode == "run" and not filters and not from_selected and (keep_backups or with_repo):
         refuse("--keep-backups and --with-repo need a mode, --from PATH, or an id prefix")
+    if mode == "list" and filters:
+        if len(filters) > 1:
+            refuse(f"--list takes one file, got {' and '.join(filters)}; use --from PATH")
+        if from_selected:
+            refuse(f"--list takes no id beside --from PATH, got {filters[0]}; use --from PATH")
+        path = pathlib.Path(filters[0])
+        filters = []
     return ParsedArgv(path, mode, case_name, filters, keep_backups, with_repo)
 
 
@@ -3039,6 +3048,11 @@ def argv_refusal_precedes_work():
             (["--keep-backups"], "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
             (["--with-repo", "--keep-backups"],
              "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
+            (["--list", "capsules/model-provider/falsifiers.json", "FS01"],
+             "--list takes one file, got capsules/model-provider/falsifiers.json "
+             "and FS01; use --from PATH"),
+            (["--from", "capsules/model-provider/falsifiers.json", "--list", "FS01"],
+             "--list takes no id beside --from PATH, got FS01; use --from PATH"),
         ):
             touched.clear()
             code = None
@@ -3189,6 +3203,33 @@ def list_mode_displays():
         parsed = parse_argv(argv)
         print(f"self-test: {' '.join(argv)} -> mode {parsed.mode}, path {parsed.path}")
         if parsed.mode != "list" or parsed.path != want_path:
+            ok = False
+    return ok
+
+
+def list_mode_takes_one_file():
+    """--list displays exactly one file: a bare token there names that file,
+    as --from does, so a listing never falls back to another file's entries.
+    A second file or an id beside --from PATH is refused before any recovery
+    or load, with its own reason."""
+    ok = True
+    chosen = pathlib.Path("capsules/model-provider/falsifiers.json")
+    for argv in (["--list", str(chosen)], [str(chosen), "--list"]):
+        parsed = parse_argv(argv)
+        print(f"self-test: {' '.join(argv)} -> mode {parsed.mode}, "
+              f"path {parsed.path}, filters {parsed.filters}")
+        if parsed.mode != "list" or parsed.path != chosen or parsed.filters:
+            ok = False
+    for argv, want in (
+        (["--from", str(chosen), "--list", "FS01"],
+         "usage: --list takes no id beside --from PATH, got FS01; use --from PATH\n"),
+        (["--list", str(chosen), "FS01"],
+         "usage: --list takes one file, got capsules/model-provider/falsifiers.json "
+         "and FS01; use --from PATH\n"),
+    ):
+        code, reason = refusal(argv)
+        print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
+        if code != 2 or reason != want:
             ok = False
     return ok
 
@@ -3550,6 +3591,7 @@ SELF_TEST_CASES = {
     "a grant-binding entry loads and runs its crate":
         a_grant_binding_entry_loads_and_runs_its_crate,
     "list mode displays": list_mode_displays,
+    "list mode takes one file": list_mode_takes_one_file,
     "prefix token still selects": prefix_token_still_selects,
     "a nested list is listed": a_nested_list_is_listed,
     "a nested run keeps the caller's backup": a_nested_run_keeps_the_callers_backup,

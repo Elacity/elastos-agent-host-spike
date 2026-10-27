@@ -2871,6 +2871,23 @@
       "tests": [
         "hosted_run_refused_at_dispatch_records_usage_refused"
       ]
+    },
+    {
+      "id": "PV132",
+      "title": "the one-file list rule never fires, so --list with two files silently uses the first and exits 0",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if len(filters) > 1:\n            refuse(f\"--list takes one file, got {' and '.join(filters)}; use --from PATH\")",
+          "new": "        if False:\n            refuse(f\"--list takes one file, got {' and '.join(filters)}; use --from PATH\")"
+        }
+      ],
+      "tests": [
+        "list mode takes one file",
+        "argv refusal precedes work"
+      ]
     }
   ]
 }
