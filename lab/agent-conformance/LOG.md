@@ -6733,3 +6733,287 @@ The first three are CAUGHT. `F-agent-host-p7` is NOT RUN with `did not run witho
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/effects.rs:275` calls `poll` only when `apply_policy` is true. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `falsifiers.json:763` names `no_policy_file_does_not_mean_allow`. The runner reported `F-ac2c` CAUGHT. |
 | 8. Identity, admission and allowance stay separate? | Yes | `tests/common/grants.rs:39` treats a missing file as zero entries. A grant still requires the flag at `tests/effects.rs:275`. |
+
+## 043 — Declared network request is denied until a grant
+
+043: The one probe manifest declares `localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`. `ungranted_network_is_refused` uses the existing `exercise_read` controller. The pending request is denied with `fixture denies unlisted read`. The network arm still returns `Ok(())` on a grant and does not call `providers::invoke`. `F-ac8a` keeps its command, path, id, title, expect and tests; only its capabilities `old` and `new` change. `F-net-grant` has no list id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Baseline row, before the plant: `fixture read: exit:Some(1) matched:0 granted:0 denied:1 content_error:false` and `probe refusal effect:network exit:Some(1) reason_present:true`. Stderr carries `BusError::Denied("fixture denies unlisted read")` and does not carry `capsule manifest does not declare authority`.
+
+`F-net-grant`, hand-run, three steps. Original `fixtures/grants.json` sha256 `3009a4dd9f0820ad07a60f4ecf2f15709161653ba598753d34f6ccd8ead1396b`:
+
+```json
+{
+  "deny_reason": "fixture denies unlisted read",
+  "grants": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/granted.txt",
+      "action": "read",
+      "reason": "agent conformance: fixture read",
+      "duration": "once"
+    }
+  ]
+}
+```
+
+Planted bytes, sha256 `a6c057ce4c56e49aeae31b27b7e2ff151b0af4edff922279531d0e6cc574c780`:
+
+```json
+{
+  "deny_reason": "fixture denies unlisted read",
+  "grants": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/granted.txt",
+      "action": "read",
+      "reason": "agent conformance: fixture read",
+      "duration": "once"
+    },
+    {
+      "resource": "elastos://net/stream",
+      "action": "execute",
+      "reason": "agent conformance: ungranted effect",
+      "duration": "once"
+    }
+  ]
+}
+```
+
+Planted `ungranted_network_is_refused` exited 101 in 19.210 seconds. The row saw `fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false` and failed `Some(0) == Some(1)`. Restored bytes matched the original. The same test then exited 0 in 25.007 seconds with `matched:0 granted:0 denied:1`.
+
+`./lab/agent-conformance/run.sh` exited 0 in 254.783 seconds. Its table has `ungranted_network_is_refused | PASS` and no ` | FAIL` row.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`.
+
+- Cold `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 864.932 seconds. The Runtime build inside the preceding network row was 256.80 seconds and the artifact tests were 575.17 seconds, so this command was outside the 600-second bound. 127 passed, 0 failed, 14 ignored.
+- Warm gate, same environment, after those builds: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.143 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 272.013 seconds. 127 passed, 0 failed, 14 ignored. This pair is inside the 600-second bound. The census pair named in the task did not fail, so there was no census rerun.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `probe/capsule.json:15` adds the Bus resource `elastos://net/stream`. The launched probe stays the staged bundle hash. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/effects.rs:533` requires `granted:0` and line 534 requires `denied:1`. The probe does not open a stream. |
+| 3. A second path or a second copy of one rule? | No | `tests/effects.rs:107` calls the one `exercise_read` controller. |
+| 4. Runtime core grows? | No | The edit is the probe manifest, `tests/effects.rs`, `tests/artifact.rs`, `falsifiers.json`, `RUNBOOK.md`, `GAPS.md` and `LOG.md`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/effects.rs:541` requires `BusError::Denied` with the fixture reason. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:260` returns `Ok(())` from `capabilities::request` and does not call `providers::invoke`. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:106` is `ungranted_network_is_refused`. Hand-run `F-net-grant` exited 101 planted and 0 restored. |
+| 8. Identity, admission and allowance stay separate? | Yes | `probe/capsule.json:15` lets the request become pending. `tests/effects.rs:534` still requires a separate deny. |
+
+## 051 — Land the reviewed stand-in stop past the stdout leftover
+
+051: `standin-runtime/mod.rs` and `standin-runtime/README.md` are the bytes from `438fb71f9bcdad43457746c7f3e20c0f83beedbb`, which match `3d8511be8269f446bf0726b049c64494cb12ad42` and `6b073a4710ee056b7007b8fb989d91238c51f413`. `git show 438fb71f9bcdad43457746c7f3e20c0f83beedbb:lab/agent-conformance/<path> | cmp - lab/agent-conformance/<path>` succeeded for both paths. `StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. `stop_one`, `revoke_live`, `stop_reason`, `unknown_instance`, `not_live` and `keeps_instance` are present. `keep` is the one life filter. `fn delete_capsule` was absent on this base before the copy. `tests/runtime.rs`, `tests/effects.rs`, `tests/common/operator.rs`, `src/census.rs`, `RUNBOOK.md`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` stay as the base has them. A search of `lab/agent-conformance` finds none of `drain_capture_holders`, `capture_holder_only`, or `capture_holder_drain_retries_a_stdout_leftover`. There is no new `falsifiers.json` id. After the restore, `git diff 438fb71f9bcdad43457746c7f3e20c0f83beedbb -- lab/agent-conformance/standin-runtime` is empty.
+
+### Hand-run falsifier
+
+No list id. One plant, then the restore, before the gates. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_sets_stopped -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The shared heavy-build lease wait was 0.000 seconds before the run.
+
+F-standin-stop-stub. Named test `standin_stop_sets_stopped`. Planted exit 101 in 12.784 seconds. Restored exit 0 in 1.721 seconds. Assertion: `src/../standin-runtime/mod.rs:982:9` `the stand-in stores stopped with the stop reason`. Left status `running` with an empty cause. Right status `stopped` with cause `stopped: stop one`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        return Ok(Value::Null);
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+The plant is the start of `delete_capsule`. It returns `Ok` of null before any instance is read. After the restore, that return is absent.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The shared heavy-build lease wait was 0.000 seconds. `Cargo.toml` and `Cargo.lock` are unchanged. There was no second test run.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.205 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 266.246 seconds. The lib target passed 26 tests. The effects target finished 55 passed, 2 failed, 12 ignored, in 217.65 seconds. The failed tests were `runaway_trap_is_bounded_while_siblings_finish` at `tests/common/parallel.rs:88` and `ungranted_sibling_read_is_refused` at `tests/effects.rs:446`. Both census lines were `process leftover; processes:1 paths:["home/Library/Application Support/elastos/host-process.lock"]`. That path includes `host-process.lock`. The task stops on that shape. The stand-in files stayed the restored bytes. `operator.rs`, `src/census.rs`, `tests/effects.rs` and `tests/runtime.rs` stayed as the base has them.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:235` `delete_capsule` takes the instance id. It does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:265` `revoke_live` changes stored grant life. It opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:331` `keep` is the one life filter. `src/census.rs:79` `cleanup` stays the one cleanup. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:451` returns 400 `unknown instance`. `:456` returns 400 `instance is not live`. `:372` returns 403 `This endpoint requires shell privileges`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:247` `stop_one` updates stand-in state. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:1449` `standin_stop_sets_stopped`. The planted return of null fails that assertion at `:982` and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:235` stops an instance and does not admit a path. `keep` at `:331` filters life and grants nothing. |
+
+## 048 — One stand-in grant does not authorise the sibling
+
+048: `StandIn::authorise` is a lab seam on the same `StandIn`. It refuses an unknown id, then a grant whose life is not `Live`, then a shell or another session, and it returns `Ok(())` for the owning client. `is_live` is the one life test. `keep` and `revoke_live` call it. The session decision calls `visible` and does not compare session ids itself. A stop still revokes that session through `revoke_live`, so the live view drops that grant and the sibling's own grant stays. `instance_grant_does_not_authorise_sibling` stays the process-isolation row. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+> **A6.** Launch `read-shared` twice. Grant instance 1 only, and wait until it
+> is `running`. The live-grant view shows exactly one grant, bound to instance 1.
+> Instance 2's request for the same resource is still pending, in its own
+> session. Deny it. Instance 2 ends `failed` with the denial in its cause, and
+> instance 1 is still `running` with the same single grant. Stop instance 1. The
+> census also requires zero live grants for both sessions.
+
+This task takes the grant half of that paragraph: two launches, one grant bound to instance 1, instance 2 refused, instance 1 still running, then stop instance 1 and the live view has no grant for that session. The sentences about a pending request, a denial cause, and the process census are not this task. After the stop, instance 2's presentation of instance 1's grant is status 400 `grant is not live: Revoked`, because the life check runs before the caller check.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and lane `target/host` plus `target/host-build`. The shared heavy-build lease wait was 0.000 seconds. After the last restore, `standin-runtime/mod.rs` matched its pre-plant bytes (`sha256 90605e0f80988326f1bb9532384d2474accc2e04470e356b5ef02eb4ec5696d1`). `git diff -- lab/agent-conformance/standin-runtime/mod.rs` is the candidate only. The plant expressions are absent from that file.
+
+F-standin-a6-stub. Named test `standin_sibling_cannot_use_the_grant`. Planted exit 101 in 1.194 seconds. Restored exit 0 in 1.607 seconds. The planted crate compiled. Assertion: `src/../standin-runtime/mod.rs:2134:9` `the stand-in refuses instance 1's grant for instance 2: Ok(())`. The inserted line shifts that assert from 2133 in the restored file.
+
+Old:
+
+```text
+    pub fn authorise(&self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        let Some(grant) = self
+```
+
+New:
+
+```text
+    pub fn authorise(&self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        return Ok(());
+        let Some(grant) = self
+```
+
+The plant is the start of `authorise`. It returns `Ok(())` before any grant is read.
+
+F-standin-a6-sibling. Named test `standin_sibling_cannot_use_the_grant`. Planted exit 101 in 0.881 seconds. Restored exit 0 in 1.189 seconds. Assertion: `src/../standin-runtime/mod.rs:2133:9` `the stand-in refuses instance 1's grant for instance 2: Ok(())`. `visible` was left as it is.
+
+Old:
+
+```text
+    !matches!(caller, Caller::Shell) && visible(grant, caller)
+```
+
+New:
+
+```text
+    !matches!(caller, Caller::Shell) && visible(grant, Caller::Shell)
+```
+
+The plant is that one call. The session decision treats every caller as the shell.
+
+F-standin-a6-stop-keeps. Named test `standin_stop_clears_that_sessions_grant`. Planted exit 101 in 1.148 seconds. Restored exit 0 in 1.385 seconds. Assertion: `src/../standin-runtime/mod.rs:2115:9` `the stand-in refuses the stopped session's grant: Ok(())`.
+
+Old:
+
+```text
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+```
+
+New:
+
+```text
+        if !is_live(grant.life) {
+            return Ok(());
+        }
+```
+
+`authorise` returns `Ok(())` for a grant whose life is not `Live`.
+
+F-standin-a6-unknown. Named test `standin_authorise_unknown_grant`. Planted exit 101 in 0.917 seconds. Restored exit 0 in 1.476 seconds. Assertion: `src/../standin-runtime/mod.rs:2104:9` `the stand-in refuses unknown grant "" for shell: Ok(())`.
+
+Old:
+
+```text
+            return Err(unknown_grant(request_id));
+```
+
+New:
+
+```text
+            return Ok(());
+```
+
+An unknown id, including `""`, is accepted.
+
+F-standin-a6-life-skip. Named test `standin_authorise_dead_grants`. Planted exit 101 in 1.202 seconds. Restored exit 0 in 1.080 seconds. Assertion: `src/../standin-runtime/mod.rs:2112:9` `the stand-in refuses a grant that is not live before the caller check: Ok(())`. The plant removes three lines, so the restored assert is at 2115.
+
+Old:
+
+```text
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+        if !session_authorises(grant, caller) {
+```
+
+New:
+
+```text
+        if !session_authorises(grant, caller) {
+```
+
+The life check is gone, so a dead grant falls through to the caller.
+
+F-standin-a6-caller-first. Named test `standin_authorise_dead_grants`. Planted exit 101 in 1.303 seconds. Restored exit 0 in 1.463 seconds. Assertion: `src/../standin-runtime/mod.rs:2115:9` `the stand-in refuses a grant that is not live before the caller check: Err((403, "wrong capsule: expected component-1, got component-2"))`.
+
+Old:
+
+```text
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+```
+
+New:
+
+```text
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+```
+
+The caller check runs before the life check.
+
+F-standin-a6-shell. Named test `standin_shell_cannot_authorise`. Planted exit 101 in 0.916 seconds. Restored exit 0 in 1.461 seconds. Assertion: `src/../standin-runtime/mod.rs:2133:9` `the stand-in refuses a shell presentation of a live grant: Ok(())`.
+
+Old:
+
+```text
+    !matches!(caller, Caller::Shell) && visible(grant, caller)
+```
+
+New:
+
+```text
+    visible(grant, caller)
+```
+
+The shell refusal is removed. `visible` was left as it is.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. The shared heavy-build lease wait was 0.000 seconds. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.135 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 306.142 seconds. 142 passed, 0 failed, 14 ignored. The lib target passed 31 tests. The effects target passed 57 tests, with 12 ignored, in 234.04 seconds. The runtime target passed 10 tests, with 2 ignored, in 14.23 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:146` `authorise` takes the caller and the request id. It does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:147` reads `self.grants`. The method is `&self` and opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:360` `is_live` is the one life test. `:373` calls `visible` and does not compare session ids. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:487` returns 400 `unknown grant:`. `:500` returns 400 `grant is not live:`. `:504` returns 403 `wrong capsule:`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:146` decides from stored grants. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2146` `standin_sibling_cannot_use_the_grant`. The planted `return Ok(())` fails that assertion and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:147` reads grants and does not read instances. `admit_resident` at `:166` still admits a path on its own. |

@@ -179,7 +179,10 @@ fn probe_manifest_names_the_current_bus_world() {
     assert_eq!(entrypoint, "agent-conformance-probe.component.wasm");
     assert_eq!(
         manifest["capabilities"],
-        serde_json::json!(["localhost://Public/agent-conformance-grants/*"])
+        serde_json::json!([
+            "localhost://Public/agent-conformance-grants/*",
+            "elastos://net/stream"
+        ])
     );
 }
 

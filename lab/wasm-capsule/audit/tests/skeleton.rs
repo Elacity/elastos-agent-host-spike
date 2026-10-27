@@ -13,6 +13,10 @@ fn manifest_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
+// The dependency line this manifest alone uses: wasmparser's default features
+// without `serde`, in the pinned crate's declaration order.
+const WASMPARSER_VALUE: &str = r#"{ version = "=0.258.0", default-features = false, features = ["std", "validate", "features", "component-model", "hash-collections", "simd"] }"#;
+
 #[test]
 fn manifest_pins_only_wasmparser_and_wat_exactly() {
     let source = read_source("Cargo.toml");
@@ -24,7 +28,7 @@ fn manifest_pins_only_wasmparser_and_wat_exactly() {
         ("[package]", "version", "\"0.1.0\""),
         ("[package]", "edition", "\"2021\""),
         ("[package]", "publish", "false"),
-        ("[dependencies]", "wasmparser", "\"=0.258.0\""),
+        ("[dependencies]", "wasmparser", WASMPARSER_VALUE),
         ("[dev-dependencies]", "wat", "\"=1.258.0\""),
     ];
     let mut tables = Vec::new();
@@ -53,7 +57,7 @@ fn manifest_pins_only_wasmparser_and_wat_exactly() {
             .unwrap_or_else(|| {
                 panic!(
                     "Cargo.toml:{number}: unexpected or repeated entry {line} in {table}; \
-                     expected exact package fields, wasmparser = \"=0.258.0\" in \
+                     expected exact package fields, wasmparser = {WASMPARSER_VALUE} in \
                      [dependencies] and wat = \"=1.258.0\" in [dev-dependencies]"
                 )
             });
@@ -83,21 +87,23 @@ fn is_plain_string(text: &str) -> bool {
 #[test]
 fn manifest_has_no_workspace_table() {
     let source = read_source("Cargo.toml");
+    let mut table = "";
     for (number, line) in manifest_lines(&source) {
         if line.starts_with('[') {
-            let table = line
+            let name = line
                 .strip_prefix('[')
                 .and_then(|text| text.strip_suffix(']'))
                 .unwrap_or_else(|| panic!("Cargo.toml:{number}: unsupported table: {line}"))
                 .trim();
             assert!(
-                is_bare_path(table),
+                is_bare_path(name),
                 "Cargo.toml:{number}: unsupported table syntax: {line}"
             );
             assert!(
-                table.split('.').next() != Some("workspace"),
+                name.split('.').next() != Some("workspace"),
                 "Cargo.toml:{number}: workspace table {line} belongs to the lab root"
             );
+            table = name;
         } else {
             let (key, value) = line
                 .split_once('=')
@@ -112,8 +118,10 @@ fn manifest_has_no_workspace_table() {
                 "Cargo.toml:{number}: workspace key {key} belongs to the lab root"
             );
             let value = value.trim();
+            let wasmparser =
+                table == "dependencies" && key == "wasmparser" && value == WASMPARSER_VALUE;
             assert!(
-                matches!(value, "true" | "false") || is_plain_string(value),
+                matches!(value, "true" | "false") || is_plain_string(value) || wasmparser,
                 "Cargo.toml:{number}: unsupported value for {key}: {value}"
             );
         }

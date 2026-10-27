@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-wasmparser = "=0.258.0"
+wasmparser = { version = "=0.258.0", default-features = false, features = ["std", "validate", "features", "component-model", "hash-collections", "simd"] }
 
 [dev-dependencies]
 wat = "=1.258.0"

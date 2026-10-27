@@ -348,6 +348,16 @@ fn declared_rights_path(name: &str) -> PathBuf {
         .join("tests/fixtures/confine/declared-rights.json")
 }
 
+/// The committed `confine.sb` of the named provider, the oracle a generated
+/// or launched profile must match.
+fn confine_oracle_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/")
+        .join(name)
+        .join("confine.sb")
+}
+
 /// The did-provider binary this test crate starts.
 ///
 /// One `cargo build` for did's manifest, run once per test process by the
@@ -816,20 +826,130 @@ impl Drop for ConfinedProvider {
     }
 }
 
+/// One of the three Linux confinement primitives the design names, as a
+/// simulated host report can leave it unavailable. This is test input: nothing
+/// here reads a kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandinPrimitive {
+    Landlock,
+    UserNamespaces,
+    SeccompFilter,
+}
+
+impl StandinPrimitive {
+    /// The design's exact refusal words for this missing primitive.
+    fn design_refusal(self) -> &'static str {
+        match self {
+            Self::Landlock => "linux confinement refused: the kernel has no Landlock",
+            Self::UserNamespaces => "linux confinement refused: user namespaces are turned off",
+            Self::SeccompFilter => {
+                "linux confinement refused: the seccomp filter cannot be installed"
+            }
+        }
+    }
+}
+
+/// The one host report the stand-in reads, in place of a bare OS name.
+///
+/// `unavailable` is test input a simulated host on any OS can carry: the
+/// Linux C0 rows carry Landlock, user namespaces or the seccomp filter
+/// missing, and the `macos` row carries Landlock missing.
+/// `standin_host_refusal` refuses such a host before it reads the OS list,
+/// `DECLARED_CONFINED_OS`, so a host that carries a missing primitive is
+/// refused whatever its OS. `reporting` names no missing primitive, so cases
+/// that call `reporting(std::env::consts::OS)` keep their behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StandinHost {
+    os: &'static str,
+    unavailable: Option<StandinPrimitive>,
+}
+
+impl StandinHost {
+    /// A host that reports every primitive present.
+    fn reporting(os: &'static str) -> Self {
+        Self {
+            os,
+            unavailable: None,
+        }
+    }
+
+    /// A simulated Linux host whose report leaves `primitive` unavailable.
+    fn linux_missing(primitive: StandinPrimitive) -> Self {
+        Self::missing("linux", primitive)
+    }
+
+    /// A simulated host on `os` whose report leaves `primitive` unavailable.
+    fn missing(os: &'static str, primitive: StandinPrimitive) -> Self {
+        Self {
+            os,
+            unavailable: Some(primitive),
+        }
+    }
+}
+
+/// The one rule that decides whether the stand-in can confine `host`.
+///
+/// A host that reports a primitive unavailable is refused first, on every OS,
+/// so the report reaches this rule before the `DECLARED_CONFINED_OS` lookup and
+/// an OS in that list cannot pass a start with a missing primitive. That
+/// early refusal is the one host check (P10).
+///
+/// `DECLARED_CONFINED_OS` is the only list of OSes where the stand-in applies
+/// confinement. Each refusal starts `{name} start on {os} is refused:` and then
+/// carries only its own case's words: a host that reports a primitive
+/// unavailable carries the design's exact words for that primitive; an OS with
+/// no confinement design names that OS and the list; a simulated Linux host
+/// that reports nothing missing says Linux is designed, not enforced, in this
+/// lab, so `linux` is not in `DECLARED_CONFINED_OS`.
+fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    if let Some(primitive) = host.unavailable {
+        let reason = primitive.design_refusal();
+        return Err(format!("{name} start on {} is refused: {reason}", host.os));
+    }
+    if DECLARED_CONFINED_OS.contains(&host.os) {
+        return Ok(());
+    }
+    let reason = if host.os == "linux" {
+        format!(
+            "linux is designed, not enforced, in this lab, so linux is not in \
+             DECLARED_CONFINED_OS ({confined_os})"
+        )
+    } else {
+        format!(
+            "{os} has no confinement design, and the lab stand-in applies confinement only on \
+             {confined_os}",
+            os = host.os
+        )
+    };
+    Err(format!("{name} start on {} is refused: {reason}", host.os))
+}
+
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
+///
+/// This function is a lane copy that is to move under the one shared stand-in,
+/// `lab/agent-conformance/standin-runtime/` (owned by cx-agent-conformance),
+/// per Flint and Rong, 2026-10-27 19:25; the move is not done. Draft PR #309
+/// at `513988ebd` names no provider-launch ask, a gap routed to Flint, so this
+/// function copies `ProviderBridge::spawn`'s inputs instead of an RA route.
 ///
 /// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
 /// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
-/// name, the host `os`, the confinement tool and the declared rights the lab
+/// name, the host report, the confinement tool and the declared rights the lab
 /// generator profiles from. `Ok(ConfinedProvider)` is Started: the provider
 /// answered `init` `ok` under the generated profile. `Err(String)` is Refused:
 /// no provider is returned, and the reason says why.
 ///
 /// It refuses, in this order:
 ///
-/// 1. an `os` outside `DECLARED_CONFINED_OS`, with one reason for every such
-///    OS that names that OS and the list where the stand-in applies
-///    confinement;
+/// 1. a host that `standin_host_refusal` refuses, with that one reason, before
+///    any tool, binary or profile check, so a refused host writes no profile
+///    and creates no storage root. A host that reports a missing primitive is
+///    refused whatever its OS. The reason starts
+///    `{name} start on {os} is refused:` and holds the words of its own case
+///    for a host that reports a primitive unavailable, for an OS with no
+///    confinement design, and for a simulated Linux host that reports nothing
+///    missing;
 /// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
 /// 3. a present `sandbox_exec` that is not `SANDBOX_EXEC`, with a reason that
 ///    names the OS, the given path and `SANDBOX_EXEC`, so the tool the stand-in
@@ -849,7 +969,7 @@ impl Drop for ConfinedProvider {
 /// rather than this provider's constants, so another provider's binary can
 /// start through this same function.
 fn standin_spawn_confined_provider(
-    os: &str,
+    host: StandinHost,
     sandbox_exec: &Path,
     name: &str,
     binary_path: &Path,
@@ -857,13 +977,8 @@ fn standin_spawn_confined_provider(
     declared: &Value,
     profile_dir: &Path,
 ) -> Result<ConfinedProvider, String> {
-    let confined_os = DECLARED_CONFINED_OS.join(", ");
-    if !DECLARED_CONFINED_OS.contains(&os) {
-        return Err(format!(
-            "{name} start on {os} is refused: the lab stand-in applies confinement only on \
-             {confined_os}"
-        ));
-    }
+    standin_host_refusal(name, host)?;
+    let os = host.os;
     if !sandbox_exec.is_file() {
         return Err(format!(
             "{name} start on {os} is refused: the confinement tool {} is absent",
@@ -3484,15 +3599,28 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// The lab stand-in launcher refuses a start it cannot confine, for the named
 /// provider with its own binary and declared rights.
 ///
-/// Cases (a) `plan9`, a forced unsupported OS, and (b) `linux`, with a present
-/// tool path, each refuse with one reason that names that OS and the list
-/// where the stand-in applies confinement. Case (c) `macos` with the absent
-/// `tests/absent-sandbox-exec` refuses with a reason that names the OS, the
-/// path and `is absent`, and carries no `SANDBOX_EXEC` path, so the absent
+/// The host rows run on every host and start no process. Case (a) `plan9`, a
+/// forced unsupported OS, refuses with one reason that says it has no
+/// confinement design and names the list where the stand-in applies
+/// confinement. Cases (b1) to (b3) are simulated Linux host reports, each
+/// naming `StandinPrimitive::Landlock`, `StandinPrimitive::UserNamespaces` or
+/// `StandinPrimitive::SeccompFilter` as unavailable, and each refuses with the
+/// design's exact words for that primitive. Case (b4) is a simulated Linux
+/// host that reports nothing missing; it refuses with a reason that says Linux
+/// is designed, not enforced, in this lab, so `linux` is not in
+/// `DECLARED_CONFINED_OS`. Case (b5) is a simulated `macos` host, an OS in
+/// `DECLARED_CONFINED_OS`, whose report leaves Landlock unavailable; it
+/// refuses with that primitive's design words and `on macos`, and its tool is
+/// the real `SANDBOX_EXEC` path, so without the missing-primitive-first rule
+/// the stand-in would go on to the tool checks and start. Each host reason
+/// starts `{name} start on {os} is refused:` and carries only its own case's
+/// words. Case (c) `macos` with the absent
+/// `tests/absent-sandbox-exec` refuses with a reason that names the OS,
+/// the path and `is absent`, and carries no `SANDBOX_EXEC` path, so the absent
 /// check answers it and not the later wrong-tool check. Case (c2) `macos` with
 /// the test executable as the tool refuses with a reason that names the OS,
-/// that path and `SANDBOX_EXEC`. Those four run on every host and start no
-/// process; each creates no storage root under its base and no profile file.
+/// that path and `SANDBOX_EXEC`. Every row creates no storage root under its
+/// base and no profile file.
 ///
 /// Cases (c3) a `binary_path` that is not a file, (d) an added
 /// `unnamed-right` rights entry, (e) a declared `storage` rule that names a
@@ -3508,16 +3636,24 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// answer, and the planted path stays a regular file. Cases (c3), (d) and (e)
 /// create no storage root.
 ///
-/// Falsifier: WP112 starts the binary bare in the OS refusal, so (a) and (b)
-/// return Started; WP113 starts it bare after a failed `init`, so (e) returns
-/// Started; WP115 ignores the writer's refusal and starts under the committed
+/// Falsifier: WP112 starts the binary bare in the host refusal, so (a) returns
+/// Started; WP113 starts it bare after a failed `init`, so (e) returns Started;
+/// WP115 ignores the writer's refusal and starts under the committed
 /// `confine.sb`, so (d) returns Started instead of its reason. WP118 removes
 /// the check that the tool is `SANDBOX_EXEC`, so (c2) is Started; WP119
 /// removes the binary-file check, so (c3) panics in `resolved`; WP120 returns
 /// `Ok(provider)` for an `init` answer that is not `ok`, so (f) is Started.
 /// WP125 makes the absent-tool check never fire, so (c) reads the wrong-tool
 /// reason instead; WP126 drops the OS from the wrong-tool reason, so (c2)
-/// loses `on macos`.
+/// loses `on macos`. WP131 starts the binary bare on a simulated Linux host
+/// that reports a primitive unavailable, so (b1) returns Started; WP132
+/// returns one fixed reason that names no primitive, so (b1) loses the
+/// design's Landlock words. WP135 moves the `DECLARED_CONFINED_OS` lookup back
+/// above the missing-primitive check, so (b5) returns Started where
+/// `sandbox-exec` exists; WP136 prefixes the missing-primitive reason with
+/// `linux has no confinement design; `, so (b1) carries the forbidden words;
+/// WP137 drops the `{name} start on {os} is refused: ` prefix from the final
+/// `Err`, so (a) lacks it.
 fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let present = std::env::current_exe().expect("the test executable path must be available");
     let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
@@ -3529,43 +3665,105 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let confined_os = DECLARED_CONFINED_OS.join(", ");
     let absent_text = absent.display().to_string();
     let present_text = present.display().to_string();
-    let cases: [(&str, &str, &Path, Vec<&str>, Vec<&str>); 4] = [
+    let missing_landlock = "linux confinement refused: the kernel has no Landlock";
+    let missing_user_namespaces = "linux confinement refused: user namespaces are turned off";
+    let missing_seccomp = "linux confinement refused: the seccomp filter cannot be installed";
+    let designed_not_enforced = "linux is designed, not enforced";
+    let cases: [(&str, StandinHost, &Path, Vec<&str>, Vec<&str>); 8] = [
         (
             "(a) a forced unsupported OS",
-            "plan9",
+            StandinHost::reporting("plan9"),
             present.as_path(),
-            vec!["plan9", confined_os.as_str()],
-            vec![],
+            vec!["plan9", "has no confinement design", confined_os.as_str()],
+            vec![
+                designed_not_enforced,
+                missing_landlock,
+                missing_user_namespaces,
+                missing_seccomp,
+            ],
         ),
         (
-            "(b) linux",
-            "linux",
+            "(b1) linux without Landlock",
+            StandinHost::linux_missing(StandinPrimitive::Landlock),
             present.as_path(),
-            vec!["linux", confined_os.as_str()],
-            vec![],
+            vec![missing_landlock],
+            vec![
+                missing_user_namespaces,
+                missing_seccomp,
+                designed_not_enforced,
+                "has no confinement design",
+            ],
+        ),
+        (
+            "(b2) linux without user namespaces",
+            StandinHost::linux_missing(StandinPrimitive::UserNamespaces),
+            present.as_path(),
+            vec![missing_user_namespaces],
+            vec![
+                missing_landlock,
+                missing_seccomp,
+                designed_not_enforced,
+                "has no confinement design",
+            ],
+        ),
+        (
+            "(b3) linux without the seccomp filter",
+            StandinHost::linux_missing(StandinPrimitive::SeccompFilter),
+            present.as_path(),
+            vec![missing_seccomp],
+            vec![
+                missing_landlock,
+                missing_user_namespaces,
+                designed_not_enforced,
+                "has no confinement design",
+            ],
+        ),
+        (
+            "(b4) linux with every primitive reported present",
+            StandinHost::reporting("linux"),
+            present.as_path(),
+            vec![designed_not_enforced, "not in DECLARED_CONFINED_OS"],
+            vec![
+                missing_landlock,
+                missing_user_namespaces,
+                missing_seccomp,
+                "has no confinement design",
+            ],
+        ),
+        (
+            "(b5) macos whose report leaves Landlock unavailable",
+            StandinHost::missing("macos", StandinPrimitive::Landlock),
+            Path::new(SANDBOX_EXEC),
+            vec![missing_landlock, "on macos"],
+            vec![
+                missing_user_namespaces,
+                missing_seccomp,
+                designed_not_enforced,
+                "has no confinement design",
+            ],
         ),
         (
             "(c) macos without the tool",
-            "macos",
+            StandinHost::reporting("macos"),
             absent.as_path(),
             vec!["on macos", "is absent", absent_text.as_str()],
             vec![SANDBOX_EXEC],
         ),
         (
             "(c2) macos with another tool",
-            "macos",
+            StandinHost::reporting("macos"),
             present.as_path(),
             vec!["on macos", present_text.as_str(), SANDBOX_EXEC],
             vec![],
         ),
     ];
-    for (case, os, sandbox_exec, named, forbidden) in cases {
+    for (case, host, sandbox_exec, named, forbidden) in cases {
         let fixture = tempfile::tempdir().expect("temporary wallet base");
         let base = resolved(fixture.path());
         let profile_root = tempfile::tempdir().expect("temporary profile root");
         let profile_dir = resolved(profile_root.path());
         let refusal = standin_spawn_confined_provider(
-            os,
+            host,
             sandbox_exec,
             name,
             provider,
@@ -3574,7 +3772,12 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             &profile_dir,
         )
         .err()
-        .unwrap_or_else(|| panic!("{case}: a start on {os} must be refused"));
+        .unwrap_or_else(|| panic!("{case}: a start on {} must be refused", host.os));
+        let prefix = format!("{name} start on {} is refused: ", host.os);
+        assert!(
+            refusal.starts_with(&prefix),
+            "{case}: the refusal must start with {prefix:?}: {refusal}"
+        );
         for expected in named {
             assert!(
                 refusal.contains(expected),
@@ -3619,7 +3822,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         absent_binary.display()
     );
     let refusal = standin_spawn_confined_provider(
-        std::env::consts::OS,
+        StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
         name,
         &absent_binary,
@@ -3666,7 +3869,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             "rules": [r#"(allow file-read* (literal "/private/var/cc-confine-standin"))"#],
         }));
     let refusal = standin_spawn_confined_provider(
-        std::env::consts::OS,
+        StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
         name,
         provider,
@@ -3716,7 +3919,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             r#"(allow file-read* (literal (param "STORAGE_UNBOUND")))"#
         ));
     let refusal = standin_spawn_confined_provider(
-        std::env::consts::OS,
+        StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
         name,
         provider,
@@ -3754,7 +3957,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     fs::create_dir_all(storage_parent(name, &base)).expect("prepare the storage parent");
     fs::write(&planted, b"not a directory").expect("plant a regular file at the storage root");
     let refusal = standin_spawn_confined_provider(
-        std::env::consts::OS,
+        StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
         name,
         provider,
@@ -3782,27 +3985,184 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     );
 }
 
-/// The stand-in refuses every start it cannot confine, for did first and then
-/// for wallet.
+/// One provider's macOS leg of the C0 journey through the lab stand-in.
+///
+/// The stand-in starts `provider` from the provider's committed declared-rights
+/// file, so `init` answered `ok` and created the provider's storage root inside
+/// the profile. One outside write is then refused and creates nothing: for
+/// wallet, `init` at an unrelated base whose shared parent exists first is
+/// refused by `assert_storage_error`; for did, the granted nickname file points
+/// at an unrelated directory, `set_nickname` answers `storage_error` and the
+/// outside directory stays empty. The root still answers, one profile sits in
+/// `profile_dir`, and `shutdown` answers `ok` and exits 0. The stand-in is test
+/// code and not the Runtime.
+fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary provider base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let mut started = standin_spawn_confined_provider(
+        StandinHost::reporting(std::env::consts::OS),
+        Path::new(SANDBOX_EXEC),
+        name,
+        provider,
+        &base,
+        declared,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+
+    match name {
+        WALLET_PROVIDER => {
+            assert!(
+                wallet_dir(&base).is_dir(),
+                "init must have created the wallet directory inside the profile: {}",
+                wallet_dir(&base).display()
+            );
+            let status = started.send(&json!({ "op": "status" }));
+            assert_eq!(
+                status["status"], "ok",
+                "the started provider must answer status: {status}"
+            );
+            let outside = tempfile::tempdir().expect("temporary outside directory");
+            let outside = resolved(outside.path());
+            let outside_wallet = wallet_dir(&outside);
+            fs::create_dir_all(storage_parent(WALLET_PROVIDER, &outside))
+                .expect("outside parent fixture");
+            let denied = started.init(&outside);
+            assert_storage_error(&denied);
+            assert!(
+                !outside_wallet.exists(),
+                "a denied write must create nothing outside the wallet root: {}",
+                outside_wallet.display()
+            );
+            let root = started.init(&base);
+            assert_eq!(root["status"], "ok", "the root still answers: {root}");
+        }
+        DID_PROVIDER => {
+            let did = started.send(&json!({ "op": "get_did" }));
+            assert_eq!(
+                did["status"], "ok",
+                "the started provider must answer get_did: {did}"
+            );
+            let did_value = did["data"]["did"]
+                .as_str()
+                .expect("get_did must name the DID")
+                .to_string();
+            assert!(
+                did_value.starts_with("did:key:"),
+                "get_did must answer a did:key DID: {did}"
+            );
+
+            let storage = provider_storage_root(DID_PROVIDER, &base);
+            let granted = storage.join("nickname.enc");
+            let allowed = started.send(&json!({ "op": "set_nickname", "nickname": "Allowed" }));
+            assert_eq!(
+                allowed["status"], "ok",
+                "the granted write must succeed: {allowed}"
+            );
+            assert!(
+                granted.is_file(),
+                "the granted nickname file must exist: {}",
+                granted.display()
+            );
+
+            let outside = tempfile::tempdir().expect("temporary outside directory");
+            let outside = resolved(outside.path());
+            let target = outside.join("nickname.enc");
+            fs::remove_file(&granted).expect("remove the granted nickname file");
+            std::os::unix::fs::symlink(&target, &granted).expect("point the granted path outside");
+            let denied = started.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
+            assert_eq!(
+                denied["status"], "error",
+                "the outside write must be denied: {denied}"
+            );
+            assert_eq!(denied["code"], "storage_error");
+            assert!(
+                denied["message"].as_str().is_some_and(
+                    |message| message.starts_with("did-provider: failed to save nickname:")
+                ),
+                "the denial must name the failed write: {denied}"
+            );
+            assert!(
+                !target.exists(),
+                "the outside write must create nothing: {}",
+                target.display()
+            );
+            assert_eq!(
+                fs::read_dir(&outside)
+                    .expect("the outside directory must be readable")
+                    .count(),
+                0,
+                "the outside directory must stay empty: {}",
+                outside.display()
+            );
+            fs::remove_file(&granted).expect("remove the outside symlink");
+
+            let after = started.send(&json!({ "op": "get_did" }));
+            assert_eq!(
+                after["status"], "ok",
+                "the provider must stay in service: {after}"
+            );
+        }
+        other => panic!("the journey names no provider whose leg it knows: {other}"),
+    }
+
+    assert_eq!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .count(),
+        1,
+        "the launcher must write one profile into the directory it is given: {}",
+        profile_dir.display()
+    );
+    started.shutdown();
+}
+
+/// M1 check C0, one end-to-end journey: did first, then wallet, each starts
+/// confined through the lab stand-in on macOS, or the stand-in refuses the
+/// host with its own reason and starts no provider.
 ///
 /// Each provider passes its own committed declared-rights file and its own
-/// binary to `standin_refusals_for`, which runs 094's cases. The did binary
-/// comes from `did_provider_binary`; the wallet binary comes from
-/// `CARGO_BIN_EXE_wallet-provider`. Either start that this test does not refuse
-/// returns no provider and creates no storage root or profile.
+/// binary. `standin_confined_journey` runs the macOS leg first, so a stand-in
+/// that starts a provider bare fails at the outside write. Then
+/// `standin_refusals_for` runs every host and process refusal, including the
+/// three simulated Linux host reports that each name one missing primitive, a
+/// simulated `macos` host that reports Landlock unavailable, and the simulated
+/// Linux host that reports nothing missing; a reported missing primitive is
+/// refused whatever its OS. Every refused case returns no provider, writes no
+/// profile and creates no storage root. The did
+/// binary comes from `did_provider_binary`; the wallet binary comes from
+/// `CARGO_BIN_EXE_wallet-provider`. Linux stays a design plus a simulated
+/// refusal: nothing here probes a real kernel or claims Linux enforcement. The
+/// stand-in is test code and not the Runtime.
 ///
-/// Falsifier: WP112 starts the binary bare in the OS refusal, so did's case (a)
-/// returns Started; WP113 starts it bare after a failed `init`, so did's case
-/// (e) returns Started; WP115 ignores the writer's refusal and starts under the
-/// committed `confine.sb`, so did's case (d) returns Started instead of its
-/// reason. WP118 removes the tool check, so did's case (c2) is Started; WP119
-/// removes the binary-file check, so did's case (c3) panics in `resolved`;
-/// WP120 returns `Ok(provider)` for an `init` answer that is not `ok`, so did's
-/// case (f) is Started. WP125 makes the absent-tool check never fire, so did's
-/// case (c) reads the wrong-tool reason and lacks `is absent`; WP126 drops the
-/// OS from the wrong-tool reason, so did's case (c2) lacks `on macos`.
+/// Falsifier: WP112 starts the binary bare in the host refusal, so did's case
+/// (a) returns Started; WP114 (and the host rows' planted fallbacks) start the
+/// binary without the generator and `sandbox-exec`, so the macOS leg succeeds
+/// at the outside write; WP113 starts it bare after a failed `init`, so did's
+/// case (e) returns Started; WP115 ignores the writer's refusal and starts
+/// under the committed `confine.sb`, so did's case (d) returns Started instead
+/// of its reason. WP118 removes the tool check, so did's case (c2) is Started;
+/// WP119 removes the binary-file check, so did's case (c3) panics in
+/// `resolved`; WP120 returns `Ok(provider)` for an `init` answer that is not
+/// `ok`, so did's case (f) is Started. WP125 makes the absent-tool check never
+/// fire, so did's case (c) reads the wrong-tool reason and lacks `is absent`;
+/// WP126 drops the OS from the wrong-tool reason, so did's case (c2) lacks `on
+/// macos`. WP131 starts the binary bare on a simulated Linux host that reports
+/// a primitive unavailable, so did's Landlock row returns Started. WP132
+/// returns one fixed reason that names no primitive, so did's Landlock row
+/// loses the design's words. WP135 moves the `DECLARED_CONFINED_OS` lookup
+/// back above the missing-primitive check, so did's new `macos` Landlock row
+/// returns Started; WP136 prefixes the missing-primitive reason with
+/// `linux has no confinement design; `, so did's Landlock row carries the
+/// forbidden words; WP137 drops the `{name} start on {os} is refused: `
+/// prefix from the final `Err`, so did's first host row, plan9, lacks it.
 #[test]
-fn standin_launcher_refuses_a_start_it_cannot_confine() {
+fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
     let providers: [(&str, &Path, Value); 2] = [
         (
             DID_PROVIDER,
@@ -3818,193 +4178,9 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         ),
     ];
     for (name, provider, declared) in &providers {
+        standin_confined_journey(name, provider, declared);
         standin_refusals_for(name, provider, declared);
     }
-}
-
-/// The lab stand-in launcher starts the wallet provider confined.
-///
-/// The launcher is Started from wallet's committed declared-rights file: it
-/// wrote one profile into the given directory, the provider answered `init`
-/// `ok` inside the launcher and created its wallet directory, and `status`
-/// answers `ok`. One `init` for an unrelated temporary base, whose shared
-/// parent exists first, is refused by `assert_storage_error` and creates
-/// nothing, as the first case of `confined_outside_write_is_denied` holds. The
-/// root still answers `ok`, and `shutdown` answers `ok` and exits 0.
-///
-/// Falsifier: WP114 replaces the generated-profile start with a bare start
-/// that skips the generator and `sandbox-exec`; the launcher is then Started,
-/// and this test fails at the outside `init`, which succeeds instead of being
-/// refused.
-#[test]
-fn standin_launcher_starts_wallet_confined_under_the_generated_profile() {
-    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
-    }
-    let declared_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
-    let declared = read_declared_rights("wallet-provider", &declared_path)
-        .unwrap_or_else(|err| panic!("{err}"));
-    let fixture = tempfile::tempdir().expect("temporary wallet base");
-    let base = resolved(fixture.path());
-    let profile_root = tempfile::tempdir().expect("temporary profile root");
-    let profile_dir = resolved(profile_root.path());
-    let mut provider = standin_spawn_confined_provider(
-        std::env::consts::OS,
-        Path::new(SANDBOX_EXEC),
-        "wallet-provider",
-        Path::new(PROVIDER_BINARY),
-        &base,
-        &declared,
-        &profile_dir,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
-    assert!(
-        wallet_dir(&base).is_dir(),
-        "init must have created the wallet directory inside the profile: {}",
-        wallet_dir(&base).display()
-    );
-    let status = provider.send(&json!({ "op": "status" }));
-    assert_eq!(
-        status["status"], "ok",
-        "the started provider must answer status: {status}"
-    );
-
-    let outside = tempfile::tempdir().expect("temporary outside directory");
-    let outside = resolved(outside.path());
-    let outside_wallet = wallet_dir(&outside);
-    fs::create_dir_all(storage_parent(WALLET_PROVIDER, &outside)).expect("outside parent fixture");
-    let denied = provider.init(&outside);
-    assert_storage_error(&denied);
-    assert!(
-        !outside_wallet.exists(),
-        "a denied write must create nothing outside the wallet root: {}",
-        outside_wallet.display()
-    );
-
-    let root = provider.init(&base);
-    assert_eq!(root["status"], "ok", "the root still answers: {root}");
-
-    assert_eq!(
-        fs::read_dir(&profile_dir)
-            .expect("the profile directory must be readable")
-            .count(),
-        1,
-        "the launcher must write one profile into the directory it is given: {}",
-        profile_dir.display()
-    );
-
-    provider.shutdown();
-}
-
-/// The lab stand-in launcher starts the did provider confined.
-///
-/// The launcher is Started from did's committed declared-rights file: it wrote
-/// one profile, the provider answered `init` `ok` with did's fixture device
-/// key, and `get_did` names the derived DID. One outside write, did's first
-/// `outside_write_denied` case, points the granted nickname file at an
-/// unrelated directory; `set_nickname` is refused with `storage_error` and
-/// creates nothing. The root still answers `get_did`, and `shutdown` answers
-/// `ok` and exits 0.
-///
-/// Falsifier: WP124 makes the stand-in use wallet's root layout for did; `init`
-/// cannot write `<base>/did`, so the launcher is Refused and this test fails at
-/// the start.
-#[test]
-fn standin_launcher_starts_did_confined_under_the_generated_profile() {
-    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
-    }
-    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
-        .unwrap_or_else(|err| panic!("{err}"));
-    let fixture = tempfile::tempdir().expect("temporary did base");
-    let base = resolved(fixture.path());
-    let profile_root = tempfile::tempdir().expect("temporary profile root");
-    let profile_dir = resolved(profile_root.path());
-    let mut provider = standin_spawn_confined_provider(
-        std::env::consts::OS,
-        Path::new(SANDBOX_EXEC),
-        DID_PROVIDER,
-        did_provider_binary(),
-        &base,
-        &declared,
-        &profile_dir,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
-
-    let did = provider.send(&json!({ "op": "get_did" }));
-    assert_eq!(
-        did["status"], "ok",
-        "the started provider must answer get_did: {did}"
-    );
-    let did_value = did["data"]["did"]
-        .as_str()
-        .expect("get_did must name the DID")
-        .to_string();
-    assert!(
-        did_value.starts_with("did:key:"),
-        "get_did must answer a did:key DID: {did}"
-    );
-
-    let storage = provider_storage_root(DID_PROVIDER, &base);
-    let granted = storage.join("nickname.enc");
-    let allowed = provider.send(&json!({ "op": "set_nickname", "nickname": "Allowed" }));
-    assert_eq!(
-        allowed["status"], "ok",
-        "the granted write must succeed: {allowed}"
-    );
-    assert!(
-        granted.is_file(),
-        "the granted nickname file must exist: {}",
-        granted.display()
-    );
-
-    let outside = tempfile::tempdir().expect("temporary outside directory");
-    let outside = resolved(outside.path());
-    let target = outside.join("nickname.enc");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
-    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path outside");
-    let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
-    assert_eq!(
-        denied["status"], "error",
-        "the outside write must be denied: {denied}"
-    );
-    assert_eq!(denied["code"], "storage_error");
-    assert!(
-        denied["message"]
-            .as_str()
-            .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
-        "the denial must name the failed write: {denied}"
-    );
-    assert!(
-        !target.exists(),
-        "the outside write must create nothing: {}",
-        target.display()
-    );
-    assert_eq!(
-        fs::read_dir(&outside)
-            .expect("the outside directory must be readable")
-            .count(),
-        0,
-        "the outside directory must stay empty: {}",
-        outside.display()
-    );
-    fs::remove_file(&granted).expect("remove the outside symlink");
-
-    let after = provider.send(&json!({ "op": "get_did" }));
-    assert_eq!(
-        after["status"], "ok",
-        "the provider must stay in service: {after}"
-    );
-    assert_eq!(
-        fs::read_dir(&profile_dir)
-            .expect("the profile directory must be readable")
-            .count(),
-        1,
-        "the launcher must write one profile into the directory it is given: {}",
-        profile_dir.display()
-    );
-    provider.shutdown();
 }
 
 /// The class one suite case must answer with, carried by the entry the suite
@@ -4138,6 +4314,7 @@ fn suite_entry(case: &'static str, class: SuiteClass, answer: &Value) -> SuiteEn
 /// that is not `ok` or that does not bind to its request fails the test,
 /// because the one wallet request path always answers a bound response.
 fn wallet_suite_entry(
+    label: &str,
     case: &'static str,
     class: SuiteClass,
     request: &WalletProviderRequestV2,
@@ -4145,14 +4322,17 @@ fn wallet_suite_entry(
 ) -> SuiteEntry {
     assert_eq!(
         answer["status"], "ok",
-        "{case}: wallet_contract must answer through the protocol: {answer}"
+        "{label}: {case}: wallet_contract must answer through the protocol: {answer}"
     );
     let data = answer.get("data").unwrap_or_else(|| {
-        panic!("{case}: wallet_contract answer must carry a bound response: {answer}")
+        panic!("{label}: {case}: wallet_contract answer must carry a bound response: {answer}")
     });
-    let bytes = serde_json::to_vec(data).expect("bound response must serialize");
+    let bytes = serde_json::to_vec(data)
+        .unwrap_or_else(|err| panic!("{label}: {case}: the bound response must serialize: {err}"));
     let result = WalletProviderResponseV2::decode_for_request(&bytes, request)
-        .unwrap_or_else(|err| panic!("{case}: provider response must bind to its request: {err}"))
+        .unwrap_or_else(|err| {
+            panic!("{label}: {case}: provider response must bind to its request: {err}")
+        })
         .result;
     let outcome = match result {
         WalletResultV2::Ok { .. } => SuiteOutcome::Ok,
@@ -4186,8 +4366,14 @@ fn wallet_suite_entry(
 /// cannot read as a permitted case. A refusal keeps the answer's `status`, its
 /// `code` and the stable start of its `message`, so two records from different
 /// roots compare equal. Both callers drive one started provider through this
-/// function; it starts none.
-fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
+/// function; it starts none. `label` names the provider, the `B3 journey` and
+/// the start this call drives, and every refusal this function raises starts
+/// with it, so a failed step names the provider and the step.
+fn wallet_standin_suite(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.init(root);
@@ -4207,13 +4393,16 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
             create_new: false,
         });
     record.push(wallet_suite_entry(
+        label,
         "create_managed_account",
         SuiteClass::Permitted,
         &request,
         &answer,
     ));
 
-    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = tempfile::tempdir().unwrap_or_else(|err| {
+        panic!("{label}: the temporary outside directory must be created: {err}")
+    });
     let outside = resolved(outside.path());
     for (case, denied_base) in &outside_write_cases(root, &outside) {
         prepare_outside_write_case(case, denied_base);
@@ -4258,8 +4447,10 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
 /// case it was pushed for. A refusal keeps the answer's `status`, its `code`
 /// and the stable start of its `message`, so two records from different roots
 /// compare equal. Both callers drive one started provider through this
-/// function; it starts none.
-fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
+/// function; it starts none. `label` names the provider, the `B3 journey` and
+/// the start this call drives, and every refusal this function raises starts
+/// with it, so a failed step names the provider and the step.
+fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.send(&json!({
@@ -4275,7 +4466,7 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let did_data = provider.send(&json!({ "op": "get_did" }));
     let did = did_data["data"]["did"]
         .as_str()
-        .expect("get_did must name the DID")
+        .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
         .to_string();
     record.push(suite_entry("get_did", SuiteClass::Permitted, &did_data));
 
@@ -4285,7 +4476,7 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let nickname = provider.send(&json!({ "op": "get_nickname" }));
     assert_eq!(
         nickname["data"]["nickname"], "Confined",
-        "the confined provider must return the stored nickname: {nickname}"
+        "{label}: the confined provider must return the stored nickname: {nickname}"
     );
     record.push(suite_entry(
         "get_nickname",
@@ -4296,7 +4487,7 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let persona = provider.send(&json!({ "op": "get_persona_did", "name": "fixture" }));
     assert_eq!(
         persona["data"]["owner_did"], did,
-        "the persona must belong to the provider's DID: {persona}"
+        "{label}: the persona must belong to the provider's DID: {persona}"
     );
     record.push(suite_entry(
         "get_persona_did",
@@ -4310,37 +4501,44 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let granted = provider_storage_root(DID_PROVIDER, root).join("nickname.enc");
     assert!(
         granted.is_file(),
-        "set_nickname must have written the granted file: {}",
+        "{label}: set_nickname must have written the granted file: {}",
         granted.display()
     );
-    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = tempfile::tempdir().unwrap_or_else(|err| {
+        panic!("{label}: the temporary outside directory must be created: {err}")
+    });
     let outside = resolved(outside.path());
     let target = outside.join("nickname.enc");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
-    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path outside");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted nickname file must be removed: {err}"));
+    std::os::unix::fs::symlink(&target, &granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted path must point outside: {err}"));
     let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
     assert_eq!(
         denied["status"], "error",
-        "the outside write must be denied: {denied}"
+        "{label}: the outside write must be denied: {denied}"
     );
-    assert_eq!(denied["code"], "storage_error");
+    assert_eq!(
+        denied["code"], "storage_error",
+        "{label}: the outside write must refuse with storage_error: {denied}"
+    );
     assert!(
         denied["message"]
             .as_str()
             .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
-        "the denial must name the failed write: {denied}"
+        "{label}: the denial must name the failed write: {denied}"
     );
     assert!(
         !target.exists(),
-        "nothing may land outside the storage root: {}",
+        "{label}: nothing may land outside the storage root: {}",
         target.display()
     );
     assert_eq!(
         fs::read_dir(&outside)
-            .expect("the outside directory must be readable")
+            .unwrap_or_else(|err| panic!("{label}: the outside directory must be readable: {err}"))
             .count(),
         0,
-        "the outside directory must stay empty: {}",
+        "{label}: the outside directory must stay empty: {}",
         outside.display()
     );
     record.push(suite_entry(
@@ -4348,7 +4546,8 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
         SuiteClass::Denied,
         &denied,
     ));
-    fs::remove_file(&granted).expect("remove the outside symlink");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the outside symlink must be removed: {err}"));
 
     // The second `outside_write_denied` target: a sibling of `did/` under the
     // same base. The test creates it before it links, so the refusal comes from
@@ -4357,36 +4556,43 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let restored = provider.send(&json!({ "op": "set_nickname", "nickname": "Sibling source" }));
     assert_eq!(
         restored["status"], "ok",
-        "the granted write must recover the file: {restored}"
+        "{label}: the granted write must recover the file: {restored}"
     );
     let sibling = storage_parent(DID_PROVIDER, root).join("sibling");
-    fs::create_dir_all(&sibling).expect("sibling directory under the same base");
+    fs::create_dir_all(&sibling).unwrap_or_else(|err| {
+        panic!("{label}: the sibling directory under the same base must be created: {err}")
+    });
     let target = sibling.join("nickname.enc");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
-    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path at its sibling");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted nickname file must be removed: {err}"));
+    std::os::unix::fs::symlink(&target, &granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted path must point at its sibling: {err}"));
     let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Sibling" }));
     assert_eq!(
         denied["status"], "error",
-        "the sibling write must be denied: {denied}"
+        "{label}: the sibling write must be denied: {denied}"
     );
-    assert_eq!(denied["code"], "storage_error");
+    assert_eq!(
+        denied["code"], "storage_error",
+        "{label}: the sibling write must refuse with storage_error: {denied}"
+    );
     assert!(
         denied["message"]
             .as_str()
             .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
-        "the denial must name the failed write: {denied}"
+        "{label}: the denial must name the failed write: {denied}"
     );
     assert!(
         !target.exists(),
-        "nothing may land beside the storage root: {}",
+        "{label}: nothing may land beside the storage root: {}",
         target.display()
     );
     assert_eq!(
         fs::read_dir(&sibling)
-            .expect("the sibling directory must be readable")
+            .unwrap_or_else(|err| panic!("{label}: the sibling directory must be readable: {err}"))
             .count(),
         0,
-        "the sibling directory must stay empty: {}",
+        "{label}: the sibling directory must stay empty: {}",
         sibling.display()
     );
     record.push(suite_entry(
@@ -4394,7 +4600,8 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
         SuiteClass::Denied,
         &denied,
     ));
-    fs::remove_file(&granted).expect("remove the sibling symlink");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the sibling symlink must be removed: {err}"));
 
     // The read half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`:
     // the provider's own encrypted nickname is copied beneath STORAGE_PARENT,
@@ -4402,44 +4609,55 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let restored = provider.send(&json!({ "op": "set_nickname", "nickname": "Planted source" }));
     assert_eq!(
         restored["status"], "ok",
-        "the granted write must recover the file: {restored}"
+        "{label}: the granted write must recover the file: {restored}"
     );
     let planted = storage_parent(DID_PROVIDER, root)
         .join("sibling")
         .join("did");
-    fs::create_dir_all(&planted).expect("planted directory beneath STORAGE_PARENT");
+    fs::create_dir_all(&planted).unwrap_or_else(|err| {
+        panic!("{label}: the planted directory beneath STORAGE_PARENT must be created: {err}")
+    });
     let planted_path = planted.join("nickname.enc");
-    fs::copy(&granted, &planted_path).expect("copy the encrypted nickname beneath the parent");
-    let planted_bytes = fs::read(&planted_path).expect("read the planted file");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
+    fs::copy(&granted, &planted_path).unwrap_or_else(|err| {
+        panic!("{label}: the encrypted nickname must be copied beneath the parent: {err}")
+    });
+    let planted_bytes = fs::read(&planted_path)
+        .unwrap_or_else(|err| panic!("{label}: the planted file must be readable: {err}"));
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted nickname file must be removed: {err}"));
     std::os::unix::fs::symlink(&planted_path, &granted)
-        .expect("point the granted path at the plant");
+        .unwrap_or_else(|err| panic!("{label}: the granted path must point at the plant: {err}"));
     let denied = provider.send(&json!({
         "op": "init",
         "config": provider_init_config(DID_PROVIDER, root),
     }));
     assert_eq!(
         denied["status"], "error",
-        "the planted read must be denied: {denied}"
+        "{label}: the planted read must be denied: {denied}"
     );
-    assert_eq!(denied["code"], "storage_error");
+    assert_eq!(
+        denied["code"], "storage_error",
+        "{label}: the planted read must refuse with storage_error: {denied}"
+    );
     assert!(
         denied["message"]
             .as_str()
             .is_some_and(|message| message.starts_with("did-provider: failed to read nickname:")),
-        "the refusal must reach the nickname loader: {denied}"
+        "{label}: the refusal must reach the nickname loader: {denied}"
     );
     assert_eq!(
-        fs::read(&planted_path).expect("the planted file must stay readable"),
+        fs::read(&planted_path)
+            .unwrap_or_else(|err| panic!("{label}: the planted file must stay readable: {err}")),
         planted_bytes,
-        "the planted file must stay unchanged"
+        "{label}: the planted file must stay unchanged"
     );
     record.push(suite_entry(
         "planted nickname beneath STORAGE_PARENT",
         SuiteClass::Denied,
         &denied,
     ));
-    fs::remove_file(&granted).expect("remove the planted symlink");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the planted symlink must be removed: {err}"));
 
     let after = provider.send(&json!({ "op": "get_did" }));
     record.push(suite_entry(
@@ -4491,14 +4709,19 @@ fn assert_suite_outcomes(label: &str, record: &[SuiteEntry], cases: &[(&str, Sui
     );
 }
 
-/// Requires the stand-in record to equal the committed-profile record entry by
-/// entry, and names the first case that differs. Both suite callers share this
-/// comparison, so the wallet and did proofs apply one rule.
-fn assert_standin_matches_oracle(oracle_record: &[SuiteEntry], standin_record: &[SuiteEntry]) {
+/// Requires the stand-in record of `name` to equal its committed-profile
+/// record entry by entry, and names the provider, the step and the first case
+/// that differs. The B3 journey compares both providers through this one
+/// function, so did and wallet apply one comparison rule (P10).
+fn assert_standin_matches_oracle(
+    name: &str,
+    oracle_record: &[SuiteEntry],
+    standin_record: &[SuiteEntry],
+) {
     assert_eq!(
         oracle_record.len(),
         standin_record.len(),
-        "the stand-in start must record as many cases as the committed confine.sb: \
+        "{name} stand-in start must record as many cases as the committed confine.sb: \
          committed {}, stand-in {}",
         oracle_record.len(),
         standin_record.len()
@@ -4506,150 +4729,170 @@ fn assert_standin_matches_oracle(oracle_record: &[SuiteEntry], standin_record: &
     for (oracle_entry, standin_entry) in oracle_record.iter().zip(standin_record) {
         assert_eq!(
             oracle_entry, standin_entry,
-            "the stand-in start differs from the committed confine.sb on case {:?}: \
+            "{name} stand-in start differs from the committed confine.sb on case {:?}: \
              committed {:?}, stand-in {:?}",
             oracle_entry.case, oracle_entry.outcome, standin_entry.outcome
         );
     }
 }
 
-/// The stand-in's start answers every permitted and denied suite case as the
-/// committed `confine.sb` does.
-///
-/// `wallet_standin_suite` runs once on a provider started under the committed
-/// profile through `ConfinedProvider::start`, and once on a provider Started by
-/// `standin_spawn_confined_provider` from wallet's committed declared-rights
-/// file, each on its own fresh temporary root. Each record must hold one entry
-/// per case of `SUITE_CASES`, in its order, with its name and class; every
-/// permitted case answers `ok`, and the key-writing call answers `ok` only when
-/// its bound wallet result is `ok`; every denied case is refused in both
-/// records, and the two records are equal entry by entry; a difference names
-/// the first differing case. The lab stand-in is test code and not the Runtime.
-///
-/// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
-/// the wallet directory; the widened grant permits `<root>/sibling`, so the
-/// stand-in record holds `ok` where the committed profile refuses and this test
-/// fails on that case. WP121 removes the planted-key push, so the record holds
-/// eight entries and this test fails naming the missing case.
-#[test]
-fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
-    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
-    }
-    let declared_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
-    let declared = read_declared_rights("wallet-provider", &declared_path)
-        .unwrap_or_else(|err| panic!("{err}"));
-
-    let oracle_fixture = tempfile::tempdir().expect("temporary wallet root");
-    let oracle_root = resolved(oracle_fixture.path());
-    let mut oracle = ConfinedProvider::start(&oracle_root);
-    let oracle_record = wallet_standin_suite(&mut oracle, &oracle_root);
-
-    let standin_fixture = tempfile::tempdir().expect("temporary wallet root");
-    let standin_root = resolved(standin_fixture.path());
-    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
-    let profile_dir = resolved(profile_fixture.path());
-    let mut standin = standin_spawn_confined_provider(
-        std::env::consts::OS,
-        Path::new(SANDBOX_EXEC),
-        "wallet-provider",
-        Path::new(PROVIDER_BINARY),
-        &standin_root,
-        &declared,
-        &profile_dir,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
-    let standin_record = wallet_standin_suite(&mut standin, &standin_root);
-
-    oracle.shutdown();
-    standin.shutdown();
-
-    assert_suite_outcomes("the committed confine.sb", &oracle_record, &SUITE_CASES);
-    assert_suite_outcomes(
-        "the stand-in's generated profile",
-        &standin_record,
-        &SUITE_CASES,
-    );
-    assert_standin_matches_oracle(&oracle_record, &standin_record);
+/// One provider's place in the B3 journey: the name the stand-in serves, the
+/// binary it starts, the one suite that drives that provider, and the cases
+/// that suite must record.
+struct B3Provider {
+    name: &'static str,
+    binary: &'static Path,
+    suite: fn(&mut ConfinedProvider, &Path, &str) -> Vec<SuiteEntry>,
+    cases: &'static [(&'static str, SuiteClass)],
 }
 
-/// The stand-in's did start answers every permitted and denied did suite case
-/// as the committed `confine.sb` does.
-///
-/// `did_standin_suite` runs once on did's binary started under did's committed
-/// `confine.sb` through `ConfinedProvider::start_under` with did's layout, and
-/// once on a provider Started by `standin_spawn_confined_provider` from did's
-/// committed declared-rights file, each on its own fresh temporary root. Each
-/// record must hold one entry per case of `DID_SUITE_CASES`, in its order, with
-/// its name and class; every permitted case answers `ok`, every denied case is
-/// refused in both records, and the two records are equal entry by entry; a
-/// difference names the first differing case. The second outside write is the
-/// sibling of `did/` under the same base, so a write grant that stops at
-/// `STORAGE_ROOT` is separable from one that covers `STORAGE_PARENT`; the
-/// unrelated directory alone cannot separate them because both grants refuse
-/// it. The lab stand-in is test code and not the Runtime.
-///
-/// Falsifier: WP124 makes the stand-in use wallet's root layout for did; the
-/// stand-in binds `STORAGE_ROOT` to `<root>/ElastOS/SystemServices/Wallet`, so
-/// its `init` cannot write `<root>/did` and the start is Refused. This test
-/// fails at the start and records no case. WP127 appends a write grant on
-/// `STORAGE_PARENT` to the stand-in's generated profile for did, so the sibling
-/// write answers `ok`; the stand-in start's suite then fails at its `the
-/// sibling write must be denied` assertion, before the two starts' records are
-/// compared. The unrelated outside write passes before it, and the planted read
-/// runs after it and needs a read grant WP127 does not add.
-#[test]
-fn standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite() {
-    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
-    }
-    let did_binary = did_provider_binary();
-    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
-        .unwrap_or_else(|err| panic!("{err}"));
-
-    let oracle_fixture = tempfile::tempdir().expect("temporary did root");
-    let oracle_root = resolved(oracle_fixture.path());
-    let bindings = canonical_bindings(DID_PROVIDER, &oracle_root, did_binary);
+/// Starts `name`'s binary under that provider's committed `confine.sb` on
+/// `root`, through the one launch builder and the provider's canonical
+/// bindings. The B3 journey takes this start as the record the committed
+/// oracle itself produces.
+fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvider {
+    let bindings = canonical_bindings(name, root, binary);
     create_shared_ancestors(&bindings);
     let paths: Vec<(&str, &Path)> = bindings
         .iter()
-        .map(|(name, path)| (*name, path.as_path()))
+        .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
-    let mut oracle =
-        ConfinedProvider::start_under(&did_provider_dir().join("confine.sb"), &paths, did_binary);
-    let oracle_record = did_standin_suite(&mut oracle, &oracle_root);
+    ConfinedProvider::start_under(&confine_oracle_path(name), &paths, binary)
+}
 
-    let standin_fixture = tempfile::tempdir().expect("temporary did root");
+/// One provider's leg of the B3 journey, from its committed declared-rights
+/// file to its permitted and denied suite record.
+///
+/// The leg reads the provider's committed declared-rights file and its
+/// committed `confine.sb`, then starts the binary through the lab stand-in into
+/// a fresh profile directory. It reads the one file the stand-in wrote there,
+/// which is the file the launch used, and requires that file to pass
+/// `check_profile_contract`, to pass `check_declared_rights` against the
+/// declared rights it was generated from, and to equal the committed oracle
+/// through `compare_profile_to_its_oracle`. The provider's suite then drives
+/// the stand-in start and a second start under the committed file, each on its
+/// own fresh root; both records must hold every case of `provider.cases` in
+/// order with its class, and the two records must agree entry by entry. Each
+/// suite step's failure starts with the provider, `B3 journey` and the start it
+/// drives. A refusal of `standin_oracle_start`'s own launch comes from
+/// `ConfinedProvider::start_under`, which this journey does not change. The
+/// stand-in is test code and not the Runtime.
+fn standin_b3_journey(provider: &B3Provider) {
+    let name = provider.name;
+    let declared = read_declared_rights(name, &declared_rights_path(name))
+        .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
+    let committed = read_allow_rule_profile(name, &confine_oracle_path(name))
+        .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
+
+    let standin_fixture = tempfile::tempdir().expect("temporary provider root");
     let standin_root = resolved(standin_fixture.path());
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
     let mut standin = standin_spawn_confined_provider(
-        std::env::consts::OS,
+        StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
-        DID_PROVIDER,
-        did_binary,
+        name,
+        provider.binary,
         &standin_root,
         &declared,
         &profile_dir,
     )
-    .unwrap_or_else(|err| panic!("{err}"));
-    let standin_record = did_standin_suite(&mut standin, &standin_root);
+    .unwrap_or_else(|err| panic!("{name} B3 journey: the stand-in start is refused: {err}"));
 
-    oracle.shutdown();
+    let launched = read_launched_profile(name, &profile_dir)
+        .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
+    check_profile_contract(name, &launched).unwrap_or_else(|err| {
+        panic!("{name} B3 journey: the launched profile must pass the contract check: {err}")
+    });
+    check_declared_rights(name, &launched, &declared).unwrap_or_else(|err| {
+        panic!("{name} B3 journey: the launched profile must trace to its declared rights: {err}")
+    });
+    compare_profile_to_its_oracle(name, &launched, &committed).unwrap_or_else(|err| {
+        panic!("{name} B3 journey: the launched profile and its oracle disagree: {err}")
+    });
+
+    let standin_label = format!("{name} B3 journey (the stand-in start)");
+    let standin_record = (provider.suite)(&mut standin, &standin_root, &standin_label);
+
+    let oracle_fixture = tempfile::tempdir().expect("temporary provider root");
+    let oracle_root = resolved(oracle_fixture.path());
+    let mut oracle = standin_oracle_start(name, provider.binary, &oracle_root);
+    let oracle_label = format!("{name} B3 journey (the start under the committed confine.sb)");
+    let oracle_record = (provider.suite)(&mut oracle, &oracle_root, &oracle_label);
+
     standin.shutdown();
+    oracle.shutdown();
 
     assert_suite_outcomes(
-        "did's committed confine.sb",
+        &format!("{name}'s committed confine.sb"),
         &oracle_record,
-        &DID_SUITE_CASES,
+        provider.cases,
     );
     assert_suite_outcomes(
-        "did's stand-in generated profile",
+        &format!("{name}'s stand-in launched profile"),
         &standin_record,
-        &DID_SUITE_CASES,
+        provider.cases,
     );
-    assert_standin_matches_oracle(&oracle_record, &standin_record);
+    assert_standin_matches_oracle(name, &oracle_record, &standin_record);
+}
+
+/// M1 check B3, one end-to-end journey for each file profile: did first, then
+/// wallet. Each provider starts from its committed declared-rights file
+/// through the lab stand-in into a fresh profile directory, and the one file
+/// the stand-in wrote there is the file the launch used. That file must pass
+/// the two contract checks and equal the provider's committed `confine.sb`
+/// through the one comparison body `compare_profile_to_its_oracle`
+/// (`standin_b3_journey`). The same provider's permitted and denied suite then
+/// runs on the stand-in start and on a start under the committed file, and
+/// both records must hold their provider's cases in order and agree entry by
+/// entry. A stand-in that changes the launched profile after the writer, in a
+/// way the suite does not exercise, fails at the launched-file checks, and a
+/// deny form there fails only at the oracle comparison. The stand-in is test
+/// code and not the Runtime.
+///
+/// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
+/// the provider's storage root; the widened grant permits did's sibling write
+/// beneath the base, so did's suite step fails at the sibling write where the
+/// record must refuse it. WP121 removes the planted-key push, so wallet's
+/// stand-in record holds eight entries where `SUITE_CASES` holds nine and the
+/// journey fails naming the missing case. WP124 makes the stand-in use wallet's
+/// root layout for did, so did's start is refused at its first `init`. WP127
+/// appends a write grant on `STORAGE_PARENT` to did's launched profile, so the
+/// journey fails at did's launched-profile check, where `check_declared_rights`
+/// refuses the appended allow form because no declared right names it. WP133
+/// appends one allow form the suite does not exercise to the launched file, so
+/// the journey fails at that same check, where `check_declared_rights` refuses
+/// the appended allow form because no declared right names it. WP134 removes
+/// `(deny network*)` from the launched file, so the journey fails at that same
+/// check, where `check_profile_contract` refuses the profile without its
+/// explicit network denial. WP138 appends
+/// `(deny file-write* (literal "/private/var/cc-confine-launched"))` to the
+/// launched file; only `compare_profile_to_its_oracle` catches it, because the
+/// head keeps its order, the contract checks read only allow forms and no suite
+/// case reads that literal, so the journey fails at its launched profile and
+/// its oracle disagree panic, which names the planted form.
+#[test]
+fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let providers = [
+        B3Provider {
+            name: DID_PROVIDER,
+            binary: did_provider_binary(),
+            suite: did_standin_suite,
+            cases: &DID_SUITE_CASES,
+        },
+        B3Provider {
+            name: WALLET_PROVIDER,
+            binary: Path::new(PROVIDER_BINARY),
+            suite: wallet_standin_suite,
+            cases: &SUITE_CASES,
+        },
+    ];
+    for provider in &providers {
+        standin_b3_journey(provider);
+    }
 }
 
 /// The stand-in start uses the generated profile, not the committed file.
@@ -4686,7 +4929,7 @@ fn standin_start_runs_under_the_generated_profile_not_the_committed_file() {
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
     let refusal = standin_spawn_confined_provider(
-        std::env::consts::OS,
+        StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
         "wallet-provider",
         Path::new(PROVIDER_BINARY),
@@ -4744,6 +4987,7 @@ fn wallet_suite_entry_records_an_inner_refusal_as_refused() {
         "the outer answer stays ok for an inner refusal: {answer}"
     );
     let entry = wallet_suite_entry(
+        "wallet_suite_entry test",
         "create_managed_account",
         SuiteClass::Denied,
         &request,
@@ -5795,9 +6039,11 @@ fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> 
     Ok(AllowRuleSources { profiles, entries })
 }
 
-/// Reads one profile for the removal check and proves that `profile_forms`
-/// accepts it, or refuses with a reason that names the profile and its path.
-/// There is no skip path.
+/// Reads one profile and proves that `profile_forms` accepts it, or refuses
+/// with a reason that names the profile and its path. The removal check reads
+/// each committed profile through it, and the generated-profile test and the
+/// B3 journey read each provider's oracle through it too. There is no skip
+/// path.
 fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
     let profile = fs::read_to_string(path).map_err(|err| {
         format!(
@@ -5817,6 +6063,43 @@ fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
             )
         })
         .map(|_forms| profile)
+}
+
+/// The one profile file the lab stand-in wrote into `profile_dir`, read as
+/// text: the file the launch used, not a second copy of the generator's text.
+/// A directory that does not hold exactly one entry is a refusal that names
+/// the provider and the path, so the B3 journey reads no guessed file name and
+/// there is no skip path.
+fn read_launched_profile(name: &str, profile_dir: &Path) -> Result<String, String> {
+    let mut entries = fs::read_dir(profile_dir)
+        .map_err(|err| {
+            format!(
+                "{name} profile directory {} must be readable: {err}",
+                profile_dir.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            format!(
+                "{name} profile directory {} must list: {err}",
+                profile_dir.display()
+            )
+        })?;
+    if entries.len() != 1 {
+        return Err(format!(
+            "{name} launcher must write exactly one profile into {}: found {}",
+            profile_dir.display(),
+            entries.len()
+        ));
+    }
+    let profile = entries.remove(0);
+    fs::read_to_string(&profile).map_err(|err| {
+        format!(
+            "{name} launched profile {} must be readable: {err}",
+            profile.display()
+        )
+    })
 }
 
 /// The one heading line every confinement document uses for its falsifier
@@ -6307,21 +6590,83 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
     }
 }
 
+/// The one profile comparison: requires `generated` to hold the contract head
+/// in order and the same remaining forms as `committed`, in any order.
+///
+/// The committed profile holds only allow forms after its head, so the order
+/// of those forms does not change what is granted and the comparison sorts
+/// them; the head keeps its order. A mismatch returns the provider name, the
+/// forms only `generated` holds and the forms only `committed` holds.
+/// `generated_did_and_wallet_profiles_match_their_committed_oracles` compares
+/// the lab generator's text with each committed oracle, and the B3 journey
+/// compares the profile the stand-in launched with that same oracle, so the
+/// two callers share one comparison body (P10).
+fn compare_profile_to_its_oracle(
+    name: &str,
+    generated: &str,
+    committed: &str,
+) -> Result<(), String> {
+    let generated_forms = profile_forms(generated);
+    let committed_forms = profile_forms(committed);
+    let head = |forms: &[String]| {
+        forms
+            .iter()
+            .take(PROFILE_HEAD.len())
+            .map(String::as_str)
+            .eq(PROFILE_HEAD)
+    };
+    if !head(&generated_forms) {
+        return Err(format!(
+            "{name} generated profile must start with {PROFILE_HEAD:?}: {generated}"
+        ));
+    }
+    if !head(&committed_forms) {
+        return Err(format!(
+            "{name} committed profile must start with {PROFILE_HEAD:?}: {committed}"
+        ));
+    }
+    let mut generated_rest: Vec<String> = generated_forms
+        .iter()
+        .skip(PROFILE_HEAD.len())
+        .cloned()
+        .collect();
+    let mut committed_rest: Vec<String> = committed_forms
+        .iter()
+        .skip(PROFILE_HEAD.len())
+        .cloned()
+        .collect();
+    generated_rest.sort();
+    committed_rest.sort();
+    if generated_rest != committed_rest {
+        let only_generated: Vec<&String> = generated_rest
+            .iter()
+            .filter(|form| !committed_rest.contains(form))
+            .collect();
+        let only_committed: Vec<&String> = committed_rest
+            .iter()
+            .filter(|form| !generated_rest.contains(form))
+            .collect();
+        return Err(format!(
+            "{name} generated profile differs from its committed oracle: only in generated \
+             {only_generated:?}, only in committed {only_committed:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// The one lab generator builds each did and wallet profile from its
 /// declared-rights file and the contract head, and the generated profile
 /// equals that provider's committed `confine.sb`, the test oracle.
 ///
-/// The test reads `capsules/did-provider/confine.sb` and
-/// `capsules/wallet-provider/confine.sb` with `read_allow_rule_profile`, reads
-/// each provider's `tests/fixtures/confine/declared-rights.json` with
-/// `read_declared_rights`, then requires `check_profile_contract` and
-/// `check_declared_rights` to accept the generated profile. The committed
-/// profile holds only allow forms after its head, so the order of those forms
-/// does not change what is granted and the test compares them as sorted
-/// lists; the head keeps its order. A mismatch fails with the provider name,
-/// the forms only the generated profile holds and the forms only the committed
-/// one holds. The Runtime's own generator and its comparison are not built.
-/// The test reads files and starts no process, so it runs on every platform.
+/// The test reads each provider's `tests/fixtures/confine/declared-rights.json`
+/// with `read_declared_rights`, generates its profile with `generate_profile`,
+/// then requires `check_profile_contract` and `check_declared_rights` to accept
+/// the generated profile. The committed profile is read with
+/// `read_allow_rule_profile` and compared with the generated one through
+/// `compare_profile_to_its_oracle`; the B3 journey calls that same comparison
+/// on the profile the stand-in launched. The Runtime's own generator and its
+/// comparison are not built. The test reads files and starts no process, so it
+/// runs on every platform.
 ///
 /// Falsifier: WP105 makes `generate_profile` emit
 /// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after
@@ -6332,64 +6677,16 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
 /// the head keeps its order and neither contract check reads a deny form.
 #[test]
 fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
-    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("capsules/wallet-provider must sit under capsules/");
     for name in allow_rule_profiles() {
-        let profile_path = capsules.join(name).join("confine.sb");
-        let committed =
-            read_allow_rule_profile(name, &profile_path).unwrap_or_else(|err| panic!("{err}"));
-        let declared_path = capsules
-            .join(name)
-            .join("tests/fixtures/confine/declared-rights.json");
-        let declared =
-            read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
+        let committed = read_allow_rule_profile(name, &confine_oracle_path(name))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let declared = read_declared_rights(name, &declared_rights_path(name))
+            .unwrap_or_else(|err| panic!("{err}"));
         let generated = generate_profile(name, &declared).unwrap_or_else(|err| panic!("{err}"));
         check_profile_contract(name, &generated).unwrap_or_else(|err| panic!("{err}"));
         check_declared_rights(name, &generated, &declared).unwrap_or_else(|err| panic!("{err}"));
-        let generated_forms = profile_forms(&generated);
-        let committed_forms = profile_forms(&committed);
-        let head = |forms: &[String]| {
-            forms
-                .iter()
-                .take(PROFILE_HEAD.len())
-                .map(String::as_str)
-                .eq(PROFILE_HEAD)
-        };
-        assert!(
-            head(&generated_forms),
-            "{name} generated profile must start with {PROFILE_HEAD:?}: {generated}"
-        );
-        assert!(
-            head(&committed_forms),
-            "{name} committed profile must start with {PROFILE_HEAD:?}: {committed}"
-        );
-        let mut generated_rest: Vec<String> = generated_forms
-            .iter()
-            .skip(PROFILE_HEAD.len())
-            .cloned()
-            .collect();
-        let mut committed_rest: Vec<String> = committed_forms
-            .iter()
-            .skip(PROFILE_HEAD.len())
-            .cloned()
-            .collect();
-        generated_rest.sort();
-        committed_rest.sort();
-        if generated_rest != committed_rest {
-            let only_generated: Vec<&String> = generated_rest
-                .iter()
-                .filter(|form| !committed_rest.contains(form))
-                .collect();
-            let only_committed: Vec<&String> = committed_rest
-                .iter()
-                .filter(|form| !generated_rest.contains(form))
-                .collect();
-            panic!(
-                "{name} generated profile differs from its committed oracle: only in generated \
-                 {only_generated:?}, only in committed {only_committed:?}"
-            );
-        }
+        compare_profile_to_its_oracle(name, &generated, &committed)
+            .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 

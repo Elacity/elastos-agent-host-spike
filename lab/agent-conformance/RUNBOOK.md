@@ -144,7 +144,7 @@ the retained-root marker. Their exact edits and named tests are in
 Task 003 adds these rows to the same table:
 
 - `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
-- `ungranted_network_is_refused`: requires the same refusal for `elastos://net/stream`. This proves the network capability request is refused; provider execution is outside this check.
+- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted read`. Provider execution stays outside this row.
 - `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
 - `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
 - `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
@@ -161,8 +161,10 @@ inside the throwaway root. The directory locates the artifact; its hash names
 the bytes. Bundle-CID admission stays separate.
 
 The earlier no-operator rows stop before the storage constructor. The new live
-rows reach the existing AC-006-STORAGE exception, recorded in GAPS.md. Their
-requests fall outside the manifest bound. The guest returns the Bus error,
+rows reach the existing AC-006-STORAGE exception, recorded in GAPS.md. The
+ungranted read stays outside the Public pattern. The manifest declares
+`elastos://net/stream`, the fixture denies that pending request, and provider
+execution stays outside that row. The guest returns the Bus error,
 and the harness requires both the nonzero exit and the exact reason. An
 unexpected grant returns success without any provider invoke, causing the
 refusal test to fail while keeping the probe free of real effects. Every live
@@ -324,9 +326,11 @@ SKIPPED table row and exits non-zero. BLOCKED continues to mean a named open
 Runtime contract gap.
 
 The new selectors share the existing probe source, manifest, build staging,
-import checks and two-build SHA-256 checks. The manifest bound is
-`localhost://Public/agent-conformance-grants/*`; task 003's resources remain
-outside it. `Public` is the file-backed fixture root. The controller writes the seed
+import checks and two-build SHA-256 checks. The manifest declares
+`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
+The ungranted read stays outside the Public pattern. The fixture denies the
+pending network request, and provider execution stays outside that row.
+`Public` is the file-backed fixture root. The controller writes the seed
 through Runtime before the guest runs; Runtime owns the stored representation. The guest expects its bytes independently of the
 seed fixture and keeps them inside the capsule.
 
@@ -696,3 +700,5 @@ These rows use lab client sessions on the run client's attach and provider route
 Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there gives the Runtime no credit.
 
 The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.
+
+These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.

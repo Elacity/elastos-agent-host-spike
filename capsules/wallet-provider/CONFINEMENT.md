@@ -128,8 +128,14 @@ provider.
 
 The stand-in refuses in the order of these steps:
 
-1. An `os` outside `DECLARED_CONFINED_OS` is refused with one reason that
-   names that OS and the list where the stand-in applies confinement.
+1. A host report that `standin_host_refusal` refuses is refused with that one
+   reason, before any tool, binary or profile check, so a refused host writes
+   no profile and creates no storage root. A host that reports a missing
+   primitive is refused whatever its OS, before the `DECLARED_CONFINED_OS`
+   lookup, and that is the one host check. The report holds the OS name and
+   which of Landlock, user namespaces or the seccomp filter it reports
+   unavailable. The reason starts `{name} start on {os} is refused:` and
+   carries only its own case's words, as the journey paragraph below states.
 2. An absent `sandbox-exec` is refused with a reason that names the OS and the
    path.
 3. A present confinement tool that is not `SANDBOX_EXEC` is refused with a
@@ -153,29 +159,277 @@ Both file-profile providers start through this one stand-in:
 `wallet-provider` here and `did-provider` in the same test file, each with its
 own committed declared-rights file, binary and storage-root layout. did's
 start binds `<base>/did` as `STORAGE_ROOT` and `<base>` as `STORAGE_PARENT`.
-`standin_launcher_starts_did_confined_under_the_generated_profile` holds the
-did journey, and
-`standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
-compares did's suite on the committed `confine.sb` and on a stand-in start,
-through the same record type and comparison as the wallet suite.
+`standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+holds M1 check B3 for both: it reads the provider's committed declared-rights
+file, starts the binary through the stand-in into a fresh profile directory,
+reads the one file the stand-in wrote there, and compares that launched profile
+and the provider's permitted and denied suite with the provider's committed
+`confine.sb`, case by case.
 
-`standin_launcher_refuses_a_start_it_cannot_confine` holds the refusals, and
-`standin_launcher_starts_wallet_confined_under_the_generated_profile` holds
-the full wallet journey through the stand-in.
-`standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` runs one
-suite of permitted and denied cases on a provider started under the committed
-`confine.sb` and on one Started by the stand-in. Each case is pushed with its
-class, and every record must hold the cases of `SUITE_CASES` in order with
+`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` holds the
+one C0 journey for did first and then wallet: the macOS start through the
+stand-in, one outside write refused with nothing created, the root still
+answering, and `shutdown` exiting 0; then every host and process refusal the
+stand-in must make. The stand-in's input is one host report, not a bare OS
+name: an OS with no confinement design, a host that names one of Landlock, user
+namespaces or the seccomp filter as unavailable on any OS, or a simulated
+Linux host that reports nothing missing. Each refusal starts
+`{name} start on {os} is refused:` and carries only its own case's words: an OS
+with no confinement design names that OS and the list where the stand-in
+applies confinement; a host with a missing primitive carries the design's
+exact words for it from `CONFINEMENT-LINUX.md`, including a simulated `macos`
+host whose report leaves Landlock unavailable; and a simulated Linux host that
+reports nothing missing says Linux is designed, not enforced, in this lab, so
+`linux` is not in `DECLARED_CONFINED_OS`. The Linux rows are simulated host
+reports and not a Linux run, so no test here probes a kernel or claims Linux
+enforcement.
+The B3 journey reads the launched profile, so a stand-in that changes the file
+after the writer, in a way the suite does not exercise, fails before the suite
+starts. The launched file must pass `check_profile_contract` and
+`check_declared_rights`, and it must equal the committed `confine.sb` through
+the one comparison body `compare_profile_to_its_oracle`, the same body the
+generated-profile test calls. Each case of the suite is pushed with its class,
+and every record must hold the cases of that provider's list in order with
 their names and classes, so a case that drops out or changes class fails with
 the case named. A refusal keeps its answer's `status`, its `code` and the
 stable start of its message, so two refusals that differ only in code do not
-compare equal. The comparison then requires the two records to agree entry by
-entry, and
+compare equal. The comparison then requires the two records, from the stand-in
+start and from a start under the committed file, to agree entry by entry.
 `standin_start_runs_under_the_generated_profile_not_the_committed_file`
 requires the stand-in to refuse a start when the generated profile drops the
 wallet-root write. The stand-in's start matches the committed `confine.sb` on
-the permitted and denied suite in the lab, and this section makes no claim
-about a Runtime launch.
+the launched profile and the permitted and denied suite in the lab, and this
+section makes no claim about a Runtime launch.
+
+Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
+
+Launcher copy: `standin_spawn_confined_provider` is still a lane copy in `capsules/wallet-provider/tests/confine.rs`. Flint and Rong (2026-10-27 19:25) ruled the copy not acceptable; it is to move under the one shared stand-in, `lab/agent-conformance/standin-runtime/`, owned by cx-agent-conformance. The evidence here runs through the copy, and the move is not done.
+
+## M1 acceptance summary: C0 and B3
+
+This section records the lab evidence for M1 checks C0 and B3 for
+`wallet-provider`. It states what the evidence is and gives no verdict;
+cc-redteam judges C0 and B3.
+
+Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
+
+Launcher copy: `standin_spawn_confined_provider` is still a lane copy in `capsules/wallet-provider/tests/confine.rs`. Flint and Rong (2026-10-27 19:25) ruled the copy not acceptable; it is to move under the one shared stand-in, `lab/agent-conformance/standin-runtime/`, owned by cx-agent-conformance. The evidence here runs through the copy, and the move is not done.
+
+### C0 part
+
+Written sentence: One C0 journey starts `did-provider` and `wallet-provider`
+confined through the lab stand-in on macOS, or the stand-in refuses each host
+and process it cannot confine with its own reason and starts no provider.
+
+Counting rule, as `lab/redteam/acceptance/C8.md` words it: a complete journey, a
+refusal with a reason, a CAUGHT falsifier, and reviews that pass.
+
+Journey test: `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
+in `capsules/wallet-provider/tests/confine.rs` at
+`7053dcd1040778beca234b5e203876ecae95f42c` (line 4159). It runs did first and
+then wallet, and this doc records wallet's leg. Its macOS leg is
+`standin_confined_journey`: it starts the provider under the stand-in's
+generated profile, refuses one outside write with nothing created, keeps the
+root answering, and exits 0 on `shutdown`. Its refusal rows call
+`standin_refusals_for` (line 3651), which reads one host report through
+`standin_host_refusal` (line 904) and the launch through
+`standin_spawn_confined_provider` (line 965).
+
+Files at their commits:
+
+- `capsules/wallet-provider/tests/confine.rs` at
+  `7053dcd1040778beca234b5e203876ecae95f42c`, the journey test and the stand-in.
+- `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json` at
+  `9bb0e9ba4debac4a78b512156841f1594d9bb8a4`.
+- `capsules/did-provider/tests/fixtures/confine/declared-rights.json` at
+  `7c5a31a956bec77db60c9d03c77d05ce6704852a`.
+- `capsules/wallet-provider/falsifiers.json` at
+  `7053dcd1040778beca234b5e203876ecae95f42c`.
+- `lab/agent-conformance/standin-runtime/README.md` at
+  `cccbd8ceb2fde5c2c3eda59ff932d09b33fc1592` answers the stand-in's routes and
+  names no provider-launch route.
+
+Refusals, with the reason the test asserts for `wallet-provider`. The did leg
+asserts the same strings with `did-provider` in place of `wallet-provider`.
+
+- plan9 row: `wallet-provider start on plan9 is refused: plan9 has no confinement design, and the lab stand-in applies confinement only on macos`.
+- Linux without Landlock: `wallet-provider start on linux is refused: linux confinement refused: the kernel has no Landlock`.
+- Linux without user namespaces: `wallet-provider start on linux is refused: linux confinement refused: user namespaces are turned off`.
+- Linux without the seccomp filter: `wallet-provider start on linux is refused: linux confinement refused: the seccomp filter cannot be installed`.
+- Linux with every primitive reported present: `wallet-provider start on linux is refused: linux is designed, not enforced, in this lab, so linux is not in DECLARED_CONFINED_OS (macos)`.
+- macOS whose report leaves Landlock unavailable: `wallet-provider start on macos is refused: linux confinement refused: the kernel has no Landlock`.
+- macOS without the tool: `wallet-provider start on macos is refused: the confinement tool <capsules/wallet-provider/tests/absent-sandbox-exec> is absent`.
+- macOS with another tool: `wallet-provider start on macos is refused: the confinement tool <the test executable path> is not /usr/bin/sandbox-exec, which is the one the stand-in runs`.
+- A binary path that is not a file: `wallet-provider start is refused: the provider binary <capsules/wallet-provider/tests/absent-provider-binary> is not a file`.
+- An unnamed right: `wallet-provider declares unnamed-right, which the shared contract does not name`.
+- A profile the launch cannot apply: `wallet-provider start is refused: <failure>`, where the failure carries `exit status:` and `invalid data type of path filter`, and no `execvp`.
+- An `init` answer that is not ok: `wallet-provider start is refused: init answered <answer>`, where the answer carries `"status":"error"`.
+
+CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
+at `7053dcd1040778beca234b5e203876ecae95f42c`. The gate logs of PR #561, PR
+#607, PR #643, PR #692 and PR #710 are not part of this tree, so this summary
+quotes no raw `CAUGHT` line and did not rerun a plant. The evidence read for
+each entry is its `expect` of `caught`, its only named test
+`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`, and the
+plant named on its line.
+
+- `WP112` (entry line 1798, PR #561, not rerun): starts the binary bare in the
+  host refusal, so case (a) returns Started.
+- `WP113` (entry line 1814, PR #561, not rerun): starts the binary bare after a
+  failed `init`, so case (e) returns Started.
+- `WP114` (entry line 1830, PR #561, not rerun): starts the binary without the
+  generator and `sandbox-exec`, so the macOS leg succeeds at the outside write.
+- `WP115` (entry line 1846, PR #561, not rerun): ignores the writer's refusal
+  and starts under the committed `confine.sb`, so case (d) returns Started.
+- `WP118` (entry line 1894, PR #607, not rerun): removes the check that the
+  tool is `SANDBOX_EXEC`, so case (c2) is Started.
+- `WP119` (entry line 1910, PR #607, not rerun): removes the binary-file check,
+  so case (c3) panics in `resolved`.
+- `WP120` (entry line 1926, PR #607, not rerun): answers `Ok(provider)` for an
+  `init` that is not `ok`, so case (f) is Started.
+- `WP125` (entry line 2006, PR #643, not rerun): makes the absent-tool check
+  never fire, so case (c) reads the wrong-tool reason.
+- `WP126` (entry line 2022, PR #643, not rerun): drops the OS from the
+  wrong-tool reason, so case (c2) loses `on macos`.
+- `WP131` (entry line 2102, PR #692, not rerun): starts the binary bare on a
+  simulated Linux host that reports a missing primitive, so wallet's Landlock
+  row returns Started.
+- `WP132` (entry line 2118, PR #692, re-anchored by PR #710, not rerun):
+  returns one fixed reason that names no primitive, so wallet's Landlock row
+  loses the design's exact words. No build log holds a run at its new anchor,
+  because PR #710's gate ran only its three new ids, and task 109 has not
+  merged at this build.
+- `WP135` (entry line 2166, PR #710, not rerun): moves the
+  `DECLARED_CONFINED_OS` lookup above the missing-primitive check, so wallet's
+  `macos` Landlock row returns Started where `sandbox-exec` exists.
+- `WP136` (entry line 2182, PR #710, not rerun): prefixes the missing-primitive
+  reason with `linux has no confinement design; `, so wallet's Landlock row
+  carries the forbidden words.
+- `WP137` (entry line 2198, PR #710, not rerun): drops the `{name} start on
+  {os} is refused: ` prefix, so the plan9 row lacks it.
+
+Reviews. Read with `gh pr view <number> --repo
+Elacity/elastos-agent-host-spike --json body,mergeCommit`; each merge commit is
+an ancestor of `345697ee3a954e140700033775bad1349587c513`. Each PASS line is
+the pull request body, which states the reviews as passed; no reviewed SHA is
+recorded in it.
+
+- PR #561, https://github.com/Elacity/elastos-agent-host-spike/pull/561, merge
+  `fc9cefc40a0d1ac29de5b985d53c54c96972b104`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #607, https://github.com/Elacity/elastos-agent-host-spike/pull/607, merge
+  `aca346f10c47812aa8bbed616a7b1b1b7ac2accf`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #643, https://github.com/Elacity/elastos-agent-host-spike/pull/643, merge
+  `5d8ba7997d598d952b432f7cd1adf9b0c38bb04e`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #692, https://github.com/Elacity/elastos-agent-host-spike/pull/692, merge
+  `705e4fbbdfaef640a51f5c707069a4a5e7564c5b`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #710, https://github.com/Elacity/elastos-agent-host-spike/pull/710, merge
+  `b7ade04219ceb5d5affc567bd745a3a1cbe73006`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+
+What this part is not: it is lab stand-in evidence, not the Runtime. The Linux
+rows are simulated host reports, not a Linux run. M1-R is not met because #309
+has no provider-launch ask. No Runtime code generated, launched or refused a
+provider in this evidence.
+
+### B3 part
+
+Written sentence: One B3 journey starts each provider from its committed
+declared-rights file through the lab stand-in into a fresh profile directory,
+reads the one file the stand-in wrote there, and requires that launched profile
+and the provider's permitted and denied suite to match the provider's committed
+`confine.sb`, case by case.
+
+Counting rule, as `lab/redteam/acceptance/C8.md` words it: a complete journey, a
+refusal with a reason, a CAUGHT falsifier, and reviews that pass.
+
+Journey test: `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+in the same file at `7053dcd1040778beca234b5e203876ecae95f42c` (line 4869). Its
+leg is `standin_b3_journey` (line 4774). The launched-profile checks are
+`check_profile_contract` (line 5558), `check_declared_rights` (line 5680) and
+`compare_profile_to_its_oracle` (line 6598). The suite comparison is
+`assert_suite_outcomes` (line 4670) and `assert_standin_matches_oracle` (line
+4710). It runs did first and then wallet, and this doc records wallet's leg.
+
+Files at their commits:
+
+- `capsules/wallet-provider/tests/confine.rs` at
+  `7053dcd1040778beca234b5e203876ecae95f42c`, the journey test and the
+  comparison body.
+- `capsules/wallet-provider/confine.sb` at
+  `959b104022bd0e8ae55636f69f6f06b8eb028e2b`.
+- `capsules/did-provider/confine.sb` at
+  `959b104022bd0e8ae55636f69f6f06b8eb028e2b`.
+- `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json` at
+  `9bb0e9ba4debac4a78b512156841f1594d9bb8a4`.
+- `capsules/did-provider/tests/fixtures/confine/declared-rights.json` at
+  `7c5a31a956bec77db60c9d03c77d05ce6704852a`.
+- `capsules/wallet-provider/falsifiers.json` at
+  `7053dcd1040778beca234b5e203876ecae95f42c`.
+
+Refusals, with the reason the test panics with for `wallet-provider`. The did
+leg asserts the same strings with `did-provider` in place of `wallet-provider`.
+
+- Launched-profile mismatch, contract check: `wallet-provider B3 journey: the launched profile must pass the contract check: wallet-provider must deny the network explicitly with (deny network*)`.
+- Launched-profile mismatch, declared-rights check: `wallet-provider B3 journey: the launched profile must trace to its declared rights: wallet-provider allow rule has no declared right and no platform-baseline rule: <appended allow form>`.
+- Launched-profile mismatch, oracle comparison: `wallet-provider B3 journey: the launched profile and its oracle disagree: wallet-provider generated profile differs from its committed oracle: only in generated <forms>, only in committed <forms>`.
+- Suite mismatch, case count: `wallet-provider stand-in start must record as many cases as the committed confine.sb: committed <count>, stand-in <count>`.
+- Suite mismatch, entry: `wallet-provider stand-in start differs from the committed confine.sb on case "<case>": committed <outcome>, stand-in <outcome>`.
+- Suite mismatch, order or class: `wallet-provider's stand-in launched profile suite must record case "<case>" as <class>`, and the permitted or denied class message that names the case.
+
+CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
+at `7053dcd1040778beca234b5e203876ecae95f42c`. The gate logs of PR #593, PR
+#624, PR #635, PR #655, PR #704 and PR #718 are not part of this tree, so this
+summary quotes no raw `CAUGHT` line and did not rerun a plant. The evidence read
+for each entry is its `expect` of `caught`, its only named test
+`standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`, and
+the plant named on its line. Each line cites the check that catches it, as the
+merged words of PR #718 say.
+
+- `WP116` (entry line 1862, PR #593, not rerun): binds the stand-in's
+  `STORAGE_ROOT` to the base; the widened grant permits did's sibling write, so
+  the suite step fails there.
+- `WP121` (entry line 1942, PR #624, not rerun): removes the planted-key push,
+  so wallet's record holds eight entries where `SUITE_CASES` holds nine.
+- `WP124` (entry line 1990, PR #635, not rerun): uses wallet's root layout for a
+  did start, so did's first `init` is refused.
+- `WP127` (entry line 2038, PR #655, not rerun): appends `(allow file-write* (subpath (param "STORAGE_PARENT")))` to did's launched profile; `check_declared_rights` catches it at did's launched-profile check, and the suite never starts.
+- `WP133` (entry line 2134, PR #704, not rerun): appends `(allow file-read* (literal "/private/etc/hosts"))` to the launched profile; `check_declared_rights` catches it at that same check, and no suite case reads that path.
+- `WP134` (entry line 2150, PR #704, not rerun): removes `(deny network*)` from the launched profile; `check_profile_contract` catches it at that same check.
+- `WP138` (entry line 2214, PR #718, not rerun): appends `(deny file-write* (literal "/private/var/cc-confine-launched"))` after the writer; only `compare_profile_to_its_oracle` catches it, because the head keeps its order and neither contract check reads a deny form.
+
+Reviews. Read with `gh pr view <number> --repo
+Elacity/elastos-agent-host-spike --json body,mergeCommit`; each merge commit is
+an ancestor of `345697ee3a954e140700033775bad1349587c513`. Each PASS line is
+the pull request body, which states the reviews as passed; no reviewed SHA is
+recorded in it.
+
+- PR #593, https://github.com/Elacity/elastos-agent-host-spike/pull/593, merge
+  `693c3681db472d565a2ce07abc9ec2c9a7e0b7e0`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #624, https://github.com/Elacity/elastos-agent-host-spike/pull/624, merge
+  `eb92d432778dcdeb5476e35e10f822dd74c6ab9b`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #635, https://github.com/Elacity/elastos-agent-host-spike/pull/635, merge
+  `3bfc39b026c86f0bf549fa2b8b53965c955418c2`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #655, https://github.com/Elacity/elastos-agent-host-spike/pull/655, merge
+  `62eac8742bb84ec1106159a6c1e5bba988476d9a`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #704, https://github.com/Elacity/elastos-agent-host-spike/pull/704, merge
+  `978873050f6dc3884cef117e39d4345e38d7fb2c`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+- PR #718, https://github.com/Elacity/elastos-agent-host-spike/pull/718, merge
+  `345697ee3a954e140700033775bad1349587c513`. Body line: `Gates passed on the
+  Mac; reviews PASS: claude,cursor.`
+
+What this part is not: it is lab stand-in evidence, not the Runtime. The Linux
+rows are simulated host reports, not a Linux run. M1-R is not met because #309
+has no provider-launch ask. No Runtime code generated, launched or refused a
+provider in this evidence.
 
 ## The model provider's inline profile
 
@@ -897,36 +1151,36 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Name `generate_profile` in `capsules/did-provider/src/main.rs` (WP111): the
   same test fails because the walk reaches the other crate and its refusal
   names that path.
-- Start the binary bare in the stand-in's OS refusal (WP112):
-  `standin_launcher_refuses_a_start_it_cannot_confine` fails on cases (a) and
-  (b), which return Started instead of their reasons.
+- Start the binary bare in the stand-in's host refusal (WP112):
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  on case (a), which returns Started instead of its reason.
 - Start the binary bare after a failed `init` (WP113): the same test fails on
   case (e), which returns Started instead of the reason.
-- Replace the stand-in's generated-profile start with a bare start (WP114):
-  `standin_launcher_starts_wallet_confined_under_the_generated_profile` fails
-  at the outside `init`, which then succeeds.
+- Replace the stand-in's generated-profile start with a bare start (WP114): the
+  same test fails at the outside `init`, which then succeeds.
 - Ignore the lab writer's refusal and start under the committed `confine.sb`
-  (WP115): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
-  (d), which returns Started instead of the unnamed-id reason.
+  (WP115): the same test fails on case (d), which returns Started instead of
+  the unnamed-id reason.
 - Bind the stand-in's `STORAGE_ROOT` to the base instead of the wallet
   directory (WP116):
-  `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
-  on the first denied case the widened grant permits, such as `<root>/sibling`,
-  because the stand-in record holds `ok` where the committed profile refuses.
+  `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+  fails at did's suite step, where the sibling write beneath the base answers
+  `ok` because the widened grant covers it, before the two records are
+  compared.
 - Write the generated profile but start under the committed `confine.sb`
   (WP117): `standin_start_runs_under_the_generated_profile_not_the_committed_file`
   fails because the start is then Started instead of refused.
 - Remove the stand-in's check that the confinement tool is `SANDBOX_EXEC`
-  (WP118): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
-  (c2), which runs the real `sandbox-exec` and returns Started.
+  (WP118): `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
+  fails on case (c2), which runs the real `sandbox-exec` and returns Started.
 - Remove the stand-in's binary-file check (WP119): the same test fails on case
   (c3), which panics in `resolved` with "wallet directory must resolve".
 - Return `Ok(provider)` for an `init` answer that is not `ok` (WP120): the same
   test fails on case (f), which returns Started instead of the answer.
 - Remove the suite's planted-key push (WP121):
-  `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
-  because the record holds eight entries where `SUITE_CASES` holds nine, and
-  the failure names the missing case.
+  `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+  fails because wallet's record holds eight entries where `SUITE_CASES` holds
+  nine, and the failure names the missing case.
 - Drop the refusal `code` from `suite_entry` (WP122):
   `suite_entry_keeps_the_refusal_code` fails because two refusals that differ
   only in `code` then compare equal.
@@ -934,21 +1188,19 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `wallet_suite_entry_records_an_inner_refusal_as_refused` fails because the
   inner refusal reads `Ok`.
 - Use wallet's root layout for a did start in the stand-in (WP124):
-  `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+  `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
   fails because the did start is refused at its first `init`.
 - Make the stand-in's absent-tool check never fire (WP125):
-  `standin_launcher_refuses_a_start_it_cannot_confine` fails on case (c),
-  which then reads the wrong-tool reason and lacks `is absent`.
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  on case (c), which then reads the wrong-tool reason and lacks `is absent`.
 - Drop the OS from the stand-in's wrong-tool reason (WP126): the same test
   fails on case (c2), whose reason then lacks `on macos`.
 - Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
   for did (WP127):
-  `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
-  fails inside the stand-in start's suite, at its `the sibling write must be
-  denied` assertion, because that write answers `ok`; the failure comes before
-  the two starts' records are compared. The unrelated outside write passes
-  before it, and the planted read runs after it and needs a read grant WP127
-  does not add.
+  `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+  fails at did's launched-profile check, where `check_declared_rights` refuses
+  the appended allow form because no declared right names it, and the suite
+  never starts.
 - Return `did_provider_dir().join("target/debug/did-provider")` from the one
   build-output reader instead of the reported `executable` (WP128):
   `did_binary_is_the_executable_the_build_reports` fails because its fixture
@@ -963,6 +1215,41 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `did_binary_is_the_executable_the_build_reports` fails because the reader
   returns the non-bin artifact's executable, which comes before the bin
   artifact.
+- Start the binary bare on a simulated Linux host that reports a missing
+  primitive (WP131):
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  at did's Landlock row, which returns Started instead of the design's words.
+- Return one fixed reason that names no primitive from the missing-primitive
+  refusal (WP132): the same test fails on did's Landlock row, whose reason then
+  loses the design's exact words for that primitive.
+- Append `(allow file-read* (literal "/private/etc/hosts"))` to the file the
+  stand-in launches, after the writer (WP133):
+  `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+  fails at did's launched-profile check, where `check_declared_rights` refuses
+  the appended allow form because no declared right names it, and no suite case
+  reads that path.
+- Remove `(deny network*)` from the file the stand-in launches, after the
+  writer (WP134): the same test fails at that launched-profile check, where
+  `check_profile_contract` refuses the profile without its explicit network
+  denial, and no suite case opens a socket.
+- Append `(deny file-write* (literal "/private/var/cc-confine-launched"))` to
+  the file the stand-in launches, after the writer (WP138): the same test fails
+  at did's launched-profile check, where `compare_profile_to_its_oracle` alone
+  catches it, because the head keeps its order and neither contract check reads
+  a deny form, so the panic names that form under "only in generated".
+  Removing the comparison call leaves the journey green under this entry's
+  plant, so this entry is the one that scores that call.
+- Move the `DECLARED_CONFINED_OS` lookup back above the missing-primitive check
+  (WP135):
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  at did's `macos` Landlock row, which returns Started where `sandbox-exec`
+  exists instead of the design's Landlock words.
+- Prefix the missing-primitive reason with `linux has no confinement design; `
+  (WP136): the same test fails at did's Landlock row, whose reason then
+  carries the forbidden words.
+- Drop the `{name} start on {os} is refused: ` prefix from the final `Err`
+  (WP137): the same test fails at did's first host row, plan9, whose reason
+  then lacks the prefix.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
