@@ -85,6 +85,19 @@
 //! leaves its engine running (as it leaves its folder). No fuel limit is
 //! promised, and no limit other than this budget and the memory cap.
 //!
+//! Task 045 (M1 A10 lab half): the caller can cancel a run through a
+//! [`CancelHandle`] from its [`RunControl`]: in-memory, thread-safe, no
+//! command and no OS signal handler (C2 (c)). [`run_engine`] checks it right
+//! after the zero-budget check, before anything is made or started, and the
+//! wait loop checks it on every poll, before the exit status and the budget.
+//! A cancel seen there stops the engine with SIGKILL, reaps it, drops its
+//! output, removes its run folder (step 6, [`finish_run`]) and refuses the run
+//! as `Cancelled`, never as `BudgetExceeded` or `EngineFailed`. [`run`] also
+//! checks it before each `--version` query, so after a cancel no engine
+//! process starts. Limits: a `--version` query is not interrupted mid-query,
+//! the verifier is not cancelled mid-call, and a runner process that is itself
+//! killed leaves its engine and folder.
+//!
 //! The runner reads no environment variable and no file, and parses no
 //! manifest or module of its own: the verified value already holds the bytes
 //! its lab CID names, and the entrypoint the verifier's one manifest read
@@ -168,6 +181,8 @@ use std::io::{self, Read};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wasm_capsule_audit::{memories, Refusal as AuditRefusal};
@@ -224,21 +239,61 @@ pub const WAIT_POLL: Duration = Duration::from_millis(10);
 /// Task 043: the caller's explicit control over a module run: its wall-clock
 /// budget. There is no default; the runner reads none from the environment or
 /// a file. Each module run gets the whole budget, counted from its own start.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Task 045: and its cancel flag, set only through a [`CancelHandle`] from
+/// [`RunControl::cancel_handle`]. A clone shares the flag. The runner reads no
+/// signal, environment variable or file for it.
+#[derive(Clone, Debug)]
 pub struct RunControl {
     budget: Duration,
+    cancel: Arc<AtomicBool>,
 }
 
 impl RunControl {
-    /// A control with a wall-clock `budget` per module run. A zero budget is
-    /// made, but refused by [`run_engine`] and [`run`] before any start.
-    pub const fn new(budget: Duration) -> RunControl {
-        RunControl { budget }
+    /// A control with a wall-clock `budget` per module run, not cancelled. A
+    /// zero budget is made, but refused by [`run_engine`] and [`run`] before
+    /// any start.
+    pub fn new(budget: Duration) -> RunControl {
+        RunControl {
+            budget,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// The wall-clock budget of one module run.
     pub fn budget(&self) -> Duration {
         self.budget
+    }
+
+    /// Task 045: a handle that cancels every run given this control (or a
+    /// clone of it), from any thread.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        CancelHandle {
+            cancel: Arc::clone(&self.cancel),
+        }
+    }
+
+    /// Task 045: whether a [`CancelHandle`] of this control has cancelled it.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+/// Task 045 (M1 A10 lab half): the caller's cancel signal, in library form.
+/// There is no command and no OS signal handler (C2 (c)); a future command's
+/// signal handler, or a test thread, calls [`CancelHandle::cancel`]. Once
+/// cancelled, a control stays cancelled.
+#[derive(Clone, Debug)]
+pub struct CancelHandle {
+    cancel: Arc<AtomicBool>,
+}
+
+impl CancelHandle {
+    /// Cancel the runs given this handle's [`RunControl`]: no engine starts
+    /// after it, and a running one is stopped with SIGKILL, reaped, and its run
+    /// folder removed; the run is refused as `Cancelled`.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
     }
 }
 
@@ -365,6 +420,10 @@ pub enum Reason {
     /// The entrypoint module's memory maximum, in pages, is above the declared
     /// `memory_mb`; it is not run uncapped (task 033).
     MemoryMaximumAboveDeclared { maximum: u64, memory_mb: u32 },
+    /// The caller cancelled the run (task 045): before `engine` was started,
+    /// so nothing was made or started, or while it ran, so the runner stopped
+    /// it with SIGKILL, reaped it and removed its run folder.
+    Cancelled { engine: Engine },
 }
 
 impl fmt::Display for Reason {
@@ -480,6 +539,10 @@ impl fmt::Display for Reason {
                 "the module's memory maximum, {maximum} × 64 KiB, is above the declared {memory_mb} MB ({} × 64 KiB): the module is not run uncapped",
                 memory_cap_bytes(*memory_mb) / WASM_PAGE_BYTES
             ),
+            Reason::Cancelled { engine } => write!(
+                f,
+                "the run on {engine} was cancelled by its caller: no engine starts after a cancel, and a running one is stopped with SIGKILL"
+            ),
         }
     }
 }
@@ -531,8 +594,9 @@ pub struct EngineRun {
 /// `bundle`'s verified entrypoint bytes, written into a new folder inside
 /// `work_root`, which is removed again once the engine has exited. Task 043:
 /// the engine runs at most `control`'s budget; a zero budget is refused first.
-/// Task 033: then the module's memory is checked ([`check_module_memory`]),
-/// before any folder is made.
+/// Task 045: then a cancelled `control` is refused ([`check_cancel`]), and a
+/// cancel while the engine runs stops it. Task 033: then the module's memory is
+/// checked ([`check_module_memory`]), before any folder is made.
 /// The steps and their order are in the module docs; the first refusal is the
 /// answer. Success returns the engine's exit status and stdout, and (task 034)
 /// the maximum that check returned.
@@ -544,6 +608,7 @@ pub fn run_engine(
     control: &RunControl,
 ) -> Result<EngineRun, Refusal> {
     check_budget(control, work_root)?;
+    check_cancel(control, engine, program)?;
     let memory_maximum = check_module_memory(bundle)?;
     check_program(program)?;
     check_work_root(work_root)?;
@@ -561,6 +626,16 @@ pub fn run_engine(
 fn check_budget(control: &RunControl, work_root: &Path) -> Result<(), Refusal> {
     if control.budget().is_zero() {
         return Err(Refusal::new(work_root, Reason::BudgetZero));
+    }
+    Ok(())
+}
+
+/// Task 045: a cancelled `control` is refused as `Cancelled` for `engine`, with
+/// `program` as its path, before that engine is started: [`run_engine`] checks
+/// here before anything is made, and [`run`] before each `--version` query.
+fn check_cancel(control: &RunControl, engine: Engine, program: &Path) -> Result<(), Refusal> {
+    if control.is_cancelled() {
+        return Err(Refusal::new(program, Reason::Cancelled { engine }));
     }
     Ok(())
 }
@@ -843,6 +918,12 @@ fn start_engine(
 /// `BudgetExceeded`. The runner gives the engine nothing: the budget is never
 /// in its argv. A failed `try_wait` stops the engine too, and is refused with
 /// its OS cause; so is a failed read of either pipe.
+///
+/// Task 045: each poll first asks whether `control` was cancelled. If so, the
+/// engine is stopped the same way, its output dropped, and the run refused as
+/// `Cancelled`, before its exit status or the budget is looked at, so a cancel
+/// is never reported as `BudgetExceeded` or `EngineFailed`. [`finish_run`]
+/// then removes the run folder, as after every outcome.
 fn wait_within_budget(
     engine: Engine,
     program: &Path,
@@ -853,6 +934,11 @@ fn wait_within_budget(
     let stdout = read_pipe(child.stdout.take());
     let stderr = read_pipe(child.stderr.take());
     let status = loop {
+        if control.is_cancelled() {
+            stop_engine(engine, program, &mut child)?;
+            let _dropped = (joined(stdout), joined(stderr));
+            return Err(Refusal::new(program, Reason::Cancelled { engine }));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= control.budget() => {
@@ -1175,7 +1261,10 @@ impl Error for TwoEngineRefusal {}
 /// [`run_engine`] refuses it, before any `--version` query. Task 033: the
 /// verified module's memory is checked by the same [`check_module_memory`]
 /// [`run_engine`] calls, right after verification and before any `--version`
-/// query.
+/// query. Task 045: a cancelled `input.control` is refused before each
+/// `--version` query (as [`TwoEngineRefusal::Version`], the step it stopped
+/// before) and before each module run (as [`TwoEngineRefusal::Engine`]), and a
+/// cancel during a module run stops that engine; no engine starts after it.
 pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     check_budget(input.control, input.work_root).map_err(TwoEngineRefusal::Engine)?;
     // Task 043: both module runs get `input.control`, each counting its own
@@ -1183,6 +1272,14 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     // falsifiers.json entries anchor, keep their four arguments.
     let run_engine = |bundle: &VerifiedBundle, engine, program: &Path, work_root: &Path| {
         run_engine(bundle, engine, program, work_root, input.control)
+    };
+    // Task 045: a cancel is checked before each `--version` query too (and
+    // before each module run, inside `run_engine`), so no engine process
+    // starts after it. Bound here, so the two anchored query lines below keep
+    // their form.
+    let query_version = |engine, program: &Path| {
+        check_cancel(input.control, engine, program)?;
+        query_version(engine, program)
     };
     let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)
         .map_err(TwoEngineRefusal::Verify)?;
