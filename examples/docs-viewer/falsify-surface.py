@@ -3,12 +3,12 @@
 
 Usage: python3 -I falsify-surface.py [--check]
 
-The page glue lives in surface/browser/reader.js, the launch client in
-surface/browser/page-client.js, and the docs-model renderer in the kit's one owner,
-examples/capsule-kit/surface/docs-render.js. A renderer mutant is written to
-the owner and then copied to the page's shipped browser/docs-render.js, as the
-build does, so the page tests see it and the copy stays pinned to the owner.
-The drift case edits only the shipped copy, and only its own test must fail.
+The page glue lives in surface/browser/reader.js. The launch client and the
+docs-model renderer each have one owner in examples/capsule-kit/surface/.
+A client or renderer mutant is written to its owner and then copied to the
+page's shipped browser/ file, as the build does, so the page tests see it and
+the copy stays pinned to the owner. Each drift case edits only a shipped
+copy, and only its own test must fail.
 
 Each falsifier replaces exact text (it must occur once), runs the named node
 tests, and requires them to FAIL. It also runs the whole test file and
@@ -27,12 +27,14 @@ import falsify_kit as kit  # noqa: E402
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
 PAGE = SURFACE / "browser" / "reader.js"
-CLIENT = SURFACE / "browser" / "page-client.js"
+CLIENT = REPO / "capsule-kit" / "surface" / "page-client.js"
+CLIENT_COPY = SURFACE / "browser" / "page-client.js"
 OWNER = REPO / "capsule-kit" / "surface" / "docs-render.js"
 COPY = SURFACE / "browser" / "docs-render.js"
 TESTS = SURFACE / "reader.test.mjs"
 
 DRIFT = "the shipped renderer matches the kit owner"
+CLIENT_DRIFT = "the shipped client matches the kit owner"
 
 # Page-glue rules: (name, exact old text, new text, tests that must fail)
 PAGE_CASES = [
@@ -84,7 +86,7 @@ PAGE_CASES = [
     ),
 ]
 
-# Launch-client rules: each case runs only the page's node tests.
+# Launch-client rules: kit-owner anchors, only the page's node tests.
 CLIENT_CASES = [
     (
         "the launch client follows redirects",
@@ -194,9 +196,17 @@ RENDER_CASES = [
 DRIFT_CASES = [
     (
         DRIFT,
+        COPY,
         "export const MAX_BLOCKS = 512;",
         "export const MAX_BLOCKS = 512 ;",
         [DRIFT],
+    ),
+    (
+        CLIENT_DRIFT,
+        CLIENT_COPY,
+        'export const TOKEN_HEADER = "x-elastos-home-token";',
+        'export const TOKEN_HEADER = "x-elastos-home-token" ;',
+        [CLIENT_DRIFT],
     ),
 ]
 
@@ -210,19 +220,27 @@ def sync_copy():
     COPY.write_bytes(OWNER.read_bytes())
 
 
+def sync_client():
+    """The build's client copy step: ship the kit owner's bytes."""
+    CLIENT_COPY.write_bytes(CLIENT.read_bytes())
+
+
 def main():
     page = [(name, PAGE, [(old, new)], tests) for name, old, new, tests in PAGE_CASES]
-    client = [(name, CLIENT, [(old, new)], tests) for name, old, new, tests in CLIENT_CASES]
+    client = [
+        (name, CLIENT, [(old, new)], tests, [(CLIENT_COPY, "")])
+        for name, old, new, tests in CLIENT_CASES
+    ]
     render = [
         (name, OWNER, [(old, new)], tests, [(COPY, "")])
         for name, old, new, tests in RENDER_CASES
     ]
-    drift = [(name, COPY, [(old, new)], tests) for name, old, new, tests in DRIFT_CASES]
+    drift = [(name, path, [(old, new)], tests) for name, path, old, new, tests in DRIFT_CASES]
     every_failure = lambda: kit.node_test_failures(TESTS)  # noqa: E731
     kit.main(
         [
             (page, None, test_fails, None, True, every_failure),
-            (client, None, test_fails, None, True, every_failure),
+            (client, sync_client, test_fails, None, True, every_failure),
             (render, sync_copy, test_fails, None, True, every_failure),
             (drift, None, test_fails, None, True, every_failure),
         ],
