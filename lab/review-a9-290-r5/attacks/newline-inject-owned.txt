@@ -1,0 +1,6 @@
+id: newline-inject-owned
+must: CAUGHT
+journey: Store::write a filename that contains a newline and a second
+  well-formed .owned line for B's (dev,ino,owner,path,stamp). Host-rename
+  B's file into A/stolen.txt. Store::read(&a, "stolen.txt") must refuse.
+survivor: the read returns B's bytes.
