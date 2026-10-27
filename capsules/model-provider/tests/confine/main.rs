@@ -3632,7 +3632,11 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// rights, and that text's head and allow lines match the oracle.
 ///
 /// The first three non-comment lines are `(version 1)`, `(deny default)` and
-/// `(deny network*)`. The sorted allow lines equal the oracle. A changed
+/// `(deny network*)`. The sorted allow lines equal the oracle. The sorted
+/// non-comment lines equal the oracle. An in-memory extra deny appends
+/// `(deny file-read* (literal "/tmp/cc-extra-deny"))`. Its sorted allow lines
+/// still equal the oracle, and its sorted non-comment lines do not. The extra
+/// side contains `cc-extra-deny`. A changed
 /// `bound-executable` rule is reflected. A declared value with no rights
 /// list, a platform baseline with no rules list, an entry with no rules list,
 /// and a rule that is not a string are each refused with their reason. The
@@ -3647,11 +3651,7 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 #[test]
 fn generated_model_profile_matches_the_oracle() {
     fn non_comment_head(profile: &str) -> Vec<&str> {
-        profile
-            .lines()
-            .filter(|line| !line.starts_with(";;"))
-            .take(3)
-            .collect()
+        non_comment_lines(profile).into_iter().take(3).collect()
     }
 
     let head = vec!["(version 1)", "(deny default)", "(deny network*)"];
@@ -3674,6 +3674,26 @@ fn generated_model_profile_matches_the_oracle() {
     generated_lines.sort();
     oracle_lines.sort();
     assert_eq!(generated_lines, oracle_lines);
+    let mut generated_non_comment = non_comment_lines(&generated);
+    let mut oracle_non_comment = non_comment_lines(&oracle);
+    generated_non_comment.sort();
+    oracle_non_comment.sort();
+    assert_eq!(generated_non_comment, oracle_non_comment);
+
+    let mut extra = generated.clone();
+    extra.push_str("(deny file-read* (literal \"/tmp/cc-extra-deny\"))\n");
+    let mut extra_allow = collect_allow_lines(&extra);
+    extra_allow.sort();
+    assert_eq!(extra_allow, oracle_lines);
+    let mut extra_non_comment = non_comment_lines(&extra);
+    extra_non_comment.sort();
+    assert_ne!(extra_non_comment, oracle_non_comment);
+    assert!(
+        extra_non_comment
+            .iter()
+            .any(|line| line.contains("cc-extra-deny")),
+        "the extra deny stays on the extra side"
+    );
 
     let original_exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
     let stub_exec = "(allow process-exec (literal \"/tmp/cc-standin-stub\"))";
@@ -4182,6 +4202,16 @@ fn standin_launch_uses_the_generated_profile() {
     );
     assert!(!storage.root.exists(), "storage.root must not exist");
     provider.shutdown();
+}
+
+fn non_comment_lines(profile: &str) -> Vec<&str> {
+    // The oracle's blank line after `(deny network*)` is not a form.
+    profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 fn collect_allow_lines(profile: &str) -> Vec<&str> {
