@@ -5,6 +5,8 @@ The tests call ``check.problems``. They do not compile a citation expression.
 
 import contextlib
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,19 +16,75 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import check
 
+IDENTITY = {
+    "GIT_AUTHOR_NAME": "citation-check",
+    "GIT_AUTHOR_EMAIL": "citation-check@example.com",
+    "GIT_COMMITTER_NAME": "citation-check",
+    "GIT_COMMITTER_EMAIL": "citation-check@example.com",
+}
+
 
 class CitationCheckTests(unittest.TestCase):
-    def _draft(self, body, files=None):
+    def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        proposal = root / "lab" / "bus-v2-proposal"
-        proposal.mkdir(parents=True)
-        (proposal / "CORE-CALLS-PROPOSAL.md").write_text(body, encoding="utf-8")
-        for rel, data in (files or {}).items():
+        (root / "lab" / "bus-v2-proposal").mkdir(parents=True)
+        return root
+
+    def _write(self, root, body, files):
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            body, encoding="utf-8"
+        )
+        for rel, data in files.items():
             path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+
+    def _git(self, root, *args):
+        env = dict(os.environ)
+        env.update(IDENTITY)
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _git_output(self, root, *args):
+        env = dict(os.environ)
+        env.update(IDENTITY)
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _commit_all(self, root):
+        self._git(root, "init", "-q")
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "fixture")
+        return self._git_output(root, "rev-parse", "HEAD")
+
+    def _draft(self, body, files=None):
+        """A temp root whose draft pins the repository's committed HEAD."""
+        root = self._temp_root()
+        self._write(root, body, files or {})
+        sha = self._commit_all(root)
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+        )
+        return root
+
+    def _raw_draft(self, body, files=None, commit=False):
+        """A temp draft with the caller's pin text and no automatic pin."""
+        root = self._temp_root()
+        self._write(root, body, files or {})
+        if commit:
+            self._commit_all(root)
         return root
 
     def _assert_one(self, body, files, expected):
@@ -45,10 +103,37 @@ class CitationCheckTests(unittest.TestCase):
             setattr(check, global_name, original)
         print(label)
 
-    def test_absent_draft_is_empty(self):
+    def test_absent_draft_is_refused(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.assertEqual(check.problems(Path(tmp.name)), [])
+        self.assertEqual(
+            check.problems(Path(tmp.name)),
+            ["refuse: proposal is absent"],
+        )
+
+    def test_missing_pin_is_refused(self):
+        got = check.problems(self._raw_draft("No pin line here.\n"))
+        self.assertEqual(got, ["refuse: draft has no pinned commit"])
+
+    def test_pin_line_is_one_commit(self):
+        sha = "a" * 40
+        bodies = (
+            "Pinned commit: HEAD\n",
+            "Pinned commit: %s\nPinned commit: %s\n" % (sha, sha),
+        )
+        for body in bodies:
+            got = check.problems(self._raw_draft(body))
+            self.assertEqual(
+                got,
+                ["refuse: pinned commit is not one 40-hex commit"],
+                body,
+            )
+
+    def test_unknown_pin_is_refused(self):
+        sha = "f" * 40
+        root = self._raw_draft("Pinned commit: " + sha + "\n", commit=True)
+        got = check.problems(root)
+        self.assertEqual(got, ["refuse: pinned commit is not a commit: " + sha])
 
     def test_supported_citations_pass(self):
         body = (
@@ -160,6 +245,42 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT reversed-range",
         )
 
+    def test_falsifier_absent_draft_is_caught(self):
+        self._caught(
+            "load_draft",
+            lambda root: "Pinned commit: " + "a" * 40 + "\n",
+            self.test_absent_draft_is_refused,
+            "refuse: proposal is absent",
+            "CAUGHT absent-draft",
+        )
+
+    def test_falsifier_missing_pin_is_caught(self):
+        self._caught(
+            "pin_refusal",
+            lambda text: None,
+            self.test_missing_pin_is_refused,
+            "refuse: draft has no pinned commit",
+            "CAUGHT missing-pin",
+        )
+
+    def test_falsifier_pin_line_is_caught(self):
+        self._caught(
+            "pin_refusal",
+            lambda text: None,
+            self.test_pin_line_is_one_commit,
+            "refuse: pinned commit is not one 40-hex commit",
+            "CAUGHT pin-line",
+        )
+
+    def test_falsifier_unknown_pin_is_caught(self):
+        self._caught(
+            "commit_exists",
+            lambda root, sha: True,
+            self.test_unknown_pin_is_refused,
+            "refuse: pinned commit is not a commit:",
+            "CAUGHT unknown-pin",
+        )
+
     def test_worktree_root_contains_checker(self):
         root = check.worktree_root()
         checker = root / "lab" / "bus-v2-proposal" / "check.py"
@@ -174,8 +295,8 @@ class CitationCheckTests(unittest.TestCase):
             code = check.main()
         self.assertIsInstance(code, int)
         if not draft.is_file():
-            self.assertEqual(code, 0)
-            self.assertEqual(buf.getvalue(), "proposal: absent\n")
+            self.assertEqual(code, 1)
+            self.assertEqual(buf.getvalue(), "refuse: proposal is absent\n")
             self.assertFalse(draft.exists())
             return
         found = check.problems(root)
@@ -201,8 +322,9 @@ class CitationCheckTests(unittest.TestCase):
         root = Path(tmp.name)
         draft = root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md"
         code, out = self._main_at(root)
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "proposal: absent\n")
+        self.assertEqual(check.problems(root), ["refuse: proposal is absent"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "refuse: proposal is absent\n")
         self.assertFalse(draft.exists())
 
     def test_main_agrees_with_problems(self):

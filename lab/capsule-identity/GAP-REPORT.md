@@ -834,6 +834,13 @@ not run the tests.
   Not shown: what an ask means, or how one is encoded. The ask-to-operation mapping is in `lab/bus-v2-proposal/`
   (its `CORE-CALLS-PROPOSAL.md`, lane cu-bus-v2-proposal), named here and not cited by line. This lane writes no
   B2 encoding, no ask schema and no mapping.
+  27 Oct, task 035: the lab stand-in (next section) hands a launched instance only the `asks.json` bytes of the
+  checked, signed bundle it launched, read through a lab test seam, not a route, so a change on disk after launch
+  does not reach it and a stub that reads the folder again fails
+  (`standin_hands_an_instance_only_its_signed_asks_bytes`, `standin_gives_each_session_its_own_asks`; README
+  "Asks come only from the signed bytes (M1 check B2, no-schema part)"); not shown: no ask schema, no parse of
+  `asks.json`, no mapping of an ask to an operation (`lab/bus-v2-proposal/`), no grant from an ask (033), and the
+  Runtime hands no asks to anything and did nothing here.
 
 ### B1 through a lab stand-in (27 Oct, tasks 032 and 033)
 
