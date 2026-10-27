@@ -64,6 +64,9 @@ declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
+The lab generator and writer are test code only, and
+`lab_generator_is_named_only_in_test_code` fails if a file outside test code
+names either, so the Runtime keeps one profile generator (P10).
 The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
@@ -827,6 +830,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   at the sorted-tail comparison, because the head keeps its order and neither
   contract check reads a deny form, so the panic names that form under "only in
   generated".
+- Name `generate_profile` in `capsules/wallet-provider/src/main.rs` (WP110):
+  `lab_generator_is_named_only_in_test_code` fails because the walk reads the
+  provider's non-test file and its refusal names that path.
+- Name `generate_profile` in `capsules/did-provider/src/main.rs` (WP111): the
+  same test fails because the walk reaches the other crate and its refusal
+  names that path.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
