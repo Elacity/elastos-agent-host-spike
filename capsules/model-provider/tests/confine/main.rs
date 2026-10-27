@@ -2273,15 +2273,21 @@ fn collect_allow_lines(profile: &str) -> Vec<&str> {
                 continue;
             }
             let mut cursor = index + 1;
-            while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+            // Between `(` and `allow`, one run skips a space, a tab, a
+            // carriage return (byte 13), a form feed (byte 12), or a vertical
+            // tab (byte 11). After `allow`, the next byte may be the end, a
+            // space, a tab, or a carriage return. A form feed or a vertical
+            // tab there is not a match. A letter, a digit, `-`, or `*` there
+            // is not a match, so `allowing` and `allow-default` stay unseen.
+            while cursor < bytes.len()
+                && matches!(bytes[cursor], b' ' | b'\t' | b'\r' | b'\x0c' | b'\x0b')
+            {
                 cursor += 1;
             }
             let allow = b"allow";
             let after = cursor + allow.len();
-            // `allowing` and `allow-default` stay unseen: the character after
-            // `allow` must be the end of the line or more ASCII whitespace.
             if bytes.get(cursor..after) == Some(&allow[..])
-                && (after == bytes.len() || matches!(bytes[after], b' ' | b'\t'))
+                && (after == bytes.len() || matches!(bytes[after], b' ' | b'\t' | b'\r'))
             {
                 return Some(index);
             }
@@ -2429,6 +2435,36 @@ fn allow_rules_trace_to_declared_rights() {
     );
     let same_line_tab = format!("(deny network*) {tab_allow}");
     assert_eq!(collect_allow_lines(&same_line_tab), [tab_allow]);
+
+    // Carriage return, form feed, and vertical tab are in memory. None of
+    // these calls reads the fixture or the profile file.
+    let cr_after = "(allow\rfile-read* (literal \"/tmp/cc-cr-allow\"))";
+    assert_eq!(collect_allow_lines(cr_after), [cr_after]);
+    let cr_before = "(\rallow file-read* (literal \"/tmp/cc-cr-before\"))";
+    assert_eq!(collect_allow_lines(cr_before), [cr_before]);
+    let ff_before = "(\x0callow file-read* (literal \"/tmp/cc-ff-before\"))";
+    assert_eq!(collect_allow_lines(ff_before), [ff_before]);
+    let vt_before = "(\x0ballow file-read* (literal \"/tmp/cc-vt-before\"))";
+    assert_eq!(collect_allow_lines(vt_before), [vt_before]);
+    let ff_same_suffix = "(\x0callow file-read* (literal \"/tmp/cc-ff-same\"))";
+    let ff_same = format!("(deny network*) {ff_same_suffix}");
+    assert_eq!(collect_allow_lines(&ff_same), [ff_same_suffix]);
+    assert!(
+        collect_allow_lines("(allow\x0cfile-read* (literal \"/tmp/cc-ff-after\"))").is_empty(),
+        "a form feed directly after allow collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allow\x0bfile-read* (literal \"/tmp/cc-vt-after\"))").is_empty(),
+        "a vertical tab directly after allow collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allowing file-read* (literal \"/tmp/cc-allowing\"))").is_empty(),
+        "(allowing file-read* collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allow-default)").is_empty(),
+        "(allow-default) collects nothing"
+    );
 
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
     let unclosed = [
