@@ -8,6 +8,9 @@ must occur once), rebuilds the tests (a mutant that does not compile proves
 nothing, so the run stops), runs the named tests, and requires them to FAIL.
 The file is restored from its saved bytes afterwards, also on error or Ctrl-C.
 The runner is the capsule kit's (examples/capsule-kit/falsify).
+
+PH6 stand-in cases extend this same runner.
+This test code stands in for the Runtime's launch by CID, which does not exist yet.
 """
 import pathlib
 import sys
@@ -19,6 +22,53 @@ BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 
 # (name, file under bundle/src, [(exact old text, new text)], tests that must fail)
 CASES = [
+    # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    ("stand-in F15 content ships only its entrypoint", "pack.rs",
+     [("if content || manifest.get(\"execution\").and_then(Value::as_str) == Some(\"web-projection\") {",
+       "if manifest.get(\"execution\").and_then(Value::as_str) == Some(\"web-projection\") {")],
+     ["stand_in_pack_ships_the_complete_photo_set",
+      "stand_in_content_cid_covers_payload_and_viewer_only"]),
+    ("stand-in F16 source README joins the closure", "pack.rs",
+     [("    let mut sources = Vec::with_capacity(files.len());",
+       "    if content { files.push(\"README.md\".into()); }\n    let mut sources = Vec::with_capacity(files.len());")],
+     ["stand_in_content_cid_covers_payload_and_viewer_only",
+      "stand_in_pack_ships_the_complete_photo_set"]),
+    ("stand-in F17 both dependency edges select by name", "admit.rs",
+     [(".find(|core| core.cid == cid && core.name == name)", ".find(|core| core.name == name)")],
+     ["stand_in_content_and_surface_resolve_by_exact_cid",
+      "stand_in_bundle_refuses_unresolved_dependencies",
+      "a_surface_resolves_its_core_by_cid_only"]),
+    ("stand-in F18 shared planning and copying follow links", "listing.rs",
+     [("            libc::AT_SYMLINK_NOFOLLOW,", "            0,"),
+      ("            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,", "            flags | libc::O_CLOEXEC,")],
+     ["stand_in_content_pack_preserves_path_safety",
+      "the_listing_refuses_symlinks_and_special_files",
+      "pack::tests::pack_refuses_a_manifest_swapped_for_a_link_after_checking",
+      "pack::tests::pack_refuses_a_source_folder_swapped_for_a_link_after_checking",
+      "pack::tests::pack_refuses_a_page_folder_swapped_for_a_link_during_planning",
+      "pack::tests::pack_refuses_a_later_link_without_leaving_partial_output"]),
+    ("stand-in F5 unpinned viewer falls back to a name", "admit.rs",
+     [("        vec![validate_content_stand_in(manifest, source.cid, &[])?]",
+       """        if manifest["viewer"].is_string() || manifest["viewer"].get("cid").is_none() {
+            let name = manifest["viewer"].as_str().or_else(|| manifest["viewer"]["name"].as_str()).unwrap_or("image-viewer");
+            let selected = installed.iter().find(|core| core.name == name).unwrap();
+            vec![json!({"name": name, "kind": "capsule", "cid": selected.cid})]
+        } else {
+            vec![validate_content_stand_in(manifest, source.cid, &[])?]
+        }""")],
+     ["stand_in_bundle_refuses_a_viewer_named_only_by_name"]),
+    ("stand-in F10 passive profile validation is bypassed", "admit.rs",
+     [("    let invalid = |detail: String| Refusal::ContentBindingInvalid {",
+       """    if true {
+        return Ok(json!({"name": manifest["viewer"]["name"], "kind": "capsule", "cid": manifest["viewer"]["cid"]}));
+    }
+    let invalid = |detail: String| Refusal::ContentBindingInvalid {""")],
+     ["stand_in_bundle_refuses_invalid_content_bindings"]),
+    ("stand-in F11 unresolved edge uses an installed selection", "admit.rs",
+     [("        } else if let Some(other) = installed\n",
+       "        } else if let Some(selected) = installed.first() {\n            cores.push(selected.clone());\n        } else if let Some(other) = installed\n")],
+     ["stand_in_bundle_refuses_unresolved_dependencies",
+      "a_surface_resolves_its_core_by_cid_only"]),
     # The listing.
     ("non-NFC names are listed", "listing.rs",
      [("if !name.is_ascii() && !is_nfc(name) {", "if false && !name.is_ascii() && !is_nfc(name) {")],

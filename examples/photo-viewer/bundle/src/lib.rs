@@ -26,6 +26,8 @@ pub mod sign;
 pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
+// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+pub use admit::{validate_content_stand_in, StandInResolveManifest};
 pub use cid::cid_v1_raw_sha256;
 pub use claim::{Claim, SignedClaim, CLAIM_SCHEMA};
 pub use listing::{
@@ -128,6 +130,11 @@ pub enum Refusal {
     StagedNotReadOnly(String),
     /// A capsule requirement with no `cid`.
     CoreUnpinned(String),
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// A passive content viewer needs its own CID pin.
+    ContentCoreUnpinned(String),
+    /// The content profile or its viewer binding is malformed.
+    ContentBindingInvalid { cid: String, detail: String },
     /// No installed capsule has the required name and CID.
     CoreMissing { name: String, cid: String },
     /// The installed capsule of that name, or with that CID, is another one.
@@ -181,6 +188,9 @@ impl Refusal {
             Refusal::StagedMismatch { .. } => "staged_mismatch",
             Refusal::StagedNotReadOnly(_) => "staged_not_read_only",
             Refusal::CoreUnpinned(_) => "core_unpinned",
+            // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+            Refusal::ContentCoreUnpinned(_) => "core_unpinned",
+            Refusal::ContentBindingInvalid { .. } => "content_binding_invalid",
             Refusal::CoreMissing { .. } => "core_missing",
             Refusal::CoreMismatch { .. } => "core_mismatch",
             Refusal::ProvenanceCidMismatch { .. } => "provenance_cid_mismatch",
@@ -194,6 +204,15 @@ impl Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+            Refusal::ContentCoreUnpinned(cid) => write!(f,
+                "core_unpinned: Content {cid} must pin its viewer with viewer.cid; a name alone cannot select it."),
+            Refusal::ContentBindingInvalid { cid, detail } => write!(f,
+                "content_binding_invalid: Content {cid} needs the passive photo profile and one viewer CID: {detail}."),
+            Refusal::CoreMissing { name, cid } => write!(f,
+                "core_missing: Required {name} at {cid} is absent; admit that exact dependency."),
+            Refusal::CoreMismatch { name, required, installed } => write!(f,
+                "core_mismatch: Required {name} at {required} differs from installed {installed}."),
             // The path named is the link; the caller needs the path it stands
             // for, which the same check accepts.
             Refusal::SymlinkInPath(_) => write!(
