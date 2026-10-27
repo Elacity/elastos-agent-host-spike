@@ -2871,6 +2871,23 @@
       "tests": [
         "hosted_run_refused_at_dispatch_records_usage_refused"
       ]
+    },
+    {
+      "id": "PV132",
+      "title": "list mode keeps a bare token as an id filter, so a wrong list path shows the default file instead of being refused and an id beside --list is silently ignored",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    if mode == \"list\" and filters:\n        refuse(f\"--list takes no id or path, got {filters[0]}; use --from PATH\")",
+          "new": "    if False:\n        refuse(f\"--list takes no id or path, got {filters[0]}; use --from PATH\")"
+        }
+      ],
+      "tests": [
+        "list with a bare token is refused",
+        "argv refusal precedes work"
+      ]
     }
   ]
 }

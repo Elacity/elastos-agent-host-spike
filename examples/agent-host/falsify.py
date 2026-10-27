@@ -225,6 +225,8 @@ def parse_argv(argv):
         mode = "self-test"
     else:
         mode = "run"
+    if mode == "list" and filters:
+        refuse(f"--list takes no id or path, got {filters[0]}; use --from PATH")
     if mode == "run" and not filters and not from_selected and (keep_backups or with_repo):
         refuse("--keep-backups and --with-repo need a mode, --from PATH, or an id prefix")
     return ParsedArgv(path, mode, case_name, filters, keep_backups, with_repo)
@@ -3039,6 +3041,11 @@ def argv_refusal_precedes_work():
             (["--keep-backups"], "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
             (["--with-repo", "--keep-backups"],
              "--keep-backups and --with-repo need a mode, --from PATH, or an id prefix"),
+            (["--list", "capsules/model-provider/falsifiers.json"],
+             "--list takes no id or path, got capsules/model-provider/falsifiers.json; "
+             "use --from PATH"),
+            (["--list", "FS01"],
+             "--list takes no id or path, got FS01; use --from PATH"),
         ):
             touched.clear()
             code = None
@@ -3202,6 +3209,27 @@ def prefix_token_still_selects():
         parsed = parse_argv(argv)
         print(f"self-test: {' '.join(argv)} -> mode {parsed.mode}, filters {parsed.filters}")
         if parsed.mode != "run" or parsed.filters != want:
+            ok = False
+    return ok
+
+
+def list_with_a_bare_token_is_refused():
+    """--list refuses a bare token: an id or a path never selects the list
+    file, so a wrong list is refused instead of shown. --from stays the one
+    way to pick the file, in either position."""
+    ok = True
+    chosen = "capsules/model-provider/falsifiers.json"
+    for argv, token in (
+        (["--list", chosen], chosen),
+        ([chosen, "--list"], chosen),
+        (["--list", "FS01"], "FS01"),
+        (["--from", chosen, "--list", "FS01"], "FS01"),
+    ):
+        code, reason = refusal(argv)
+        want = ("usage: --list takes no id or path, "
+                f"got {token}; use --from PATH\n")
+        print(f"self-test: {' '.join(argv)} -> exit {code}: {reason.strip()}")
+        if code != 2 or reason != want:
             ok = False
     return ok
 
@@ -3551,6 +3579,7 @@ SELF_TEST_CASES = {
         a_grant_binding_entry_loads_and_runs_its_crate,
     "list mode displays": list_mode_displays,
     "prefix token still selects": prefix_token_still_selects,
+    "list with a bare token is refused": list_with_a_bare_token_is_refused,
     "a nested list is listed": a_nested_list_is_listed,
     "a nested run keeps the caller's backup": a_nested_run_keeps_the_callers_backup,
     "released backups are recovered again": released_backups_are_recovered_again,
