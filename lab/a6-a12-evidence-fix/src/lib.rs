@@ -1204,7 +1204,7 @@ mod tests {
         let start = source.find("fn drain(").expect("LiveWatch::drain");
         let body = &source[start..];
         assert!(
-            body.contains("IN_Q_OVERFLOW"),
+            body.contains("if ev.mask & libc::IN_Q_OVERFLOW != 0"),
             "dropping the IN_Q_OVERFLOW check must be CAUGHT"
         );
         println!("A12 inotify drain still fails closed on IN_Q_OVERFLOW");

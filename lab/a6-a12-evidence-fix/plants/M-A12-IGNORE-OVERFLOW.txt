@@ -6,7 +6,5 @@ test: tests::a12_inotify_overflow_check_is_pinned
                     return Err("inotify queue overflow; leftover watch fail closed".into());
                 }
 --- new
-                if false && ev.mask & libc::IN_Q_OVERFLOW != 0 {
-                    return Err("inotify queue overflow; leftover watch fail closed".into());
-                }
+                let _overflow = ev.mask;
 --- end
