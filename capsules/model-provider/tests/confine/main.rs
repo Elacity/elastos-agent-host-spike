@@ -2611,6 +2611,67 @@ fn generated_profile_permits_init_and_denies_the_local_offer() {
     provider.shutdown();
 }
 
+/// A declared value with no rights list is refused, and a generated profile
+/// that does not parse never starts the provider.
+///
+/// `standin_profile` on `json!({})` returns an error that contains
+/// `model-provider` and `rights`. That call starts no provider. `{}` has no
+/// `rights` key. `generated_model_profile_matches_the_oracle` already refuses
+/// a present `rights` value that is not a list, on this same line. When the
+/// sandbox is present, the real fixture's generated text loses its last `)`,
+/// `write_standin_profile` writes that text, and `assert_startup_is_refused`
+/// reads exit 65 with marker `expecting ')'`.
+///
+/// Falsifier: F-cc43a makes `standin_profile` return an empty profile when
+/// the rights list is missing, so this test fails before any launch, and
+/// `generated_model_profile_matches_the_oracle` fails on the same line.
+/// F-cc42a makes `write_standin_profile` write an allow-default profile and
+/// ignore the generated text, so this launch does not exit 65.
+#[test]
+fn standin_refuses_a_start_it_cannot_apply() {
+    let refused =
+        standin_profile(&json!({})).expect_err("a declared value with no rights list is refused");
+    assert!(
+        refused.contains("model-provider") && refused.contains("rights"),
+        "the refusal must name the provider and the rights list: {refused}"
+    );
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let trimmed = generated.trim_end();
+    assert!(
+        trimmed.ends_with(')'),
+        "the generated profile does not parse: the generated text must end with ')'"
+    );
+    let broken = &trimmed[..trimmed.len() - 1];
+    let storage = Storage::prepare("standin-cannot-apply");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, broken);
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    assert_startup_is_refused(
+        "the generated profile does not parse",
+        Launch::Profile {
+            profile: &profile,
+            bindings: &bindings,
+        },
+        &storage,
+        "expecting ')'",
+    );
+}
+
 fn collect_allow_lines(profile: &str) -> Vec<&str> {
     fn allow_at(line: &str) -> Option<usize> {
         let bytes = line.as_bytes();
