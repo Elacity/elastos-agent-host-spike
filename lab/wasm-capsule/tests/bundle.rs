@@ -20,7 +20,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use wasm_capsule_tools::bundle::{
-    parse_args, run, write_all_to, write_new_file, ArgRefusal, Mode, USAGE,
+    parse_args, run, write_all_to, write_new_file, ArgRefusal, Mode, Reason, USAGE,
 };
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
@@ -386,14 +386,16 @@ fn bundle_io_refusals_keep_path_and_cause() {
     );
 
     // capsule.json is made new: a missing folder, an existing file and a link
-    // are each refused, and nothing is written through the link.
+    // are each refused, and nothing is written through the link. The writer's
+    // reason names no file, so the path in front of it is the only name.
     let missing = tmp.path().join("missing").join("capsule.json");
     let error = write_new_file(&missing, CAPSULE_MANIFEST).expect_err("no folder");
+    assert!(matches!(error.reason, Reason::FileNotCreated(_)));
     assert_eq!(
         error.to_string(),
         refused(
             &missing,
-            &format!("capsule.json cannot be created: {NO_SUCH_FILE}")
+            &format!("cannot be created as a new file: {NO_SUCH_FILE}")
         )
     );
     let existing = tmp.path().join("existing.json");
@@ -404,11 +406,12 @@ fn bundle_io_refusals_keep_path_and_cause() {
     symlink(&target, &link).expect("link to a file");
     for path in [&existing, &link] {
         let error = write_new_file(path, CAPSULE_MANIFEST).expect_err("an entry is there");
+        assert!(matches!(error.reason, Reason::FileNotCreated(_)));
         assert_eq!(
             error.to_string(),
             refused(
                 path,
-                "capsule.json cannot be created: File exists (os error 17)"
+                "cannot be created as a new file: File exists (os error 17)"
             )
         );
     }
@@ -418,11 +421,12 @@ fn bundle_io_refusals_keep_path_and_cause() {
     // A write that fails after the file is made.
     let made = tmp.path().join("made.json");
     let error = write_all_to(&made, &mut FailingWriter, CAPSULE_MANIFEST).expect_err("refused");
+    assert!(matches!(error.reason, Reason::FileNotWritten(_)));
     assert_eq!(
         error.to_string(),
         refused(
             &made,
-            "capsule.json cannot be written: the test writer refuses every byte"
+            "was created, but its bytes cannot be written: the test writer refuses every byte"
         )
     );
 }

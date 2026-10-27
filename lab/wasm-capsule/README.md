@@ -302,7 +302,11 @@ exist. The build mode:
    the build is refused;
 4. makes `bundle/capsule.json` with `create_new`, which refuses any entry
    already there (a link included), and writes this capsule's manifest bytes
-   (`CAPSULE_MANIFEST`);
+   (`CAPSULE_MANIFEST`). This is the shared writer `write_new_file`, which the
+   run receipts use too, so its two refusals name no file; the path in front
+   names it: `<OUT_DIR>/bundle/capsule.json: cannot be created as a new file:
+   <OS error>` and `<OUT_DIR>/bundle/capsule.json: was created, but its bytes
+   cannot be written: <cause>` (task 050);
 5. moves the module in with `rename(OUT_DIR/capsule.wasm,
    OUT_DIR/bundle/capsule.wasm)`. A rename moves a folder entry: it reads and
    writes no file content and never follows a link. A link at the source moves
@@ -556,7 +560,11 @@ its own budget from its own start, `wasmtime`'s and then `wasmer`'s, never one
 shared clock. Known limits: the `--version` queries have no budget; the budget
 is wall-clock time, not CPU time; a stopped run's partial stdout and stderr are
 dropped; a runner process that is itself killed leaves its engine running, as
-it leaves its folder (task 039). This is lab input for M1 A7, not a Runtime
+it leaves its folder (task 039); after the kill, the runner joins both readers
+(`joined`), which wait for end-of-file on the engine's stdout and stderr, so
+an engine that started a child holding those pipes open would keep the runner
+waiting past the budget (task 050: the pinned engines start no child, and no
+test covers this). This is lab input for M1 A7, not a Runtime
 admission or launch claim. The refusal receipt (task 044) is in "Run receipt
 (wc-005c)"; cancel (task 045) is in "Cancel (M1 A10 lab half)".
 
@@ -801,8 +809,9 @@ number belongs here waits for Flint.
 with the shared `bundle::write_new_file` (`create_new`). An existing file, a
 live link or a dangling link at that path is refused with that writer's own
 reason and cause, unchanged, and nothing at or behind the path changes. The
-writer's text names `capsule.json`, its first use (`<path>: capsule.json cannot
-be created: File exists (os error 17)`); the path before it is the receipt's.
+writer's reason names no file, so the path before it, the receipt's, is the
+only file name (`<path>: cannot be created as a new file: File exists (os error
+17)`).
 
 **The claim, unchanged from task 015.** One core module, on this one Mac,
 with both engines test-only and not endorsed; not the Component ABI. The
@@ -843,7 +852,8 @@ the verifier's own words. Every value comes from the refusal; nothing is
 configured. There is no lab CID line, since a verifier refusal may have none.
 `write_refused_receipt` writes it through the same `bundle::write_new_file`, so
 an existing file or link at the path is refused with that writer's own reason
-and cause, unchanged. The refusal receipt is lab text: it makes no admission
+and cause, unchanged; that reason names no file, so the refusal receipt's path
+is the only name in it. The refusal receipt is lab text: it makes no admission
 decision, and it is not signed. The passed-run receipt above is unchanged.
 
 Task 045: `outcome` is `cancelled` for a run the caller cancelled (id
@@ -2448,24 +2458,24 @@ gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
 ## Falsifiers
 
-`falsifiers.json` holds 184 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 185 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
-033, two task 034, one task 045 and two task 046.
+033, two task 034, one task 045, two task 046 and one task 050.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 120, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 121, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045 and 046: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046 and 050: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 68, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
@@ -3266,3 +3276,25 @@ F-WC5-ENGINE-ENV's named tests (dropping `env_clear()` gives the child's fixture
 both named tests failing (LOG.md, task 049), and it keeps its runner-caught
 label above. No entry is added, so the total (184) and the runner-caught count
 (120) are unchanged; the hand-proven total (66 before) gains these two, 68.
+
+Task 050's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 050). Its anchor is the create reason's `write!` line in
+`tools/src/bundle.rs`, a recovery target, found exactly once, and both named
+tests fail at an assertion:
+
+- F-WC5-WRITER-NAMES-MANIFEST — the shared writer's create reason starts with
+  `capsule.json ` again, so a receipt the writer cannot create is refused under
+  the bundle manifest's name, not only its own path
+  (`receipt_write_refuses_an_existing_path` and
+  `refusal_receipt_write_refuses_an_existing_path`, each at its no-`capsule.json`
+  check).
+
+Task 050 also renames the shared writer's two reasons (`FileNotCreated`,
+`FileNotWritten`; their texts name no file) and so re-anchors five entries to
+the new names and texts, each the same bug as before: F-WC3-IO-CAUSE-MANIFEST,
+F-WC3-IO-CAUSE-WRITE, F-WC5-IO-MODULE-CREATE, F-WC5-IO-MODULE-WRITE and
+F-WC5-RECEIPT-OVERWRITE (its planted `fs::write` builds the renamed
+`FileNotCreated`, so it compiles). It also re-anchors F-WC-README-COUNT to the
+new total. The canonical runner reports all six CAUGHT (LOG.md, task 050). Each
+keeps its own evidence label above: F-WC3-IO-CAUSE-MANIFEST and -WRITE stay in
+task 009's hand-proven count, and this task changes no label.
