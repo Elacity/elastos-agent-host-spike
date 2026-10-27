@@ -1,6 +1,7 @@
 //! Admission: verify, then stage a read-only copy under its CID, verify the
 //! copy, and load only from it.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use serde_json::{json, Value};
 
-use crate::listing::{cid_of, read_closure, Entry};
+use crate::listing::{cid_of, read_closure, ClosureRead, Entry};
 use crate::{io, Refusal, SignedClaim, TrustPolicy};
 
 /// A capsule already in the person's inventory.
@@ -37,6 +38,9 @@ pub struct Loaded {
     pub path: PathBuf,
     pub entries: Vec<Entry>,
     pub manifest: Value,
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// The same bytes that were hashed, keyed by closure entry path.
+    pub bytes: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn admit(
@@ -48,7 +52,9 @@ pub fn admit(
     now: u64,
 ) -> Result<Admitted, Refusal> {
     // 1. The closure, and its CID.
-    let (entries, manifest) = read_closure(source)?;
+    let ClosureRead {
+        entries, manifest, ..
+    } = read_closure(source)?;
     let computed = cid_of(&entries);
     let claimed = &claim.claim;
     if computed != claimed.cid {
@@ -162,8 +168,21 @@ pub fn admit(
 pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
     check_cid_form(cid)?;
     let path = store.join(cid);
+    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    if let Err(err) = std::fs::symlink_metadata(&path) {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Err(Refusal::StagedMissing {
+                cid: cid.to_string(),
+            });
+        }
+        return Err(io(err, &path));
+    }
     check_read_only(&path, &path)?;
-    let (entries, manifest) = read_closure(&path)?;
+    let ClosureRead {
+        entries,
+        manifest,
+        bytes,
+    } = read_closure(&path)?;
     let computed = cid_of(&entries);
     if computed != cid {
         return Err(Refusal::StagedMismatch {
@@ -177,6 +196,7 @@ pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
         path,
         entries,
         manifest,
+        bytes,
     })
 }
 
@@ -420,7 +440,7 @@ fn copy_and_seal(
     }
     // The copy, not the source, is what must hash to the CID: a source that
     // changed after it was verified is caught here.
-    let (copied, _) = read_closure(staging)?;
+    let copied = read_closure(staging)?.entries;
     let computed = cid_of(&copied);
     if computed != cid {
         return Err(Refusal::StagedMismatch {
@@ -508,7 +528,7 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("capsule.json"), b"{}").unwrap();
         std::fs::write(source.join("a.wasm"), b"verified").unwrap();
-        let (entries, _) = read_closure(&source).unwrap();
+        let entries = read_closure(&source).unwrap().entries;
         let cid = cid_of(&entries);
 
         std::fs::write(source.join("a.wasm"), b"swapped!").unwrap();

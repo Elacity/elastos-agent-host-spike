@@ -33,11 +33,17 @@ pub struct Entry {
 /// refused, never followed. Paths must be ASCII or NFC and unique under
 /// case folding.
 pub fn list_closure(root: &Path) -> Result<Vec<Entry>, Refusal> {
-    Ok(read_closure(root)?.0)
+    Ok(read_closure(root)?.entries)
 }
 
-/// The listing and the `capsule.json` bytes it lists, read in the same pass.
-pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal> {
+pub(crate) struct ClosureRead {
+    pub entries: Vec<Entry>,
+    pub manifest: Vec<u8>,
+    pub bytes: BTreeMap<String, Vec<u8>>,
+}
+
+/// The listing, manifest and every file's bytes, read in the same pass.
+pub(crate) fn read_closure(root: &Path) -> Result<ClosureRead, Refusal> {
     let (root, meta) = real_path(root)?;
     let root = root.as_path();
     if !meta.is_dir() {
@@ -47,6 +53,7 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
     let shown = root.display().to_string();
     let mut entries = Vec::new();
     let mut manifest = None;
+    let mut file_bytes = BTreeMap::new();
     walk_regular_files(&dir, "", &shown, &mut |parent, name, relative, shown| {
         let mut file = open_regular_at(parent, name, shown)?;
         let meta = file.metadata().map_err(|err| io(err, Path::new(shown)))?;
@@ -64,15 +71,20 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
             sha256: hex::encode(Sha256::digest(&bytes)),
         });
         if relative == "capsule.json" {
-            manifest = Some(bytes);
+            manifest = Some(bytes.clone());
         }
+        file_bytes.insert(relative.to_string(), bytes);
         Ok(())
     })?;
     entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
 
     check_unique_under_case_folding(entries.iter().map(|entry| entry.path.as_str()))?;
     let manifest = manifest.ok_or(Refusal::ManifestMissing)?;
-    Ok((entries, manifest))
+    Ok(ClosureRead {
+        entries,
+        manifest,
+        bytes: file_bytes,
+    })
 }
 
 /// `path` rebuilt from its parts, with every prefix that exists lstat'ed: no

@@ -7,8 +7,8 @@
 //
 // This file is the one owner. A page that draws the docs model ships a copy
 // at browser/docs-render.js, made by its build, and its surface test pins the
-// copy to these bytes. Page glue (launch token, client, document list, page
-// bounds) stays in the page.
+// copy to these bytes. The launch client has its own owner, page-client.js;
+// the document list and page bounds stay in the page.
 //
 // Browser-safe ESM: no node imports.
 
