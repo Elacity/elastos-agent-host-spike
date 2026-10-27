@@ -118,6 +118,7 @@ fn a_different_version_of_a_declared_interface_is_refused() {
         ("elastos:bus/runtime@1.0.0", "elastos:bus/RUNTIME@1.0.0"),
         ("elastos:bus/RUNTIME@1.0.0", "elastos:bus/runtime@1.0.0"),
         ("elastos:bus/runtime@1.0.0", "my-elastos:bus/runtime@1.0.0"),
+        ("my-elastos:bus/runtime@1.0.0", "elastos:bus/runtime@1.0.0"),
     ] {
         let wasm = wat::parse_str(format!(r#"(component (import "{name}" (instance)))"#)).unwrap();
         assert_undeclared(&wasm, &[declared], name);
