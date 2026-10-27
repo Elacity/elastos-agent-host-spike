@@ -93,28 +93,33 @@ depth lexically and never resolves the path.
 Authorship is a host-side receipt. The Runtime appends one JSON line per
 bus call to `runtime/capability-requests.jsonl`, with the structured
 code `manifest_capability_denied` and the action plus resource. Each run
-uses a fresh `mktemp` Home. The test fails if that file already exists
-when the guest starts, records size and inode at launch, and reads only
-lines appended after. It binds those lines to the component id the
-Runtime printed for this launch (a `[run]` line or API, never the guest
-or the jsonl itself), plus session id and guest module hash when the
-Runtime writes them. Records with other ids are refused.
+uses a fresh `mktemp` Home. The test fails if that file exists at any
+point from the snapshot through spawn, records size and inode at launch,
+locks the first inode seen during `elastos run`, and reads only that
+file. It binds those lines to the component id the Runtime printed for
+this launch (a `[run]` line or API, never the guest or the jsonl
+itself). A missing assigned id is not a match: NEEDS RUNTIME, never
+PASS. A foreign `capsule_id` is a FAIL. Session id must equal this
+launch. `module_hash` is the only hash field. `guest_function` must be
+`request_journal_grants`. The cargo test itself refuses PASS while any
+of those fields is missing.
 
 The Runtime today writes `capsule_id` as `component-<uuid>` and leaves
 `principal_id` null. It does not print that id, and it does not record
-session id or module hash. The test process shares the Runtime's uid, so
-it can write the same file; making the file unwritable also blocks the
-Runtime. Those gaps are the Runtime ask in
+session id, module hash, or guest function. The test process shares the
+Runtime's uid, so it can write the same file; making the file unwritable
+also blocks the Runtime. Those gaps are the Runtime ask in
 [RUNTIME-ASK.md](RUNTIME-ASK.md). The pass row is NEEDS RUNTIME until
-the Runtime binds this guest, this session, and this hash.
+the Runtime binds this guest, this session, this hash, and this function.
 
 The guest still cannot name a path that maps to the jsonl. The test
-requires write and then read for that one fake key, then the honest
-follow-up `the journal append did not follow its grants`. That is what
-`request_journal_grants` asks and then does with empty grants. A guest
-that only prints the Internal sentence, that asks once after
-`identity::context()`, that skips `request_journal_grants`, or whose
-lines the test process wrote, fails. `host_path` still treats every
+requires write and then read for that one fake key. The honest sequence
+is judged only from host receipts and the Runtime / bus host log, never
+from guest stderr. A guest that skips `request_journal_grants` and
+prints `Invalid("the journal append did not follow its grants")` fails.
+A guest that only prints the Internal sentence, that asks once after
+`identity::context()`, or whose lines the test process wrote before
+launch or after the snapshot, fails. `host_path` still treats every
 other `..` or `/` path as a host path.
 
 The run must exit nonzero. The fake key bytes must be unchanged and the
@@ -180,6 +185,8 @@ when each test fails at its refusal assertion.
 | F-A8-direct-request | D-direct-request: guest asks `capabilities::request` after identity | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-test-writes-lines | test writes the two expected jsonl lines and launches a no-bus guest | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-skip-journal-grants | guest asks write then read, skips `request_journal_grants`, ignores the refusal | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-guest-follow-sentence | guest asks write then read, skips `request_journal_grants`, prints the Invalid sentence | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-race-after-snapshot | test writes the two lines after the inode snapshot, foreign `capsule_id`, no-bus guest | `agent_host_host_key_read_is_refused` | CAUGHT |
 
 Under F-A1-runtime the Runtime still refused the WASI build, through its
 core-module import check, with a different reason; the exact-reason assertion
@@ -191,8 +198,11 @@ the Runtime sentence. F-A8-early fails the same way on the early-return
 marker. The four #356 plants fail on the host-side write-then-read
 receipt, except F-A8-wasm-bus-only, which fails when it requires the
 Internal sentence on stderr. F-A8-test-writes-lines fails because the
-jsonl already exists before launch. F-A8-skip-journal-grants fails the
-honest follow-up sentence. [LOG.md](LOG.md) has the exact lines.
+jsonl already exists before launch. F-A8-skip-journal-grants and
+F-A8-guest-follow-sentence fail the host-side sequence (guest function
+`request_journal_grants`). F-A8-race-after-snapshot fails because the
+jsonl exists at spawn. [LOG.md](LOG.md) has the exact lines.
+`mutants/binding.py` kills one mutant per new assert.
 
 `runtime-local` entries edit Runtime source on the test machine for one run.
 They are restored byte-identical and never committed.

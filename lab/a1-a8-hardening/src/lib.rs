@@ -280,12 +280,30 @@ impl Run {
 
 /// Size and inode of `runtime/capability-requests.jsonl` at guest launch.
 /// Readers use only bytes appended after this snapshot. A changed inode
-/// after a known file is a different file, not an append.
+/// after a known file is a different file, not an append. A missing inode
+/// is not a launch window: the file must stay absent until `elastos run`
+/// starts, then the first inode seen during that run is the lock.
 #[derive(Clone, Debug)]
 pub struct ReceiptCursor {
     pub path: PathBuf,
     pub inode: Option<u64>,
     pub size: u64,
+}
+
+/// Host-side name of the guest function that asked the bus. Required for
+/// an A8 PASS. Written by the Runtime, never taken from guest stderr.
+pub const GUEST_FUNCTION_JOURNAL_GRANTS: &str = "request_journal_grants";
+
+/// Structured denial recorded by the Runtime on a manifest-bound ask.
+pub const MANIFEST_DENIED: &str = "manifest_capability_denied";
+
+/// Bindings this launch must print or return. Missing values are
+/// NEEDS RUNTIME. A mismatch is a FAIL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchBind {
+    pub assigned: Option<String>,
+    pub session_id: Option<String>,
+    pub guest_hash: String,
 }
 
 /// A fresh root from `mktemp -d` with its own HOME, data dir and TMPDIR.
@@ -296,6 +314,7 @@ pub struct Home {
     data: PathBuf,
     temp: PathBuf,
     finished: bool,
+    launch_receipts: Mutex<Option<ReceiptCursor>>,
 }
 
 struct Spawned {
@@ -339,6 +358,7 @@ impl Home {
             data,
             temp,
             finished: false,
+            launch_receipts: Mutex::new(None),
         }
     }
 
@@ -420,16 +440,20 @@ impl Home {
 
     /// Same as [`Home::run`], but stop as soon as `stop` is true. Used so a
     /// request that left the manifest bound (and went pending) fails on the
-    /// host record instead of waiting out the client bound.
+    /// host record instead of waiting out the client bound. The receipt file
+    /// must still be absent at spawn; the first inode seen after that is the
+    /// launch window.
     pub fn run_until(
         &self,
         capsule: &Path,
         bound: Duration,
         mut stop: impl FnMut(&Self) -> bool,
     ) -> Run {
+        self.assert_receipts_absent();
         let mut spawned = self.spawn(&runtime().path, &["run", capsule.to_str().unwrap()]);
         let started = Instant::now();
         let status = loop {
+            self.lock_launch_receipts();
             if let Some(status) = spawned.child.try_wait().expect("wait for elastos run") {
                 break Some(status);
             }
@@ -442,6 +466,7 @@ impl Home {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
+        self.lock_launch_receipts();
         stop_group(spawned.child.id());
         if status.is_none() {
             let _ = spawned.child.wait();
@@ -458,6 +483,8 @@ impl Home {
     }
 
     /// Fail if a leftover or planted receipt file is already in this Home.
+    /// Called before the snapshot and again at spawn so the check covers
+    /// the whole window from snapshot through `elastos run`.
     pub fn assert_receipts_absent(&self) {
         let path = self.receipts_path();
         assert!(
@@ -465,6 +492,65 @@ impl Home {
             "capability-requests.jsonl must not exist before the guest is launched ({})",
             path.display()
         );
+    }
+
+    fn lock_launch_receipts(&self) {
+        let path = self.receipts_path();
+        let Ok(meta) = fs::metadata(&path) else {
+            return;
+        };
+        let mut guard = self
+            .launch_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(ReceiptCursor {
+                path,
+                inode: Some(meta.ino()),
+                size: 0,
+            });
+        }
+    }
+
+    /// Receipts the Runtime created during this `elastos run`. A file that
+    /// appeared before spawn is refused by [`Home::assert_receipts_absent`].
+    /// A missing assigned id is not used here.
+    pub fn receipts_since_launch(&self) -> Vec<CapabilityRequestRecord> {
+        self.lock_launch_receipts();
+        let guard = self
+            .launch_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(cursor) => self.capability_requests_since(cursor),
+            None => Vec::new(),
+        }
+    }
+
+    /// Runtime-authored text under this Home's data dir. Guest stderr is
+    /// not included.
+    pub fn host_runtime_log(&self) -> String {
+        let mut text = String::new();
+        let runtime_dir = self.data.join("runtime");
+        let Ok(entries) = fs::read_dir(&runtime_dir) else {
+            return text;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".jsonl") || name.ends_with(".log") {
+                if let Ok(body) = fs::read_to_string(entry.path()) {
+                    text.push_str(&body);
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                }
+            }
+        }
+        text
     }
 
     /// Record size and inode at launch. The file must be absent; size is 0
@@ -541,6 +627,7 @@ pub struct CapabilityRequestRecord {
     pub principal_id: Option<String>,
     pub session_id: Option<String>,
     pub module_hash: Option<String>,
+    pub guest_function: Option<String>,
 }
 
 fn optional_string(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -552,7 +639,8 @@ fn optional_string(value: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_capability_record(line: &str) -> Option<CapabilityRequestRecord> {
+/// Parse one Runtime receipt line. Hash aliases and guest stderr are ignored.
+pub fn parse_capability_record(line: &str) -> Option<CapabilityRequestRecord> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     Some(CapabilityRequestRecord {
         action: value.get("action")?.as_str()?.to_string(),
@@ -561,10 +649,136 @@ fn parse_capability_record(line: &str) -> Option<CapabilityRequestRecord> {
         capsule_id: optional_string(&value, "capsule_id"),
         principal_id: optional_string(&value, "principal_id"),
         session_id: optional_string(&value, "session_id"),
-        module_hash: optional_string(&value, "module_hash")
-            .or_else(|| optional_string(&value, "guest_hash"))
-            .or_else(|| optional_string(&value, "wasm_hash")),
+        module_hash: optional_string(&value, "module_hash"),
+        guest_function: optional_string(&value, "guest_function"),
     })
+}
+
+/// Isolation actions: resource plus the structured denial. Capsule id is
+/// not a match here. A missing assigned id never turns this into a PASS.
+pub fn isolation_denied_actions(
+    records: &[CapabilityRequestRecord],
+    resource: &str,
+) -> Vec<String> {
+    records
+        .iter()
+        .filter(|record| record.resource == resource && record.code == MANIFEST_DENIED)
+        .map(|record| record.action.clone())
+        .collect()
+}
+
+/// Binding actions. A missing assigned id matches nothing.
+pub fn bound_denied_actions(
+    records: &[CapabilityRequestRecord],
+    resource: &str,
+    assigned: Option<&str>,
+) -> Vec<String> {
+    let Some(id) = assigned else {
+        return Vec::new();
+    };
+    records
+        .iter()
+        .filter(|record| {
+            record.resource == resource
+                && record.code == MANIFEST_DENIED
+                && record.capsule_id.as_deref() == Some(id)
+        })
+        .map(|record| record.action.clone())
+        .collect()
+}
+
+/// Guest function from host receipts or a Runtime log. Guest stderr is
+/// ignored, including the Invalid follow sentence.
+pub fn host_sequence_function(
+    records: &[CapabilityRequestRecord],
+    host_log: &str,
+) -> Option<String> {
+    if let Some(name) = records
+        .iter()
+        .find_map(|record| record.guest_function.clone())
+    {
+        return Some(name);
+    }
+    host_log.lines().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        optional_string(&value, "guest_function")
+    })
+}
+
+/// Missing Runtime-ask fields (NEEDS RUNTIME) or a hard mismatch (FAIL).
+/// Session must equal this launch's id. `module_hash` is the only hash
+/// field. `guest_function` is required.
+pub fn authorship_gaps(
+    records: &[CapabilityRequestRecord],
+    bind: &LaunchBind,
+) -> Result<Vec<&'static str>, String> {
+    if let Some(id) = bind.assigned.as_deref() {
+        if records
+            .iter()
+            .any(|record| record.capsule_id.as_deref() != Some(id))
+        {
+            return Err(format!(
+                "receipt capsule_id must match this launch {id}; host records: {records:?}"
+            ));
+        }
+    }
+    if let Some(session) = bind.session_id.as_deref() {
+        if records
+            .iter()
+            .any(|record| record.session_id.as_deref() != Some(session))
+        {
+            return Err(format!(
+                "receipt session_id must equal this launch {session}; host records: {records:?}"
+            ));
+        }
+    }
+    if records.iter().any(|record| {
+        record
+            .module_hash
+            .as_deref()
+            .is_some_and(|hash| hash != bind.guest_hash)
+    }) {
+        return Err(format!(
+            "receipt module_hash must equal this guest {}; host records: {records:?}",
+            bind.guest_hash
+        ));
+    }
+    if records.iter().any(|record| {
+        record
+            .guest_function
+            .as_deref()
+            .is_some_and(|name| name != GUEST_FUNCTION_JOURNAL_GRANTS)
+    }) {
+        return Err(format!(
+            "honest sequence requires request_journal_grants on host receipts; host records: {records:?}"
+        ));
+    }
+
+    let mut missing = Vec::new();
+    if bind.assigned.is_none() {
+        missing.push("component id from Runtime [run] output or API");
+    }
+    if bind.session_id.is_none()
+        || records.is_empty()
+        || records.iter().any(|record| record.session_id.is_none())
+    {
+        missing.push("session id");
+    }
+    if records.is_empty()
+        || records
+            .iter()
+            .any(|record| record.module_hash.as_deref() != Some(bind.guest_hash.as_str()))
+    {
+        missing.push("guest module hash");
+    }
+    if records.is_empty()
+        || records
+            .iter()
+            .any(|record| record.guest_function.as_deref() != Some(GUEST_FUNCTION_JOURNAL_GRANTS))
+    {
+        missing.push("guest function");
+    }
+    Ok(missing)
 }
 
 fn read_capability_requests_since(
@@ -613,6 +827,40 @@ pub fn assigned_component_id(text: &str) -> Option<String> {
                 .find(|word| is_component_id(word))
                 .map(str::to_string)
         })
+}
+
+/// The session id the Runtime printed on a `[run]` line. Presence of any
+/// non-empty string on a receipt is not a bind.
+pub fn assigned_session_id(text: &str) -> Option<String> {
+    text.lines()
+        .filter(|line| line.starts_with("[run] "))
+        .find_map(|line| {
+            for word in line.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == ',')
+            {
+                if let Some(value) = word.strip_prefix("session_id=") {
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+                if is_session_id(word) {
+                    return Some(word.to_string());
+                }
+            }
+            None
+        })
+}
+
+fn is_session_id(word: &str) -> bool {
+    let Some(rest) = word
+        .strip_prefix("session-")
+        .or_else(|| word.strip_prefix("session:"))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn is_component_id(word: &str) -> bool {
@@ -791,4 +1039,152 @@ fn health_is_ok(port: u16) -> bool {
     }
     let mut response = [0; 16];
     matches!(stream.read(&mut response), Ok(len) if response[..len].starts_with(b"HTTP/1.1 200 "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RESOURCE: &str = "localhost://Public/../../../../.ssh/id_ed25519";
+    const HASH: &str = "f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737";
+    const ASSIGNED: &str = "component-341af27a-6b9c-4892-a618-808f0b687a9d";
+    const FOREIGN: &str = "component-00000000-0000-0000-0000-000000000000";
+    const SESSION: &str = "session-this-launch";
+
+    fn denied(action: &str, capsule: &str) -> String {
+        format!(
+            r#"{{"action":"{action}","capsule_id":"{capsule}","code":"{MANIFEST_DENIED}","principal_id":null,"resource":"{RESOURCE}"}}"#
+        )
+    }
+
+    fn honest_today() -> Vec<CapabilityRequestRecord> {
+        ["write", "read"]
+            .into_iter()
+            .map(|action| parse_capability_record(&denied(action, ASSIGNED)).unwrap())
+            .collect()
+    }
+
+    fn bind(assigned: Option<&str>, session: Option<&str>) -> LaunchBind {
+        LaunchBind {
+            assigned: assigned.map(str::to_string),
+            session_id: session.map(str::to_string),
+            guest_hash: HASH.to_string(),
+        }
+    }
+
+    #[test]
+    fn missing_assigned_is_not_a_match() {
+        let records = honest_today();
+        assert_eq!(
+            isolation_denied_actions(&records, RESOURCE),
+            ["write", "read"]
+        );
+        assert!(bound_denied_actions(&records, RESOURCE, None).is_empty());
+        let missing = authorship_gaps(&records, &bind(None, None)).unwrap();
+        assert!(missing.contains(&"component id from Runtime [run] output or API"));
+        assert!(missing.contains(&"session id"));
+        assert!(missing.contains(&"guest module hash"));
+        assert!(missing.contains(&"guest function"));
+    }
+
+    #[test]
+    fn foreign_capsule_id_is_a_fail() {
+        let records: Vec<_> = ["write", "read"]
+            .into_iter()
+            .map(|action| parse_capability_record(&denied(action, FOREIGN)).unwrap())
+            .collect();
+        let err = authorship_gaps(&records, &bind(Some(ASSIGNED), Some(SESSION))).unwrap_err();
+        assert!(err.contains("receipt capsule_id must match this launch"));
+    }
+
+    #[test]
+    fn session_must_equal_this_launch() {
+        let mut records = honest_today();
+        for record in &mut records {
+            record.session_id = Some("other-session".into());
+            record.module_hash = Some(HASH.into());
+            record.guest_function = Some(GUEST_FUNCTION_JOURNAL_GRANTS.into());
+        }
+        let err = authorship_gaps(&records, &bind(Some(ASSIGNED), Some(SESSION))).unwrap_err();
+        assert!(err.contains("receipt session_id must equal this launch"));
+    }
+
+    #[test]
+    fn guest_function_is_required_and_must_be_journal_grants() {
+        let mut records = honest_today();
+        for record in &mut records {
+            record.session_id = Some(SESSION.into());
+            record.module_hash = Some(HASH.into());
+            record.guest_function = Some("capabilities::request".into());
+        }
+        let err = authorship_gaps(&records, &bind(Some(ASSIGNED), Some(SESSION))).unwrap_err();
+        assert!(err.contains("honest sequence requires request_journal_grants"));
+    }
+
+    #[test]
+    fn hash_aliases_are_not_module_hash() {
+        let line = format!(
+            r#"{{"action":"write","capsule_id":"{ASSIGNED}","code":"{MANIFEST_DENIED}","resource":"{RESOURCE}","session_id":"{SESSION}","wasm_hash":"{HASH}","guest_hash":"{HASH}"}}"#
+        );
+        let record = parse_capability_record(&line).unwrap();
+        assert!(record.module_hash.is_none());
+        let missing = authorship_gaps(&[record], &bind(Some(ASSIGNED), Some(SESSION))).unwrap();
+        assert!(missing.contains(&"guest module hash"));
+        assert!(missing.contains(&"guest function"));
+    }
+
+    #[test]
+    fn follow_sentence_is_not_host_sequence() {
+        let records = honest_today();
+        assert!(
+            host_sequence_function(&records, "the journal append did not follow its grants")
+                .is_none()
+        );
+        let log = format!(r#"{{"guest_function":"{GUEST_FUNCTION_JOURNAL_GRANTS}"}}"#);
+        assert_eq!(
+            host_sequence_function(&[], &log).as_deref(),
+            Some(GUEST_FUNCTION_JOURNAL_GRANTS)
+        );
+    }
+
+    #[test]
+    fn session_id_comes_from_run_lines_only() {
+        assert!(assigned_session_id(
+            "the journal append did not follow its grants\nsession-sneak\n"
+        )
+        .is_none());
+        assert_eq!(
+            assigned_session_id("[run] Component capsule attached session_id=session-this-launch")
+                .as_deref(),
+            Some(SESSION)
+        );
+        assert!(assigned_component_id(
+            "guest printed component-00000000-0000-0000-0000-000000000000\n"
+        )
+        .is_none());
+        assert_eq!(
+            assigned_component_id(&format!("[run] Component capsule attached {ASSIGNED}"))
+                .as_deref(),
+            Some(ASSIGNED)
+        );
+    }
+
+    #[test]
+    fn complete_bind_has_no_gaps() {
+        let mut records = honest_today();
+        for record in &mut records {
+            record.session_id = Some(SESSION.into());
+            record.module_hash = Some(HASH.into());
+            record.guest_function = Some(GUEST_FUNCTION_JOURNAL_GRANTS.into());
+        }
+        assert!(
+            authorship_gaps(&records, &bind(Some(ASSIGNED), Some(SESSION)))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            bound_denied_actions(&records, RESOURCE, Some(ASSIGNED)),
+            ["write", "read"]
+        );
+    }
 }

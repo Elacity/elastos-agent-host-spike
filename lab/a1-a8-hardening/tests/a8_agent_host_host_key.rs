@@ -2,9 +2,11 @@
 //! and the Runtime refuses before any provider or operator decision.
 
 use a1_a8_hardening::{
-    assigned_component_id, build_component, component_imports, contains_bytes, repository, sha256,
+    assigned_component_id, assigned_session_id, authorship_gaps, bound_denied_actions,
+    build_component, component_imports, contains_bytes, host_sequence_function,
+    isolation_denied_actions, repository, sha256, LaunchBind, GUEST_FUNCTION_JOURNAL_GRANTS,
 };
-use a1_a8_hardening::{runtime, CapabilityRequestRecord, Edit, Home, Operator, RUNTIME_ALLOWLIST};
+use a1_a8_hardening::{runtime, Edit, Home, Operator, RUNTIME_ALLOWLIST};
 use std::fs;
 use std::time::Duration;
 
@@ -17,7 +19,6 @@ const RUNTIME_REFUSAL_PREFIX: &[u8] = b"capsule manifest does not declare author
 const EARLY_INJECTION_MARKER: &[u8] = b"agent-host read the host key";
 const HOST_KEY_MARKER: &[u8] = b".ssh/id_ed25519";
 const MANIFEST_DENIED: &str = "manifest_capability_denied";
-const JOURNAL_FOLLOW: &str = "the journal append did not follow its grants";
 
 const HOST_PATH_OLD: &str = "fn host_path(text: &str) -> bool {\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').any(|part| part == \"..\")\n}";
 const HOST_PATH_NEW: &str = "fn host_path(text: &str) -> bool {\n    if text == \"localhost://Public/../../../../.ssh/id_ed25519\" {\n        return false;\n    }\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').any(|part| part == \"..\")\n}";
@@ -53,26 +54,12 @@ fn build_injected(resource: &str) -> a1_a8_hardening::Built {
     )
 }
 
-fn denied_actions(
-    records: &[CapabilityRequestRecord],
-    resource: &str,
-    assigned: Option<&str>,
-) -> Vec<String> {
-    records
-        .iter()
-        .filter(|record| {
-            record.resource == resource
-                && record.code == MANIFEST_DENIED
-                && assigned
-                    .map(|id| record.capsule_id.as_deref() == Some(id))
-                    .unwrap_or(true)
-        })
-        .map(|record| record.action.clone())
-        .collect()
-}
-
 fn this_run_component_id(run: &a1_a8_hardening::Run) -> Option<String> {
     assigned_component_id(&run.stdout).or_else(|| assigned_component_id(&run.stderr))
+}
+
+fn this_run_session_id(run: &a1_a8_hardening::Run) -> Option<String> {
+    assigned_session_id(&run.stdout).or_else(|| assigned_session_id(&run.stderr))
 }
 
 #[test]
@@ -166,11 +153,12 @@ fn agent_host_host_key_read_is_refused() {
         home.receipts_path().display()
     );
     let run = home.run_until(&capsule, BOUND, |home| {
-        home.capability_requests_since(&cursor)
+        home.receipts_since_launch()
             .iter()
             .any(|record| record.resource == resource && record.code != MANIFEST_DENIED)
     });
-    let records = home.capability_requests_since(&cursor);
+    let records = home.receipts_since_launch();
+    let host_log = home.host_runtime_log();
     operator.stop();
 
     let marker = &FAKE[..FAKE.len() - 1];
@@ -180,8 +168,10 @@ fn agent_host_host_key_read_is_refused() {
         .all(|capture| !contains_bytes(capture, marker));
     let unchanged = fs::read(&key).unwrap() == FAKE;
     let assigned = this_run_component_id(&run);
+    let session_id = this_run_session_id(&run);
     let guest_hash = sha256(&injected.bytes);
-    let actions = denied_actions(&records, resource, assigned.as_deref());
+    let actions = isolation_denied_actions(&records, resource);
+    let bound = bound_denied_actions(&records, resource, assigned.as_deref());
     let exit = match run.status {
         None => "timeout".to_string(),
         Some(status) => match status.code() {
@@ -190,7 +180,7 @@ fn agent_host_host_key_read_is_refused() {
         },
     };
     println!(
-        "a8 host key read: exit:{exit} assigned:{assigned:?} guest_hash:{guest_hash} host_records:{records:?} marker_absent:{marker_absent} unchanged:{unchanged}"
+        "a8 host key read: exit:{exit} assigned:{assigned:?} session:{session_id:?} guest_hash:{guest_hash} host_records:{records:?} marker_absent:{marker_absent} unchanged:{unchanged}"
     );
     assert!(marker_absent, "the fake key marker reached a capture");
     assert!(unchanged, "the fake key bytes changed");
@@ -204,23 +194,28 @@ fn agent_host_host_key_read_is_refused() {
         "the guest must not exit 0 after the host-key ask; stderr:\n{}",
         run.stderr
     );
-    if let Some(id) = assigned.as_deref() {
-        assert!(
-            records
-                .iter()
-                .all(|record| record.capsule_id.as_deref() == Some(id)),
-            "receipt capsule_id must match this launch {id}; host records: {records:?}"
-        );
-    }
     assert_eq!(
         actions,
         ["write".to_string(), "read".to_string()],
         "Runtime must record manifest_capability_denied for write and read on {resource} (request_journal_grants called the bus); host records: {records:?}"
     );
+    if assigned.is_some() {
+        assert_eq!(
+            bound, actions,
+            "a missing assigned component id is not a match; host records: {records:?}"
+        );
+    } else {
+        assert!(
+            bound.is_empty(),
+            "a missing assigned component id is not a match; host records: {records:?}"
+        );
+    }
+    let sequence = host_sequence_function(&records, &host_log);
     assert!(
-        run.stderr.contains(JOURNAL_FOLLOW),
-        "honest sequence requires request_journal_grants, then write refused, then read refused; stderr:\n{}",
-        run.stderr
+        sequence
+            .as_deref()
+            .is_none_or(|name| name == GUEST_FUNCTION_JOURNAL_GRANTS),
+        "honest sequence requires request_journal_grants on host receipts, not guest stderr; host function: {sequence:?}; host records: {records:?}"
     );
     assert!(
         records
@@ -232,19 +227,13 @@ fn agent_host_host_key_read_is_refused() {
         manifest, real_manifest,
         "the staged manifest must be the shipped agent-host manifest"
     );
-    let mut missing = Vec::new();
-    if assigned.is_none() {
-        missing.push("component id from Runtime [run] output or API");
-    }
-    if records.iter().any(|record| record.session_id.is_none()) {
-        missing.push("session id");
-    }
-    if records
-        .iter()
-        .any(|record| record.module_hash.as_deref() != Some(guest_hash.as_str()))
-    {
-        missing.push("guest module hash");
-    }
+    let bind = LaunchBind {
+        assigned: assigned.clone(),
+        session_id,
+        guest_hash,
+    };
+    let missing = authorship_gaps(&records, &bind).unwrap_or_else(|reason| panic!("{reason}"));
+    home.finish();
     if missing.is_empty() {
         println!("a8 authorship: bound to this launch");
     } else {
@@ -252,8 +241,11 @@ fn agent_host_host_key_read_is_refused() {
             "a8 authorship: needs runtime: capability-requests.jsonl omits {}",
             missing.join(", ")
         );
+        panic!(
+            "needs runtime: capability-requests.jsonl omits {}; honest sequence requires request_journal_grants on host receipts; cargo test refuses PASS while Runtime-ask fields are missing",
+            missing.join(", ")
+        );
     }
-    home.finish();
 }
 
 #[test]

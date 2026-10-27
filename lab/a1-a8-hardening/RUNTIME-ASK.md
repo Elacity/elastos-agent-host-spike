@@ -23,45 +23,72 @@ appends one JSON line to `<data dir>/runtime/capability-requests.jsonl`:
 
 `capsule_id` is `component-<uuid>` from load in
 `elastos-compute` `ComponentProvider::load`. `principal_id` is null on
-`elastos run`. There is no session field and no guest module hash field.
+`elastos run`. There is no session field, no guest module hash field, and
+no guest function field.
 
 `elastos run` prints `[run] Component capsule attached` and
 `[run] Component capsule '<name>' exited`. It does not print the assigned
-id. The attached-run Home also has no signed audit chain for this path.
+id or a session id. The attached-run Home also has no signed audit chain
+for this path.
 
 The test process and the Runtime share one uid, so the test can write the
 same file. chmod on the file or its directory also blocks the Runtime.
 
-## What A8 needs the Runtime to record
+## Required asserts (the cargo test refuses PASS without them)
 
-Each receipt line, for the launch that just ran:
+Each receipt line, for the launch that just ran, must carry every field
+below. The cargo test itself asserts them. `run.sh` remaps that failure
+to NEEDS RUNTIME. A cargo `ok` while any field is missing is a FAIL.
 
 1. **Component id** the Runtime assigned at load, also printed on a `[run]`
    line or returned by an operator API the test can read without opening
-   the jsonl.
-2. **Session id** for this `elastos run` (today the pending store reuses
-   the capsule id, and the jsonl has no session field).
+   the jsonl. A missing assigned id is **not** a match for any
+   `capsule_id`. It is NEEDS RUNTIME at best, never PASS. A record whose
+   `capsule_id` is not that id is a FAIL.
+2. **Session id** for this `elastos run`, printed on a `[run]` line or
+   returned by the same API. The receipt `session_id` must **equal this
+   launch's id**. Any other non-empty string is a FAIL. Presence alone
+   is not a bind.
 3. **Guest module hash** of the exact component bytes that were loaded,
-   written by the Runtime, not by the test.
-4. **A writer the test process cannot satisfy**: a Runtime signature or
+   written by the Runtime in the field named `module_hash` only. Aliases
+   (`guest_hash`, `wasm_hash`) are not a match. A missing hash is NEEDS
+   RUNTIME. A hash that is not these staged bytes is a FAIL.
+4. **Guest function** the Runtime recorded for the ask. Required. The
+   honest sequence is `request_journal_grants`, then write refused, then
+   read refused. Judge that sequence only from host-side evidence: the
+   jsonl lines appended after launch, and the Runtime / bus host log.
+   Guest-controlled stderr is not evidence, including
+   `Invalid("the journal append did not follow its grants")`. A guest
+   that skips `request_journal_grants` and prints that sentence is a
+   FAIL (`F-A8-guest-follow-sentence`).
+5. **A writer the test process cannot satisfy**: a Runtime signature or
    a monotonic sequence over those fields, or a file the test user cannot
    append to.
 
-Optional, and useful: the bus reason and the guest function that asked
-(`request_journal_grants`), so write-then-read without that function
-cannot look like the honest sequence.
+Receipts written after the inode snapshot, or at any point in the launch
+window before `elastos run` starts, are a FAIL (`F-A8-race-after-snapshot`,
+`F-A8-test-writes-lines`). The pre-exist check covers the whole run
+window: absent at snapshot, still absent at spawn, then only the inode
+that appears during that run is read.
 
 ## What the lab will do until then
 
 - Fresh Home via `mktemp`.
-- Fail if `capability-requests.jsonl` exists before the guest starts.
-- Record size and inode at launch; read only lines appended after.
-- Reject a record whose capsule id is not the id from `[run]` / API when
-  that id is present.
-- Catch a test that writes the two expected lines and launches a no-bus
-  guest (`F-A8-test-writes-lines`).
-- Require the honest follow-up sentence after `request_journal_grants`
-  (`F-A8-skip-journal-grants`).
+- Fail if `capability-requests.jsonl` exists before spawn, including after
+  the inode snapshot.
+- Record size and inode at launch; lock the first inode seen during the
+  run; read only that file.
+- Treat a missing assigned id as no match (NEEDS RUNTIME). Refuse a
+  record whose capsule id is not the id from `[run]` / API when that id
+  is present.
+- Require `session_id` to equal this launch, `module_hash` to equal these
+  bytes, and `guest_function` to be `request_journal_grants`.
+- Catch a test that writes the two expected lines before launch
+  (`F-A8-test-writes-lines`) or after the snapshot
+  (`F-A8-race-after-snapshot`).
+- Catch a guest that skips `request_journal_grants` and prints the
+  Invalid sentence (`F-A8-guest-follow-sentence`,
+  `F-A8-skip-journal-grants`).
 
-Until items 1 to 3 land in the Runtime, the A8 pass row stays
+Until items 1 to 4 land in the Runtime, the A8 pass row stays
 **NEEDS RUNTIME**. Do not count it as closed authorship.
