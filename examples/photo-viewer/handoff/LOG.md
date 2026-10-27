@@ -50,3 +50,4 @@ One line per slice: date, slice, branch, last commit, result.
 - 2026-10-27 task 014: PH6-DESIGN.md specifies a passive photo content closure with viewer.cid, one bundle resolver and kit stand-in launch, exact content grants and revocation, three code slices with named tests/falsifiers, all 19 principles and the remaining Runtime gaps; design only.
 - 2026-10-27 task 016: PH6 stand-in slice 1 packs a passive photo set through the shared folder walk and resolves viewer/core pins through the existing CID loop; seven named bundle tests and F5/F10/F11/F15-F18 cover the rules; slice 1 packs and resolves; it does not launch.
 - 2026-10-27 task 022: the lane gate does not repeat the kit guest checks.
+- 2026-10-27 task 028: the repro README no longer repeats the kit image pin.

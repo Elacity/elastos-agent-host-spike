@@ -16,18 +16,17 @@ and the artifact, written to `examples/photo-viewer/photo-viewer.component.wasm`
 
 | Input | Pin |
 | --- | --- |
-| Image | `rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5` |
+| Image | `IMAGE` in `examples/capsule-kit/repro/build-in-container.sh` owns the digest pin |
 | Platform | `linux/amd64`, also on Apple Silicon (Docker runs it emulated) |
 | Toolchain | Rust 1.91.0 (image and `rust-toolchain.toml`), target `wasm32-unknown-unknown` |
 | Crates | `Cargo.lock` of the guest and of `elastos/tools/componentize`, built `--locked` |
 | Paths | Repository mounted at `/src/elastos-runtime`, the path the builder remaps to; `HOME=/home/builder` |
-| `python3` | `3.11.2-1+b1` from `snapshot.debian.org/archive/debian/20261015T000000Z` (bookworm main only) |
+| `python3` | The package version and Debian snapshot date in `examples/capsule-kit/repro/build-in-container.sh` (bookworm main only) |
 | Builder | The repository's own `scripts/build-component-capsule.sh`: `SOURCE_DATE_EPOCH=0`, no incremental, path remapping, componentize |
 
 `python3` runs the builder's manifest checks and prints the hash; it does not
-touch the artifact bytes. It is pinned all the same, as `python3=3.11.2-1+b1`
-from the Debian snapshot `20261015T000000Z`. The snapshot is immutable, so its
-dependencies are fixed too.
+touch the artifact bytes. The kit script assigns its exact package version and
+Debian snapshot date. The snapshot is immutable, so its dependencies are fixed too.
 
 ## Why one platform
 
