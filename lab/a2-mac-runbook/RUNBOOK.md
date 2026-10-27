@@ -22,6 +22,7 @@ The paste does not install these, and it does not run `sudo`.
   Otherwise go to <https://rustup.rs> and run the install command on
   that page. Then close Terminal and open it again.
 - About 20 GiB free on the disk that holds `/tmp`.
+- `lsof` on PATH. Apple Silicon Terminal already has it.
 - Your usual GitHub sign-in. This repository is private.
 
 Do not clone first. The paste makes a fresh `mktemp` directory and
@@ -45,7 +46,11 @@ set -euo pipefail
 a2_finished=0
 a2_workdir=""
 a2_summary=""
-a2_elastos_before=""
+a2_login_home=""
+a2_elastos_home_before=""
+a2_elastos_login_before=""
+a2_elastos_home_snap=""
+a2_elastos_login_snap=""
 a2_row_lines=""
 a2_pin_a2=9e7a85d631aec12de8c1da4fc4958bce18252d21
 
@@ -103,6 +108,91 @@ a2_hash_file() {
   else
     shasum -a 256 -- "$1" | awk '{ print $1 }'
   fi
+}
+
+a2_snapshot_tree() {
+  python3 -I -c '
+import os
+import sys
+
+root = sys.argv[1]
+if not os.path.exists(root):
+    raise SystemExit(0)
+rows = []
+
+def add(kind, path, rel):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return
+    mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
+    rows.append("%s\t%d\t%d\t%s" % (kind, mtime, st.st_size, rel))
+
+if os.path.isdir(root) and not os.path.islink(root):
+    add("d", root, ".")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        filenames.sort()
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            add("d", path, os.path.relpath(path, root))
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            kind = "l" if os.path.islink(path) else "f"
+            add(kind, path, os.path.relpath(path, root))
+else:
+    kind = "l" if os.path.islink(root) else "f"
+    add(kind, root, ".")
+rows.sort(key=lambda line: line.split("\t")[-1])
+sys.stdout.write("\n".join(rows) + ("\n" if rows else ""))
+' "$1"
+}
+
+a2_same_path() {
+  python3 -I -c '
+import os, sys
+raise SystemExit(0 if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else 1)
+' "$1" "$2"
+}
+
+a2_lsof_writers() {
+  python3 -I -c '
+import os
+import subprocess
+import sys
+
+directory, evidence = sys.argv[1], sys.argv[2]
+self_pid = os.getpid()
+parent_pid = os.getppid()
+lines = []
+cmds = []
+if os.path.isdir(directory):
+    cmds.append(["lsof", "+D", directory])
+if os.path.exists(evidence):
+    cmds.append(["lsof", evidence])
+if not cmds:
+    raise SystemExit(0)
+for cmd in cmds:
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        sys.stdout.write("lsof-missing\n")
+        raise SystemExit(0)
+    for line in (done.stdout or "").splitlines():
+        if not line or line.startswith("COMMAND"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        if pid in (self_pid, parent_pid) or parts[0] == "lsof":
+            continue
+        lines.append(line)
+sys.stdout.write("\n".join(lines) + ("\n" if lines else ""))
+' "$1" "$2"
 }
 
 if [ -n "${A2_WORKDIR:-}" ]; then
@@ -178,6 +268,7 @@ a2_need_cmd rustup
 a2_need_cmd rustc
 a2_need_cmd cargo
 a2_need_cmd bash
+a2_need_cmd lsof
 
 if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
   a2_add_missing "neither sha256sum nor shasum is on PATH"
@@ -204,10 +295,34 @@ if [ -n "$a2_missing" ]; then
   a2_finish "NOT RUN" "$a2_missing"
 fi
 
+a2_login_home=$(eval echo ~$(id -un))
+case $a2_login_home in
+  ''|"~$(id -un)")
+    if command -v dscl >/dev/null 2>&1; then
+      a2_login_home=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{ print $2 }')
+    fi
+    ;;
+esac
+if [ -z "$a2_login_home" ]; then
+  a2_login_home=$HOME
+fi
+a2_elastos_home_snap="$a2_workdir/elastos-home.snap"
+a2_elastos_login_snap="$a2_workdir/elastos-login.snap"
 if [ -e "$HOME/.elastos" ]; then
-  a2_elastos_before=PRESENT
+  a2_elastos_home_before=PRESENT
+  a2_snapshot_tree "$HOME/.elastos" > "$a2_elastos_home_snap"
 else
-  a2_elastos_before=ABSENT
+  a2_elastos_home_before=ABSENT
+fi
+if [ -e "$a2_login_home/.elastos" ]; then
+  a2_elastos_login_before=PRESENT
+  if [ -n "$HOME" ] && a2_same_path "$HOME/.elastos" "$a2_login_home/.elastos"; then
+    cp -- "$a2_elastos_home_snap" "$a2_elastos_login_snap"
+  else
+    a2_snapshot_tree "$a2_login_home/.elastos" > "$a2_elastos_login_snap"
+  fi
+else
+  a2_elastos_login_before=ABSENT
 fi
 
 # 3. rustup skip-if-present. The paste never curls rustup.rs.
@@ -371,6 +486,36 @@ def alive(pid):
         return False
 
 
+def argv_mentions(needle):
+    found = []
+    try:
+        out = subprocess.check_output(["ps", "-ax", "-o", "pid,command"], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    self_pid = os.getpid()
+    for line in out.splitlines():
+        if needle not in line:
+            continue
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == self_pid:
+            continue
+        found.append(pid)
+    return found
+
+
+workdir = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.getcwd()
+lane = os.path.abspath("lab/a2-e2e-resume")
+needles = []
+for item in (workdir, lane, "lab/a2-e2e-resume"):
+    if item not in needles:
+        needles.append(item)
+
 child = os.fork()
 if child == 0:
     try:
@@ -387,8 +532,16 @@ while time.time() < deadline:
     if live is None:
         sys.stderr.write("cannot list run.sh process group\n")
         raise SystemExit(1)
+    named = []
+    for needle in needles:
+        extra = argv_mentions(needle)
+        if extra is None:
+            sys.stderr.write("cannot list processes that name the A2 workdir\n")
+            raise SystemExit(1)
+        named.extend(extra)
     still = [pid for pid in live if pid != child and alive(pid)]
-    if not still:
+    named = [pid for pid in named if pid != child and alive(pid)]
+    if not still and not named:
         empty += 1
         if empty >= 2:
             raise SystemExit(rc)
@@ -399,7 +552,7 @@ sys.stderr.write("run.sh or one of its children was still running after 7200s\n"
 raise SystemExit(1)
 A2WAIT
 set +e
-python3 -I "$a2_wait_py" > "$a2_journey_out" 2>&1
+python3 -I "$a2_wait_py" "$a2_workdir" > "$a2_journey_out" 2>&1
 a2_journey_rc=$?
 set -e
 cat "$a2_journey_out"
@@ -412,10 +565,35 @@ if [ "$a2_live" != "$a2_pin_now" ]; then
   a2_tamper="tampered guest hash: wasm=${a2_live} pin=${a2_pin_now}"
 fi
 a2_evidence="$a2_clone/lab/a2-e2e-resume/evidence.txt"
+a2_evidence_dir="$a2_clone/lab/a2-e2e-resume"
 a2_evidence_snap="$a2_workdir/evidence.snap"
 a2_score_path=$a2_evidence
 a2_evidence_hash=""
-if [ -f "$a2_evidence" ]; then
+if [ -L "$a2_evidence" ] || [ -e "$a2_evidence" ]; then
+  if [ -L "$a2_evidence" ] || [ ! -f "$a2_evidence" ]; then
+    a2_finish "FAIL" "evidence.txt is not a regular file in the clone"
+  fi
+  if ! python3 -I -c '
+import os, sys
+ev = os.path.realpath(sys.argv[1])
+root = os.path.realpath(sys.argv[2])
+raise SystemExit(0 if ev.startswith(root + os.sep) else 1)
+' "$a2_evidence" "$a2_clone"; then
+    a2_finish "FAIL" "evidence.txt resolves outside the temp clone"
+  fi
+  a2_writers=$(a2_lsof_writers "$a2_evidence_dir" "$a2_evidence")
+  if [ -n "$a2_writers" ]; then
+    a2_finish "FAIL" "evidence still has a live writer before the quiet period"
+  fi
+  a2_quiet_hash=$(a2_hash_file "$a2_evidence")
+  sleep 15
+  a2_writers=$(a2_lsof_writers "$a2_evidence_dir" "$a2_evidence")
+  if [ -n "$a2_writers" ]; then
+    a2_finish "FAIL" "evidence still has a live writer after the quiet period"
+  fi
+  if [ "$(a2_hash_file "$a2_evidence")" != "$a2_quiet_hash" ]; then
+    a2_finish "FAIL" "evidence.txt changed during the quiet period; A2 cannot PASS on a moving file"
+  fi
   cp -- "$a2_evidence" "$a2_evidence_snap"
   a2_evidence_hash=$(a2_hash_file "$a2_evidence")
   if [ "$(a2_hash_file "$a2_evidence_snap")" != "$a2_evidence_hash" ]; then
@@ -441,10 +619,16 @@ if not evidence.is_file():
     print("run.sh wrote no evidence.txt")
     print("")
     raise SystemExit(0)
+raw = evidence.read_bytes()
+if b"\r" in raw or any(byte > 127 for byte in raw):
+    print("FAIL")
+    print("evidence rows contain a CR or non-ASCII byte")
+    print("")
+    raise SystemExit(0)
 rows = {}
 counted = None
 conflict = False
-for line in evidence.read_text(encoding="utf-8", errors="replace").splitlines():
+for line in raw.decode("ascii").splitlines():
     if line == "log:":
         break
     for name in rows_order:
@@ -509,8 +693,23 @@ if [ -n "$a2_evidence_hash" ]; then
     a2_finish "FAIL" "evidence snapshot was altered after it was taken"
   fi
 fi
-if [ "$a2_elastos_before" = ABSENT ] && [ -e "$HOME/.elastos" ]; then
+if [ "$a2_elastos_home_before" = ABSENT ] && [ -e "$HOME/.elastos" ]; then
   a2_finish "FAIL" "this run created $HOME/.elastos; A2 must stay inside the temp workdir"
+fi
+if [ "$a2_elastos_login_before" = ABSENT ] && [ -e "$a2_login_home/.elastos" ]; then
+  a2_finish "FAIL" "this run created $a2_login_home/.elastos; A2 must stay inside the temp workdir"
+fi
+if [ "$a2_elastos_home_before" = PRESENT ]; then
+  a2_snapshot_tree "$HOME/.elastos" > "$a2_workdir/elastos-home.after"
+  if ! cmp -s "$a2_elastos_home_snap" "$a2_workdir/elastos-home.after"; then
+    a2_finish "FAIL" "this run changed $HOME/.elastos; A2 must stay inside the temp workdir"
+  fi
+fi
+if [ "$a2_elastos_login_before" = PRESENT ]; then
+  a2_snapshot_tree "$a2_login_home/.elastos" > "$a2_workdir/elastos-login.after"
+  if ! cmp -s "$a2_elastos_login_snap" "$a2_workdir/elastos-login.after"; then
+    a2_finish "FAIL" "this run changed $a2_login_home/.elastos; A2 must stay inside the temp workdir"
+  fi
 fi
 if [ "$a2_verdict" != "PASS" ] && [ "$a2_verdict" != "FAIL" ] && [ "$a2_verdict" != "NOT RUN" ]; then
   a2_finish "NOT RUN" "scorer printed no verdict"
@@ -539,21 +738,24 @@ does not delete it. It never deletes anything outside that folder.
 
 | Last line | Meaning |
 | --- | --- |
-| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and its children exited 0 with no SURVIVED line, and the guest bytes still match the pin written in the temp folder. |
-| `A2: FAIL.` | A row failed, a row name appeared twice, `run.sh` exited nonzero, a falsifier printed SURVIVED, the guest hash was tampered, `evidence.txt` moved after the snapshot, or the run wrote outside the temp folder. |
+| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and any process that still names the temp dir or `lab/a2-e2e-resume` exited 0 with no SURVIVED line, `evidence.txt` is a regular file inside the temp clone with no CR or non-ASCII byte, `lsof` showed no writer, a 15s quiet re-hash stayed still, and the guest bytes still match the pin written in the temp folder. |
+| `A2: FAIL.` | A row failed, a row name appeared twice, `run.sh` exited nonzero, a falsifier printed SURVIVED, the guest hash was tampered, `evidence.txt` was a symlink or lived outside the clone, a quiet-period hash moved, a live writer remained, or the run created or changed `~/.elastos` under `$HOME` or the login home. |
 | `A2: NOT RUN.` | A named prerequisite was missing, the clone is not a descendant of A2 head `9e7a85d6`, or a row was skipped. A2 is not booked. |
 
 `Proof.row` on the A2 harness still refuses a hardcoded PASS. This
 paste does not print `A2: PASS.` unless it parsed the six rows from a
-snapshot of `lab/a2-e2e-resume/evidence.txt` taken after `run.sh` and
-its children exited.
+snapshot of `lab/a2-e2e-resume/evidence.txt` taken after `run.sh`, any
+process that still names the temp dir, and a 15s quiet re-hash.
 
 ## What this paste does not do
 
 - It does not run `elastos serve`.
 - It does not use Sash's real Home. `XDG_*` points at the temp folder.
   `HOME` stays your login home so rustup and cargo keep working. The
-  paste refuses if it creates `~/.elastos`.
+  paste watches both `$HOME/.elastos` and the login-home `~/.elastos`
+  (`eval echo ~$(id -un)`, or `dscl` on a Mac). It refuses if it
+  creates either path, and it refuses if an already-present tree
+  changes.
 - It does not overwrite `guest.sha256` in any checkout you already
   have. The new pin is written only under the temp clone.
 - It does not run `sudo`, `xcode-select --install`, or the rustup.rs

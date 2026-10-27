@@ -134,6 +134,17 @@ def evidence_text(kind: str) -> str:
         }
         counted = "yes"
         extras = ["WRITE: FAIL — planted second result"]
+    elif kind == "lookalike":
+        rows = {
+            "WRITE": "PASS — computed from fixture journal",
+            "STALE": "PASS — computed from fixture conflict",
+            "STOP": "PASS — computed from fixture exit 0",
+            "START": "PASS — computed from fixture second pid",
+            "RESUME": "PASS — computed from fixture read:ok",
+            "WRITE2": "PASS — computed from fixture write:ok",
+        }
+        counted = "yes"
+        extras = ["WR\u0399TE: FAIL — planted lookalike"]
     else:
         rows = {
             "WRITE": "PASS — computed from fixture journal",
@@ -195,8 +206,69 @@ def write_run_sh(run: Path, kind: str) -> None:
         )
     elif kind == "exit1":
         body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n" + "exit 1\n"
+    elif kind in ("setsid", "python-double-fork"):
+        fail = evidence_text("fail")
+        helper = (
+            "cat > \"$lane/rewrite-later.py\" <<'PY'\n"
+            "import pathlib, sys, time\n"
+            "time.sleep(12)\n"
+            "pathlib.Path(sys.argv[1]).write_bytes(pathlib.Path(sys.argv[2]).read_bytes())\n"
+            "PY\n"
+            f"cat > \"$lane/rewrite-later.txt\" <<'EOF'\n{fail}EOF\n"
+        )
+        if kind == "setsid":
+            launch = (
+                "setsid python3 -I \"$lane/rewrite-later.py\" "
+                "\"$lane/evidence.txt\" \"$lane/rewrite-later.txt\" &\n"
+            )
+        else:
+            launch = (
+                "cat > \"$lane/double-fork.py\" <<'PY'\n"
+                "import os, sys\n"
+                "script, ev, src = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+                "if os.fork() > 0:\n"
+                "    raise SystemExit(0)\n"
+                "os.setsid()\n"
+                "if os.fork() > 0:\n"
+                "    os._exit(0)\n"
+                "os.execv(sys.executable, [sys.executable, '-I', script, ev, src])\n"
+                "PY\n"
+                "python3 -I \"$lane/double-fork.py\" "
+                "\"$lane/rewrite-later.py\" \"$lane/evidence.txt\" \"$lane/rewrite-later.txt\"\n"
+            )
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + helper
+            + launch
+        )
+    elif kind == "symlink":
+        body = (
+            header
+            + f"cat > \"$HOME/planted-evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "ln -s -- \"$HOME/planted-evidence.txt\" \"$lane/evidence.txt\"\n"
+        )
+    elif kind == "home-redirect":
+        body = (
+            header
+            + "a2_login=$(eval echo ~$(id -un))\n"
+            + "mkdir -p -- \"$a2_login/.elastos\"\n"
+            + "printf 'planted\\n' > \"$a2_login/.elastos/a2-home-redirect\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        )
+    elif kind == "existing-elastos-write":
+        body = (
+            header
+            + "mkdir -p -- \"$HOME/.elastos\"\n"
+            + "printf 'planted\\n' > \"$HOME/.elastos/a2-existing-write\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        )
     else:
-        ev_kind = kind if kind in ("fail", "missing-row", "duplicate-write", "pass-then-fail") else "happy"
+        ev_kind = (
+            kind
+            if kind in ("fail", "missing-row", "duplicate-write", "pass-then-fail", "lookalike")
+            else "happy"
+        )
         body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{evidence_text(ev_kind)}EOF\n"
     run.write_text(body, encoding="utf-8")
     run.chmod(0o755)
@@ -262,6 +334,11 @@ def write_fixture(root: Path, kind: str, *, include_pin: bool = True) -> Path:
     return repo
 
 
+def login_home_path() -> Path:
+    out = subprocess.check_output(["bash", "-c", "eval echo ~$(id -un)"], text=True)
+    return Path(out.strip())
+
+
 def hide_rustup(path: str) -> str:
     kept = []
     for part in path.split(":"):
@@ -281,10 +358,13 @@ def run_block(
     hide_tool: str | None = None,
     include_pin: bool = True,
     fake_home: bool = False,
+    existing_elastos: bool = False,
 ) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix=f"a2-mac-dryrun-{kind}-"))
     started = time.time()
-    timeout = 180 if kind == "late-rewrite" else 120
+    timeout = 180
+    login_elastos = login_home_path() / ".elastos"
+    login_existed = login_elastos.exists()
     try:
         shim_dir = tmp / "shims"
         if shim:
@@ -314,6 +394,10 @@ def run_block(
                 env["RUSTUP_HOME"] = str(rustup_home)
             if cargo_home.is_dir():
                 env["CARGO_HOME"] = str(cargo_home)
+            if existing_elastos:
+                elastos = home / ".elastos"
+                elastos.mkdir()
+                (elastos / "pre-existing").write_text("before\n", encoding="utf-8")
         if hide_tool is None:
             remote = write_fixture(tmp, kind, include_pin=include_pin)
             env["A2_REMOTE"] = str(remote)
@@ -363,6 +447,9 @@ def run_block(
             "workdir": str(tmp / "work"),
             "tmp": str(tmp),
         }
+    finally:
+        if kind == "home-redirect" and not login_existed and login_elastos.exists():
+            shutil.rmtree(login_elastos, ignore_errors=True)
 
 
 def caught(ok: bool) -> str:
@@ -411,6 +498,31 @@ def main() -> int:
         static_ok = False
     else:
         print("static no-single-branch CAUGHT")
+    if "readlink -f" in text or "sed -i" in text or "stat -c" in text:
+        print("static bsd-portable MISSED")
+        static_ok = False
+    else:
+        print("static bsd-portable CAUGHT")
+    if re.search(r"curl\s*\|", text):
+        print("static no-curl-sh MISSED")
+        static_ok = False
+    else:
+        print("static no-curl-sh CAUGHT")
+    if '["ps", "-ax", "-o", "pid,command"]' not in text:
+        print("static argv-wait MISSED")
+        static_ok = False
+    else:
+        print("static argv-wait CAUGHT")
+    if "lsof" not in text or "sleep 15" not in text:
+        print("static lsof-quiet MISSED")
+        static_ok = False
+    else:
+        print("static lsof-quiet CAUGHT")
+    if "eval echo ~$(id -un)" not in text:
+        print("static login-home MISSED")
+        static_ok = False
+    else:
+        print("static login-home CAUGHT")
 
     cases = []
     cases.append(
@@ -507,6 +619,60 @@ def main() -> int:
             run_block(block, kind="pass-then-fail", shim=True),
             "A2: FAIL.",
             None,
+        )
+    )
+    cases.append(
+        (
+            "setsid-rewrite",
+            run_block(block, kind="setsid", shim=True),
+            "A2: FAIL.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "python-double-fork",
+            run_block(block, kind="python-double-fork", shim=True),
+            "A2: FAIL.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "evidence-symlink",
+            run_block(block, kind="symlink", shim=True, fake_home=True),
+            "A2: FAIL.",
+            "evidence.txt",
+        )
+    )
+    cases.append(
+        (
+            "lookalike-row",
+            run_block(block, kind="lookalike", shim=True),
+            "A2: FAIL.",
+            "non-ASCII",
+        )
+    )
+    cases.append(
+        (
+            "home-redirect",
+            run_block(block, kind="home-redirect", shim=True, fake_home=True),
+            "A2: FAIL.",
+            ".elastos",
+        )
+    )
+    cases.append(
+        (
+            "existing-elastos-write",
+            run_block(
+                block,
+                kind="existing-elastos-write",
+                shim=True,
+                fake_home=True,
+                existing_elastos=True,
+            ),
+            "A2: FAIL.",
+            ".elastos",
         )
     )
 

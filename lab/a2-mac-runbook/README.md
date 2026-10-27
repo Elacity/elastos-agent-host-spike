@@ -10,8 +10,8 @@ lanes, BACKLOG.md, lane.env, or any 0.8.0 runtime code.
 
 The only ` ```bash ` fence in [RUNBOOK.md](RUNBOOK.md):
 
-- sha256: cd41affbdad608214d824f9082aef78958e134e5b813d7adf1980a44f55b9a4e
-- bytes: 15459
+- sha256: fd7d4b049f40cda224bbdffbcb610f5390daaa383e343f5d428aac7f0ca0f6c0
+- bytes: 21909
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
@@ -24,7 +24,8 @@ python3 -I lab/a2-mac-runbook/dryrun.py
 
 The recorder pastes that exact block under zsh with a macOS `uname`
 and `xcode-select` shim. It does not rebuild the real guest. It
-proves the four author cases and the eight reviewer plants:
+proves the four author cases, the eight reviewer plants, and the six
+r2 plants:
 
 | Case | Last line | Plant |
 | --- | --- | --- |
@@ -40,6 +41,12 @@ proves the four author cases and the eight reviewer plants:
 | created `~/.elastos` | `A2: FAIL.` | `run.sh` creates `$HOME/.elastos` |
 | `run.sh` exit 1 | `A2: FAIL.` | all-PASS evidence and nonzero journey |
 | PASS then FAIL | `A2: FAIL.` | same row `PASS` then `FAIL` |
+| `setsid` rewrite | `A2: FAIL.` | `setsid` daemon sleeps 12s, then writes FAIL |
+| Python double-fork | `A2: FAIL.` | `os.setsid` plus double fork, then writes FAIL |
+| evidence symlink | `A2: FAIL.` | `evidence.txt` is a symlink outside the clone |
+| lookalike row | `A2: FAIL.` | `WRΙTE: FAIL` (Greek iota) plus a real `WRITE: PASS` |
+| `HOME` redirect | `A2: FAIL.` | dummy `HOME`; `run.sh` creates the login-home `~/.elastos` |
+| existing `~/.elastos` write | `A2: FAIL.` | `run.sh` writes into a pre-existing `~/.elastos` |
 
 Recorded on this Linux x86_64 host, zsh 5.9, with the macOS shim.
 A2 on macOS is **NOT RUN ON MAC** until Sash pastes the block on
@@ -59,6 +66,12 @@ Apple Silicon and that run's `summary.txt` ends with `A2: PASS.`
 | created `~/.elastos` | `A2: FAIL.` | `run.sh` creates `$HOME/.elastos` | CAUGHT |
 | `run.sh` exit 1 | `A2: FAIL.` | all-PASS evidence and exit 1 | CAUGHT |
 | PASS then FAIL | `A2: FAIL.` | same row `PASS` then `FAIL` | CAUGHT |
+| `setsid` rewrite | `A2: FAIL.` | `setsid` daemon sleeps 12s, then writes FAIL | CAUGHT |
+| Python double-fork | `A2: FAIL.` | `os.setsid` plus double fork, then writes FAIL | CAUGHT |
+| evidence symlink | `A2: FAIL.` | `evidence.txt` is a symlink outside the clone | CAUGHT |
+| lookalike row | `A2: FAIL.` | `WRΙTE: FAIL` (Greek iota) plus a real `WRITE: PASS` | CAUGHT |
+| `HOME` redirect | `A2: FAIL.` | dummy `HOME`; login-home `~/.elastos` created | CAUGHT |
+| existing `~/.elastos` write | `A2: FAIL.` | write into a pre-existing `~/.elastos` | CAUGHT |
 
 ## Before Sash pastes
 
@@ -76,9 +89,10 @@ Apple Silicon and that run's `summary.txt` ends with `A2: PASS.`
   password, Ctrl-C and paste again with
   `A2_REMOTE=git@github.com:Elacity/elastos-agent-host-spike.git`.
 - The paste never runs `elastos serve`, never writes Sash's real
-  Home, and refuses if it creates `~/.elastos`. The new guest pin is
-  written only inside the temp clone. The Linux pin from #351 will
-  not match a Mac rebuild; that is expected. Do not copy the new pin
-  into a committed file unless you mean to re-pin for Mac.
+  Home, and refuses if it creates or changes `~/.elastos` under
+  `$HOME` or the login home. The new guest pin is written only
+  inside the temp clone. The Linux pin from #351 will not match a
+  Mac rebuild; that is expected. Do not copy the new pin into a
+  committed file unless you mean to re-pin for Mac.
 
 Book A2 only on `A2: PASS.` from that Mac `summary.txt`.
