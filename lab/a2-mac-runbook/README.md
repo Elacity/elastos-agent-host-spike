@@ -10,8 +10,8 @@ lanes, BACKLOG.md, lane.env, or any 0.8.0 runtime code.
 
 The only ` ```bash ` fence in [RUNBOOK.md](RUNBOOK.md):
 
-- sha256: d19219ff8b076f12aed711ca048130219c2b5e4b0646559eeb4f10569361d517
-- bytes: 22309
+- sha256: 3e9370470e3efcf776f300913566f10264a501d72e329fb3500dba57c8be50d2
+- bytes: 24487
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
@@ -24,8 +24,8 @@ python3 -I lab/a2-mac-runbook/dryrun.py
 
 The recorder pastes that exact block under zsh with a macOS `uname`
 and `xcode-select` shim. It does not rebuild the real guest. It
-proves the four author cases, the eight reviewer plants, and the six
-r2 plants:
+proves the 18 earlier cases plus the r3 freeze, hash, lsof, and
+waiter plants:
 
 | Case | Last line | Plant |
 | --- | --- | --- |
@@ -47,6 +47,14 @@ r2 plants:
 | lookalike row | `A2: FAIL.` | `WRΙTE: FAIL` (Greek iota) plus a real `WRITE: PASS` |
 | `HOME` redirect | `A2: FAIL.` | dummy `HOME`; `run.sh` creates the login-home `~/.elastos` |
 | existing `~/.elastos` write | `A2: FAIL.` | `run.sh` writes into a pre-existing `~/.elastos` |
+| `exec -a mds` + setsid at 22s | `A2: PASS.` | helper lives under `/tmp`, writes FAIL at 22s; freeze keeps evidence PASS |
+| reopened fd at 22s | `A2: PASS.` | close, sleep 22s, reopen and write; freeze keeps evidence PASS |
+| hardlink rewrite at 22s | `A2: PASS.` | rewrite via the other name at 22s; `uchg` on the inode blocks it |
+| summary rewrite after score | `A2: FAIL.` | FAIL journey; helper rewrites `summary.txt` to PASS; file stays FAIL |
+| same-size `~/.elastos` overwrite | `A2: FAIL.` | content becomes `plante\n` and mtime is restored; sha256 moves |
+| read-only `mds` fd | `A2: PASS.` | `exec -a mds` holds a read-only fd on `evidence.txt` |
+| unrelated argv | `A2: PASS.` | another process names `lab/a2-e2e-resume`; waiter uses absolute paths |
+| `A2_CLEAN=1` after `uchg` | `A2: PASS.` | cleanup runs `chflags nouchg` inside the workdir, then removes it |
 
 Recorded on this Linux x86_64 host, zsh 5.9, with the macOS shim.
 A2 on macOS is **NOT RUN ON MAC** until Sash pastes the block on
@@ -72,6 +80,14 @@ Apple Silicon and that run's `summary.txt` ends with `A2: PASS.`
 | lookalike row | `A2: FAIL.` | `WRΙTE: FAIL` (Greek iota) plus a real `WRITE: PASS` | CAUGHT |
 | `HOME` redirect | `A2: FAIL.` | dummy `HOME`; login-home `~/.elastos` created | CAUGHT |
 | existing `~/.elastos` write | `A2: FAIL.` | write into a pre-existing `~/.elastos` | CAUGHT |
+| `exec -a mds` + setsid at 22s | `A2: PASS.` | `/tmp` helper writes FAIL at 22s | CAUGHT |
+| reopened fd at 22s | `A2: PASS.` | reopen and write at 22s | CAUGHT |
+| hardlink rewrite at 22s | `A2: PASS.` | rewrite via the other name at 22s | CAUGHT |
+| summary rewrite after score | `A2: FAIL.` | helper rewrites `summary.txt` to PASS | CAUGHT |
+| same-size `~/.elastos` overwrite | `A2: FAIL.` | `plante\n` with restored mtime | CAUGHT |
+| read-only `mds` fd | `A2: PASS.` | read-only Spotlight-named fd on `evidence.txt` | CAUGHT |
+| unrelated argv | `A2: PASS.` | argv contains `lab/a2-e2e-resume` | CAUGHT |
+| `A2_CLEAN=1` after `uchg` | `A2: PASS.` | `nouchg` then `rm -rf` of the workdir | CAUGHT |
 
 ## Before Sash pastes
 

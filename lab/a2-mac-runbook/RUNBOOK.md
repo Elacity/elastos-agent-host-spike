@@ -22,7 +22,7 @@ The paste does not install these, and it does not run `sudo`.
   Otherwise go to <https://rustup.rs> and run the install command on
   that page. Then close Terminal and open it again.
 - About 20 GiB free on the disk that holds `/tmp`.
-- `lsof` on PATH. Apple Silicon Terminal already has it.
+- `lsof` and `chflags` on PATH. Apple Silicon Terminal already has both.
 - Your usual GitHub sign-in. This repository is private.
 
 Do not clone first. The paste makes a fresh `mktemp` directory and
@@ -51,11 +51,56 @@ a2_elastos_home_before=""
 a2_elastos_login_before=""
 a2_elastos_home_snap=""
 a2_elastos_login_snap=""
+a2_evidence=""
+a2_evidence_snap=""
 a2_row_lines=""
 a2_pin_a2=9e7a85d631aec12de8c1da4fc4958bce18252d21
 
+a2_path_inside_workdir() {
+  python3 -I -c '
+import os, sys
+path = os.path.realpath(sys.argv[1])
+root = os.path.realpath(sys.argv[2])
+raise SystemExit(0 if (path == root or path.startswith(root + os.sep)) else 1)
+' "$1" "$2"
+}
+
+a2_nouchg_if_inside() {
+  if [ -z "${1:-}" ] || [ ! -e "$1" ]; then
+    return 0
+  fi
+  if [ -z "${a2_workdir:-}" ] || [ ! -d "$a2_workdir" ]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! a2_path_inside_workdir "$1" "$a2_workdir"; then
+    return 0
+  fi
+  if command -v chflags >/dev/null 2>&1; then
+    chflags nouchg "$1" || true
+  fi
+}
+
+a2_freeze_file() {
+  if [ -z "${1:-}" ] || [ ! -e "$1" ]; then
+    return 0
+  fi
+  if ! command -v chflags >/dev/null 2>&1; then
+    return 0
+  fi
+  chflags uchg "$1"
+}
+
 a2_cleanup() {
   if [ "${A2_CLEAN:-0}" = 1 ] && [ -n "${a2_workdir:-}" ] && [ -d "$a2_workdir" ]; then
+    a2_nouchg_if_inside "${a2_evidence:-}"
+    a2_nouchg_if_inside "${a2_evidence_snap:-}"
+    a2_nouchg_if_inside "${a2_summary:-}"
+    a2_nouchg_if_inside "$a2_workdir/evidence.snap"
+    a2_nouchg_if_inside "$a2_workdir/summary.txt"
+    a2_nouchg_if_inside "$a2_workdir/src/lab/a2-e2e-resume/evidence.txt"
     rm -rf -- "$a2_workdir"
   fi
 }
@@ -84,6 +129,7 @@ a2_write_summary() {
 a2_finish() {
   a2_finished=1
   a2_write_summary "$1" "$2"
+  a2_freeze_file "${a2_summary:-}"
   case "$1" in
     PASS) exit 0 ;;
     FAIL) exit 1 ;;
@@ -112,6 +158,7 @@ a2_hash_file() {
 
 a2_snapshot_tree() {
   python3 -I -c '
+import hashlib
 import os
 import sys
 
@@ -120,17 +167,31 @@ if not os.path.exists(root):
     raise SystemExit(0)
 rows = []
 
+def skip_name(name):
+    return name == ".DS_Store" or name == ".localized" or name.startswith("._")
+
 def add(kind, path, rel):
+    if rel not in (".",) and skip_name(os.path.basename(path)):
+        return
     try:
         st = os.lstat(path)
     except OSError:
         return
     mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
-    rows.append("%s\t%d\t%d\t%s" % (kind, mtime, st.st_size, rel))
+    digest = "-"
+    if kind == "f":
+        try:
+            with open(path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            digest = "unreadable"
+    rows.append("%s\t%d\t%d\t%s\t%s" % (kind, mtime, st.st_size, digest, rel))
 
 if os.path.isdir(root) and not os.path.islink(root):
     add("d", root, ".")
     for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if not skip_name(name)]
+        filenames = [name for name in filenames if not skip_name(name)]
         dirnames.sort()
         filenames.sort()
         for name in dirnames:
@@ -161,38 +222,43 @@ import os
 import subprocess
 import sys
 
-directory, evidence = sys.argv[1], sys.argv[2]
+evidence = sys.argv[1]
 self_pid = os.getpid()
 parent_pid = os.getppid()
 lines = []
-cmds = []
-if os.path.isdir(directory):
-    cmds.append(["lsof", "+D", directory])
-if os.path.exists(evidence):
-    cmds.append(["lsof", evidence])
-if not cmds:
+if not os.path.exists(evidence):
     raise SystemExit(0)
-for cmd in cmds:
+
+def spotlight(cmd):
+    if cmd in ("mds", "mds_stores"):
+        return True
+    return cmd.startswith("mdworker")
+
+try:
+    done = subprocess.run(["lsof", evidence], capture_output=True, text=True)
+except OSError:
+    sys.stdout.write("lsof-missing\n")
+    raise SystemExit(0)
+for line in (done.stdout or "").splitlines():
+    if not line or line.startswith("COMMAND"):
+        continue
+    parts = line.split()
+    if len(parts) < 4:
+        continue
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True)
-    except OSError:
-        sys.stdout.write("lsof-missing\n")
-        raise SystemExit(0)
-    for line in (done.stdout or "").splitlines():
-        if not line or line.startswith("COMMAND"):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        try:
-            pid = int(parts[1])
-        except ValueError:
-            continue
-        if pid in (self_pid, parent_pid) or parts[0] == "lsof":
-            continue
-        lines.append(line)
+        pid = int(parts[1])
+    except ValueError:
+        continue
+    if pid in (self_pid, parent_pid) or parts[0] == "lsof":
+        continue
+    if spotlight(parts[0]):
+        continue
+    fd = parts[3]
+    if "w" not in fd and "u" not in fd:
+        continue
+    lines.append(line)
 sys.stdout.write("\n".join(lines) + ("\n" if lines else ""))
-' "$1" "$2"
+' "$1"
 }
 
 if [ -n "${A2_WORKDIR:-}" ]; then
@@ -207,6 +273,7 @@ else
   a2_workdir=$(mktemp -d "${TMPDIR:-/tmp}/a2-mac-runbook.XXXXXX")
 fi
 a2_summary=${A2_SUMMARY:-"$a2_workdir/summary.txt"}
+a2_evidence_snap="$a2_workdir/evidence.snap"
 mkdir -p -- "$a2_workdir/xdg/data" "$a2_workdir/xdg/config" "$a2_workdir/xdg/cache" "$a2_workdir/xdg/state"
 printf 'WORKDIR %s\n' "$a2_workdir"
 printf 'SUMMARY %s\n' "$a2_summary"
@@ -248,6 +315,9 @@ if [ "$a2_os" = Darwin ]; then
   fi
   if ! command -v xcode-select >/dev/null 2>&1 || ! xcode-select -p >/dev/null 2>&1; then
     a2_add_missing "Xcode command line tools are not installed; run xcode-select --install in another window, then paste again"
+  fi
+  if ! command -v chflags >/dev/null 2>&1; then
+    a2_add_missing "chflags is not on PATH"
   fi
 fi
 if [ "$a2_mach" != arm64 ]; then
@@ -512,7 +582,7 @@ def argv_mentions(needle):
 workdir = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.getcwd()
 lane = os.path.abspath("lab/a2-e2e-resume")
 needles = []
-for item in (workdir, lane, "lab/a2-e2e-resume"):
+for item in (workdir, lane):
     if item not in needles:
         needles.append(item)
 
@@ -565,7 +635,6 @@ if [ "$a2_live" != "$a2_pin_now" ]; then
   a2_tamper="tampered guest hash: wasm=${a2_live} pin=${a2_pin_now}"
 fi
 a2_evidence="$a2_clone/lab/a2-e2e-resume/evidence.txt"
-a2_evidence_dir="$a2_clone/lab/a2-e2e-resume"
 a2_evidence_snap="$a2_workdir/evidence.snap"
 a2_score_path=$a2_evidence
 a2_evidence_hash=""
@@ -581,13 +650,13 @@ raise SystemExit(0 if ev.startswith(root + os.sep) else 1)
 ' "$a2_evidence" "$a2_clone"; then
     a2_finish "FAIL" "evidence.txt resolves outside the temp clone"
   fi
-  a2_writers=$(a2_lsof_writers "$a2_evidence_dir" "$a2_evidence")
+  a2_writers=$(a2_lsof_writers "$a2_evidence")
   if [ -n "$a2_writers" ]; then
     a2_finish "FAIL" "evidence still has a live writer before the quiet period"
   fi
   a2_quiet_hash=$(a2_hash_file "$a2_evidence")
   sleep 15
-  a2_writers=$(a2_lsof_writers "$a2_evidence_dir" "$a2_evidence")
+  a2_writers=$(a2_lsof_writers "$a2_evidence")
   if [ -n "$a2_writers" ]; then
     a2_finish "FAIL" "evidence still has a live writer after the quiet period"
   fi
@@ -598,6 +667,13 @@ raise SystemExit(0 if ev.startswith(root + os.sep) else 1)
   a2_evidence_hash=$(a2_hash_file "$a2_evidence")
   if [ "$(a2_hash_file "$a2_evidence_snap")" != "$a2_evidence_hash" ]; then
     a2_finish "FAIL" "evidence snapshot did not match the live file"
+  fi
+  if ! a2_freeze_file "$a2_evidence" || ! a2_freeze_file "$a2_evidence_snap"; then
+    a2_finish "FAIL" "could not freeze evidence files with chflags uchg"
+  fi
+  if [ "$(a2_hash_file "$a2_evidence")" != "$a2_evidence_hash" ] \
+    || [ "$(a2_hash_file "$a2_evidence_snap")" != "$a2_evidence_hash" ]; then
+    a2_finish "FAIL" "evidence hash changed after freeze; A2 cannot PASS on a moving file"
   fi
   a2_score_path=$a2_evidence_snap
 fi
@@ -755,14 +831,15 @@ does not delete it. It never deletes anything outside that folder.
 
 | Last line | Meaning |
 | --- | --- |
-| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and any process that still names the temp dir or `lab/a2-e2e-resume` exited 0 with no SURVIVED line, `evidence.txt` is a regular file inside the temp clone with no CR and no non-ASCII row name, `lsof` showed no writer, a 15s quiet re-hash stayed still, and the guest bytes still match the pin written in the temp folder. |
-| `A2: FAIL.` | A row failed, a row name appeared twice, `run.sh` exited nonzero, a falsifier printed SURVIVED, the guest hash was tampered, `evidence.txt` was a symlink or lived outside the clone, a quiet-period hash moved, a live writer remained, or the run created or changed `~/.elastos` under `$HOME` or the login home. |
+| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and any process that still names the absolute temp dir or the absolute lane path exited 0 with no SURVIVED line, `evidence.txt` is a regular file inside the temp clone with no CR and no non-ASCII row name, `lsof` showed no write or read-write fd on that file (Spotlight readers are ignored), a 15s quiet re-hash stayed still, `chflags uchg` froze `evidence.txt`, `evidence.snap`, and `summary.txt` and the re-hash matched, and the guest bytes still match the pin written in the temp folder. |
+| `A2: FAIL.` | A row failed, a row name appeared twice, `run.sh` exited nonzero, a falsifier printed SURVIVED, the guest hash was tampered, `evidence.txt` was a symlink or lived outside the clone, a quiet-period or post-freeze hash moved, a live write fd remained on `evidence.txt`, or the run created or changed `~/.elastos` under `$HOME` or the login home (file contents are hashed). |
 | `A2: NOT RUN.` | A named prerequisite was missing, the clone is not a descendant of A2 head `9e7a85d6`, or a row was skipped. A2 is not booked. |
 
 `Proof.row` on the A2 harness still refuses a hardcoded PASS. This
 paste does not print `A2: PASS.` unless it parsed the six rows from a
 snapshot of `lab/a2-e2e-resume/evidence.txt` taken after `run.sh`, any
-process that still names the temp dir, and a 15s quiet re-hash.
+process that still names the absolute temp dir or the absolute lane,
+a 15s quiet re-hash, and a matching post-freeze re-hash.
 
 ## What this paste does not do
 
@@ -772,7 +849,8 @@ process that still names the temp dir, and a 15s quiet re-hash.
   paste watches both `$HOME/.elastos` and the login-home `~/.elastos`
   (`eval echo ~$(id -un)`, or `dscl` on a Mac). It refuses if it
   creates either path, and it refuses if an already-present tree
-  changes.
+  changes (regular files are hashed with sha256; `.DS_Store`, `._*`,
+  and `.localized` are skipped).
 - It does not overwrite `guest.sha256` in any checkout you already
   have. The new pin is written only under the temp clone.
 - It does not run `sudo`, `xcode-select --install`, or the rustup.rs

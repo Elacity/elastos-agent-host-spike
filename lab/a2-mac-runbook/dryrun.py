@@ -2,8 +2,9 @@
 """Linux dry-run of the A2 Mac runbook fence.
 
 Pastes the exact ```bash block from RUNBOOK.md with a macOS uname /
-xcode-select shim. Does not edit lab/a2-e2e-resume or run a real
-guest build. A2 itself stays NOT RUN ON MAC.
+xcode-select / chflags shim. Does not edit lab/a2-e2e-resume or run a
+real guest build. Never writes the login-home ~/.elastos. A2 itself
+stays NOT RUN ON MAC.
 """
 
 from __future__ import annotations
@@ -86,7 +87,31 @@ def write_macos_shims(shim_dir: Path) -> None:
         "exit 0\n",
         encoding="utf-8",
     )
-    for path in (uname, xcode):
+    chflags = shim_dir / "chflags"
+    chflags.write_text(
+        "#!/bin/sh\n"
+        "flag=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  case \"$arg\" in\n"
+        "    -*) continue ;;\n"
+        "    uchg|nouchg|schg|noschg|dump|nodump)\n"
+        "      flag=$arg\n"
+        "      continue\n"
+        "      ;;\n"
+        "  esac\n"
+        "  if [ -z \"$flag\" ] || [ ! -e \"$arg\" ]; then\n"
+        "    continue\n"
+        "  fi\n"
+        "  if [ \"$flag\" = uchg ]; then\n"
+        "    chmod a-w \"$arg\"\n"
+        "  elif [ \"$flag\" = nouchg ]; then\n"
+        "    chmod u+w \"$arg\" 2>/dev/null || chmod a+w \"$arg\"\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    for path in (uname, xcode, chflags):
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
@@ -263,6 +288,125 @@ def write_run_sh(run: Path, kind: str) -> None:
             + "printf 'planted\\n' > \"$HOME/.elastos/a2-existing-write\"\n"
             + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
         )
+    elif kind == "exec-a-delay22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "plant_dir=/tmp/a2-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "ev=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "time.sleep(22)\n"
+            + "pathlib.Path(r'''$ev''').write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "reopen-fd-22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "plant_dir=/tmp/a2-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "ev=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "path = pathlib.Path(r'''$ev''')\n"
+            + "fh = path.open('rb')\n"
+            + "fh.close()\n"
+            + "time.sleep(22)\n"
+            + "path.write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "hardlink-delay22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "plant_dir=/tmp/a2-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "outside=$plant_dir/linked-evidence\n"
+            + "ln -- \"$lane/evidence.txt\" \"$outside\"\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "time.sleep(22)\n"
+            + "pathlib.Path(r'''$outside''').write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "summary-rewrite":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{fail}EOF\n"
+            + "plant_dir=/tmp/a2-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "sum=${A2_SUMMARY:-}\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time, os\n"
+            + "path = pathlib.Path(os.environ.get('A2_SUMMARY_BAK', r'''$sum'''))\n"
+            + "deadline = time.time() + 40\n"
+            + "while time.time() < deadline:\n"
+            + "    if path.is_file() and 'A2: ' in path.read_text(encoding='utf-8', errors='replace'):\n"
+            + "        time.sleep(1.5)\n"
+            + "        text = path.read_text(encoding='utf-8', errors='replace')\n"
+            + "        lines = text.splitlines()\n"
+            + "        if lines:\n"
+            + "            lines[-1] = 'A2: PASS.'\n"
+            + "        path.write_text('\\n'.join(lines) + '\\n', encoding='utf-8')\n"
+            + "        break\n"
+            + "    time.sleep(0.05)\n"
+            + "PY\n"
+            + "export A2_SUMMARY_BAK=\"$sum\"\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "mtime-preserve":
+        body = (
+            header
+            + "python3 -I -c '\n"
+            + "import os\n"
+            + "from pathlib import Path\n"
+            + "p = Path.home() / \".elastos\" / \"pre-existing\"\n"
+            + "st = p.stat()\n"
+            + "p.write_text(\"plante\\n\", encoding=\"utf-8\")\n"
+            + "os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+            + "'\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        )
+    elif kind == "mds-reader":
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "plant_dir=/tmp/a2-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "target=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "cat > \"$plant_dir/reader.py\" <<PY\n"
+            + "import time\n"
+            + "fh = open(r'''$target''', 'rb')\n"
+            + "time.sleep(20)\n"
+            + "fh.close()\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/reader.py\" &\n"
+        )
     else:
         ev_kind = (
             kind
@@ -359,10 +503,13 @@ def run_block(
     include_pin: bool = True,
     fake_home: bool = False,
     existing_elastos: bool = False,
+    linger: float = 0,
+    timeout: int = 180,
+    a2_clean: str = "0",
+    pre_proc: subprocess.Popen | None = None,
 ) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix=f"a2-mac-dryrun-{kind}-"))
     started = time.time()
-    timeout = 180
     login_elastos = login_home_path() / ".elastos"
     login_existed = login_elastos.exists()
     try:
@@ -383,7 +530,7 @@ def run_block(
         env["PATH"] = ":".join(path_parts)
         env["A2_WORKDIR"] = str(work)
         env["A2_SUMMARY"] = str(summary)
-        env["A2_CLEAN"] = "0"
+        env["A2_CLEAN"] = a2_clean
         if fake_home:
             home = tmp / "fake-home"
             home.mkdir()
@@ -399,7 +546,7 @@ def run_block(
                 elastos.mkdir()
                 (elastos / "pre-existing").write_text("before\n", encoding="utf-8")
         if hide_tool is None:
-            remote = write_fixture(tmp, kind, include_pin=include_pin)
+            remote = write_fixture(tmp, kind if kind != "argv-hang" else "happy", include_pin=include_pin)
             env["A2_REMOTE"] = str(remote)
             env["A2_BRANCH"] = BRANCH
         script = tmp / "block.sh"
@@ -414,16 +561,29 @@ def run_block(
             capture_output=True,
             timeout=timeout,
         )
+        if linger > 0:
+            time.sleep(linger)
         output = (done.stdout or "") + (done.stderr or "")
         last = ""
         reason = ""
+        summary_text = ""
         if summary.is_file():
-            lines = summary.read_text(encoding="utf-8").splitlines()
+            summary_text = summary.read_text(encoding="utf-8", errors="replace")
+            lines = summary_text.splitlines()
             if lines:
                 last = lines[-1]
             for line in lines:
                 if line.startswith("reason: "):
                     reason = line[len("reason: ") :]
+        evidence = ""
+        ev = work / "src" / "lab" / "a2-e2e-resume" / "evidence.txt"
+        if ev.is_file():
+            evidence = ev.read_text(encoding="utf-8", errors="replace")
+        home_after = ""
+        if fake_home:
+            planted = Path(env["HOME"]) / ".elastos" / "pre-existing"
+            if planted.is_file():
+                home_after = planted.read_text(encoding="utf-8")
         return {
             "kind": kind,
             "exit": done.returncode,
@@ -432,8 +592,13 @@ def run_block(
             "reason": reason,
             "output": output,
             "summary": str(summary) if summary.is_file() else "",
+            "summary_text": summary_text,
+            "evidence": evidence,
+            "home_after": home_after,
             "workdir": str(work),
+            "workdir_exists": work.exists(),
             "tmp": str(tmp),
+            "timeout": False,
         }
     except subprocess.TimeoutExpired as error:
         return {
@@ -444,10 +609,21 @@ def run_block(
             "reason": f"TIMEOUT after {error.timeout}s",
             "output": (error.stdout or "") + (error.stderr or ""),
             "summary": "",
+            "summary_text": "",
+            "evidence": "",
+            "home_after": "",
             "workdir": str(tmp / "work"),
+            "workdir_exists": (tmp / "work").exists(),
             "tmp": str(tmp),
+            "timeout": True,
         }
     finally:
+        if pre_proc is not None:
+            pre_proc.terminate()
+            try:
+                pre_proc.wait(timeout=2)
+            except Exception:
+                pre_proc.kill()
         if kind == "home-redirect" and not login_existed and login_elastos.exists():
             shutil.rmtree(login_elastos, ignore_errors=True)
 
@@ -523,6 +699,34 @@ def main() -> int:
         static_ok = False
     else:
         print("static login-home CAUGHT")
+    if "chflags uchg" not in text or "a2_freeze_file" not in text:
+        print("static freeze-uchg MISSED")
+        static_ok = False
+    else:
+        print("static freeze-uchg CAUGHT")
+    if "chflags nouchg" not in text or "a2_nouchg_if_inside" not in text:
+        print("static nouchg-clean MISSED")
+        static_ok = False
+    else:
+        print("static nouchg-clean CAUGHT")
+    if "hashlib.sha256" not in text or ".DS_Store" not in text:
+        print("static elastos-sha256 MISSED")
+        static_ok = False
+    else:
+        print("static elastos-sha256 CAUGHT")
+    if "lsof +D" in text or 'cmds.append(["lsof", "+D"' in text:
+        print("static lsof-file-only MISSED")
+        static_ok = False
+    else:
+        print("static lsof-file-only CAUGHT")
+    if 'for item in (workdir, lane, "lab/a2-e2e-resume")' in text:
+        print("static wait-abs-paths MISSED")
+        static_ok = False
+    elif "for item in (workdir, lane):" not in text:
+        print("static wait-abs-paths MISSED")
+        static_ok = False
+    else:
+        print("static wait-abs-paths CAUGHT")
 
     cases = []
     cases.append(
@@ -675,6 +879,79 @@ def main() -> int:
             ".elastos",
         )
     )
+    cases.append(
+        (
+            "exec-a-delay22",
+            run_block(block, kind="exec-a-delay22", shim=True, linger=8),
+            "A2: PASS.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "reopen-fd-22",
+            run_block(block, kind="reopen-fd-22", shim=True, linger=8),
+            "A2: PASS.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "hardlink-delay22",
+            run_block(block, kind="hardlink-delay22", shim=True, linger=8),
+            "A2: PASS.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "summary-rewrite",
+            run_block(block, kind="summary-rewrite", shim=True, linger=3),
+            "A2: FAIL.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "mtime-preserve",
+            run_block(
+                block,
+                kind="mtime-preserve",
+                shim=True,
+                fake_home=True,
+                existing_elastos=True,
+            ),
+            "A2: FAIL.",
+            ".elastos",
+        )
+    )
+    cases.append(
+        (
+            "mds-reader",
+            run_block(block, kind="mds-reader", shim=True),
+            "A2: PASS.",
+            None,
+        )
+    )
+    decoy = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import time; time.sleep(120)  # lab/a2-e2e-resume"],
+    )
+    cases.append(
+        (
+            "argv-hang",
+            run_block(block, kind="argv-hang", shim=True, timeout=40, pre_proc=decoy),
+            "A2: PASS.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "clean-uchg",
+            run_block(block, kind="happy", shim=True, a2_clean="1"),
+            "A2: PASS.",
+            None,
+        )
+    )
 
     missed = 0 if static_ok else 1
     for name, result, want_last, want_reason in cases:
@@ -683,7 +960,19 @@ def main() -> int:
         if want_reason:
             blob = result["reason"] + "\n" + result["output"]
             reason_ok = want_reason in blob
-        ok = last_ok and reason_ok
+        extra_ok = True
+        evidence = result.get("evidence") or ""
+        if name in ("exec-a-delay22", "reopen-fd-22", "hardlink-delay22"):
+            extra_ok = "STALE: FAIL" not in evidence
+        elif name == "summary-rewrite":
+            extra_ok = result["last"] == "A2: FAIL."
+        elif name == "mtime-preserve":
+            extra_ok = result.get("home_after") == "plante\n"
+        elif name == "argv-hang":
+            extra_ok = not result.get("timeout")
+        elif name == "clean-uchg":
+            extra_ok = not result.get("workdir_exists", True)
+        ok = last_ok and reason_ok and extra_ok
         tag = caught(ok)
         if not ok:
             missed += 1
