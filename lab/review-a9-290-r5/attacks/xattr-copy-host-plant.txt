@@ -1,0 +1,7 @@
+id: xattr-copy-host-plant
+must: CAUGHT
+result: SURVIVED
+journey: A Store-writes note.txt. Host unlinks it. Host creates note.txt
+  again (inode reused). lsetxattr copies the leftover
+  user.owned-storage.nonce. Store::read(&a, "note.txt") returned planted.
+  ctime/btime collided on this kernel.
