@@ -249,7 +249,7 @@ if [ -e "$a2_clone" ]; then
   a2_finish "NOT RUN" "clone path already exists inside the temp workdir"
 fi
 printf 'CLONE branch %s\n' "$a2_branch"
-if ! git clone --single-branch --branch "$a2_branch" "$a2_url" "$a2_clone"; then
+if ! git clone --branch "$a2_branch" "$a2_url" "$a2_clone"; then
   a2_finish "NOT RUN" "git clone failed; if git asked for a password, set A2_REMOTE=git@github.com:Elacity/elastos-agent-host-spike.git and paste again"
 fi
 cd -- "$a2_clone"
@@ -259,10 +259,15 @@ fi
 if [ -n "$(git status --porcelain=v1)" ]; then
   a2_finish "NOT RUN" "the new clone has local changes"
 fi
-if git cat-file -e "${a2_pin_a2}^{commit}" 2>/dev/null; then
-  if ! git merge-base --is-ancestor "$a2_pin_a2" HEAD; then
-    a2_finish "NOT RUN" "clone is not a descendant of A2 head ${a2_pin_a2}"
-  fi
+if ! git cat-file -e "${a2_pin_a2}^{commit}" 2>/dev/null; then
+  git fetch --unshallow >/dev/null 2>&1 || true
+fi
+if ! git cat-file -e "${a2_pin_a2}^{commit}" 2>/dev/null; then
+  git fetch -- "$a2_url" "$a2_pin_a2" >/dev/null 2>&1 || true
+fi
+if ! git cat-file -e "${a2_pin_a2}^{commit}" 2>/dev/null \
+  || ! git merge-base --is-ancestor "$a2_pin_a2" HEAD; then
+  a2_finish "NOT RUN" "clone is not a descendant of A2 head ${a2_pin_a2}"
 fi
 
 # 6. Rebuild the guest. Show old pin vs new hash. Write the pin only here.
@@ -308,12 +313,45 @@ if [ -n "$(git diff --cached --name-only)" ]; then
   a2_finish "FAIL" "the paste staged files; it must not"
 fi
 
-# 7. A2 journey in this clone only.
+# 7. A2 journey in this clone only. Wait for run.sh and its children.
+a2_journey_out="$a2_workdir/journey.out"
+: > "$a2_journey_out"
 set +e
-bash lab/a2-e2e-resume/run.sh
+python3 -I -c 'import os, subprocess; os.setpgrp(); raise SystemExit(subprocess.call(["bash", "lab/a2-e2e-resume/run.sh"]))' > "$a2_journey_out" 2>&1 &
+a2_journey_pid=$!
+a2_pgid=$a2_journey_pid
+a2_waited=0
+a2_empty=0
+while [ "$a2_waited" -lt 7200 ]; do
+  a2_live=$(ps -ax -o pid= -o pgid= 2>/dev/null | awk -v g="$a2_pgid" 'NF >= 2 && ($2 + 0) == (g + 0) { print $1 }')
+  a2_busy=0
+  if kill -0 "$a2_journey_pid" 2>/dev/null; then
+    a2_busy=1
+  fi
+  for a2_p in $a2_live; do
+    if kill -0 "$a2_p" 2>/dev/null; then
+      a2_busy=1
+    fi
+  done
+  if [ "$a2_busy" -eq 0 ]; then
+    a2_empty=$((a2_empty + 1))
+    if [ "$a2_empty" -ge 2 ]; then
+      break
+    fi
+  else
+    a2_empty=0
+  fi
+  a2_waited=$((a2_waited + 1))
+  sleep 1
+done
+wait "$a2_journey_pid"
 a2_journey_rc=$?
 set -e
+cat "$a2_journey_out"
 printf 'JOURNEY run.sh -> %s\n' "$a2_journey_rc"
+if [ "$a2_waited" -ge 7200 ]; then
+  a2_finish "FAIL" "run.sh or one of its children was still running after 7200s"
+fi
 
 a2_live=$(a2_hash_file "$a2_wasm")
 a2_pin_now=$(tr -d ' \t\r\n' < "$a2_pin")
@@ -322,8 +360,19 @@ if [ "$a2_live" != "$a2_pin_now" ]; then
   a2_tamper="tampered guest hash: wasm=${a2_live} pin=${a2_pin_now}"
 fi
 a2_evidence="$a2_clone/lab/a2-e2e-resume/evidence.txt"
+a2_evidence_snap="$a2_workdir/evidence.snap"
+a2_score_path=$a2_evidence
+a2_evidence_hash=""
+if [ -f "$a2_evidence" ]; then
+  cp -- "$a2_evidence" "$a2_evidence_snap"
+  a2_evidence_hash=$(a2_hash_file "$a2_evidence")
+  if [ "$(a2_hash_file "$a2_evidence_snap")" != "$a2_evidence_hash" ]; then
+    a2_finish "FAIL" "evidence snapshot did not match the live file"
+  fi
+  a2_score_path=$a2_evidence_snap
+fi
 
-a2_score=$(python3 -I - "$a2_evidence" "$a2_tamper" <<'PY'
+a2_score=$(python3 -I - "$a2_score_path" "$a2_tamper" <<'PY'
 import pathlib
 import sys
 
@@ -358,7 +407,7 @@ for line in evidence.read_text(encoding="utf-8", errors="replace").splitlines():
                 result = "NOT RUN"
             else:
                 result = "UNKNOWN"
-            if name in rows and rows[name] != result:
+            if name in rows:
                 conflict = True
             rows[name] = result
     if line.startswith("A2_counted:"):
@@ -366,7 +415,7 @@ for line in evidence.read_text(encoding="utf-8", errors="replace").splitlines():
 body = "\n".join(f"{name}: {rows.get(name, 'MISSING')}" for name in rows_order)
 if conflict:
     print("FAIL")
-    print("evidence has disagreeing rows")
+    print("evidence has duplicate or disagreeing rows")
     print(body)
     raise SystemExit(0)
 fails = [name for name in rows_order if rows.get(name) == "FAIL"]
@@ -400,11 +449,29 @@ a2_verdict=$(printf '%s\n' "$a2_score" | sed -n '1p')
 a2_reason=$(printf '%s\n' "$a2_score" | sed -n '2p')
 a2_row_lines=$(printf '%s\n' "$a2_score" | sed -n '3,$p')
 
+if [ -n "$a2_evidence_hash" ]; then
+  if [ ! -f "$a2_evidence" ] || [ "$(a2_hash_file "$a2_evidence")" != "$a2_evidence_hash" ]; then
+    a2_finish "FAIL" "evidence.txt changed after the snapshot; A2 cannot PASS on a moving file"
+  fi
+  if [ "$(a2_hash_file "$a2_evidence_snap")" != "$a2_evidence_hash" ]; then
+    a2_finish "FAIL" "evidence snapshot was altered after it was taken"
+  fi
+fi
 if [ "$a2_elastos_before" = ABSENT ] && [ -e "$HOME/.elastos" ]; then
   a2_finish "FAIL" "this run created $HOME/.elastos; A2 must stay inside the temp workdir"
 fi
 if [ "$a2_verdict" != "PASS" ] && [ "$a2_verdict" != "FAIL" ] && [ "$a2_verdict" != "NOT RUN" ]; then
   a2_finish "NOT RUN" "scorer printed no verdict"
+fi
+if [ "$a2_verdict" = PASS ] && [ "${a2_journey_rc:-1}" -ne 0 ]; then
+  a2_finish "FAIL" "run.sh exited ${a2_journey_rc}; A2 cannot PASS while the journey or its falsifiers failed"
+fi
+a2_survived=0
+if grep -q SURVIVED "$a2_journey_out" 2>/dev/null; then
+  a2_survived=1
+fi
+if [ "$a2_verdict" = PASS ] && [ "$a2_survived" -eq 1 ]; then
+  a2_finish "FAIL" "run.sh printed SURVIVED; A2 cannot PASS while a falsifier survived"
 fi
 a2_finish "$a2_verdict" "$a2_reason"
 ```
@@ -420,13 +487,14 @@ does not delete it. It never deletes anything outside that folder.
 
 | Last line | Meaning |
 | --- | --- |
-| `A2: PASS.` | Every journey row is a **computed** PASS, and `A2_counted` is yes. The guest bytes still match the pin written in the temp folder. |
-| `A2: FAIL.` | A row failed, the guest hash was tampered, or the run wrote outside the temp folder. |
-| `A2: NOT RUN.` | A named prerequisite was missing, or a row was skipped. A2 is not booked. |
+| `A2: PASS.` | Every journey row is a **computed** PASS, each of the six names appears exactly once, `A2_counted` is yes, `run.sh` and its children exited 0 with no SURVIVED line, and the guest bytes still match the pin written in the temp folder. |
+| `A2: FAIL.` | A row failed, a row name appeared twice, `run.sh` exited nonzero, a falsifier printed SURVIVED, the guest hash was tampered, `evidence.txt` moved after the snapshot, or the run wrote outside the temp folder. |
+| `A2: NOT RUN.` | A named prerequisite was missing, the clone is not a descendant of A2 head `9e7a85d6`, or a row was skipped. A2 is not booked. |
 
 `Proof.row` on the A2 harness still refuses a hardcoded PASS. This
-paste does not print `A2: PASS.` unless it parsed the six rows from
-`lab/a2-e2e-resume/evidence.txt`.
+paste does not print `A2: PASS.` unless it parsed the six rows from a
+snapshot of `lab/a2-e2e-resume/evidence.txt` taken after `run.sh` and
+its children exited.
 
 ## What this paste does not do
 

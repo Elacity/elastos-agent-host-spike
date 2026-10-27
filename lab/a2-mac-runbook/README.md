@@ -10,8 +10,8 @@ lanes, BACKLOG.md, lane.env, or any 0.8.0 runtime code.
 
 The only ` ```bash ` fence in [RUNBOOK.md](RUNBOOK.md):
 
-- sha256: 409684d41a3c97f476085a05e61fca5c571583c8e41f86a8147013f4bf9d41eb
-- bytes: 11683
+- sha256: 3ca69fecf2837bdf7f1a76a4cd76e167d5afcd55b119a060150fbb402f106a12
+- bytes: 14078
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
@@ -24,14 +24,22 @@ python3 -I lab/a2-mac-runbook/dryrun.py
 
 The recorder pastes that exact block under zsh with a macOS `uname`
 and `xcode-select` shim. It does not rebuild the real guest. It
-proves:
+proves the four author cases and the eight reviewer plants:
 
 | Case | Last line | Plant |
 | --- | --- | --- |
-| happy path | `A2: PASS.` | six computed PASS rows |
+| happy path | `A2: PASS.` | six computed PASS rows; clone is a descendant of `9e7a85d6` |
 | planted failing row | `A2: FAIL.` | `STALE: FAIL` |
 | missing tool | `A2: NOT RUN.` | `rustup` hidden |
 | tampered guest hash | `A2: FAIL.` | last wasm byte flipped after the pin |
+| missing row | `A2: NOT RUN.` | `WRITE2` row missing; `A2_counted: yes` |
+| duplicate WRITE | `A2: FAIL.` | two `WRITE: PASS` lines |
+| survived falsifier | `A2: FAIL.` | `F-REV-GUEST-HASH SURVIVED` and exit 0 |
+| late evidence rewrite | `A2: FAIL.` | `run.sh` backgrounds an 8s rewrite to FAIL |
+| missing A2 pin | `A2: NOT RUN.` | clone has the lab files but no `9e7a85d6` |
+| created `~/.elastos` | `A2: FAIL.` | `run.sh` creates `$HOME/.elastos` |
+| `run.sh` exit 1 | `A2: FAIL.` | all-PASS evidence and nonzero journey |
+| PASS then FAIL | `A2: FAIL.` | same row `PASS` then `FAIL` |
 
 Recorded on this Linux x86_64 host, zsh 5.9, with the macOS shim.
 A2 on macOS is **NOT RUN ON MAC** until Sash pastes the block on
@@ -39,10 +47,18 @@ Apple Silicon and that run's `summary.txt` ends with `A2: PASS.`
 
 | Case | Last line | Plant | Result |
 | --- | --- | --- | --- |
-| happy path | `A2: PASS.` | six computed PASS rows | CAUGHT |
+| happy path | `A2: PASS.` | six computed PASS rows; descendant of `9e7a85d6` | CAUGHT |
 | planted failing row | `A2: FAIL.` | `STALE: FAIL` | CAUGHT |
 | missing tool | `A2: NOT RUN.` | rustup hidden | CAUGHT (`missing: rustup is not on PATH`; rustc and cargo sit in the same rustup bin dir, so they were named too) |
 | tampered guest hash | `A2: FAIL.` | last wasm byte flipped after the pin | CAUGHT |
+| missing row | `A2: NOT RUN.` | `WRITE2` missing; `A2_counted: yes` | CAUGHT |
+| duplicate WRITE | `A2: FAIL.` | two `WRITE: PASS` lines | CAUGHT |
+| survived falsifier | `A2: FAIL.` | `F-REV-GUEST-HASH SURVIVED` and exit 0 | CAUGHT |
+| late evidence rewrite | `A2: FAIL.` | background 8s rewrite to FAIL | CAUGHT |
+| missing A2 pin | `A2: NOT RUN.` | no `9e7a85d6` object | CAUGHT |
+| created `~/.elastos` | `A2: FAIL.` | `run.sh` creates `$HOME/.elastos` | CAUGHT |
+| `run.sh` exit 1 | `A2: FAIL.` | all-PASS evidence and exit 1 | CAUGHT |
+| PASS then FAIL | `A2: FAIL.` | same row `PASS` then `FAIL` | CAUGHT |
 
 ## Before Sash pastes
 

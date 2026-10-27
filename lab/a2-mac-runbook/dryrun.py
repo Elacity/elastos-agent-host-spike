@@ -22,9 +22,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNBOOK = HERE / "RUNBOOK.md"
 README = HERE / "README.md"
+REPO_ROOT = HERE.parents[1]
 ROWS = ("WRITE", "STALE", "STOP", "START", "RESUME", "WRITE2")
 OLD_PIN = "0" * 64
 BRANCH = "cursor/a2-mac-runbook-f873"
+PIN_A2 = "9e7a85d631aec12de8c1da4fc4958bce18252d21"
+GIT_IDENT = ["-c", "user.email=lab@ela.city", "-c", "user.name=a2-mac-runbook"]
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -98,6 +101,39 @@ def evidence_text(kind: str) -> str:
             "WRITE2": "NOT RUN — planted fail stopped later rows",
         }
         counted = "no"
+        extras: list[str] = []
+    elif kind == "missing-row":
+        rows = {
+            "WRITE": "PASS — computed from fixture journal",
+            "STALE": "PASS — computed from fixture conflict",
+            "STOP": "PASS — computed from fixture exit 0",
+            "START": "PASS — computed from fixture second pid",
+            "RESUME": "PASS — computed from fixture read:ok",
+        }
+        counted = "yes"
+        extras = []
+    elif kind == "duplicate-write":
+        rows = {
+            "WRITE": "PASS — computed from fixture journal",
+            "STALE": "PASS — computed from fixture conflict",
+            "STOP": "PASS — computed from fixture exit 0",
+            "START": "PASS — computed from fixture second pid",
+            "RESUME": "PASS — computed from fixture read:ok",
+            "WRITE2": "PASS — computed from fixture write:ok",
+        }
+        counted = "yes"
+        extras = ["WRITE: PASS — duplicate planted line"]
+    elif kind == "pass-then-fail":
+        rows = {
+            "WRITE": "PASS — computed from fixture journal",
+            "STALE": "PASS — computed from fixture conflict",
+            "STOP": "PASS — computed from fixture exit 0",
+            "START": "PASS — computed from fixture second pid",
+            "RESUME": "PASS — computed from fixture read:ok",
+            "WRITE2": "PASS — computed from fixture write:ok",
+        }
+        counted = "yes"
+        extras = ["WRITE: FAIL — planted second result"]
     else:
         rows = {
             "WRITE": "PASS — computed from fixture journal",
@@ -108,15 +144,91 @@ def evidence_text(kind: str) -> str:
             "WRITE2": "PASS — computed from fixture write:ok",
         }
         counted = "yes"
+        extras = []
     lines = ["A2 e2e resume proof", ""]
-    lines.extend(f"{name}: {rows[name]}" for name in ROWS)
+    lines.extend(f"{name}: {rows[name]}" for name in ROWS if name in rows)
+    lines.extend(extras)
     lines.append(f"A2_counted: {counted}")
-    lines.append("skipped: none" if counted == "yes" else "skipped: STOP, START, RESUME, WRITE2")
+    if counted == "yes":
+        lines.append("skipped: none")
+    else:
+        lines.append("skipped: STOP, START, RESUME, WRITE2")
     lines.append("")
     return "\n".join(lines) + "\n"
 
 
-def write_fixture(root: Path, kind: str) -> Path:
+def write_run_sh(run: Path, kind: str) -> None:
+    header = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "lane=$(cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
+        "root=$(cd -- \"$lane/../..\" && pwd -P)\n"
+    )
+    happy = evidence_text("happy")
+    if kind == "tamper":
+        body = (
+            header
+            + "printf x >> \"$root/examples/agent-host/agent-host.component.wasm\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        )
+    elif kind == "survived":
+        body = (
+            header
+            + "printf 'F-REV-GUEST-HASH SURVIVED\\n'\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        )
+    elif kind == "late-rewrite":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + "(\n"
+            + "  sleep 8\n"
+            + f"  cat > \"$lane/evidence.txt\" <<'EOF'\n{fail}EOF\n"
+            + ") &\n"
+        )
+    elif kind == "elastos":
+        body = (
+            header
+            + "mkdir -p -- \"$HOME/.elastos\"\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+        )
+    elif kind == "exit1":
+        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n" + "exit 1\n"
+    else:
+        ev_kind = kind if kind in ("fail", "missing-row", "duplicate-write", "pass-then-fail") else "happy"
+        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{evidence_text(ev_kind)}EOF\n"
+    run.write_text(body, encoding="utf-8")
+    run.chmod(0o755)
+
+
+def graft_pin(repo: Path, kind: str) -> None:
+    fetched = subprocess.run(
+        ["git", "fetch", "--", str(REPO_ROOT), PIN_A2],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if fetched.returncode != 0:
+        raise SystemExit(f"fixture fetch pin failed: {fetched.stderr}")
+    tree = subprocess.run(
+        ["git", "write-tree"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    commit = subprocess.run(
+        ["git", *GIT_IDENT, "commit-tree", tree, "-p", PIN_A2, "-m", f"fixture {kind}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "reset", "--hard", commit], cwd=repo, check=True, capture_output=True)
+
+
+def write_fixture(root: Path, kind: str, *, include_pin: bool = True) -> Path:
     repo = root / "remote"
     (repo / "examples" / "agent-host").mkdir(parents=True)
     (repo / "lab" / "a2-e2e-resume").mkdir(parents=True)
@@ -130,26 +242,7 @@ def write_fixture(root: Path, kind: str) -> Path:
         encoding="utf-8",
     )
     build.chmod(0o755)
-    run = repo / "lab" / "a2-e2e-resume" / "run.sh"
-    if kind == "tamper":
-        run.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "lane=$(cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
-            "root=$(cd -- \"$lane/../..\" && pwd -P)\n"
-            "printf x >> \"$root/examples/agent-host/agent-host.component.wasm\"\n"
-            f"cat > \"$lane/evidence.txt\" <<'EOF'\n{evidence_text('happy')}EOF\n",
-            encoding="utf-8",
-        )
-    else:
-        run.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "lane=$(cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
-            f"cat > \"$lane/evidence.txt\" <<'EOF'\n{evidence_text(kind)}EOF\n",
-            encoding="utf-8",
-        )
-    run.chmod(0o755)
+    write_run_sh(repo / "lab" / "a2-e2e-resume" / "run.sh", kind)
     (repo / "lab" / "a2-e2e-resume" / "harness.py").write_text(
         "# fixture stub; the Mac paste runs run.sh\n",
         encoding="utf-8",
@@ -157,21 +250,15 @@ def write_fixture(root: Path, kind: str) -> Path:
     (repo / "lab" / "a2-e2e-resume" / "guest.sha256").write_text(OLD_PIN + "\n", encoding="utf-8")
     subprocess.run(["git", "init", "-b", BRANCH], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.email=lab@ela.city",
-            "-c",
-            "user.name=a2-mac-runbook",
-            "commit",
-            "-m",
-            f"fixture {kind}",
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
+    if include_pin:
+        graft_pin(repo, kind)
+    else:
+        subprocess.run(
+            ["git", *GIT_IDENT, "commit", "-m", f"fixture {kind}"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
     return repo
 
 
@@ -192,9 +279,12 @@ def run_block(
     kind: str,
     shim: bool,
     hide_tool: str | None = None,
+    include_pin: bool = True,
+    fake_home: bool = False,
 ) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix=f"a2-mac-dryrun-{kind}-"))
     started = time.time()
+    timeout = 180 if kind == "late-rewrite" else 120
     try:
         shim_dir = tmp / "shims"
         if shim:
@@ -214,8 +304,18 @@ def run_block(
         env["A2_WORKDIR"] = str(work)
         env["A2_SUMMARY"] = str(summary)
         env["A2_CLEAN"] = "0"
+        if fake_home:
+            home = tmp / "fake-home"
+            home.mkdir()
+            env["HOME"] = str(home)
+            rustup_home = Path.home() / ".rustup"
+            cargo_home = Path.home() / ".cargo"
+            if rustup_home.is_dir():
+                env["RUSTUP_HOME"] = str(rustup_home)
+            if cargo_home.is_dir():
+                env["CARGO_HOME"] = str(cargo_home)
         if hide_tool is None:
-            remote = write_fixture(tmp, kind)
+            remote = write_fixture(tmp, kind, include_pin=include_pin)
             env["A2_REMOTE"] = str(remote)
             env["A2_BRANCH"] = BRANCH
         script = tmp / "block.sh"
@@ -228,7 +328,7 @@ def run_block(
             env=env,
             text=True,
             capture_output=True,
-            timeout=120,
+            timeout=timeout,
         )
         output = (done.stdout or "") + (done.stderr or "")
         last = ""
@@ -306,6 +406,11 @@ def main() -> int:
         static_ok = False
     else:
         print("static mktemp-trap CAUGHT")
+    if "--single-branch" in text:
+        print("static no-single-branch MISSED")
+        static_ok = False
+    else:
+        print("static no-single-branch CAUGHT")
 
     cases = []
     cases.append(
@@ -338,6 +443,70 @@ def main() -> int:
             run_block(block, kind="tamper", shim=True),
             "A2: FAIL.",
             "tampered guest hash",
+        )
+    )
+    cases.append(
+        (
+            "missing-row",
+            run_block(block, kind="missing-row", shim=True),
+            "A2: NOT RUN.",
+            "WRITE2",
+        )
+    )
+    cases.append(
+        (
+            "duplicate-write",
+            run_block(block, kind="duplicate-write", shim=True),
+            "A2: FAIL.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "survived-line",
+            run_block(block, kind="survived", shim=True),
+            "A2: FAIL.",
+            "SURVIVED",
+        )
+    )
+    cases.append(
+        (
+            "late-rewrite",
+            run_block(block, kind="late-rewrite", shim=True),
+            "A2: FAIL.",
+            None,
+        )
+    )
+    cases.append(
+        (
+            "missing-pin",
+            run_block(block, kind="happy", shim=True, include_pin=False),
+            "A2: NOT RUN.",
+            "9e7a85d6",
+        )
+    )
+    cases.append(
+        (
+            "elastos-created",
+            run_block(block, kind="elastos", shim=True, fake_home=True),
+            "A2: FAIL.",
+            ".elastos",
+        )
+    )
+    cases.append(
+        (
+            "runsh-exit1",
+            run_block(block, kind="exit1", shim=True),
+            "A2: FAIL.",
+            "run.sh exited",
+        )
+    )
+    cases.append(
+        (
+            "pass-then-fail",
+            run_block(block, kind="pass-then-fail", shim=True),
+            "A2: FAIL.",
+            None,
         )
     )
 
