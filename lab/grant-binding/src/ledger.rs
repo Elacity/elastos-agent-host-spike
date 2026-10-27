@@ -86,6 +86,7 @@ pub struct Reservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReserveRefuse {
     OverCeiling { ceiling: u64, held: u64, asked: u64 },
+    SumOverflow { held: u64, asked: u64 },
     Binding(Refuse),
 }
 
@@ -94,6 +95,9 @@ impl std::fmt::Display for ReserveRefuse {
         match self {
             ReserveRefuse::OverCeiling { .. } => {
                 formatter.write_str("reservation exceeds the ceiling")
+            }
+            ReserveRefuse::SumOverflow { .. } => {
+                formatter.write_str("reservation sum does not fit in u64")
             }
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
@@ -212,10 +216,10 @@ impl Verifier {
     }
 
     /// Holds `amount` on the ledger when the total this identity compares plus
-    /// `amount` stays at or under the ceiling and the stored sum of every open
-    /// hold plus `amount` fits in `u64`. A binding refusal records nothing, a
-    /// sum that does not fit in `u64` is over the ceiling, and the request's
-    /// reported usage does not lower the hold.
+    /// `amount` stays at or under the ceiling. A binding refusal records nothing,
+    /// a total that does not fit in `u64` is over the ceiling, a stored sum of
+    /// every open hold plus `amount` that does not fit in `u64` is a sum
+    /// overflow, and the request's reported usage does not lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
@@ -258,9 +262,8 @@ impl Verifier {
             match shared.checked_add(amount) {
                 Some(shared_total) => Some(shared_total),
                 None => {
-                    return Err(ReserveRefuse::OverCeiling {
-                        ceiling: ledger.ceiling,
-                        held,
+                    return Err(ReserveRefuse::SumOverflow {
+                        held: shared,
                         asked: amount,
                     })
                 }
@@ -1828,13 +1831,12 @@ fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
         .expect_err("the stored sum does not fit in u64");
     assert_eq!(
         refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 1,
-            held: 0,
+        ReserveRefuse::SumOverflow {
+            held: u64::MAX,
             asked: 1,
         }
     );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    assert_eq!(refusal.to_string(), "reservation sum does not fit in u64");
     let after = books(&verifier);
     assert_eq!(after.held, u64::MAX);
     assert_eq!(after.open.len(), 1);
